@@ -1,0 +1,45 @@
+﻿#define APSTUDIO_READONLY_SYMBOLS
+#include "winres.h"
+#undef APSTUDIO_READONLY_SYMBOLS
+// 源文件按 UTF-8 保存；告知 rc 编译器以 UTF-8 解析其后的窄字符串，
+// 否则中文(如"轻雪")会按系统 ANSI 代码页(GBK)错解，写入版本资源后任务管理器显示乱码。
+#pragma code_page(65001)
+1 ICON "logo.ico"
+icon.ttf RCDATA "iconfont.ttf"
+// 语言文件内嵌为资源；MSBuild 不把 RCDATA 的数据文件当作输入依赖，
+// 所以改动 lang.*.json 后需要让本 .rc 重新编译才能生效。
+zh-CN RCDATA "lang.zh-CN.json"
+en-US RCDATA "lang.en-US.json"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 1,0,0,0
+PRODUCTVERSION 1,0,0,0
+FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+FILEFLAGS 0x1L
+#else
+FILEFLAGS 0x0L
+#endif
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName", "CM-idea"
+            VALUE "FileDescription", "SnowAir 轻雪"
+            VALUE "FileVersion", "1.0.0.0"
+            VALUE "InternalName", "SnowAir.exe"
+            VALUE "LegalCopyright", "Copyright (C) CM-idea"
+            VALUE "OriginalFilename", "SnowAir.exe"
+            VALUE "ProductName", "SnowAir 轻雪"
+            VALUE "ProductVersion", "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END
