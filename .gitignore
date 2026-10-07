@@ -1,0 +1,55 @@
+# Native C++ deps (clone separately, see Native/README.md)
+Native/deps/
+Native/x64/
+Native/x86/
+Native/Release/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+hotkey_test*.log
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Tauri 2 / Node
+Tauri2/node_modules
+Tauri2/dist
+Tauri2/dist-ssr
+Tauri2/*.local
+
+# Tauri / Rust
+Tauri2/src-tauri/target/
+
+# Local-only notes
+Tauri2/DEV.md
+
+# 构建/启动脚本（不入开源仓库）
+*.bat
+*.cmd
+
+# 本地临时内容：探针、素材包
+/_probe/
+/_laser_probe/
+/_layout_probe/
+/font_*/
+/call
+
+# 编辑器/IDE 私有数据
+/.trae/
+
+# VS 资源缓存
+*.aps

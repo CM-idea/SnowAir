@@ -1,0 +1,8 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="deps/Ling/yoga/yoga.vcxproj" Id="28bb8cf9-fdec-47f2-9b06-600b089caaf5" />
+  <Project Path="deps/Ling/Ling.vcxproj" Id="540bb258-d062-4159-8cf3-fe9ab9e4b0ae" />
+  <Project Path="Src/SnowAir.vcxproj" Id="967bc419-6e05-4d12-a5bd-6cf5e5af37c0" />
+</Solution>
