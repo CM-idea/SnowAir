@@ -37,14 +37,22 @@
 
 > \* 带星号的为专业版功能。
 
+## 🖼️ 界面
+
+浅色 / 深色两种主题，可跟随系统自动切换，也可手动指定。
+
+| 浅色主题 | 深色主题 |
+| :---: | :---: |
+| ![浅色主题](images/Bright.png) | ![深色主题](images/dark.png) |
+
 ## 🧩 版本
 
 SnowAir 分为两个版本，共享同一套使用体验与功能布局：
 
-| 版本 | 说明 | 获取方式 |
+| 版&#8288;本 | 说明 | 获&#8288;取&#8288;方&#8288;式 |
 | --- | --- | --- |
-| **免费版** | 本仓库维护，源码开放，覆盖截图、标注、长截图、录屏、OCR 与贴图等基础能力 | [GitHub Releases](https://github.com/CM-idea/SnowAir/releases) |
-| **专业版** | 独立发行，在免费版基础上提供更完整的功能与持续更新支持 | 官方渠道获取 |
+| **免&#8288;费&#8288;版** | 3MB 级超小体积、单文件免安装，覆盖截图、标注、长截图、录屏、OCR 与贴图等日常功能。 | [点&#8288;此&#8288;获&#8288;取][releases-link] |
+| **专&#8288;业&#8288;版** | 基于 Qt6 开发，在免费版基础上提供更完整的专业功能（AI 大模型、屏幕镜像、超级动作、快捷翻译等）与持续更新支持 | [点&#8288;此&#8288;获&#8288;取][releases-link] |
 
 ## 📦 安装
 
@@ -131,6 +139,14 @@ SnowAir 由 [CM-idea](https://github.com/CM-idea) 维护，欢迎通过 [Issue](
 ## 隐私声明
 
 SnowAir 是本地工具，默认不上传任何截图或文本；联网仅用于检查更新、在线 OCR / 翻译服务与插件下载。
+
+## 🙏 鸣谢
+
+感谢 [xland](https://github.com/xland) 及 [ScreenCapture](https://github.com/xland/ScreenCapture) 的开源与分享。
+
+## 许可证
+
+本项目以 **Apache License 2.0** 协议开源，全文见 [`LICENSE`](LICENSE)；第三方组件与上游署名见 [`NOTICE`](NOTICE)。
 
 [releases-link]: https://github.com/CM-idea/SnowAir/releases
 [issues-link]: https://github.com/CM-idea/SnowAir/issues
