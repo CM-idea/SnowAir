@@ -1698,6 +1698,8 @@ ConfirmDialog::~ConfirmDialog()
     // host 在宿主销毁路径里会被置空（那一路的 onDestroy 回调），这里只在宿主还活着时解绑
     if (host) host->onDestroy.remove(hostDestroyTok);
     if (s_open == this) s_open = nullptr;
+    // WinBase 析构不销毁 HWND：不 close 就析构会留下"幽灵窗"，WndProc 重入已释放对象
+    if (hwnd) { close(); hwnd = nullptr; }
 }
 
 bool ConfirmDialog::isOpen()

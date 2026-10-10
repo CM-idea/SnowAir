@@ -17,7 +17,11 @@ ToolNestedPanel::ToolNestedPanel(ToolSub* owner) : Ling::WinBase(), owner(owner)
 	createNativeWindow(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, WS_POPUP);
 }
 
-ToolNestedPanel::~ToolNestedPanel() = default;
+ToolNestedPanel::~ToolNestedPanel()
+{
+	// WinBase 析构不销毁 HWND：不 close 就析构会留下"幽灵窗"，WndProc 重入已释放对象
+	if (hwnd) { close(); hwnd = nullptr; }
+}
 
 void ToolNestedPanel::onCreated()
 {
@@ -259,7 +263,7 @@ void ToolNestedPanel::rebuildEmojiGrid()
 {
 	clearContent();
 	if (!contentNode) return;
-	// QT：7 列 × 40 格，间距 6，边距 14/12 → 宽约 344、内容高约 202
+	// 7 列 × 40 格，间距 6，边距 14/12 → 宽约 344、内容高约 202
 	constexpr float cell{ 40.f };
 	constexpr float gap{ 6.f };
 	constexpr float padX{ 14.f };

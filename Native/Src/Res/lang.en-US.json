@@ -434,6 +434,7 @@
     "noPermission": "The program folder is not writable, so it can not update itself. Click OK to open the download page."
   },
   "ocr": {
-    "fail": "Recognition failed"
+    "fail": "Recognition failed",
+    "copy": "Copy text"
   }
 }

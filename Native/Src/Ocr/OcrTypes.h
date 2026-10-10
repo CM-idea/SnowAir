@@ -6,7 +6,7 @@ enum class OcrEngineKind {
 	PpOcrV6 = 0,
 	PpOcrV5 = 1,
 	PpOcrV4 = 2,
-	Tesseract = 3,
+	// 3 原为 Tesseract，已移除。空出来不用，避免旧配置里的数值错位。
 	System = 4,
 	Cloud = 5,
 };

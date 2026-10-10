@@ -50,7 +50,7 @@ public:
 	void refreshNestedTrigger();
 	void updateEmojiTriggerGlyph();
 	RECT workAreaRect() const;
-	// 视窗内滚轮：按工具量程微调主滑条（对齐 QT adjustPrimarySize）
+	// 视窗内滚轮：按工具量程微调主滑条
 	bool adjustPrimarySize(int dir);
 	// 属性栏是否在主栏上方（箭头朝下）；二级弹窗据此决定默认开向
 	bool tipDown() const { return tipDown_; }
@@ -60,7 +60,7 @@ public:
 private:
 	LRESULT onHitTest(const POINT pos) override; // 选区边/角穿透给底层 WinCap
 public:
-	// numberStyle: 0 数字 / 1 字母 / 2 Emoji（对齐 QT 三种序号，无中文）
+	// numberStyle: 0 数字 / 1 字母 / 2 Emoji（三种序号，无中文）
 	enum NumberStyle : int { NumberDigit = 0, NumberLetter = 1, NumberEmoji = 2 };
 	// arrowHead: 0 普通 / 1 大箭头 / 2 双箭头 / 3 标注箭头（对齐产品属性气泡）
 	enum ArrowHead : int { ArrowDefault = 0, ArrowBig = 1, ArrowBoth = 2, ArrowAnnot = 3 };
@@ -173,7 +173,7 @@ private:
 	float overlayAlpha{ 0.25f };
 	bool* overlayFlag{ nullptr };
 	float sizeExtraW{ 0.f };
-	// 仅本会话记忆（对齐 QT PropertyBubble m_store）；不写盘
+	// 仅本会话记忆；不写盘
 	std::unordered_map<std::wstring, float> sliderMem;
 	std::unordered_map<std::wstring, UINT> colorIndexMem;
 	UINT32 sessionCustomColor{ 0xFF272CFF };

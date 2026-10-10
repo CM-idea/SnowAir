@@ -14,7 +14,11 @@ ToolPicker::ToolPicker() : Ling::WinBase()
 	createNativeWindow(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, WS_POPUP);
 }
 
-ToolPicker::~ToolPicker() = default;
+ToolPicker::~ToolPicker()
+{
+	// WinBase 析构不销毁 HWND：不 close 就析构会留下"幽灵窗"，WndProc 重入已释放对象
+	if (hwnd) { close(); hwnd = nullptr; }
+}
 
 void ToolPicker::onCreated()
 {

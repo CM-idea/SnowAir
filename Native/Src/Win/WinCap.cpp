@@ -450,7 +450,7 @@ BOOL WinCap::setCursor()
 		const auto img = toImgPos(pos);
 		const float ix = (float)img.x, iy = (float)img.y;
 
-		// 1) 已选中标注：控点缩放 / 平移（优先于选区边，对齐 QT）
+		// 1) 已选中标注：控点缩放 / 平移（优先于选区边）
 		if (shapeHover && !shapeHover->isUndo && shapeHover != newShape
 			&& !shapeHover->isViewportFilter()) {
 			if (annotMouseDown) {
@@ -796,7 +796,7 @@ bool WinCap::nudgeSelectionByArrow(int dx, int dy)
 	if (demoMode) return false;
 	if (stage != CapStage::Adjust && !annotLive && !videoCanAdjust()) return false;
 	if (maskDragging || isPress) return false;
-	// 已有标注时方向键不挪选区（对齐 QT）
+	// 已有标注时方向键不挪选区
 	if (annotLive && hasAnnotShapes()) return false;
 	cutMask->translateBy((float)dx, (float)dy);
 	if (annotLive) syncViewportFilters();
@@ -1626,7 +1626,7 @@ void WinCap::startAnnotate(const std::wstring& toolId)
 	ensureHistory();
 	if (toolSub) toolSub->bindOwner(hwnd);
 	annotLive = true;
-	// 标注阶段仍显示选区尺寸信息栏（与 QT/Tauri 一致）；长图/录屏才在 enterLiveStage 里隐藏
+	// 标注阶段仍显示选区尺寸信息栏；长图/录屏才在 enterLiveStage 里隐藏
 	cutMask->hideLabel = false;
 	// 全屏同表面：不挖洞、不建选区 Pin；只换笔；保留已选标注
 	if (toolCap) toolCap->selectAnnotTool(toolId);
@@ -1928,7 +1928,7 @@ void WinCap::setMouseTransparent(bool transparent)
     if (capVideo) capVideo->syncPierceBtn(transparent);
 }
 
-// 文字识别：进程内 OcrService + 选区浮层（对齐 QT showOcrPanel）
+// 文字识别：进程内 OcrService + 选区浮层
 void WinCap::startOcr()
 {
 	// 再点一次同一个按钮 = 取消：收起识别面板（结果留在临时缓存里，下次点同一块选区直接就出来，
@@ -1952,12 +1952,13 @@ void WinCap::startOcrInternal(bool translateMode)
 
 	std::vector<BYTE> pixels;
 	int cw{ 0 }, ch{ 0 };
+	if (!exportSelection(pixels, cw, ch)) return;
+
 	OcrResult result;
 	if (g_ocrCacheValid && sameOcrRect(g_ocrCacheRect, sel)) {
-		result = g_ocrCache;   // 同一块选区：直接用临时缓存
+		result = g_ocrCache;   // 同一块选区：识别结果直接用临时缓存（省掉识别那几百毫秒）
 	}
 	else {
-		if (!exportSelection(pixels, cw, ch)) return;
 		result = OcrService::instance().recognize(cw, ch, pixels.data());
 		g_ocrCache = result;
 		g_ocrCacheRect = sel;
@@ -1965,7 +1966,7 @@ void WinCap::startOcrInternal(bool translateMode)
 	}
 
 	toolQrcode.reset();
-	toolOcr = std::make_unique<ToolOcr>(this, result, translateMode);
+	toolOcr = std::make_unique<ToolOcr>(this, result, translateMode, std::move(pixels), cw, ch);
 	toolOcr->createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP);
 	SetWindowLongPtr(toolOcr->hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(hwnd));
 	syncOcrPanel();
@@ -2090,6 +2091,12 @@ void WinCap::saveToFile(bool keepOpen)
 
 void WinCap::copyToClipboard(bool keepOpen)
 {
+    // 文字识别面板开着时，「复制 / 完成」复制的是识别出来的文字，而不是截图图片
+    if (toolOcr && toolOcr->result().ok && !toolOcr->result().text.empty()) {
+        Ling::Util::setTextToClipboard(toolOcr->result().text);
+        if (!keepOpen) close();
+        return;
+    }
     std::vector<BYTE> pixels;
     int cw{ 0 }, ch{ 0 };
     if (!exportSelection(pixels, cw, ch)) return;

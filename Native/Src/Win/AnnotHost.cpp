@@ -26,7 +26,11 @@ using namespace Microsoft::WRL;
 
 AnnotHost::AnnotHost() = default;
 
-AnnotHost::~AnnotHost() = default;
+AnnotHost::~AnnotHost()
+{
+	// WinBase 析构不销毁 HWND：不 close 就析构会留下"幽灵窗"，WndProc 重入已释放对象
+	if (hwnd) { close(); hwnd = nullptr; }
+}
 
 void AnnotHost::ensureHistory()
 {
@@ -603,11 +607,11 @@ void AnnotHost::applyToolDrawCursor()
 		return;
 	}
 	if (tool == L"text") SetCursor(LoadCursor(nullptr, IDC_IBEAM));
-	else if (tool == L"eraser") SetCursor(LoadCursor(nullptr, IDC_HAND)); // 对齐 QT PointingHand
+	else if (tool == L"eraser") SetCursor(LoadCursor(nullptr, IDC_HAND)); // 橡皮用抓手光标
 	else if (tool == L"watermark" || tool == L"patina") SetCursor(LoadCursor(nullptr, IDC_ARROW));
 	else if (tool == L"number") {
 		numberCursorFollow = true;
-		SetCursor(nullptr); // 对齐 QT BlankCursor：跟手圆/表情即光标
+		SetCursor(nullptr); // 跟手圆/表情即光标
 	}
 	else SetCursor(LoadCursor(nullptr, IDC_CROSS));
 }
@@ -750,7 +754,7 @@ void AnnotHost::paintSizePreview(ID2D1DeviceContext* ctx)
 	const float x1 = cx - half;
 	const float x2 = cx + half;
 
-	// 整段预览用层透明度，避免杆身与箭头交接处叠色发暗（对齐 QT setOpacity）
+	// 整段预览用层透明度，避免杆身与箭头交接处叠色发暗
 	ComPtr<ID2D1Layer> layer;
 	ctx->CreateLayer(nullptr, layer.GetAddressOf());
 	if (layer) {
@@ -983,7 +987,7 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 				}
 			}
 		}
-		// 对齐 QT：双击箭头/线段端点切换 free（绕对端旋转 ↔ 自由拖点）
+		// 双击箭头/线段端点切换 free（绕对端旋转 ↔ 自由拖点）
 		if (shapeHover) {
 			if (auto* a = dynamic_cast<ShapeArrow*>(shapeHover)) {
 				if (a->toggleFreeEndpoint(dx, dy)) return true;
@@ -1087,7 +1091,7 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 		}
 	}
 
-	// 对齐 QT/Tauri：按下时先命中已有标注（空工具也能点选），未命中才落笔
+	// 按下时先命中已有标注（空工具也能点选），未命中才落笔
 	// 录屏工具启用时跳过点选，直接落笔，避免标注过程中拖到旧图形
 	// 文本工具落在线段中间时要例外：那儿就是要打字，不能被"命中已有箭头"抢走
 	const bool textOnShaft = (shaftHost != nullptr);

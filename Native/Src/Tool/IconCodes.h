@@ -83,7 +83,7 @@ namespace Icon
 	inline constexpr const wchar_t* Dash = L"\ue60c";           // 虚线
 	inline constexpr const wchar_t* Watermark = L"\ue60e";      // 水印
 	inline constexpr const wchar_t* CornerBR = L"\ue60f";       // 下右
-	inline constexpr const wchar_t* UnlockAspect = L"\ue611";   // 长宽比锁定（选中变色，对齐 QT lock-aspect-ratio）
+	inline constexpr const wchar_t* UnlockAspect = L"\ue611";   // 长宽比锁定（选中变色）
 	inline constexpr const wchar_t* GreenScreen = L"\ue613";    // 绿镜
 	inline constexpr const wchar_t* DashRect = L"\ue615";       // 虚线框
 	inline constexpr const wchar_t* Eyedropper = L"\ue617";     // 吸管

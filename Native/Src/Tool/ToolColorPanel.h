@@ -3,7 +3,7 @@
 #include "ToolbarTheme.h"
 
 class ToolSub;
-// 颜色二级属性栏：参考 QT NestedShell，主属性栏只留当前色块，点开后出现本窗。
+// 颜色二级属性栏：主属性栏只留当前色块，点开后出现本窗。
 class ToolColorPanel : public Ling::WinBase
 {
 public:

@@ -222,7 +222,6 @@
     <ClCompile Include="Ocr\OcrService.cpp" />
     <ClCompile Include="Ocr\PpOcrEngine.cpp" />
     <ClCompile Include="Ocr\SystemOcr.cpp" />
-    <ClCompile Include="Ocr\TesseractOcr.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
@@ -343,7 +342,6 @@
     <ClInclude Include="Ocr\PluginPaths.h" />
     <ClInclude Include="Ocr\PpOcrEngine.h" />
     <ClInclude Include="Ocr\SystemOcr.h" />
-    <ClInclude Include="Ocr\TesseractOcr.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="quirc\quirc.h" />
     <ClInclude Include="quirc\quirc_internal.h" />

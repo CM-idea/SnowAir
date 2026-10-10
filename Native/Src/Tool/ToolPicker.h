@@ -25,7 +25,7 @@ public:
 	bool isOpen() const { return isVisible; }
 	bool hitTestScreen(POINT screenPt) const;
 	bool hitKeepOpen(POINT screenPt) const;
-	// 进入/离开气泡时回调（对齐 QT SubToolPopover::hoverChanged）
+	// 进入/离开气泡时回调
 	std::function<void(bool inside)> onHoverChange;
 private:
 	void onCreated() override;

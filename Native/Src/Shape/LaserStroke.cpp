@@ -15,7 +15,7 @@ const Point kUnit{ 1.f, 0.f, 0.f };
 constexpr float kGoneSize{ 0.35f };
 constexpr float kCapGoneSize{ 0.5f };
 constexpr float kStartCapMinSize{ 0.1f };
-// 急转弯判定：低速 75°，高速 37.5°（QT cornerVariance）
+// 急转弯判定：低速 75°，高速 37.5°
 constexpr float kCornerSpeed{ 35.f };
 
 Point add(Point a, Point b) { return { a.x + b.x, a.y + b.y, a.t + b.t }; }
@@ -350,7 +350,7 @@ ComPtr<ID2D1PathGeometry> buildGeometry(ID2D1Factory* factory, const Trail& trai
 		sink->AddLine(P(o[1]));
 	}
 	else {
-		// 中点二次曲线闭合（QT appendSmoothClosed）：控制点取顶点，终点取相邻中点
+		// 中点二次曲线闭合：控制点取顶点，终点取相邻中点
 		for (int i = 1; i < n - 1; ++i) {
 			sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
 				P(o[i]),

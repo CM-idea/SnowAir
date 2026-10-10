@@ -105,6 +105,8 @@ float ToolCap::contentLeadWidth() const
 
 ToolCap::~ToolCap()
 {
+	// WinBase 析构不销毁 HWND：不 close 就析构（例如直接重新 make_unique 覆盖）会留下"幽灵窗"
+	if (hwnd) { close(); hwnd = nullptr; }
 }
 
 bool ToolCap::isAnnotationTool(const std::wstring& id)
@@ -356,6 +358,11 @@ AnnotHost* ToolCap::annotHost() const
 
 void ToolCap::selectAnnotTool(const std::wstring& id)
 {
+	// 切到别的工具时，文字识别面板与其选中态一起收掉 —— 保持"同一时刻只有一个工具处于选中态"
+	if (winCap && winCap->hasOcrPanel()) winCap->clearOcrPanel();
+	for (auto b : btns) {
+		if (b->id == L"ocr") applyNormalStyle(b);
+	}
 	// 渐隐画笔 / 画笔 是同级一级槽位，底层都是 pen：先定好 isPenFade 再建属性栏
 	if (auto* host = annotHost(); host && host->toolSub) host->toolSub->setPenSlotMode(id);
 	// 包浆/水印/高亮是 mosaic 槽的子工具，工具栏按钮 id 仍是 mosaic
@@ -619,7 +626,7 @@ void ToolCap::initDragHandle()
 	dragHandle->setText(Icon::DragHandle);
 	dragHandle->setFontFamily(Icon::Family);
 	dragHandle->setFontSize(Icon::Size);
-	// 对齐 QT：半透明手柄、无悬停灰底
+	// 半透明手柄、无悬停灰底
 	dragHandle->setColor(ToolbarTheme::dragHandleColor);
 	dragHandle->setHoverColor(ToolbarTheme::dragHandleColor);
 	dragHandle->setHoverBg(0);
@@ -839,8 +846,20 @@ void ToolCap::onClickCap(Ling::Button* btn)
 			else showComingSoon();
 		}
 		else if (btn->id == L"ocr") {
-			if (eff == L"qrcode") winCap->startQrcode();
-			else winCap->startOcr();
+			if (eff == L"qrcode") {
+				winCap->startQrcode();
+			}
+			else {
+				winCap->startOcr();
+				// 与其他工具一致：识别面板开着时该按钮为选中态；再点一次关面板并恢复常态
+				if (winCap->hasOcrPanel()) {
+					cancelSelect();
+					applySelectedStyle(btn);
+				}
+				else {
+					applyNormalStyle(btn);
+				}
+			}
 		}
 	}
 	// 屏幕录制：气泡已取消，直接是普通按钮

@@ -53,6 +53,8 @@ public:
 	void startOcr();
 	void startTranslate();
 	void clearOcrPanel();
+	// 文字识别面板是否开着（工具栏据此决定该按钮是否显示选中态）
+	bool hasOcrPanel() const { return toolOcr != nullptr; }
 	void startQrcode();
 	void syncQrcodePanel();
 	void syncOcrPanel();
@@ -163,7 +165,7 @@ private:
 	// 工作线程抓好的 BGRA（top-down）：onCreated 用它建 screenImg，免去 UI 线程同步抓屏
 	std::shared_ptr<std::vector<BYTE>> pendingGrab_;
 	bool annotLive{ false };
-	// 标注中拖选区边/角（与落笔分离，对齐 QT 视窗可调）
+	// 标注中拖选区边/角（与落笔分离，视窗可调）
 	bool maskDragging{ false };
 	COLORREF pixColor_{ 0 };
 	int pixSampleX_{ -1 }, pixSampleY_{ -1 };

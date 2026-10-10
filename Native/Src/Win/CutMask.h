@@ -54,7 +54,7 @@ public:
 	bool infoTipAnchor(InfoHit hit, float& screenX, float& screenY) const;
 	float selRadius() const { return selRadius_; }
 	int selShadowW() const { return selShadowW_; }
-	// 导出时套圆角裁切 + 外阴影（对齐 QT exportCrop）；无效果则原样返回 true
+	// 导出时套圆角裁切 + 外阴影；无效果则原样返回 true
 	bool applyExportEffects(std::vector<BYTE>& pixels, int& cw, int& ch) const;
 public:
 	D2D1_RECT_F maskRect{};
@@ -134,7 +134,7 @@ private:
 	static constexpr float minSize{ 4.f };
 	static constexpr float handleLogical{ 8.f };
 	static constexpr float hitBandLogical{ 14.f };
-	// 统一：QT CaptureInfoBar 圆角滑条（轨 4 / 钮半径 7）
+	// 圆角滑条：轨 4 / 钮半径 7
 	static constexpr float sliderTrackH{ ToolbarTheme::sliderTrackH };
 	static constexpr float sliderThumbR{ ToolbarTheme::sliderThumbR };
 	static constexpr float swatchSize{ ToolbarTheme::swatchSize };

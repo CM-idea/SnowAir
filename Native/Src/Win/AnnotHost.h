@@ -101,7 +101,7 @@ protected:
 	void annotKey(UINT key);
 	void annotTimer(UINT id);
 	virtual POINT toImgPos(const POINT& pos) const;
-	// 按下时命中（优先当前选中的控点）；对齐 QT hitTestOp
+	// 按下时命中（优先当前选中的控点）
 	ShapeBase* hitShapeAt(float x, float y);
 	void clearAnnotSelection();
 	// 清空全部标注：**必须先断开 shapeHover / newShape / editingText 这些裸指针再释放**

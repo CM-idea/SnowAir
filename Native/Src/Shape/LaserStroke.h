@@ -13,7 +13,7 @@ namespace LaserStroke
 	inline constexpr int64_t kHoldMs{ 200 };
 	// 单点从全粗收到消失的时间（合计寿命约 1s）
 	inline constexpr int64_t kFadeMs{ 780 };
-	// 跟手平滑：0.58 = QT kStreamline
+	// 跟手平滑：0.58
 	inline constexpr float kStreamline{ 0.58f };
 	// 未稳定段（tail）的最大长度，超过就并入 stable
 	inline constexpr float kMaxTailLength{ 100.f };
@@ -22,7 +22,7 @@ namespace LaserStroke
 	{
 		float x{ 0.f };
 		float y{ 0.f };
-		// 绝对时间戳 ms（QT 里存在 laser-pointer 的 pressure 字段）
+		// 绝对时间戳 ms
 		float t{ 0.f };
 	};
 
@@ -48,7 +48,7 @@ namespace LaserStroke
 	bool stillVisible(const Trail& trail, int64_t now);
 	// 逐点寿命 → 封闭描边轮廓；全消失 / 点数不足时返回空
 	std::vector<Point> outline(const Trail& trail, int64_t now);
-	// 轮廓 → 填充几何（中点二次曲线闭合，对齐 QT appendSmoothClosed）
+	// 轮廓 → 填充几何（中点二次曲线闭合）
 	Microsoft::WRL::ComPtr<ID2D1PathGeometry> buildGeometry(
 		ID2D1Factory* factory, const Trail& trail, int64_t now);
 }

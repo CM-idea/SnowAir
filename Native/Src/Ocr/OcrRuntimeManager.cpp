@@ -84,7 +84,7 @@ namespace {
 		// 优先 NuGet 包（体积小），失败退回 GitHub 官方 zip
 		const std::wstring nuget = L"https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.24.4/microsoft.ml.onnxruntime.1.24.4.nupkg";
 		const std::wstring ghZip = L"https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-win-x64-1.24.4.zip";
-		std::filesystem::path archive = tmp / L"ort.nupkg";
+		std::filesystem::path archive = tmp / L"ort-nuget.zip";   // 必须用 .zip 落盘：Expand-Archive 只认 .zip 扩展名
 		bool ok = tryDownload({ nuget, std::wstring(L"https://ghfast.top/") + nuget }, archive,
 			[&](float p) { if (progress) progress(p * 0.6f); });
 		if (!ok || !std::filesystem::is_regular_file(archive, ec)) {
