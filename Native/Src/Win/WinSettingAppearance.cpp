@@ -341,15 +341,27 @@ void WinSettingAppearance::tbShowKindMenu()
     // 下拉宽度 = 导航胶囊宽度（与触发条等宽）
     float pw = SettingTheme::dropdownWidth;
     if (seg0TitleBtn && seg0TitleBtn->w > 0.f && win->dpi > 0.f) pw = seg0TitleBtn->w / win->dpi;
-    tbKindPopup = std::make_unique<SettingUi::Popup>(win, pw, totalH);
+    // 与设置页其它下拉统一：1px 描边改用「外环 + 内底」两层实心圆角块叠出
+    // （圆角节点直接 setBorder 会让描边外沿与圆角 clip 二次抗锯齿，四角糊出灰噪点）。
+    // 窗口四周各多留 edge 个逻辑像素当外环，面板内容随之内缩。
+    const float edge = (win->dpi > 0.f) ? 1.f / win->dpi : 1.f;
+    tbKindPopup = std::make_unique<SettingUi::Popup>(win, pw + edge * 2.f, totalH + edge * 2.f);
     auto* box = tbKindPopup->box();
-    box->setBg(SettingTheme::popover);
-    box->setBorder(1.f, SettingTheme::border);
-    box->setBorderRadius(SettingTheme::radiusSm);
-    box->setPadding(4.f, 4.f, 4.f, 4.f);
+    box->setBg(SettingTheme::border);   // 外壳填描边色：内底内缩后露出一圈 1px 外环
+    box->setBorder(0.f, 0);
+    box->setBorderRadius(SettingTheme::radiusCtl);
+    box->setPadding(edge, edge, edge, edge);
+
+    auto* panel = box->makeChild<Ling::Node>();   // 内底：浮层真正的底色与圆角
+    panel->setWidthPercent(100.f);
+    panel->setBg(SettingTheme::popover);
+    panel->setBorderRadius(SettingTheme::radiusCtl - edge);
+    panel->setFlexDirection(Ling::FlexDirection::Column);
+    panel->setFlexShrink(1.f);
+    panel->setPadding(4.f, 4.f, 4.f, 4.f);
     auto weakThis = getWeakThis();
     for (int i = 0; i < (int)options.size(); i++) {
-        auto* item = box->makeChild<Ling::Button>();
+        auto* item = panel->makeChild<Ling::Button>();
         item->setText(options[i]);
         item->setHeight(itemH);
         item->setWidthPercent(100.f);
@@ -357,14 +369,14 @@ void WinSettingAppearance::tbShowKindMenu()
         item->setJustifyContent(Ling::Justify::Start);
         item->setAlignItems(Ling::Align::Center);
         item->setPadding(8.f, 0, 8.f, 0);
-        item->setBorderRadius(SettingTheme::radiusInner);   // 内层小框：与外框(10)同心
+        item->setBorderRadius(SettingTheme::radiusInner);   // 内层小框：与外框(8)同心
         if (i + 1 < (int)options.size()) item->setMarginBottom(itemGap);
         bool isCurrent = (i == tbKind);
-        // 当前项：底色取与其它项 hover 相同的浅灰，hover 底色/文字色取同值 → 悬停不产生任何变化。
-        item->setColor(SettingTheme::textPrimary);
-        item->setBg(isCurrent ? SettingTheme::accent : 0);
-        item->setHoverBg(SettingTheme::accent);
-        if (isCurrent) item->setHoverColor(SettingTheme::textPrimary);
+        // 当前项与悬停项同底色、文字恒为浮层文字色 → 悬停不产生任何变化。
+        item->setColor(SettingTheme::popupFg);
+        item->setHoverColor(SettingTheme::popupFg);
+        item->setBg(isCurrent ? SettingTheme::popupSelBg : 0);
+        item->setHoverBg(SettingTheme::popupSelBg);
         int idx = i;
         item->onClick.add([this, weakThis, idx](Ling::Button*) {
             if (!weakThis.lock()) return;
@@ -489,7 +501,16 @@ void WinSettingAppearance::initThemeCtrls(Ling::Node* p)
     SettingUi::selectRow(p, Lang::get(L"setting.theme"),
         { Lang::get(L"setting.themeFollow"), Lang::get(L"setting.themeLight"), Lang::get(L"setting.themeDark") },
         cur < 0 || cur > 2 ? 0 : cur,
-        [](int i, const std::wstring&) { Setting::get()->setAppTheme(i); }, true);
+        [this](int i, const std::wstring&) {
+            Setting::get()->setAppTheme(i);
+            // 换主题要整窗重建：各子页在构建时就把语义色读进了控件，改色板不会自动回溯。
+            // 延迟到浮层关闭后再执行，避免与 destroyPopup 的 body 访问冲突（同语言切换）。
+            Ling::App::get()->dq.TryEnqueue([this]() {
+                SettingTheme::apply(Setting::get()->getAppTheme());
+                if (win) win->close();
+                Ling::App::get()->dq.TryEnqueue([]() { WinSetting::init(4); });
+            });
+        }, true);
 }
 
 // ---- 贴图边框卡（颜色 + 滑条 + 右侧效果预览） ----
@@ -585,7 +606,7 @@ void WinSettingAppearance::initPinBorderCtrls(Ling::Node* p)
         sl->setStep(1.f);
         sl->setValue((float)val);
         // 滑条配色：浅色=浅槽 + 深柄 + 绿色已选段（白柄在浅底上会看不见）
-        sl->setTrackColor(SettingTheme::zinc200);
+        sl->setTrackColor(SettingTheme::input);
         sl->setFillColor(0x34C759FFu);
         sl->setThumbColor(SettingTheme::primary);
         sl->setHoverThumbColor(SettingTheme::primary);

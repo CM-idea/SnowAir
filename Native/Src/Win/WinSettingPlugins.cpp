@@ -143,11 +143,13 @@ WinSettingPlugins::PackUi WinSettingPlugins::makePack(Ling::Node* parent,
 	ui.dlBtn->setPadding(0.f, 0.f, 0.f, 0.f);
 	ui.dlBtn->setBorderRadius(SettingTheme::radiusLg);
 	ui.dlBtn->setBorder(0.f, 0);
-	// 固定配色：#F5F4F4 底 + 黑图标；悬停色取同值 → 没有任何额外的停悬效果
-	ui.dlBtn->setBg(0xF5F4F4FF);
-	ui.dlBtn->setHoverBg(0xF5F4F4FF);
-	ui.dlBtn->setColor(0x000000FF);
-	ui.dlBtn->setHoverColor(0x000000FF);
+	// 配色随主题：浅色=#F5F4F4 底 + 黑图标；深色=#222222 底 + 白图标。
+	// 悬停色取同值 → 没有任何额外的停悬效果
+	const bool darkDl = SettingTheme::isDark();
+	ui.dlBtn->setBg(darkDl ? 0x222222FF : 0xF5F4F4FF);
+	ui.dlBtn->setHoverBg(darkDl ? 0x222222FF : 0xF5F4F4FF);
+	ui.dlBtn->setColor(darkDl ? 0xFFFFFFFF : 0x000000FF);
+	ui.dlBtn->setHoverColor(darkDl ? 0xFFFFFFFF : 0x000000FF);
 	ui.dlBtn->setFlexDirection(Ling::FlexDirection::Row);
 	ui.dlBtn->setJustifyContent(Ling::Justify::Center);
 	ui.dlBtn->setAlignItems(Ling::Align::Center);
