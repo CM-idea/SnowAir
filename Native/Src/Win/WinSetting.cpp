@@ -199,9 +199,10 @@ void WinSetting::onCreated()
 	// ② 中部：7 菜单
 	initMenuItems(sideNav);
 
-	// ③ 底部：版本号（zinc-400 弱文字）
+	// ③ 底部：版本号（zinc-400 弱文字）。数字从 exe 资源取，与「关于」页同源；后缀带 Lite 版本标记。
 	auto versionLabel = sideNav->makeChild<Ling::Label>();
-	versionLabel->setText(L"v0.1.0 beta");
+	const auto appVer = Ling::Util::getVerNum();
+	versionLabel->setText(std::format(L"V{}.{}.{}{}", appVer[0], appVer[1], appVer[2], SettingUi::kEditionTag));
 	versionLabel->setFontSize(SettingTheme::fontXs);
 	versionLabel->setColor(SettingTheme::textTertiary);
 

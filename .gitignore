@@ -48,6 +48,9 @@ Tauri2/DEV.md
 /font_*/
 /call
 
+# 本地发布的构建产物（发行包不入库）
+/release/
+
 # 编辑器/IDE 私有数据
 /.trae/
 
