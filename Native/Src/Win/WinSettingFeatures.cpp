@@ -541,7 +541,7 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 		&& OcrRuntimeManager::instance().isInstalled(OcrPackVariant::StableV4)) {
 		labels.push_back(L"PP-OCRv4"); engines.push_back(2); cloudIds.push_back(L"");
 	}
-	// 文本识别模型默认只有「系统 OCR」（Tesseract 已不再提供）
+	// 文本识别模型默认只有「系统 OCR」
 	labels.push_back(Lang::get(L"setting.fnOcrSystem")); engines.push_back(4); cloudIds.push_back(L"");
 	for (auto& c : s->getOcrCloudConfigs()) {
 		if (!c.isConfigured()) continue;

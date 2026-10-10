@@ -21,7 +21,11 @@ ToolQrcode::ToolQrcode(WinCap* win, std::wstring text)
 	});
 }
 
-ToolQrcode::~ToolQrcode() {}
+ToolQrcode::~ToolQrcode()
+{
+	// 同 ToolOcr：WinBase 析构不销毁 HWND，直接 reset 会留下"幽灵窗"，重入已释放对象
+	if (hwnd) { close(); hwnd = nullptr; }
+}
 
 bool ToolQrcode::isHttpUrl() const
 {

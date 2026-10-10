@@ -19,7 +19,7 @@ void applyPropBubbleContentPad(Ling::Node* contentNode, bool tipDown)
 namespace {
 
 constexpr float kAaPad{ 1.f };     // 窗内留 1px 给 AA，不改布局间距
-constexpr float kSuperSample{ 2.f }; // 2× 绘制再高质量缩小 → 圆角更柔（对齐 QT SmoothTransformation 思路）
+constexpr float kSuperSample{ 2.f }; // 2× 绘制再高质量缩小 → 圆角更柔
 
 void enableSmooth(ID2D1DeviceContext* ctx)
 {

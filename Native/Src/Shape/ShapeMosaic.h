@@ -19,7 +19,7 @@ private:
 	void resetMosaic();
 	void buildEffectBitmap();
 	Microsoft::WRL::ComPtr<ID2D1Bitmap> createEffectBitmap();
-	D2D1_RECT_F sampleAabb() const; // 旋转后轴对齐包围盒（对齐 QT filterSampleRect）
+	D2D1_RECT_F sampleAabb() const; // 旋转后轴对齐包围盒
 	void mosaicPixels(BYTE* bits, UINT32 pitch, UINT32 width, UINT32 height, int blockSize);
 	void blurPixels(BYTE* bits, UINT32 pitch, UINT32 width, UINT32 height, int radius);
 private:

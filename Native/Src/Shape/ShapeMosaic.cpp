@@ -58,7 +58,7 @@ void ShapeMosaic::paint(ID2D1DeviceContext* ctx)
 		return;
 	}
 
-	// 对齐 QT：只旋转滤镜窗口（裁剪），贴图像素保持轴对齐，不跟着拧
+	// 只旋转滤镜窗口（裁剪），贴图像素保持轴对齐，不跟着拧
 	ComPtr<ID2D1Layer> layer;
 	ctx->CreateLayer(nullptr, layer.GetAddressOf());
 	if (layer) {

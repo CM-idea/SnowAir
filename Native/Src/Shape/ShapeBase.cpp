@@ -6,7 +6,7 @@
 #include <cmath>
 
 ShapeBase::ShapeBase(AnnotHost* win) :win{ win },
-	// 对齐 QT paintSelectedOp：内圆直径 8、命中约 12
+	// 内圆直径 8、命中约 12
 	draggerSize{ 8.f * win->dpi },
 	hitPad{ 2.f * win->dpi }
 {
@@ -158,7 +158,7 @@ bool ShapeBase::applyUnselectedHoverCursor()
 		}
 	}
 	if (isSelected() || hoverDraggerIndex < 0) return false;
-	// 对齐 QT PointingHand：未选中标注上提示可点选二次编辑
+	// 未选中标注上提示可点选二次编辑
 	SetCursor(LoadCursor(nullptr, IDC_HAND));
 	return true;
 }

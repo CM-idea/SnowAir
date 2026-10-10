@@ -71,7 +71,7 @@ bool jpegRoundtrip(std::vector<BYTE>& bgra, UINT32 w, UINT32 h, UINT32 pitch, in
 		IID_PPV_ARGS(factory.GetAddressOf()))))
 		return false;
 
-	// 编码用 24bpp BGR（无 alpha），对齐 QT RGB32→JPEG
+	// 编码用 24bpp BGR（无 alpha）
 	std::vector<BYTE> bgr((size_t)w * h * 3);
 	for (UINT32 y = 0; y < h; ++y) {
 		auto src = bgra.data() + y * pitch;
@@ -166,7 +166,7 @@ std::wstring pickName(SeedRand& rand)
 void drawStamp(BYTE* bits, UINT32 pitch, UINT32 w, UINT32 h, int basePlan, int wmSize, SeedRand& rand,
 	IDWriteFactory* dw, ID2D1Factory* /*d2d*/)
 {
-	// CPU 侧用 GDI 画戳，避免再开 D2D target；字号对齐 QT
+	// CPU 侧用 GDI 画戳，避免再开 D2D target
 	int fontSize = 22 + rand.range(0, 7);
 	if (fontSize < 1) fontSize = 1;
 	float px = (float)w / (float)fontSize;
@@ -309,7 +309,7 @@ bool apply(std::vector<BYTE>& bgra, UINT32 width, UINT32 height, UINT32 pitch, c
 				row[x * 4 + 3] = 255;
 			}
 		}
-		// 略微错位贴回（对齐 QT drawImage 拉伸）
+		// 略微错位贴回
 		const float dw = (float)tw + dx;
 		const float dh = (float)th + dy;
 		const float ox = -dx / 2.f;

@@ -5,7 +5,7 @@
 
 class ToolSub;
 
-// 属性栏二级气泡：圆角滑条 / 水印角度 / 包浆水印位置+大小（对齐 QT NestedShell）
+// 属性栏二级气泡：圆角滑条 / 水印角度 / 包浆水印位置+大小
 class ToolNestedPanel : public Ling::WinBase
 {
 public:

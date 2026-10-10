@@ -141,7 +141,7 @@ void ToolSub::beginTool(const std::wstring& id)
 	curSliderKey = cfg->key;
 	sliderMin = cfg->min;
 	sliderMax = cfg->max;
-	// 会话内记忆；新截图会话 ToolSub 重建后回到默认（对齐 QT resetDefaults）
+	// 会话内记忆；新截图会话 ToolSub 重建后回到默认
 	sliderVal = rememberedSlider(id, cfg->def, cfg->min, cfg->max);
 	auto cit = colorIndexMem.find(id);
 	selectColorIndex = (cit != colorIndexMem.end() && cit->second < colors.size()) ? cit->second : 0;
@@ -644,7 +644,7 @@ bool ToolSub::pickCustomColor()
 
 void ToolSub::styleToolbarBtn(Ling::Button* btn)
 {
-	// QT propGap=16：槽宽 = 字形 + 间距
+	// propGap=16：槽宽 = 字形 + 间距
 	const float slot = Icon::Size + ToolbarTheme::propGap;
 	const float marginH{ (slot - iconInner) * 0.5f };
 	const float marginV{ (btnSize - iconInner) * 0.5f };

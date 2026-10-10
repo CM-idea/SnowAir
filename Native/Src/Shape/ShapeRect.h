@@ -36,7 +36,7 @@ private:
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
 	Microsoft::WRL::ComPtr<ID2D1StrokeStyle> strokeStyle;
 	float strokeWidth{ 1.f }, pressX{ 0.f }, pressY{ 0.f };
-	float angle{ 0.f }; // 弧度，顶部为 0（对齐 QT）
+	float angle{ 0.f }; // 弧度，顶部为 0
 	// 角外一圈旋转：光标按角挑字形，拖动按增量转
 	int rotateCorner{ 0 };
 	float rotateStartAngle{ 0.f }, rotateStartAtan{ 0.f };

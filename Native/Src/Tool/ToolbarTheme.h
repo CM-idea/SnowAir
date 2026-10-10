@@ -31,7 +31,7 @@ namespace ToolbarTheme
 	inline constexpr float sliderValueWidth{ 28.f };
 	// 滑条轨道控件 ↔ 数值：比 propGap 更紧（对齐参考属性气泡）
 	inline constexpr float sliderValueGap{ 8.f };
-	// 统一：QT CaptureInfoBar 圆角滑条（轨 4 / 钮 14 / #333·绿·浅灰）
+	// 圆角滑条：轨 4 / 钮 14 / #333·绿·浅灰
 	// 颜色随工具栏主题刷新（见文件末尾 refresh()），故不再写 constexpr。
 	inline constexpr float sliderTrackH{ 4.f };
 	inline constexpr float sliderThumbR{ 7.f };
@@ -39,7 +39,7 @@ namespace ToolbarTheme
 	inline uint32_t sliderFill{ 0x34C759FFu };
 	inline uint32_t sliderThumb{ 0xD9D9D9FFu };
 
-	// 色块统一（对齐 QT swatchSize=18）
+	// 色块统一：18
 	inline constexpr float swatchSize{ 18.f };
 	inline constexpr float swatchRing{ 22.f };
 	inline constexpr float swatchRadius{ 2.f };

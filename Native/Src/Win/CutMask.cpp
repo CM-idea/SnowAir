@@ -1812,7 +1812,7 @@ void CutMask::paintInfoIcons(ID2D1DeviceContext* ctx)
 	drawIcon(radiusLayout.Get(), radiusBtnRect, selRadius_ > 0.f);
 	drawIcon(shadowLayout.Get(), shadowBtnRect, selShadowW_ > 0);
 
-	// 与 Ling::Slider 同一套：QT CaptureInfoBar（轨 4 / 钮 14 / 深轨·绿进度·浅钮）
+	// 与 Ling::Slider 同一套：圆角滑条（轨 4 / 钮 14 / 深轨·绿进度·浅钮）
 	if (selRadius_ > 0.f && radiusSliderRect.right > radiusSliderRect.left) {
 		const float w = radiusSliderRect.right - radiusSliderRect.left;
 		const float h = radiusSliderRect.bottom - radiusSliderRect.top;

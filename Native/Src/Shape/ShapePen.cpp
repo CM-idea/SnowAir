@@ -96,7 +96,7 @@ void ShapePen::rebuildPath()
 		rebuildDashSpine();
 		return;
 	}
-	// 实线硬笔/软笔：对齐 QT FreehandStroke 填充轮廓
+	// 实线硬笔/软笔：填充轮廓
 	auto d2d = Ling::D2D::get();
 	path = FreehandStroke::outline(d2d->d2dFactory.Get(), pts, strokeWidth, isSoft, times);
 	pathFilled = (path != nullptr);
@@ -111,7 +111,7 @@ void ShapePen::appendSample(float x, float y, bool force)
 {
 	// 渐隐画笔：点带时间戳按寿命收细，平滑/补点在 LaserStroke 内做
 	if (isFade) {
-		if (force) return; // 抬笔不再补点，与 QT closeTrail 一致
+		if (force) return; // 抬笔不再补点
 		const int64_t now = nowMs();
 		LaserStroke::addPoint(laser, x, y, now);
 		rebuildLaserPath(now);
@@ -129,7 +129,7 @@ void ShapePen::appendSample(float x, float y, bool force)
 	}
 
 	D2D1_POINT_2F sample{ x, y };
-	// QT：软笔更密、少 EMA；硬笔/虚线抑抖
+	// 软笔更密、少 EMA；硬笔/虚线抑抖
 	if (!isSoft || isDash) {
 		const float k = isDash ? 0.42f : 0.38f;
 		smoothX = smoothX * (1.f - k) + x * k;
@@ -475,7 +475,7 @@ void ShapePen::setCursor()
 
 bool ShapePen::hitErase(const float x, const float y)
 {
-	if (isFade) return false; // 渐隐画笔不参与橡皮命中（对齐 QT：laser 不进标注列表）
+	if (isFade) return false; // 渐隐画笔不参与橡皮命中（laser 不进标注列表）
 	if (pts.empty()) return false;
 	float lx = x, ly = y;
 	if (settled) toLocal(x, y, lx, ly);
