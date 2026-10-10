@@ -26,6 +26,8 @@ private:
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
 	Microsoft::WRL::ComPtr<ID2D1Bitmap> mosaicBitmap;
 	Microsoft::WRL::ComPtr<ID2D1BitmapBrush> mosaicBrush;
+	// 演示画布（实时桌面）没有会话底图时，在图形创建那一刻拍下的桌面快照，当取样源用
+	Microsoft::WRL::ComPtr<ID2D1Bitmap1> liveSource;
 	D2D1_POINT_2F mosaicOrigin{ 0.f, 0.f };
 	D2D1_RECT_F mosaicSample{ 0, 0, 0, 0 }; // 含 pad 的取样区（轴对齐）
 	float strokeWidth{ 1.f };
