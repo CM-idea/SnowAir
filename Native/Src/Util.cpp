@@ -159,7 +159,13 @@ void Util::saveToClipboard(const int w, const int h, BYTE* data)
 	GlobalUnlock(hDib);
 
 	// ---------- 4) 写入剪切板 ----------
-	if (!OpenClipboard(nullptr)) {
+	// OpenClipboard 可能被别的进程短暂占用：单次失败就会"复制不上"，这里有限次重试（最多约 100ms）
+	bool opened = false;
+	for (int attempt = 0; attempt < 10; ++attempt) {
+		if (OpenClipboard(nullptr)) { opened = true; break; }
+		Sleep(10);
+	}
+	if (!opened) {
 		GlobalFree(hDib);
 		GlobalFree(hDibV5);
 		GlobalFree(hPng);
@@ -261,7 +267,13 @@ std::vector<BYTE> Util::captureScreen(const int x, const int y, const int w, con
 
 void Util::addFileToClipboard(const std::wstring& filePath)
 {
-	if (!OpenClipboard(nullptr)) return;
+	// 同「复制图片」：OpenClipboard 可能被别的进程短暂占用，有限次重试
+	bool opened = false;
+	for (int attempt = 0; attempt < 10; ++attempt) {
+		if (OpenClipboard(nullptr)) { opened = true; break; }
+		Sleep(10);
+	}
+	if (!opened) return;
 	EmptyClipboard();
 	// DROPFILES 之后紧跟双 \0 结尾的路径列表，这里只放一条
 	auto totalSize = sizeof(DROPFILES) + (filePath.length() + 2) * sizeof(wchar_t);

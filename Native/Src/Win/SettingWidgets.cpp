@@ -77,10 +77,14 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
         // 这里 gPopup 已为 null，导致"点击第二下仍展开"。因此钩子对点击锚定按钮本身不干预，
         // 由本回调判断是否已展开来切换。
         if (gPopup && gPopup->anchorButton() == btn) {
+            btn->setBorderWidth(1.f);   // 恢复触发框描边
             destroyPopup();
             return;
         }
         destroyPopup();
+        // 展开期间把触发框自己的描边藏起来：浮层顶部与触发框重合，
+        // 两条描边叠在一起会多出一圈边，看着"不对"。关闭时再恢复（见下方各处 destroyPopup）。
+        btn->setBorderWidth(0.f);
 
         // ── 一体面板：浮层顶到触发框上缘并盖住它，面板首行复刻触发框
         //    （同高度/同左右内边距/同字号与箭头），下面直接接选项列表 → 视觉上就是"触发框 + 列表"
@@ -121,19 +125,32 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
         if (btn->w > 0.f && w && w->dpi > 0.f)
             pw = btn->w / w->dpi;
 
-        gPopup = std::make_unique<SettingUi::Popup>(w, pw, totalH);
+        // 1px 描边不用圆角节点直接 setBorder：描边外沿与圆角 clip 边缘重合会被二次抗锯齿，
+        // 四角糊出一圈灰噪点。改成「外环 + 内底」两层实心圆角块叠出 1px 圆环。
+        // 代价：窗口四周各多留 edge 个逻辑像素当外环，面板内容整体内缩同样宽度（place() 里把窗口回退对齐触发框）。
+        const float edge = (w && w->dpi > 0.f) ? 1.f / w->dpi : 1.f;   // 1 个物理像素对应的逻辑长度
+        gPopup = std::make_unique<SettingUi::Popup>(w, pw + edge * 2.f, totalH + edge * 2.f);
         gPopup->setAttachTop(true);
-        gPopup->setHitTransparentTop(headerH * dpi);   // 顶部那条=触发框：点击透给宿主触发框
+        gPopup->setHitTransparentTop(headerH * dpi + 1.f);   // 顶部那条=触发框：点击透给宿主触发框
         auto* box = gPopup->box();
-        box->setBg(SettingTheme::popover);
-        box->setBorder(1.f, SettingTheme::border);
-        box->setBorderRadius(SettingTheme::radiusLg);
-        // 内边距交给各段自己出：首行要贴满整宽（左右内边距才和触发框对齐），选项区再整体缩进 pad。
-        box->setPadding(0.f, 0.f, 0.f, 0.f);
+        box->setBg(SettingTheme::border);   // 外壳填描边色：内底内缩后正好露出一圈 1px 外环
+        box->setBorder(0.f, 0);
+        // 浮层与触发框圆角必须一致：展开后首行盖在原触发框位置上，
+        // 若两者圆角不同（10 vs 8），同一处的四角会"跳一下"。
+        box->setBorderRadius(SettingTheme::radiusCtl);
+        box->setPadding(edge, edge, edge, edge);
 
-        // 首行：复刻触发框。底透明（透出面板底色、不遮面板描边），左内边距用触发框自己的值。
+        // 内底：浮层真正的底色与圆角；首行/选项都挂在它下面。
+        auto* panel = box->makeChild<Ling::Node>();
+        panel->setWidthPercent(100.f);
+        panel->setBg(SettingTheme::popover);
+        panel->setBorderRadius(SettingTheme::radiusCtl - edge);
+        panel->setFlexDirection(Ling::FlexDirection::Column);
+        panel->setFlexShrink(1.f);
+
+        // 首行：复刻触发框（同高/同左右内边距/同字号与箭头），左内边距用触发框自己的值。
         const auto btnPad = btn->getPadding();
-        auto* head = box->makeChild<Ling::Button>();
+        auto* head = panel->makeChild<Ling::Button>();
         head->setText(L"");   // 文本/图标都交给子 Label，字体族才能与触发框一致
         head->setHeight(headerH);
         head->setWidthPercent(100.f);
@@ -142,13 +159,18 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
         head->setAlignItems(Ling::Align::Center);
         head->setPadding(std::get<0>(btnPad), 0.f, std::get<2>(btnPad), 0.f);
         head->setBorderRadius(0.f);
-        head->setBg(SettingTheme::accent);        // 展开态：当前项＝选中色（面板圆角会裁掉上两角，描边盖在其上）
-        head->setHoverBg(SettingTheme::accent);   // 悬停不产生变化
-        head->onClick.add([](Ling::Button*) { destroyPopup(); });   // 点首行（原触发框位置）＝收起
+        // 首行＝原来的触发框位置，显示的就是"当前选中项"：用选中底色标出，
+        // 悬停取同值 → 鼠标进出不产生变化。点它只是收起（它不是可选项）。
+        head->setBg(SettingTheme::popupSelBg);
+        head->setHoverBg(SettingTheme::popupSelBg);
+        head->onClick.add([btn](Ling::Button*) {   // 点首行（原触发框位置）＝收起
+            btn->setBorderWidth(1.f);
+            destroyPopup();
+        });
         {
             auto* val = head->makeChild<Ling::Label>();
             val->setFontSize(SettingTheme::fontBase);
-            val->setColor(SettingTheme::textPrimary);
+            val->setColor(SettingTheme::popupFg);
             val->setFlexShrink(1.f);
             val->setText(cur >= 0 && cur < (int)options.size() ? options[cur] : L"");
             auto* spacer = head->makeChild<Ling::Node>();
@@ -164,7 +186,7 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
         }
 
         // 选项区
-        auto* listWrap = box->makeChild<Ling::Node>();
+        auto* listWrap = panel->makeChild<Ling::Node>();
         listWrap->setWidthPercent(100.f);
         listWrap->setFlexDirection(Ling::FlexDirection::Column);
         listWrap->setFlexShrink(1.f);
@@ -180,11 +202,15 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
             item->setAlignItems(Ling::Align::Center);
             item->setPadding(8.f, 0, 8.f, 0);
             item->setBorderRadius(SettingTheme::radiusInner);   // 与外框(10)同心
-            item->setColor(SettingTheme::textPrimary);
+            item->setColor(SettingTheme::popupFg);
+            // 悬停文字必须与常态同色：Button 悬停时会用 hoverColor 覆盖 text，
+            // 不设就退回默认深灰(#333333)，在深色浮层上等于看不见。
+            item->setHoverColor(SettingTheme::popupFg);
             item->setBg(0);
-            item->setHoverBg(SettingTheme::accent);
-            item->onClick.add([onPick](Ling::Button*) {
+            item->setHoverBg(SettingTheme::popupSelBg);
+            item->onClick.add([onPick, btn](Ling::Button*) {
                 if (onPick) onPick();
+                btn->setBorderWidth(1.f);   // 恢复触发框描边
                 destroyPopup();
             });
             return item;
@@ -204,7 +230,10 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
             addRow(Lang::get(L"setting.none"), nullptr);
         }
         gPopup->setAnchor(btn);
-        gPopup->onDismiss = []() { destroyPopup(); };
+        gPopup->onDismiss = [btn]() {
+            btn->setBorderWidth(1.f);   // 恢复触发框描边
+            destroyPopup();
+        };
         // 延迟 open：本回调运行在宿主 onMouseDown 的派发循环内（点触发按钮即触发），
         // 在此把浮窗的 hook add 到宿主事件，会修改正在迭代的订阅列表；与 destroyPopup
         // 的延迟释放同理，推迟到调度队列执行可避免事件循环中途增删订阅导致的崩溃。
@@ -238,7 +267,7 @@ Ling::Button* makeBtn(Ling::Node* parent, const std::wstring& text,
         b->setBorder(1.f, SettingTheme::primary);
         b->setBg(SettingTheme::primary);
         b->setColor(SettingTheme::primaryForeground);
-        b->setHoverBg(SettingTheme::zinc800);
+        b->setHoverBg(SettingTheme::primaryHover);
         b->setHoverColor(SettingTheme::primaryForeground);
         break;
     case BtnVariant::Outline:
@@ -366,7 +395,9 @@ void Popup::place()
     if (attachTop) {
         POINT tl{ static_cast<LONG>(anchor->x), static_cast<LONG>(anchor->y - sy) };
         ClientToScreen(host->hwnd, &tl);
-        setPosition(tl.x, tl.y);
+        // 面板四周各留了 1px 外环（见 bindPopup），窗口左上角相应回退 1px，
+        // 面板内容（首行）才能与触发框严格对齐。
+        setPosition(tl.x - 1, tl.y - 1);
         return;
     }
     // 触发按钮与浮层之间留 4px（设计单位 → 物理像素）间距，不再紧贴按钮下缘。
@@ -468,8 +499,8 @@ constexpr float kTipPadY{ 8.f };    // 文本上下内边距（比系统 tooltip
 constexpr float kTipGap{ 4.f };     // 三角尖端到锚定控件边缘的间距
 constexpr float kTipProbeH{ 400.f };// 首次测量的探测高度（只为取折行后的文本高）
 // 颜色按 RRGGBBAA 解析（Ling::Color 的约定）
-constexpr uint32_t kTipBg{ 0x262626FF };   // 气泡底色 #262626
-constexpr uint32_t kTipFg{ 0xFFFFFFFF };   // 文字白色
+constexpr uint32_t kTipBg{ 0xE5E5E5FF };   // 气泡底色 #E5E5E5
+constexpr uint32_t kTipFg{ 0x262626FF };   // 文字深灰（浅底必须用深字才读得清）
 }
 
 HoverTip::HoverTip(Ling::WinBase* host) : Ling::WinBase(), host(host)
@@ -527,7 +558,7 @@ void HoverTip::layout()
     auto ctx = canvas->startPaint();
     if (!ctx) return;
     ctx->Clear(0);
-    // 无描边（0.f）：只填 #EEEEEE 底，气泡不带边框
+    // 无描边（0.f）：只填 #E5E5E5 底，气泡不带边框
     ToolbarChrome::paintPropBubble(ctx, w, h, dpi, brushBg.Get(), arrowX, tipDown, 0.f);
     canvas->finishPaint();
 }
@@ -842,14 +873,16 @@ Ling::Button* helpTipButton(Ling::Node* parent, const std::wstring& text)
     if (!s_helpTip) return nullptr;                                        // 窗口尚未注册气泡
     if (!Setting::get() || !Setting::get()->getFeatureTips()) return nullptr;  // 总开关关闭
 
-    // 问号按钮：用图标字库里的「问题」字形（无圆底/描边），颜色 #E5E5E5；
+    // 问号按钮：用图标字库里的「问题」字形（无圆底/描边）。
+    // 颜色随主题：浅色 #1E1E1E（白卡片上看得清）；深色 #E5E5E5（深卡片上看得清）。
     // 悬停只弹统一气泡（HoverTip），按钮本身颜色不变。
+    const uint32_t qc = SettingTheme::isDark() ? 0xE5E5E5FF : 0x1E1E1EFF;
     auto* btn = parent->makeChild<Ling::Button>();
     btn->setText(Icon::Problem);
     btn->setFontFamily(Icon::Family);
     btn->setFontSize(16.f);
-    btn->setColor(0xE5E5E5FF);        // #E5E5E5
-    btn->setHoverColor(0xE5E5E5FF);   // 保持颜色不变
+    btn->setColor(qc);
+    btn->setHoverColor(qc);           // 保持颜色不变
     btn->setSize(18.f, 18.f);
     btn->setPadding(0.f, 0.f, 0.f, 0.f);
     btn->setMarginLeft(6.f);
@@ -1047,22 +1080,20 @@ void grid2Cells(Ling::Node* grid)
 // ============================================================================
 //  Toggle Row：Switch 行
 // ============================================================================
-// 胶囊开关轨道色：关闭 #E5E5E5（比画布 F3F3F3 略深，落在白色卡片上边界更清晰）/ 开启 #0FDC78
-constexpr uint32_t kToggleTrackOff{ 0xE5E5E5FF };
-constexpr uint32_t kToggleTrackOn { 0x0FDC78FF };
 constexpr float    kToggleH{ 24.f };   // 胶囊开关高度（比 ctrlH 矮，行的右内边距要按它算才与上下留白一致）
+// 轨道色随主题（关：浅色 E5E5E5 / 深色 3A3A3A；开：0FDC78）—— 见 SettingTheme
 
 void styleToggle(Ling::Button* btn, bool on)
 {
-    // 44×24 轨道 + 20×20 滑块；无描边，轨道关闭 #E5E5E5 / 开启 #0FDC78，
-    // 滑块恒为纯白，悬停不产生任何颜色变化。
+    // 44×24 轨道 + 20×20 滑块；无描边。轨道：关闭 #E5E5E5(浅)/#424242(深)，开启恒为 #0FDC78；
+    // 滑块恒为纯白（两种状态、两种主题都一样），悬停不产生任何颜色变化。
     // 半径 12 是轨道整圆（胶囊形），不参与"圆角统一 10"。
     btn->setSize(44.f, kToggleH);
     btn->setBorderRadius(12.f);
     btn->setBorderWidth(0.f);
     btn->setText(L"");
     btn->setPadding(0, 0, 0, 0);
-    const uint32_t track = on ? kToggleTrackOn : kToggleTrackOff;
+    const uint32_t track = on ? SettingTheme::toggleTrackOn : SettingTheme::toggleTrackOff;
     btn->setBg(track);
     // 悬停色与常态色取同一值：Button 在悬停期间 setBg 只写缓存不刷新 visual，
     // 必须靠 setHoverBg 立即落笔，同时保证鼠标进出不产生任何颜色变化。
@@ -1076,7 +1107,7 @@ void styleToggle(Ling::Button* btn, bool on)
         thumb->setPositionType(Ling::Position::Absolute);
     }
     thumb->setBorderWidth(0.f);              // 兼容旧构建已带描边的滑块
-    thumb->setBg(SettingTheme::background);  // 纯白 #FFFFFF，任何状态下都不变
+    thumb->setBg(0xFFFFFFFF);                // 纯白：开/关、浅色/深色都一样
     thumb->setPosition(Ling::Edge::Left, on ? 22.f : 2.f);
     thumb->setPosition(Ling::Edge::Top,  2.f);   // (24-20)/2=2，垂直居中
 }
@@ -1112,10 +1143,10 @@ Ling::Button* selectDdl(Ling::Node* parent,
     btn->setHeight(SettingTheme::ctrlH);
     btn->setBorderRadius(SettingTheme::radiusCtl);   // 与所在行的外框(10)同心
     btn->setBorder(1.f, SettingTheme::input);
-    btn->setBg(SettingTheme::inputBg);
-    btn->setColor(SettingTheme::textPrimary);
-    btn->setHoverBg(SettingTheme::accent);
-    btn->setHoverColor(SettingTheme::textPrimary);
+    btn->setBg(SettingTheme::inputBg);           // 常态：与卡片同底（不额外加底色）
+    btn->setColor(SettingTheme::popupFg);
+    btn->setHoverBg(SettingTheme::popupSelBg);   // 底色只在停悬时出现（浅色 F5F4F4 / 深色 424242）
+    btn->setHoverColor(SettingTheme::popupFg);
     btn->setFlexDirection(Ling::FlexDirection::Row);
     btn->setJustifyContent(Ling::Justify::Start);
     btn->setAlignItems(Ling::Align::Center);
@@ -1125,7 +1156,7 @@ Ling::Button* selectDdl(Ling::Node* parent,
     // 选中值（左，普通字体，宽度不足可收缩截断）
     auto* valueLab = btn->makeChild<Ling::Label>();
     valueLab->setFontSize(SettingTheme::fontBase);
-    valueLab->setColor(SettingTheme::textPrimary);
+    valueLab->setColor(SettingTheme::popupFg);
     valueLab->setFlexShrink(1.f);
     if (!options.empty()) valueLab->setText(options[current]);
 
@@ -1366,13 +1397,14 @@ struct SegPillsState {
     int current{ 0 };
 };
 
-// 切换选中段的视觉：选中段填充 #262626 背景 + 白字；未选中透明 + 黑字（hover 微高亮）
+// 切换选中段的视觉：选中段 = primary 底 + primaryForeground 字（浅色=深底白字 / 深色=浅底深字）；
+// 未选中透明 + textPrimary 字（hover 微高亮）。与「外观设置」页的分段导航取同一对令牌，两处观感一致。
 void styleSegBtn(Ling::Button* btn, bool on)
 {
     if (on) {
         btn->setBorder(0.f, 0);
-        btn->setBg(0x262626FF);
-        btn->setHoverBg(0x262626FF);
+        btn->setBg(SettingTheme::primary);
+        btn->setHoverBg(SettingTheme::primary);
         btn->setColor(SettingTheme::primaryForeground);
         btn->setHoverColor(SettingTheme::primaryForeground);
     } else {
@@ -1510,7 +1542,7 @@ Ling::Button* dashedAdd(Ling::Node* parent, const std::wstring& label,
     btn->setWidthPercent(100.f);
     btn->setBorderRadius(SettingTheme::radiusLg);
     btn->setBorder(1.f, SettingTheme::border);
-    btn->setBorderColor(SettingTheme::zinc300);
+    btn->setBorderColor(SettingTheme::input);
     btn->setBg(0);
     btn->setColor(SettingTheme::textSecondary);
     btn->setHoverBg(SettingTheme::accent);

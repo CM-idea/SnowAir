@@ -1,6 +1,8 @@
 #include "pch.h"
+#include <dwmapi.h>
 #include "../App.h"
 #include "../Lang.h"
+#include "../Setting.h"
 #include "WinSetting.h"
 #include "SettingTheme.h"
 #include "SettingWidgets.h"
@@ -24,6 +26,9 @@ std::unique_ptr<WinSetting> winSetting;
 
 WinSetting::WinSetting() : Ling::WinBase()
 {
+	// ★ 主题必须先套用：SettingTheme 的语义色是运行时变量，各子页在构建时就把它读进控件了，
+	//   所以要在建窗（onCreated → loadPage）之前按设置重写一遍调色板。
+	SettingTheme::apply(Setting::get()->getAppTheme());
 	onDestroy.add([]() {
 		Ling::App::get()->dq.TryEnqueue([]() { winSetting.reset(); });
 		});
@@ -75,9 +80,9 @@ struct MenuItemData {
 };
 static std::vector<MenuItemData> gMenuData;
 
-// 菜单视觉：根据选中/未选中应用 shadcn 风格
-//   选中 = sidebarAccent(zinc-100) 底 + foreground 深字
-//   未选中 = 透明底 + mutedForeground(zinc-500) 字，悬停→sidebarAccent + foreground
+// 菜单视觉：根据选中/未选中应用风格
+//   选中 = sidebarSelected 底 + sidebarSelectedFg 字（浅色=浅灰底深字；深色=深灰底浅字）
+//   未选中 = 透明底 + mutedForeground 字，悬停→sidebarAccent + foreground
 static void ApplyMenuItemStyle(Ling::Button* item, bool selected, MenuItemData& data)
 {
 	using namespace SettingTheme;
@@ -100,14 +105,14 @@ static void ApplyMenuItemStyle(Ling::Button* item, bool selected, MenuItemData& 
 	};
 
 	if (selected) {
-		item->setBg(sideSelected);                // zinc-100
+		item->setBg(sideSelected);
 		item->setHoverBg(sideSelected);
-		setFg(textPrimary);                       // zinc-950
+		setFg(sidebarSelectedFg);
 	}
 	else {
-		item->setBg(0);                           // 透明（侧栏底已经是 sidebar: 白）
-		item->setHoverBg(sideHover);              // zinc-100 悬停
-		setFg(textSecondary);                     // zinc-500
+		item->setBg(0);                           // 透明（露出窗口最外层的底）
+		item->setHoverBg(sideHover);
+		setFg(textSecondary);
 		data.enterTok = item->onEnter.add([&data, item](Ling::Button*) {
 			item->setColor(SettingTheme::textPrimary);
 			if (data.lab)  data.lab->setColor(SettingTheme::textPrimary);
@@ -124,6 +129,12 @@ static void ApplyMenuItemStyle(Ling::Button* item, bool selected, MenuItemData& 
 void WinSetting::onCreated()
 {
 	enableShadow();
+
+	// 深色主题：连系统标题栏一起切成深色（Win10 1809+，属性 20 = DWMWA_USE_IMMERSIVE_DARK_MODE）
+	if (SettingTheme::isDark() && hwnd) {
+		BOOL dark = TRUE;
+		DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
+	}
 
 	// 「?」说明气泡（工具栏停悬气泡那套外壳）：需要宿主 hwnd，只能在窗口创建后构造。
 	// 必须在 loadPage 之前注册 —— 子页构建时 optionRow/groupLabel 会据此生成问号。

@@ -1019,6 +1019,24 @@ void WinCap::onDown(POINT pos, bool isRight)
         if (tip) { tip->hide(); infoTipHit_ = InfoHit::None; }
         return;
     }
+    // 选区框好之后、且当前没有任何标注时，窗口里任意位置双击 = 点工具条上的「完成」（复制并退出）。
+    // 双击判定自己做：Ling 的窗口类没带 CS_DBLCLKS，WM_LBUTTONDBLCLK 根本不会来，
+    // 所以用系统双击间隔（控制面板里调的那个）+ 双击判定框来认。
+    // ★ 必须放在 annotLive 分支之前：选区框好后 annotLive 恒为 true，
+    //   原先那次判定写在 annotLive 之后 → 永远走不到，"双击完成"形同不存在。
+    {
+        const auto now = GetTickCount64();
+        const bool dbl = (now - lastDownTime <= GetDoubleClickTime())
+            && std::abs(pos.x - lastDownPos.x) <= GetSystemMetrics(SM_CXDOUBLECLK)
+            && std::abs(pos.y - lastDownPos.y) <= GetSystemMetrics(SM_CYDOUBLECLK);
+        lastDownTime = now;
+        lastDownPos = pos;
+        if (dbl && !demoMode && cutMask && cutMask->hasRect()
+            && !hasAnnotShapes() && stage == CapStage::Adjust) {
+            copyToClipboard();
+            return;
+        }
+    }
     if (annotLive) {
         if (beginMaskResize(pos)) return;
         annotDown(pos, isRight);
@@ -1026,19 +1044,6 @@ void WinCap::onDown(POINT pos, bool isRight)
     }
     // 演示画布：没开标注会话（默认工具=无）时画布不响应点击，别退化成"拖选区"
     if (demoMode) return;
-    // 选区框好之后，窗口里任意位置双击都等于点了工具条上的"复制到剪切板"。
-    // 双击判定得自己做：Ling 的窗口类没带 CS_DBLCLKS，WM_LBUTTONDBLCLK 根本不会来，
-    // 所以拿系统的双击间隔（用户在控制面板里调的那个）和双击判定框来认
-    auto now = GetTickCount64();
-    bool isDblClick = (now - lastDownTime <= GetDoubleClickTime())
-        && std::abs(pos.x - lastDownPos.x) <= GetSystemMetrics(SM_CXDOUBLECLK)
-        && std::abs(pos.y - lastDownPos.y) <= GetSystemMetrics(SM_CYDOUBLECLK);
-    lastDownTime = now;
-    lastDownPos = pos;
-    if (isDblClick && stage == CapStage::Adjust) {
-        copyToClipboard();
-        return;
-    }
     if (stage == CapStage::Select) {
         isPress = true;
         selectDragging_ = false;

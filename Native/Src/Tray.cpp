@@ -8,6 +8,7 @@
 #include "Win/WinCap.h"
 #include "Win/WinSetting.h"
 #include "Setting.h"
+#include "Win/SettingTheme.h"
 #include "Util.h"
 #include <string>
 #include <vector>
@@ -68,15 +69,29 @@ namespace {
 
 	struct MenuPalette { uint32_t bg, border, fg, hover, hoverFg, sep; };
 
+	// 菜单配色随「软件外观 → 软件主题」：跟随系统(0) 读注册表 / 浅色(1) / 深色(2)。
+	// 菜单窗口每次弹出都会重建（onCreated 里调本函数），所以改完主题再点托盘立刻生效。
 	MenuPalette menuPalette()
 	{
 		MenuPalette p;
-		p.bg = 0xFFFFFFFF;       // 浅色：白底
-		p.border = 0x0000001A;   // 浅色：1px rgba(0,0,0,0.1)
-		p.fg = 0x0B0C0EE0;       // 浅色：前景色 alpha 224
-		p.hover = 0xF4F4F5FF;    // 浅色：悬停底色
-		p.hoverFg = 0x0B0C0EFF;  // 浅色：悬停前景色
-		p.sep = 0x0000000D;      // 浅色：分隔线 rgba(0,0,0,0.05)
+		const int mode = Setting::get() ? Setting::get()->getAppTheme() : 1;
+		const bool dark = (mode == 2) || (mode == 0 && !SettingTheme::sysIsLight());
+		if (!dark) {
+			p.bg = 0xFFFFFFFF;       // 浅色：白底
+			p.border = 0x0000001A;   // 浅色：1px rgba(0,0,0,0.1)
+			p.fg = 0x0B0C0EE0;       // 浅色：前景色 alpha 224
+			p.hover = 0xF4F4F5FF;    // 浅色：悬停底色
+			p.hoverFg = 0x0B0C0EFF;  // 浅色：悬停前景色
+			p.sep = 0x0000000D;      // 浅色：分隔线 rgba(0,0,0,0.05)
+		}
+		else {
+			p.bg = 0x1F1F1FFF;       // 深色：菜单底 #1F1F1F
+			p.border = 0xFFFFFF1A;   // 深色：1px rgba(255,255,255,0.1)
+			p.fg = 0xF5F5F5E6;       // 深色：前景色 alpha 230
+			p.hover = 0x363635FF;    // 深色：悬停底 #363635
+			p.hoverFg = 0xFFFFFFFF;  // 深色：悬停前景色
+			p.sep = 0xFFFFFF14;      // 深色：分隔线 rgba(255,255,255,0.08)
+		}
 		return p;
 	}
 
