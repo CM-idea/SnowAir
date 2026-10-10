@@ -43,7 +43,7 @@ namespace {
 
 	constexpr int kMenuW{ 180 };
 	constexpr int kRowH{ 28 };
-	constexpr int kMenuPadY{ 8 };
+	constexpr int kMenuPadY{ 4 };   // 菜单上下留白：与条目左右外边距(4)对齐，别比左右更大显得空
 	constexpr int kSepMarginX{ 10 };
 	constexpr int kItemMarginX{ 4 };
 	constexpr int kItemPadX{ 12 };
