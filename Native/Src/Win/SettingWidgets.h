@@ -26,6 +26,10 @@
 
 namespace SettingUi {
 
+// 版本标记：免费版在版本号后面带「Lite」，与将来的专业版区分。改这一处，全局生效。
+// 只影响「显示用」的版本串（设置页左下角 / 关于页）；exe 的数字版本(0.1.0.0)不带它，更新器要靠它比对。
+inline constexpr const wchar_t* kEditionTag{ L" - Lite beta" };
+
 // ─── 浮层管理（所有下拉/弹层共享同一个 gPopup，互斥显示） ──────────────
 void closePopup(Ling::WinBase* win);
 bool hasPopup();

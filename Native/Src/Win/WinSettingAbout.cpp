@@ -17,7 +17,8 @@ WinSettingAbout::WinSettingAbout(Ling::WinBase* parent) : Ling::Node(parent)
 	name->setFontSize(14.f);
 	name->setColor(SettingTheme::textPrimary);
 	auto ver = Ling::Util::getVerNum();
-	auto verStr = std::format(L"{}.{}.{}", ver[0], ver[1], ver[2]);
+	// 版本串带 Lite 标记（与设置页左下角同源），用来区分免费版与专业版
+	auto verStr = std::format(L"{}.{}.{}{}", ver[0], ver[1], ver[2], SettingUi::kEditionTag);
 	auto fmt = Lang::get(L"about.versionFmt");
 	auto pos = fmt.find(L"%1");
 	if (pos != std::wstring::npos) fmt.replace(pos, 2, verStr);
