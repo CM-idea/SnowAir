@@ -4,6 +4,8 @@
 #include "Tool/IconCodes.h"
 #include "History.h"
 #include "ShapeMosaic.h"
+#include "App.h"
+#include "Util.h"
 #include <cmath>
 
 using Microsoft::WRL::ComPtr;
@@ -18,6 +20,16 @@ ShapeMosaic::ShapeMosaic(AnnotHost* win) : ShapeArea(win)
 	d2d->deviceContext->CreateSolidColorBrush(c, brush.GetAddressOf());
 	strokeWidth = toolSub->getSliderVal();
 	isBlur = toolSub->isMosaicBlur;
+
+	// 演示画布（实时桌面）没有会话底图，先拍一张当取样源。
+	// ⚠ 必须趁这一刻拍：构造函数跑在鼠标按下、**本图形还没画出来**的时候，屏幕上是纯桌面。
+	//   要是拖完再拍，抓到的是合成后的屏幕 —— 里面含我们自己的全屏覆盖窗（那块绿色占位），
+	//   于是占位块会被"烘焙"进马赛克，看起来就是"临时范围提示一直不消失"。
+	if (!win->screenImg && win->w > 0 && win->h > 0) {
+		auto pixels = Util::captureScreen(win->x, win->y, (int)win->w, (int)win->h);
+		if (!pixels.empty())
+			App::createBitmapFromBGRA((int)win->w, (int)win->h, pixels, liveSource.GetAddressOf());
+	}
 }
 
 void ShapeMosaic::applyStyle()
@@ -109,7 +121,11 @@ void ShapeMosaic::buildEffectBitmap()
 ComPtr<ID2D1Bitmap> ShapeMosaic::createEffectBitmap()
 {
 	ComPtr<ID2D1Bitmap> result;
-	if (win->w <= 0 || win->h <= 0 || !win->screenImg) return result;
+	if (win->w <= 0 || win->h <= 0) return result;
+
+	// 取样源：会话底图；演示画布用构造时拍的那张桌面快照
+	ID2D1Bitmap* src = win->screenImg ? win->screenImg.Get() : liveSource.Get();
+	if (!src) return result;
 
 	auto d2d = Ling::D2D::get();
 	auto ctx = d2d->deviceContext.Get();
@@ -145,7 +161,7 @@ ComPtr<ID2D1Bitmap> ShapeMosaic::createEffectBitmap()
 	ctx->SetTransform(D2D1::Matrix3x2F::Translation(-mosaicOrigin.x, -mosaicOrigin.y));
 	ctx->BeginDraw();
 	ctx->Clear(D2D1::ColorF(0, 0.0f));
-	ctx->DrawBitmap(win->screenImg.Get(), D2D1::RectF(0, 0, win->w, win->h));
+	ctx->DrawBitmap(src, D2D1::RectF(0, 0, win->w, win->h));
 	for (auto& shape : win->history->shapes) {
 		auto cur = shape.get();
 		if (cur == this) break;

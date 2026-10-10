@@ -300,7 +300,10 @@ void WinCap::layout()
     // 演示模式不画遮罩的任何部件（不压暗、不描边、不控点、不标签）—— 整屏就是画布
     if (cutMask && !demoMode) {
         const bool findHover = (stage == CapStage::Select && !isPress);
-        cutMask->showDim = !findHover;
+        // 录屏相关阶段不压暗：框选录制区域时要能看清整屏（不然选到屏幕上的什么都看不准），
+        // 录起来之后选区外也保持原样。pendingRecord = 托盘「屏幕录制」进来、还没框完这一段。
+        const bool recording = pendingRecord || stage == CapStage::Video;
+        cutMask->showDim = !findHover && !recording;
         // 拖选区时不画控点，少一圈 FillRectangle（对齐跟手）
         const bool editingSel = isPress && (stage == CapStage::Adjust || maskDragging
             || videoCanAdjust() || (stage == CapStage::Select));
