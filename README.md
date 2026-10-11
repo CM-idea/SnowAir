@@ -19,6 +19,11 @@
   <span> · </span>
   <a href="https://github.com/CM-idea/SnowAir/releases">发布说明</a>
 </h3>
+<p align="center">
+  <span>简体中文</span>
+  <span> | </span>
+  <a href="README.en.md">English</a>
+</p>
 
 ## 🔨 功能
 
@@ -129,14 +134,9 @@ SnowAir.exe --enter=tray        # 仅托盘，等同于默认行为
 
 ## ❤️ SnowAir 社区
 
-SnowAir 由 [CM-idea](https://github.com/CM-idea) 维护，欢迎通过 [Issue](https://github.com/CM-idea/SnowAir/issues) 反馈问题或提出建议。
+SnowAir 由 [Liuyiran](https://github.com/CM-idea) 维护，欢迎通过 [Issue](https://github.com/CM-idea/SnowAir/issues) 反馈问题或提出建议。
 
-## 贡献
-
-本项目欢迎各类贡献，除了功能开发与 Bug 修复，也包括体验设计、文档完善与问题反馈。
-当前开源的免费版源码位于本仓库，开始动手前建议先阅读 [`Native/ARCHITECTURE.md`](Native/ARCHITECTURE.md) 了解整体结构。
-
-## 隐私声明
+## 🔒 隐私声明
 
 SnowAir 是本地工具，默认不上传任何截图或文本；联网仅用于检查更新、在线 OCR / 翻译服务与插件下载。
 
@@ -144,7 +144,7 @@ SnowAir 是本地工具，默认不上传任何截图或文本；联网仅用于
 
 感谢 [xland](https://github.com/xland) 及 [ScreenCapture](https://github.com/xland/ScreenCapture) 的开源与分享。
 
-## 许可证
+## 📄 许可证
 
 本项目以 **Apache License 2.0** 协议开源，全文见 [`LICENSE`](LICENSE)；第三方组件与上游署名见 [`NOTICE`](NOTICE)。
 
