@@ -228,6 +228,7 @@ void ShapeMosaic::mosaicPixels(BYTE* bits, UINT32 pitch, UINT32 width, UINT32 he
 	}
 }
 
+// 两趟可分盒模糊（2 pass）
 void ShapeMosaic::blurPixels(BYTE* bits, UINT32 pitch, UINT32 width, UINT32 height, int radius)
 {
 	if (!bits || radius < 1 || width == 0 || height == 0) return;

@@ -9,6 +9,7 @@
 #include "Win/WinSetting.h"
 #include "Setting.h"
 #include "Win/SettingTheme.h"
+#include "Win/MenuTheme.h"
 #include "Util.h"
 #include <string>
 #include <vector>
@@ -41,59 +42,10 @@ namespace {
 		{ kCmdExit,              L"tray.exit",              nullptr },
 	};
 
-	constexpr int kMenuW{ 180 };
-	constexpr int kRowH{ 28 };
-	constexpr int kMenuPadY{ 4 };   // 菜单上下留白：与条目左右外边距(4)对齐，别比左右更大显得空
-	constexpr int kSepMarginX{ 10 };
-	constexpr int kItemMarginX{ 4 };
-	constexpr int kItemPadX{ 12 };
-	constexpr int kItemRadius{ 4 };
-	constexpr int kMenuRadius{ 8 };
-	constexpr int kSepH{ 11 };
-
-	uint32_t fromColorRef(COLORREF c)
-	{
-		return (uint32_t)((GetRValue(c) << 24) | (GetGValue(c) << 16) | (GetBValue(c) << 8) | 0xFF);
-	}
-
-	uint32_t themeColor(int part, int state, int prop, COLORREF fallback)
-	{
-		HTHEME theme = OpenThemeData(nullptr, L"Menu");
-		COLORREF c = fallback;
-		if (theme) {
-			if (FAILED(GetThemeColor(theme, part, state, prop, &c))) c = fallback;
-			CloseThemeData(theme);
-		}
-		return fromColorRef(c);
-	}
-
-	struct MenuPalette { uint32_t bg, border, fg, hover, hoverFg, sep; };
-
-	// 菜单配色随「软件外观 → 软件主题」：跟随系统(0) 读注册表 / 浅色(1) / 深色(2)。
-	// 菜单窗口每次弹出都会重建（onCreated 里调本函数），所以改完主题再点托盘立刻生效。
-	MenuPalette menuPalette()
-	{
-		MenuPalette p;
-		const int mode = Setting::get() ? Setting::get()->getAppTheme() : 1;
-		const bool dark = (mode == 2) || (mode == 0 && !SettingTheme::sysIsLight());
-		if (!dark) {
-			p.bg = 0xFFFFFFFF;       // 浅色：白底
-			p.border = 0x0000001A;   // 浅色：1px rgba(0,0,0,0.1)
-			p.fg = 0x0B0C0EE0;       // 浅色：前景色 alpha 224
-			p.hover = 0xF4F4F5FF;    // 浅色：悬停底色
-			p.hoverFg = 0x0B0C0EFF;  // 浅色：悬停前景色
-			p.sep = 0x0000000D;      // 浅色：分隔线 rgba(0,0,0,0.05)
-		}
-		else {
-			p.bg = 0x1F1F1FFF;       // 深色：菜单底 #1F1F1F
-			p.border = 0xFFFFFF1A;   // 深色：1px rgba(255,255,255,0.1)
-			p.fg = 0xF5F5F5E6;       // 深色：前景色 alpha 230
-			p.hover = 0x363635FF;    // 深色：悬停底 #363635
-			p.hoverFg = 0xFFFFFFFF;  // 深色：悬停前景色
-			p.sep = 0xFFFFFF14;      // 深色：分隔线 rgba(255,255,255,0.08)
-		}
-		return p;
-	}
+	// 菜单外观（配色/尺寸）统一由 Win/MenuTheme.h 提供，托盘与贴图右键菜单共用。
+	using MenuPalette = MenuTheme::Palette;
+	using namespace MenuTheme;
+	inline MenuPalette menuPalette() { return MenuTheme::palette(); }
 
 	void runTrayCommand(UINT cmd);
 	void closeTrayMenu();

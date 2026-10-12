@@ -60,7 +60,7 @@ namespace ToolbarStore {
 		}
 		else {
 			// 贴图栏（kind=3）：椭圆不单列
-			st.active = { L"show-border", L"split-0", L"rect", L"arrow",
+			st.active = { L"show-border", L"opacity", L"split-0", L"rect", L"arrow",
 				L"pen", L"text", L"serial-number", L"mosaic", L"eraser", L"split-1",
 				L"undo", L"split-2", L"ocr", L"translate", L"cancel", L"confirm" };
 		}
@@ -246,6 +246,7 @@ namespace ToolbarStore {
 		if (id == L"reset-canvas") return Icon::Redo;
 		if (id == L"mouse-through") return Icon::Pierce;
 		if (id == L"show-border") return Icon::DashRect;
+		if (id == L"opacity") return Icon::Opacity;
 		return L"";
 	}
 }

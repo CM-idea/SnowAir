@@ -10,6 +10,7 @@
 #include "ToolbarChrome.h"
 #include "ToolbarTheme.h"
 #include "../Win/AnnotHost.h"
+#include "../Win/PinMenu.h"
 
 ToolCap::ToolCap(WinCap* capWin) : Ling::WinBase(), winCap(capWin)
 {
@@ -128,7 +129,7 @@ bool ToolCap::isPinHidden(const std::wstring& id)
 
 bool ToolCap::isPinOnly(const std::wstring& id)
 {
-	return id == L"border";
+	return id == L"border" || id == L"opacity";
 }
 
 std::vector<bool> ToolCap::visibleSlots() const
@@ -346,6 +347,7 @@ void ToolCap::showToolSubForEffective(const std::wstring& eff)
 	else if (eff == L"watermark") host->toolSub->showWatermarkTools();
 	else if (eff == L"highlight") host->toolSub->showHighlightTools();
 	else if (eff == L"eraser") host->toolSub->showEraserTools();
+	else if (eff == L"opacity") host->toolSub->showOpacityTools();
 	else host->toolSub->hideTools();
 }
 
@@ -356,13 +358,26 @@ AnnotHost* ToolCap::annotHost() const
 	return nullptr;
 }
 
+void ToolCap::syncOcrTranslateButtons()
+{
+	// 只有截图栏的「识别 / 翻译」是浮层开关，贴图栏走各自逻辑
+	if (!winCap) return;
+	const bool hasPanel = winCap->hasOcrPanel();
+	const bool isTranslate = winCap->isTranslatePanel();
+	for (auto* b : btns) {
+		if (b->id == L"ocr") {
+			if (hasPanel && !isTranslate) applySelectedStyle(b); else applyNormalStyle(b);
+		}
+		else if (b->id == L"translate") {
+			if (hasPanel && isTranslate) applySelectedStyle(b); else applyNormalStyle(b);
+		}
+	}
+}
+
 void ToolCap::selectAnnotTool(const std::wstring& id)
 {
-	// 切到别的工具时，文字识别面板与其选中态一起收掉 —— 保持"同一时刻只有一个工具处于选中态"
-	if (winCap && winCap->hasOcrPanel()) winCap->clearOcrPanel();
-	for (auto b : btns) {
-		if (b->id == L"ocr") applyNormalStyle(b);
-	}
+	// 标注与「识别 / 翻译」浮层可以并存：切标注工具时**不**收掉识别面板，
+	// 用户不必先取消识别再标注（浮层里只有文字块吃鼠标，其余区域穿透，仍可正常画）。
 	// 渐隐画笔 / 画笔 是同级一级槽位，底层都是 pen：先定好 isPenFade 再建属性栏
 	if (auto* host = annotHost(); host && host->toolSub) host->toolSub->setPenSlotMode(id);
 	// 包浆/水印/高亮是 mosaic 槽的子工具，工具栏按钮 id 仍是 mosaic
@@ -649,6 +664,7 @@ void ToolCap::layout()
 void ToolCap::onDragDown(POINT pos, bool isRight)
 {
 	if (isRight) {
+		// 工具栏右键：分层取消，但不重框选/退出
 		if (winCap) winCap->handleLayerCancel(true);
 		return;
 	}
@@ -850,14 +866,9 @@ void ToolCap::onClickCap(Ling::Button* btn)
 			}
 			else {
 				winCap->startOcr();
-				// 与其他工具一致：识别面板开着时该按钮为选中态；再点一次关面板并恢复常态
-				if (winCap->hasOcrPanel()) {
-					cancelSelect();
-					applySelectedStyle(btn);
-				}
-				else {
-					applyNormalStyle(btn);
-				}
+				// 识别面板开着时按钮为选中态；再点一次收面板并恢复常态
+				cancelSelect();
+				syncOcrTranslateButtons();
 			}
 		}
 	}
@@ -876,6 +887,9 @@ void ToolCap::onClickCap(Ling::Button* btn)
 	}
 	else if (btn->id == L"translate") {
 		winCap->startTranslate();
+		// 翻译面板开着时按钮为选中态；再点一次收面板并恢复常态
+		cancelSelect();
+		syncOcrTranslateButtons();
 	}
 	else if (btn->id == L"undo") {
 		if (winCap->isAnnotating() && winCap->history && winCap->history->canUndo())
@@ -920,6 +934,17 @@ void ToolCap::onClickPin(Ling::Button* btn)
 		winPin->toggleBorderVisible();
 		if (winPin->isBorderVisible()) applySelectedStyle(btn);
 		else applyNormalStyle(btn);
+		return;
+	}
+	else if (btn->id == L"opacity") {
+		// 透明度：与其它工具一致，走标准属性栏（ToolSub + PropSlider），不再弹右键菜单那套自绘滑条
+		for (auto b : btns) {
+			if (b->id == curId) applyNormalStyle(b);
+			if (b->id == btn->id) applySelectedStyle(b);
+		}
+		curId = btn->id;
+		showToolSubForEffective(L"opacity");
+		winPin->layoutTools();
 		return;
 	}
 	const auto eff = resolveToolId(btn->id);

@@ -521,6 +521,8 @@ bool Setting::getPinAutoFit() { return featBool(L"pinAutoFit", true); }
 void Setting::setPinAutoFit(bool on) { setFeatBool(L"pinAutoFit", on); }
 int Setting::getPinDoubleClickAction() { return featInt(L"pinDoubleClickAction", 0); }
 void Setting::setPinDoubleClickAction(int v) { setFeatInt(L"pinDoubleClickAction", v); }
+int Setting::getPinOpacity() { return featInt(L"pinOpacity", 100); }
+void Setting::setPinOpacity(int v) { setFeatInt(L"pinOpacity", v); }
 int Setting::getDemoDefaultTool() { return featInt(L"demoDefaultTool", 0); }
 void Setting::setDemoDefaultTool(int v) { setFeatInt(L"demoDefaultTool", v); }
 int Setting::getDemoEdgeBehavior() { return featInt(L"demoEdgeBehavior", 0); }
@@ -553,6 +555,7 @@ void Setting::restoreFunctionScreenshotDefaults()
 	setPinAutoOcr(false);
 	setPinAutoFit(true);
 	setPinDoubleClickAction(0);
+	setPinOpacity(100);
 }
 
 int Setting::getVideoQuality() { return featInt(L"videoQuality", 2); }

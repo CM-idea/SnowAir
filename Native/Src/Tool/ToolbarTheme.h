@@ -29,7 +29,7 @@ namespace ToolbarTheme
 	inline constexpr float sliderWidth{ 100.f };
 	// 一级 / 二级属性栏滑条右侧数值区（共用，勿在子面板再写一套）
 	inline constexpr float sliderValueWidth{ 28.f };
-	// 滑条轨道控件 ↔ 数值：比 propGap 更紧（对齐参考属性气泡）
+	// 滑条轨道控件 ↔ 数值：比 propGap 更紧（与属性气泡内边距一致）
 	inline constexpr float sliderValueGap{ 8.f };
 	// 圆角滑条：轨 4 / 钮 14 / #333·绿·浅灰
 	// 颜色随工具栏主题刷新（见文件末尾 refresh()），故不再写 constexpr。

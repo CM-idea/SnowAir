@@ -204,12 +204,20 @@ namespace {
 		return (ex & WS_EX_TRANSPARENT) != 0;
 	}
 
-	/** 自家进程的窗口一律不是目标：截图遮罩自己、工具条，以及各种隐藏辅助窗 ——
-	 *  不排除的话命中测试会返回遮罩自己的元素，高亮出页面上根本没有的"莫须有"框。 */
+	/** 自家进程里的"工具类浮窗"：截图遮罩 / 工具条 / 下拉浮层 / 结果窗等一律带 WS_EX_TOOLWINDOW；
+	 *  设置中心是普通窗口（无该扩展样式）。查找元素只应排除前者，后者是真实界面，应能命中。 */
+	bool isOwnToolWindow(HWND hwnd)
+	{
+		if (!isOwnProcess(hwnd)) return false;
+		return (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0;
+	}
+
+	/** 不该被当作查找目标的窗口：遮罩自身 / 自家工具类浮窗 / 不可见·最小化·幽灵·桌面外壳·鼠标穿透。
+	 *  不再按"整个进程"一刀切排除，否则连自己的设置中心都查不到。 */
 	bool isBadWindow(HWND hwnd, HWND exclude)
 	{
 		if (!hwnd || hwnd == exclude) return true;
-		if (isOwnProcess(hwnd)) return true;
+		if (isOwnToolWindow(hwnd)) return true;
 		return isExcludedCaptureWindow(hwnd);
 	}
 
@@ -507,12 +515,15 @@ namespace {
 		if (rectValid(virt) && (r.right - r.left) >= (virt.right - virt.left) - 2
 			&& (r.bottom - r.top) >= (virt.bottom - virt.top) - 2)
 			return false;
-		// 自家进程的元素一律不采纳：命中测试是**全局**命中的，光标下最顶层就是我们的遮罩，它基本
-		// 总会返回"遮罩自己"的元素；这类元素的包围盒在页面上对应不到任何东西，就是"莫须有元素"。
-		if (pid > 0 && pid == (long)GetCurrentProcessId()) return false;
+		// 自家进程里只排除"工具类浮窗"（遮罩/工具条/下拉浮层…，均带 WS_EX_TOOLWINDOW）：命中测试是
+		// **全局**命中的，光标下最顶层常是我们的遮罩，它返回的"遮罩自己"的元素在页面上对应不到任何
+		// 东西。设置中心这类普通窗口是真实界面，应能被查找元素命中，故不再按整个进程一刀切排除。
 		if (hwndVal) {
 			const HWND h = reinterpret_cast<HWND>(hwndVal);
-			if (h == excludeOv || isOwnProcess(h) || isExcludedCaptureWindow(h)) return false;
+			if (h == excludeOv || isOwnToolWindow(h) || isExcludedCaptureWindow(h)) return false;
+		}
+		else if (pid > 0 && pid == (long)GetCurrentProcessId()) {
+			return false;   // 无窗口句柄可判：保守拒绝自家元素
 		}
 		out = r;
 		return true;

@@ -17,6 +17,10 @@ public:
 	Ling::TextBox* getTextBox();
 	void setEditingText(ShapeText* shape);
 	void onToolStyleChanged();
+	// 贴图「画面不透明度」（百分比）。仅 WinPin 有意义；ToolSub 的「透明度」属性栏通过它读写。
+	// 基类默认无操作，非贴图宿主（截图等）调用不会有效果。
+	virtual int  pinOpacityPercent() const { return 100; }
+	virtual void setPinOpacityPercent(int /*percent*/) {}
 	// 下层标注变了（拖动/改属性/撤销删除）→ 重新采样它上面盖着的模糊/马赛克。
 	// changed 传 nullptr 表示"全部滤镜都重算"。z 序后面的才是盖在上面的。
 	void refreshFiltersAbove(ShapeBase* changed);

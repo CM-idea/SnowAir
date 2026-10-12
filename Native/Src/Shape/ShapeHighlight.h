@@ -13,7 +13,7 @@ public:
 	float borderWidth() const { return strokeWidth; }
 	float stylePrimarySize() const override { return strokeWidth; }
 	ID2D1SolidColorBrush* borderBrush() const { return brushBorder.Get(); }
-	// 高亮矩形支持 AI 式四角圆角点（椭圆高亮没有圆角可言）
+	// 高亮矩形支持四角圆角点（椭圆高亮没有圆角可言）
 	bool cornerDotsEnabled() const override { return !isEllipse; }
 	static D2D1_RECT_F viewportOf(AnnotHost* win);
 	static void paintMerged(ID2D1DeviceContext* ctx, AnnotHost* win,

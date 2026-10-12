@@ -10,7 +10,7 @@ using Microsoft::WRL::ComPtr;
 namespace AnnotCursor {
 namespace {
 
-// 图标字体（iconfont 项目 5228143）里的四角旋转字形：左上 / 右上 / 右下 / 左下旋转
+// 图标字体里的四角旋转字形：左上 / 右上 / 右下 / 左下旋转
 // 按角槽位取值：slot 0..3 = TL / TR / BR / BL
 constexpr wchar_t kGlyph[4] = { L'\ue667', L'\ue668', L'\ue669', L'\ue66a' };
 

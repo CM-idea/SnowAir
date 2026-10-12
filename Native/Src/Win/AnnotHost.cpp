@@ -608,7 +608,7 @@ void AnnotHost::applyToolDrawCursor()
 	}
 	if (tool == L"text") SetCursor(LoadCursor(nullptr, IDC_IBEAM));
 	else if (tool == L"eraser") SetCursor(LoadCursor(nullptr, IDC_HAND)); // 橡皮用抓手光标
-	else if (tool == L"watermark" || tool == L"patina") SetCursor(LoadCursor(nullptr, IDC_ARROW));
+	else if (tool == L"watermark" || tool == L"patina" || tool == L"opacity") SetCursor(LoadCursor(nullptr, IDC_ARROW));
 	else if (tool == L"number") {
 		numberCursorFollow = true;
 		SetCursor(nullptr); // 跟手圆/表情即光标
@@ -747,7 +747,8 @@ void AnnotHost::paintSizePreview(ID2D1DeviceContext* ctx)
 	if (!sizePreviewHold && GetTickCount64() >= sizePreviewPulseUntil) return;
 	auto id = getCurToolId();
 	if (id.empty() || id == L"eraser" || id == L"mosaic" || id == L"patina"
-		|| id == L"watermark" || id == L"highlight" || id == L"number") return;
+		|| id == L"watermark" || id == L"highlight" || id == L"number"
+		|| id == L"opacity") return;
 
 	float cx = 0.f, cy = 0.f, half = 40.f;
 	if (!sizePreviewOrigin(cx, cy, half)) return;
@@ -904,6 +905,7 @@ void AnnotHost::paintSizePreview(ID2D1DeviceContext* ctx)
 bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 {
 	ensureHistory();
+	// 编辑中点输入框外只提交退出，同一次点击不点选、不落笔
 	if (editingText) {
 		if (textBox && textBox->isPosIn(pos)) return true;
 		editingText->finishEdit();

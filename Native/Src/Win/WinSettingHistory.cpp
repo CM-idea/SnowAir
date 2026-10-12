@@ -425,7 +425,12 @@ void WinSettingHistory::refreshGrid()
 		auto* img = thumbHost->makeChild<Ling::ImageBox>();
 		img->setWidthPercent(100.f);
 		img->setHeightPercent(100.f);
-		img->loadImg(it.filePath);
+		// 缩略图按缩略图级分辨率解码：历史页会随滚动不断累积格子，若每格都持有整张 4K 原图
+		// （约 33MB）解码位图，内存会很快堆起来。上限取显示尺寸的 2 倍（物理像素）足够清晰。
+		{
+			const float thumbCap = (kThumbH + kPad * 2.f + kCaptionH) * 2.f * win->dpi;
+			img->loadImg(it.filePath, thumbCap * 2.f, thumbCap);
+		}
 
 		const std::wstring id = it.id;
 		auto* copyBtn = mkIconBtn(thumbHost, Icon::Copy, 70.f, false,

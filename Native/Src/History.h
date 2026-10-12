@@ -8,6 +8,7 @@ public:
 	History(AnnotHost* win);
 	~History();
 	ShapeBase* createShape(const std::wstring& state, const int& x, const int& y);
+	// 选水印/包浆立即铺满选区
 	void syncViewportFilters(const std::wstring& toolId);
 	void undo();
 	void redo();

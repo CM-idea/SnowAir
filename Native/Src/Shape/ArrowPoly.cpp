@@ -218,6 +218,7 @@ ArrowHitInfo ArrowPolyState::hit(float x, float y, float dpi, bool dragging, boo
 {
 	ArrowHitInfo out;
 	if (pts.size() < 2) return out;
+	// 箭头命中半径 6（逻辑像素 × dpi）
 	const float r = 6.f * dpi;
 	const auto pf = D2D1::Point2F(x, y);
 	auto nearPt = [&](D2D1_POINT_2F p) {

@@ -91,7 +91,26 @@
   "pin": {
     "cancelEdit": "Cancel edit",
     "confirmEdit": "Confirm edit",
-    "showBorder": "Show border"
+    "showBorder": "Show border",
+    "opacityTool": "Opacity",
+    "menuCopy": "Copy to clipboard",
+    "menuCopyFile": "Copy as file",
+    "menuSaveAs": "Save as file…",
+    "menuOcr": "Show recognized text",
+    "menuEdit": "Edit pin",
+    "menuRotateL": "Rotate left 90°",
+    "menuRotateR": "Rotate right 90°",
+    "menuFlipH": "Flip horizontal",
+    "menuFlipV": "Flip vertical",
+    "menuThumb": "Thumbnail mode",
+    "menuFocus": "Focus mode",
+    "menuTop": "Always on top",
+    "menuOpacity": "Opacity",
+    "menuTransform": "Transform",
+    "menuZoomMode": "Zoom mode",
+    "menuClose": "Close pin",
+    "zoomDirect": "Zoom in place",
+    "zoomCrop": "Zoom crop"
   },
   "color": {
     "red": "Red",

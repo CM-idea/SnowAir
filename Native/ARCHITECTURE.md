@@ -114,7 +114,7 @@ void destroyPopup() { if (gPopup) gPopup.reset(); }  // 析构内自动 close(HW
 - `hasPopup()`：`return gPopup != nullptr;`
 - `selectDdl()` 调用 `bindPopup`；`selectRow()` 设置 `dropdownWidth(160)`
 
-## 5. 独立弹窗参考实现（源：Src\Tool）
+## 5. 独立弹窗（源：Src\Tool）
 
 ### ToolNestedPanel（ToolNestedPanel.h / .cpp）
 
@@ -251,7 +251,7 @@ inputArea->setPadding(0.f, 8.f, 0.f, 0.f);
 - 「穿透」= `WinCap::toggleDemoThrough()` → `setMouseTransparent()`（`WS_EX_TRANSPARENT`，鼠标交给桌面，标注保留在屏幕上；工具条是独立顶层窗口，穿透时仍可点击）
 - 「重置画布」= 清空 `history->shapes`；「取消」= 清空并关闭窗口
 
-图标字体：`Src/Res/iconfont.ttf`，字码表与 `Src/Tool/IconCodes.h` 一致。
+图标字体：`Src/Res/SnowAirIcons.ttf`，字码表与 `Src/Tool/IconCodes.h` 一致。
 
 ## 11. 构建输出编码
 

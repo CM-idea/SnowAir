@@ -1,11 +1,11 @@
 #pragma once
 #include <cstdint>
-// 轻雪图标字码（iconfont 项目 font_5228143_zy5cb71piv，字体族名 font_family）。
+// 轻雪图标字码（字体族名 font_family）。
 // 字库是全集：这里列出全部码点，当前 UI 只用到一部分，其余留给后续功能。
 namespace Icon
 {
 	inline constexpr const wchar_t* Family = L"font_family";
-	// 设计稿 24×24：IcoMoon/iconfont 字形高度约等于 font-size
+	// 24×24 设计网格：字形高度约等于 font-size
 	inline constexpr float Size{ 22.f };
 	inline constexpr float SizeSm{ 20.f }; // 信息栏图标（槽 24）
 	inline constexpr float DropSize{ 16.f }; // 下拉箭头（略小于 SizeSm）
@@ -54,6 +54,7 @@ namespace Icon
 	inline constexpr const wchar_t* Bold = L"\ue62e";           // 加粗
 	inline constexpr const wchar_t* Italic = L"\ue625";         // 斜体
 	inline constexpr const wchar_t* Pierce = L"\ue62f";         // 穿透模式（半透明）
+	inline constexpr const wchar_t* Opacity = L"\ue66b";        // 透明度
 	inline constexpr const wchar_t* MicOn = L"\ue63b";          // 打开麦克风
 	inline constexpr const wchar_t* MicOff = L"\ue62a";         // 关闭麦克风
 

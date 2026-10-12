@@ -491,9 +491,10 @@ void Popup::uninstallHook()
 
 // ─── SettingUi::HoverTip：悬停气泡（圆角矩形 + 底部小三角）───────────────
 //   外壳直接复用工具栏停悬气泡那套 ToolbarChrome::paintPropBubble（一体闭合路径，
-//   圆角与三角接缝处不会多出一条描边）；宽度固定 280，文本在其中自动折行。
+//   圆角与三角接缝处不会多出一条描边）；宽度自适应内容 —— 文字少时不强制宽度（贴合文字），
+//   只有超过最大宽度 kTipW 的长文本才限宽折行。
 namespace {
-constexpr float kTipW{ 280.f };     // 气泡固定宽度；文本在此宽度内自动折行
+constexpr float kTipW{ 280.f };     // 气泡最大宽度；文本自然宽超过它才限宽折行
 constexpr float kTipPadX{ 12.f };   // 文本左右内边距（比系统 tooltip 宽）
 constexpr float kTipPadY{ 8.f };    // 文本上下内边距（比系统 tooltip 高）
 constexpr float kTipGap{ 4.f };     // 三角尖端到锚定控件边缘的间距
@@ -595,12 +596,22 @@ void HoverTip::showNow()
     if (!host || !anchor || !label || !hwnd) return;
     label->setText(text);
     const float d = dpi > 0.f ? dpi : 1.f;
-    // 宽度固定 280：长文本由 Text::measureCB 在该宽度内自动折行，探测一次取折行后的文本高，
-    // 再据此定窗口最终高度（文本 + 上下内边距 + 三角）。
-    setSize(kTipW, kTipProbeH);
+    // 宽度自适应：先按"不限宽"测一次文本自然宽（物理像素 → 逻辑），
+    //   · 自然宽 <= 内容区上限：不强制宽度，气泡贴合文字（含左右内边距）；
+    //   · 超过上限：用最大宽度 kTipW，超出的部分由 Text 在该宽度内折行。
+    const float maxContentW = kTipW - kTipPadX * 2.f;
+    float naturalW = 0.f;
+    if (auto lay = Ling::D2D::makeTextLayout(text, SettingTheme::fontSm * d)) {
+        DWRITE_TEXT_METRICS m{};
+        if (SUCCEEDED(lay->GetMetrics(&m))) naturalW = m.width / d;
+    }
+    const float textW = std::max(1.f, naturalW);
+    // +2 逻辑像素余量：测量与渲染存在亚像素差，贴边会让本该单行的文本被挤成两行。
+    const float boxW = textW > maxContentW ? kTipW : (textW + kTipPadX * 2.f + 2.f);
+    setSize(boxW, kTipProbeH);
     layout();
     const float ch = std::max(1.f, label->h / d);
-    setSize(kTipW, ch + kTipPadY * 2.f + ToolbarTheme::caretSize);
+    setSize(boxW, ch + kTipPadY * 2.f + ToolbarTheme::caretSize);
     layout();
     place();
     layout();   // place() 定下三角位置后再绘一次，避免显示首帧三角错位
@@ -732,7 +743,7 @@ void trimTrailingGap(Ling::Node* content)
 
 // ============================================================================
 //  Section Header：页面标题 + 描述
-//  shadcn PageHeader：h1(20px zinc-950) + p(12px zinc-500)
+//  PageHeader：h1(20px zinc-950) + p(12px zinc-500)
 //  注意：Ling 不支持粗体，通过字号对比与 muted 色建立层级。
 // ============================================================================
 Ling::Node* sectionHeader(Ling::Node* parent,
@@ -768,7 +779,7 @@ Ling::Node* sectionHeader(Ling::Node* parent,
 }
 
 // ============================================================================
-//  Group Card：shadcn Card 分组容器
+//  Group Card：卡片分组容器
 //  白底 + zinc-200 描边 + radiusLg + header/content 结构
 // ============================================================================
 Ling::Node* groupCard(Ling::Node* parent,
@@ -1027,7 +1038,7 @@ OptionRowRef optionRow(Ling::Node* parent,
 
 // ============================================================================
 //  双栏网格容器：把多个 optionRow/toggleRow/selectRow 以 2 列排布
-//  视觉：每个选项 = 独立卡片（白底+描边+圆角），两两一行（shadcn grid-cols-2）。
+//  视觉：每个选项 = 独立卡片（白底+描边+圆角），两两一行（两列网格）。
 //  用法：auto* g = SettingUi::grid2(p); 然后往 g 里 add toggleRow/selectRow(..., chrome=true)，
 //       最后调用 SettingUi::grid2Cells(g) 统一拆成"每行 2 列"并等宽排布。
 //  宽度保证：grid 是 Column；grid2Cells 把子行按两两一组塞进独立 Row，行内两列用
@@ -1165,7 +1176,7 @@ Ling::Button* selectDdl(Ling::Node* parent,
     spacer->setFlexGrow(1.f);
     spacer->setFlexShrink(1.f);
 
-    // 下拉图标（右，iconfont）
+    // 下拉图标（右）
     auto* iconLab = btn->makeChild<Ling::Label>();
     iconLab->setText(Icon::Dropdown);
     iconLab->setFontFamily(Icon::Family);
@@ -1326,7 +1337,7 @@ Ling::TextBox* inputField(Ling::Node* parent,
 }
 
 // ============================================================================
-//  Sub Tabs：shadcn Tabs 样式
+//  Sub Tabs：页签样式
 //  variant="solid"（默认）: active = primary / inactive = white+border
 // ============================================================================
 void styleSubTab(Ling::Button* btn, bool on)
@@ -1554,7 +1565,7 @@ Ling::Button* dashedAdd(Ling::Node* parent, const std::wstring& label,
 }
 
 // ============================================================================
-//  shadcn Button 四变体
+//  Button 四变体
 // ============================================================================
 Ling::Button* btnPrimary(Ling::Node* parent, const std::wstring& text,
                          std::function<void()> onClick, float w)
@@ -1578,7 +1589,7 @@ Ling::Button* btnDestructive(Ling::Node* parent, const std::wstring& text,
 }
 
 // ============================================================================
-//  Callout：提示卡（shadcn Callout variant=info/success/warning/destructive）
+//  Callout：提示卡（variant=info/success/warning/destructive）
 // ============================================================================
 Ling::Node* callout(Ling::Node* parent,
                     const std::wstring& message,

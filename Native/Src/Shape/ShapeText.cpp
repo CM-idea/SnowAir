@@ -408,7 +408,8 @@ void ShapeText::startEdit()
 	const float visScale = (rect.right > rect.left)
 		? (tb->w / (rect.right - rect.left)) : win->scale;
 	// 附着在箭头上的文字：编辑框**不留内边距**。框高已经是一行，再叠一份内边距，文字
-	// 附着文字是"中心锚点 + 用同一个排版量出的尺寸"，没有第二份留白可叠。
+	// 就被挤到框的下半部分（= 截图里插入符沉在线段下方）。附着文字是"中心锚点 + 用同一个排版
+	// 量出的尺寸"，没有第二份留白可叠。
 	tb->setPadding(attachTo ? 0.f : borderPadding * visScale / d);
 	tb->setFontSize(fontSize * visScale / d);
 	tb->setBold(isBold);

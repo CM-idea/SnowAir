@@ -50,6 +50,25 @@ namespace
 	D2D1_RECT_F g_ocrCacheRect{};
 	bool g_ocrCacheValid{ false };
 
+	// 「显示光标」：会话开始那一刻鼠标下面那个**真实窗口**正在用的光标。
+	// 不能只靠 GetCursorInfo —— 上一次截图退出时我们的框选十字光标（IDC_CROSS）可能还残留在
+	// 全局光标状态里（鼠标不动就不会被刷新），于是这次会抓到"我们自己的截图框选光标"。
+	// 趁还没有任何本程序窗口遮挡鼠标，先给鼠标下的窗口补发一次 WM_SETCURSOR 让它把光标设回来，
+	// 再读 GetCursor()，交 captureCursorSnapshot 取用。
+	HCURSOR g_cursorForCapture{ nullptr };
+
+	void primeCursorForCapture()
+	{
+		POINT p{};
+		if (!GetCursorPos(&p)) return;
+		if (HWND under = WindowFromPoint(p)) {
+			DWORD_PTR res = 0;
+			SendMessageTimeoutW(under, WM_SETCURSOR, (WPARAM)under,
+				MAKELPARAM(HTCLIENT, WM_MOUSEMOVE), SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &res);
+		}
+		g_cursorForCapture = GetCursor();
+	}
+
 	bool sameOcrRect(const D2D1_RECT_F& a, const D2D1_RECT_F& b)
 	{
 		return std::abs(a.left - b.left) < 0.5f && std::abs(a.top - b.top) < 0.5f
@@ -101,24 +120,32 @@ WinCap::~WinCap()
 // 如果整段都发生在热键回调里，系统会认为"应用正忙"，鼠标上会短暂闪一下"忙"光标。
 // 这里把抓屏丢给工作线程、建窗推给调度队列的下一轮：热键回调立即返回、应用回到空闲态，
 // 抓屏完成后再回 UI 线程建窗（抓屏发生在覆盖窗 show() 之前，底图不会带上本窗口）。
+// 【盾牌也要晚铺】盾牌是置顶、可收鼠标的窗口；若在抓屏前就出现，会顶掉光标下目标窗口的悬停态
+// （网页 tooltip / 菜单高亮等"要停悬才出现"的效果），抓到的底图就缺这些效果。故先抓屏、抓完再
+// 铺盾牌 —— 盾牌仍覆盖"抓屏后到覆盖窗 show() 之间"的建窗空窗，拖动照旧不会漏给下层。
 void WinCap::init(StartMode mode)
 {
     // 双击托盘图标会连着来两下，已经开着就不再建第二个
     if (winCap) return;
-    // 先铺一层"看不见但能收鼠标"的盾牌：紧接着的建窗 + 抓屏有几十~几百毫秒空窗，
-    // 不拦的话这一段拖动会落到下面的窗口（浏览器里就是"网页文字被拖选"），
-    // 而且覆盖窗永远收不到这次按下 —— 表现成"按了快捷键不能马上框选"。
-    // 覆盖窗 show() 之后由 onCreated 里的 drain() 把这一下补交给它。
-    CaptureShield::arm();
+
+    // 抢在铺盾牌 / 建覆盖窗之前，抓一次"鼠标下真实窗口此刻的光标"（见 primeCursorForCapture）
+    primeCursorForCapture();
 
     auto* app = Ling::App::get();
-    if (!app) { initNow(mode, nullptr); return; }   // 无调度队列：退回同步（正常不会走到）
+    if (!app) {   // 无调度队列：退回同步（正常不会走到）
+        CaptureShield::arm();
+        initNow(mode, nullptr);
+        return;
+    }
     const auto [sx, sy, sw, sh] = App::get()->getScreenArea();
     auto grab = std::make_shared<std::vector<BYTE>>();
     std::thread([grab, sx, sy, sw, sh, app, mode]() {
         // 演示画布不用底图（实时桌面），省掉这次抓屏
         if (mode != StartMode::Demo) *grab = Util::captureScreen(sx, sy, sw, sh);
-        app->dq.TryEnqueue([grab, mode]() { WinCap::initNow(mode, grab); });
+        app->dq.TryEnqueue([grab, mode]() {
+            CaptureShield::arm();   // 抓屏完成后再铺盾牌：不遮挡目标窗口的悬停态
+            WinCap::initNow(mode, grab);
+        });
     }).detach();
 }
 
@@ -331,6 +358,8 @@ void WinCap::layout()
     paintPix(ctx);
     paintCursor(ctx);
     canvas->finishPaint();
+    // 识别浮层里的"标注镜像"跟着本窗口一起重画（标注一变就同步，避免两个窗口错帧）
+    if (toolOcr) toolOcr->repaintOverlay();
 }
 
 void WinCap::applyMaskHitCursor(MaskHit hit)
@@ -1158,13 +1187,18 @@ void WinCap::onMove(POINT pos)
             POINT cur{};
             GetCursorPos(&cur);
             ScreenToClient(hwnd, &cur);
-            cutMask->makeRect(cur);
             // 超过单击抖动阈值才算拖动 → 才出放大镜
             if (!selectDragging_) {
                 const int moved = std::abs(cur.x - lastDownPos.x) + std::abs(cur.y - lastDownPos.y);
                 if (moved > 5) selectDragging_ = true;
             }
-            if (selectDragging_) setPixPos(cur);
+            // 只有真正拖动后才改写选区：单击时保留「查找元素」悬停到的那个框。
+            // 否则一点点手抖就会 makeRect 出一个极小的框（常是 0 宽或 0 高），hasRect() 判空后
+            // onUp 直接 return —— 表现就是"单击没确认、要连点好几次才成"。
+            if (selectDragging_) {
+                cutMask->makeRect(cur);
+                setPixPos(cur);
+            }
             refresh();
         }
         else {
@@ -1489,6 +1523,7 @@ void WinCap::requestExitAfterRightUp()
 
 bool WinCap::handleLayerCancel(bool fromToolbar)
 {
+	// 右键分层取消（Esc 另走直接退出）
 	// 返回 true = 应退出截图（由 onUp 再 close，避免桌面吃到右键抬起）
 	if (stage == CapStage::Long) {
 		if (capLong && capLong->isEditMode()) {
@@ -1935,7 +1970,8 @@ void WinCap::startOcr()
 {
 	// 再点一次同一个按钮 = 取消：收起识别面板（结果留在临时缓存里，下次点同一块选区直接就出来，
 	// 不用再等一次识别）。以前这里会再跑一遍识别 —— 同步的几百毫秒，看着就像点了没反应/失败。
-	if (toolOcr) {
+	// 若当前开的是「翻译」面板则不收起，直接切到文字识别。
+	if (toolOcr && !toolOcr->translateMode()) {
 		clearOcrPanel();
 		return;
 	}
@@ -1944,8 +1980,16 @@ void WinCap::startOcr()
 
 void WinCap::startTranslate()
 {
+	// 与识别按钮一致：再点一次 = 收起翻译面板；当前开的是识别面板则直接切到翻译。
+	if (toolOcr && toolOcr->translateMode()) {
+		clearOcrPanel();
+		return;
+	}
 	startOcrInternal(true);
 }
+
+bool WinCap::isTranslatePanel() const { return toolOcr && toolOcr->translateMode(); }
+bool WinCap::isOcrPanel() const { return toolOcr && !toolOcr->translateMode(); }
 
 void WinCap::startOcrInternal(bool translateMode)
 {
@@ -1954,7 +1998,8 @@ void WinCap::startOcrInternal(bool translateMode)
 
 	std::vector<BYTE> pixels;
 	int cw{ 0 }, ch{ 0 };
-	if (!exportSelection(pixels, cw, ch)) return;
+	// 识别/翻译只看**原始截图内容**，不带上用户画的标注 —— 标注会盖住原文字、干扰识别。
+	if (!exportSelection(pixels, cw, ch, false)) return;
 
 	OcrResult result;
 	if (g_ocrCacheValid && sameOcrRect(g_ocrCacheRect, sel)) {
@@ -1971,8 +2016,20 @@ void WinCap::startOcrInternal(bool translateMode)
 	toolOcr = std::make_unique<ToolOcr>(this, result, translateMode, std::move(pixels), cw, ch);
 	toolOcr->createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP);
 	SetWindowLongPtr(toolOcr->hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(hwnd));
+	// 标注要盖在识别结果上：浮层是独立置顶窗口，标注画在本窗口里，两个窗口没法互相穿插 ——
+	// 把本窗口的标注"镜像"到浮层顶层，视觉上就等于"后画的标注盖在识别结果上面"。
+	// 之后再叠一次选框（边框/控点/尺寸标签）：选框必须始终压在最上层，否则会被标注或识别结果盖住。
+	{
+		WinCap* self = this;
+		toolOcr->setAnnotPainter([self](ID2D1DeviceContext* ctx) {
+			self->paintShapes(ctx, false);
+			if (self->cutMask) self->cutMask->paint(ctx);
+		});
+	}
 	syncOcrPanel();
-	App::excludeFromCapture(toolOcr->hwnd);
+	// 这里**不能**给结果面板加「排除出捕获」：用户常要用别的截图/录屏工具把这个识别结果
+	// 拍下来（反馈问题、分享），一旦排除掉，对方的截图里就只剩"被盖住的底图"，看着就像结果没了。
+	// 面板随截图会话结束而销毁，不会残留到下一次截图里，所以不排除不会造成"拍到上次结果"。
 
 	if (result.ok && !result.text.empty()) {
 		Ling::Util::setTextToClipboard(result.text);
@@ -2044,7 +2101,7 @@ void WinCap::startQrcode()
 	int cw{ 0 }, ch{ 0 };
 	if (!exportSelection(pixels, cw, ch)) return;
 	auto text = Util::decodeQrCode(cw, ch, pixels.data());
-	// 对齐参考：结果盖在选区上，不弹系统框；主工具栏保持可见
+	// 结果直接盖在选区上，不弹系统框；主工具栏保持可见
 	if (!cutMask || !cutMask->hasRect()) {
 		close();
 		return;
@@ -2108,11 +2165,11 @@ void WinCap::copyToClipboard(bool keepOpen)
     if (!keepOpen) close();
 }
 
-bool WinCap::exportSelection(std::vector<BYTE>& pixels, int& cw, int& ch)
+bool WinCap::exportSelection(std::vector<BYTE>& pixels, int& cw, int& ch, bool includeAnnot)
 {
     if (!cutMask->hasRect() || !screenImg) return false;
     D2D1_SIZE_U size{};
-    if (annotLive && history && !history->shapes.empty()) {
+    if (includeAnnot && annotLive && history && !history->shapes.empty()) {
         if (!getAnnotPixels(pixels, size, &cutMask->maskRect)) return false;
         // 合成结果可能带预乘 alpha，导出当不透明图
         for (size_t i = 3; i < pixels.size(); i += 4) pixels[i] = 255;
@@ -2162,8 +2219,14 @@ void WinCap::captureCursorSnapshot()
     cursorW = cursorH = 0;
     CURSORINFO ci{ sizeof(CURSORINFO) };
     if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING) || !ci.hCursor) return;
+    // 优先用会话开始前抓到的真实光标（见 primeCursorForCapture）；拿不到再退回当前光标
+    HCURSOR useCur = g_cursorForCapture;
+    g_cursorForCapture = nullptr;
     ICONINFO ii{};
-    if (!GetIconInfo(ci.hCursor, &ii)) return;
+    if (!useCur || !GetIconInfo(useCur, &ii)) {
+        useCur = ci.hCursor;
+        if (!GetIconInfo(useCur, &ii)) return;
+    }
     auto cleanup = [&] {
         if (ii.hbmColor) DeleteObject(ii.hbmColor);
         if (ii.hbmMask) DeleteObject(ii.hbmMask);
@@ -2201,7 +2264,7 @@ void WinCap::captureCursorSnapshot()
     }
     HGDIOBJ old = SelectObject(memDc, dib);
     memset(bits, 0, (size_t)width * (size_t)height * 4);
-    DrawIconEx(memDc, 0, 0, ci.hCursor, width, height, 0, nullptr, DI_NORMAL);
+    DrawIconEx(memDc, 0, 0, useCur, width, height, 0, nullptr, DI_NORMAL);
     cursorPix.assign((size_t)width * (size_t)height * 4, 0);
     memcpy(cursorPix.data(), bits, cursorPix.size());
 
@@ -2270,7 +2333,8 @@ void WinCap::captureCursorSnapshot()
 void WinCap::toggleShowCursor()
 {
     showCursor = !showCursor;
-    if (showCursor && !cursorValid) captureCursorSnapshot();
+    // 光标快照只在会话开始时抓一次（那时鼠标下面是真实窗口，见 primeCursorForCapture）。
+    // 这里**不**补抓 —— 此刻鼠标下的已经是我们自己的覆盖窗，补抓只会抓到"我们的框选光标"。
     refresh();
 }
 

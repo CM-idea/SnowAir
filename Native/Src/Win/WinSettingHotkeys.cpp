@@ -196,7 +196,7 @@ WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
 void WinSettingHotkeys::buildGroup(const std::wstring& grpTitle,
     const std::vector<std::pair<std::wstring, std::wstring>>& items, Ling::Node* p)
 {
-    // 分组标题：独立加粗文本（无卡片背景），参考图一
+    // 分组标题：独立加粗文本（无卡片背景）
     SettingUi::groupLabel(p, grpTitle);
 
     // 每个选项为独立的浅灰圆角卡片行，行间由 optionGap 自然留出间距

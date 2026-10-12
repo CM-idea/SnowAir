@@ -3,11 +3,11 @@
 #include <windows.h>
 
 // ============================================================
-//  shadcn/ui · Default (Zinc) 设计令牌 —— 浅色 / 深色两套，运行时切换
-//  颜色存储：AABBGGRR？不是 —— 本工程统一 RGBA（0xRRGGBBAA，AA=FF 为不透明）
+//  设计令牌（灰阶色板 50–950）—— 浅色 / 深色两套，运行时切换
+//  颜色存储：本工程统一 RGBA（0xRRGGBBAA，AA=FF 为不透明）
 //  设计原则：
-//    1. 严格对齐 shadcn 的 CSS 变量语义。
-//    2. 暴露完整 Zinc 50-950 色阶，方便组件按语义取用（色阶不随主题变）。
+//    1. 组件按语义色取用，不直接写死色值。
+//    2. 暴露完整 50-950 色阶（色阶不随主题变），方便组件按语义取用。
 //    3. 字号不使用粗体，通过字号阶梯 + 颜色对比建立层级。
 //    4. 所有圆角、间距、控件高度均走 4px 网格。
 //  切换方式：SettingTheme::apply(mode)（0 跟随系统 / 1 浅色 / 2 深色）。
@@ -15,7 +15,7 @@
 // ============================================================
 namespace SettingTheme {
 
-// ─── 0. Zinc 完整色阶（50 ~ 950）—— 原始调色板，不随主题变 ────
+// ─── 0. 完整色阶（50 ~ 950）—— 原始调色板，不随主题变 ────
 inline constexpr uint32_t zinc50  { 0xFAFAFAFF };  // hsl(0  0%  98%)
 inline constexpr uint32_t zinc100 { 0xF5F4F4FF };  // hsl(240 4.8% 95.9%)
 inline constexpr uint32_t zinc200 { 0xE7E4E4FF };  // hsl(240 5.9% 90%)
@@ -106,7 +106,7 @@ inline uint32_t panel            { card };
 inline uint32_t inputBg          { card };
 inline uint32_t rowDivider       { border };
 
-// ─── 5. 圆角 shadcn --radius：sm / md / lg / xl ────────────
+// ─── 5. 圆角半径：sm / md / lg / xl ────────────
 inline constexpr float radiusXs  { 10.f };  // 设置窗内圆角统一 10（胶囊/圆形另走 radiusFull）
 inline constexpr float radiusSm  { 10.f };  // 同上
 inline constexpr float radiusMd  { 10.f };  // 同上
@@ -118,7 +118,7 @@ inline constexpr float radiusCtl  { 8.f };  // 选项行内控件（下拉/输�
 inline constexpr float radiusRow  { radiusCtl + 6.f };  // 选项行外框：= 控件圆角 + 行内边距(6)，与控件同心（14）
 inline constexpr float radius    { radiusMd };
 
-// ─── 6. 间距 · 4px 阶梯（shadcn p-1=4 ... p-8=32）──────────
+// ─── 6. 间距 · 4px 阶梯（1→4 … 8→32）──────────
 inline constexpr float sp1  {  4.f };
 inline constexpr float sp2  {  8.f };
 inline constexpr float sp3  { 12.f };
@@ -130,7 +130,7 @@ inline constexpr float sp8  { 32.f };
 inline constexpr float sp10 { 40.f };
 inline constexpr float sp12 { 48.f };
 
-// ─── 7. 字号 · shadcn typography（无粗体，靠阶梯建立层级）──
+// ─── 7. 字号 · 排版阶梯（无粗体，靠阶梯建立层级）──
 inline constexpr float fontXs   { 11.f };
 inline constexpr float fontSm   { 12.f };
 inline constexpr float fontBase { 13.f };

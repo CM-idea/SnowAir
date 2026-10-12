@@ -28,7 +28,7 @@ private:
 	void toLocal(float x, float y, float& lx, float& ly) const;
 	D2D1_POINT_2F center() const;
 	void withRotation(ID2D1DeviceContext* ctx, const std::function<void()>& draw);
-	// 圆角：四角独立（对齐 AI 的 live corner widget）
+	// 圆角：四角独立（可拖动的圆角控点）
 	Microsoft::WRL::ComPtr<ID2D1PathGeometry> buildShape() const;
 private:
 	std::vector<D2D1_RECT_F> draggers;

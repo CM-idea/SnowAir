@@ -82,7 +82,8 @@ std::wstring utf8ToW(const std::string& s)
 	return out;
 }
 
-OcrResult parseJsonPayload(const std::string& payload, OcrEngineKind kind)
+OcrResult parseJsonPayload(const std::string& payload, OcrEngineKind kind,
+	float scale = 1.f, float pad = 0.f)
 {
 	OcrResult r;
 	r.engineUsed = kind;
@@ -156,12 +157,14 @@ OcrResult parseJsonPayload(const std::string& payload, OcrEngineKind kind)
 				text = item.GetString().c_str();
 			}
 			if (text.empty()) continue;
+			// 引擎返回的是"送进去那张图"的坐标：减掉白边、再除回放大倍数
 			OcrRegion reg;
 			reg.text = text;
 			reg.displayText = text;
-			reg.x = x; reg.y = y;
-			reg.w = std::max(2.f, w);
-			reg.h = std::max(2.f, h);
+			reg.x = (x - pad) / scale;
+			reg.y = (y - pad) / scale;
+			reg.w = std::max(2.f, w / scale);
+			reg.h = std::max(2.f, h / scale);
 			r.regions.push_back(reg);
 			if (!plain.empty()) plain += L'\n';
 			plain += text;
@@ -196,6 +199,33 @@ OcrEngineKind kindOf(OcrPackVariant v)
 	return OcrEngineKind::PpOcrV5;
 }
 
+// 送进引擎前的预处理：在图像四周补白边（该 DLL 会忽略 optionsJson，只能靠输入图像影响结果）。
+// 文字贴着图像边缘时检测容易把行尾裁掉，留白可避免；不做缩放 —— 缩放会改变笔画形态，
+// 反而容易把相邻的字并成一个，还多一次重采样。返回的 pad 用于把引擎坐标映射回原图。
+struct Prepared
+{
+	std::vector<BYTE> data;
+	int w{};
+	int h{};
+	float scale{ 1.f };
+	float pad{ 0.f };
+};
+
+Prepared prepareForOcr(int w, int h, const BYTE* bgra)
+{
+	Prepared p;
+	const int kPad = 64;   // 物理像素
+	p.scale = 1.f;
+	p.pad = (float)kPad;
+	p.w = w + kPad * 2;
+	p.h = h + kPad * 2;
+	p.data.assign((size_t)p.w * p.h * 4, 0xFF);   // 先铺白（BGRA 四字节全 FF）
+	for (int y = 0; y < h; ++y)
+		memcpy(p.data.data() + ((size_t)(y + kPad) * p.w + kPad) * 4,
+			bgra + (size_t)y * w * 4, (size_t)w * 4);
+	return p;
+}
+
 } // namespace
 
 bool isInstalled(OcrPackVariant v)
@@ -228,7 +258,8 @@ OcrResult recognize(int w, int h, const BYTE* bgra, OcrPackVariant v)
 		std::filesystem::create_directories(tmp, ec);
 		auto img = tmp / L"ppocr.png";
 		auto out = tmp / L"ppocr_out.json";
-		if (!Util::saveToFile(img.wstring(), w, h, const_cast<BYTE*>(bgra))) {
+		Prepared prep = prepareForOcr(w, h, bgra);
+		if (!Util::saveToFile(img.wstring(), prep.w, prep.h, prep.data.data())) {
 			r.error = L"无法写出临时图片";
 			return r;
 		}
@@ -250,7 +281,7 @@ OcrResult recognize(int w, int h, const BYTE* bgra, OcrPackVariant v)
 		std::string payload((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 		std::filesystem::remove(img, ec);
 		std::filesystem::remove(out, ec);
-		return parseJsonPayload(payload, r.engineUsed);
+		return parseJsonPayload(payload, r.engineUsed, prep.scale, prep.pad);
 	}
 
 	// v4/v5: RapidOCR.dll（导出 RapidOcrFromPathW，引擎由 DLL 内部自管）
@@ -274,16 +305,19 @@ OcrResult recognize(int w, int h, const BYTE* bgra, OcrPackVariant v)
 	std::error_code ec;
 	std::filesystem::create_directories(tmp, ec);
 	auto img = tmp / L"ppocr.png";
-	if (!Util::saveToFile(img.wstring(), w, h, const_cast<BYTE*>(bgra))) {
+	Prepared prep = prepareForOcr(w, h, bgra);
+	if (!Util::saveToFile(img.wstring(), prep.w, prep.h, prep.data.data())) {
 		FreeLibrary(mod);
 		r.error = L"无法写出临时图片";
 		return r;
 	}
-	const char* json = fromPath(img.wstring().c_str(), nullptr);   // 模型路径由 DLL 自治，options 传 NULL
+	// options 传 nullptr：实测该 DLL 完全忽略 optionsJson（见 prepareForOcr 的说明），
+	// 参数只能靠"加白边 / 放大"这类预处理来影响，写 JSON 反而误导。
+	const char* json = fromPath(img.wstring().c_str(), nullptr);
 	std::string payload = json ? json : "";
 	FreeLibrary(mod);
 	std::filesystem::remove(img, ec);
-	return parseJsonPayload(payload, r.engineUsed);
+	return parseJsonPayload(payload, r.engineUsed, prep.scale, prep.pad);
 }
 
 } // namespace PpOcrEngine

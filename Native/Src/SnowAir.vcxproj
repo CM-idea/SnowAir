@@ -283,6 +283,7 @@
     <ClCompile Include="Win\SettingWidgets.cpp" />
     <ClCompile Include="Win\WinCap.cpp" />
     <ClCompile Include="Win\WinPin.cpp" />
+    <ClCompile Include="Win\PinMenu.cpp" />
     <ClCompile Include="Win\WinSetting.cpp" />
     <ClCompile Include="Win\WinSettingAbout.cpp" />
     <ClCompile Include="Win\WinSettingAppearance.cpp" />
@@ -408,6 +409,8 @@
     <ClInclude Include="Win\SettingWidgets.h" />
     <ClInclude Include="Win\WinCap.h" />
     <ClInclude Include="Win\WinPin.h" />
+    <ClInclude Include="Win\PinMenu.h" />
+    <ClInclude Include="Win\MenuTheme.h" />
     <ClInclude Include="Win\WinSetting.h" />
     <ClInclude Include="Win\WinSettingAbout.h" />
     <ClInclude Include="Win\WinSettingAppearance.h" />
@@ -424,7 +427,7 @@
     <Image Include="Res\logo.ico" />
   </ItemGroup>
   <ItemGroup>
-    <Font Include="Res\iconfont.ttf" />
+    <Font Include="Res\SnowAirIcons.ttf" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\deps\Ling\yoga\yoga.vcxproj">

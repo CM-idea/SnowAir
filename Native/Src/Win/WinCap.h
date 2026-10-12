@@ -55,6 +55,9 @@ public:
 	void clearOcrPanel();
 	// 文字识别面板是否开着（工具栏据此决定该按钮是否显示选中态）
 	bool hasOcrPanel() const { return toolOcr != nullptr; }
+	// 当前浮层是「翻译」还是「文字识别」（无浮层时都返回 false）—— 工具栏据此点亮对应按钮
+	bool isTranslatePanel() const;
+	bool isOcrPanel() const;
 	void startQrcode();
 	void syncQrcodePanel();
 	void syncOcrPanel();
@@ -116,7 +119,7 @@ private:
 	bool enterByArg();
 	void relayoutTool();
 	void enterLiveStage();
-	bool exportSelection(std::vector<BYTE>& pixels, int& cw, int& ch);
+	bool exportSelection(std::vector<BYTE>& pixels, int& cw, int& ch, bool includeAnnot = true);
 	bool beginMaskResize(POINT pos);
 	void applyMaskHitCursor(MaskHit hit);
 	bool hasAnnotShapes() const;

@@ -41,7 +41,7 @@ namespace ToolbarStore {
 	Colors current();             // 按 mode 返回生效色
 	Colors custom();              // 自定义色（Custom 模式用，可编辑）
 	void applyCustom(const Colors& c, bool persist = true);
-	// 色槽下标 -> 中文名（shadcn 风格色板标签，直接内联免语言包）
+	// 色槽下标 -> 中文名（色板标签，直接内联免语言包）
 	const wchar_t* slotName(int slot);
 
 	// 工具 ID -> 图标字形（IconCodes.h）；split-* / record-time 返回空由 UI 特判

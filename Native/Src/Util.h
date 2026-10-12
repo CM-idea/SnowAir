@@ -20,6 +20,8 @@ public:
 	static std::wstring createFileName(const std::wstring& ext);
 	// GDI 抓屏。返回 BGRA、top-down、行紧凑（步长 = w*4），与本类其他函数的入参格式一致
 	static std::vector<BYTE> captureScreen(const int x, const int y, const int w, const int h);
+	// BGRA（自上而下、行紧凑）双线性缩放到目标尺寸；OCR 前放大/加边用
+	static std::vector<BYTE> scaleBGRA(const BYTE* src, int sw, int sh, int dw, int dh);
 	// 把文件路径以 CF_HDROP 写进剪切板，粘贴到资源管理器/聊天窗口就是一个文件
 	static void addFileToClipboard(const std::wstring& filePath);
 	// —— History 操作 —— 根据条目 id 找到 Setting 的历史条目，然后执行对应动作
@@ -32,6 +34,12 @@ public:
 	// 用 ZXing 识别二维码与常见一维条码（Code128/EAN/UPC 等）；失败时退回 quirc 仅扫 QR。
 	// 图里有多个码时用换行拼在一起
 	static std::wstring decodeQrCode(const int w, const int h, BYTE* data);
+
+	// 取当前 exe 自身的版本号（X.Y.Z）。从【已加载进内存的模块资源】里读，
+	// 不走磁盘文件路径 —— 否则运行期间磁盘上的 exe 一旦被替换/改名/删除
+	// （自升级拷贝、重新构建等），同一进程里先后两次调用就会拿到不同的值，
+	// 表现为设置页左下角版本号对、而「关于」页（每次打开都重新读）对不上。
+	static std::array<int, 3> getAppVersion();
 
 	// —— 截图输出路径 ——
 	// 默认输出根目录：图片\SnowAir；取不到「图片」文件夹时退回空路径（不建目录）

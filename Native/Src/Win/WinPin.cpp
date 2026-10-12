@@ -9,6 +9,10 @@
 #include "AnnotHost.h"
 #include "WinPin.h"
 #include "WinCap.h"
+#include "PinMenu.h"
+#include "../Tool/ToolOcr.h"
+#include "../Ocr/OcrService.h"
+#include "../Lang.h"
 #include "../App.h"
 #include "../Setting.h"
 #include "../Util.h"
@@ -66,7 +70,8 @@ WinPin::WinPin(int x, int y, int w, int h, const std::vector<BYTE>* data, const 
 		if (!initialTool.empty()) pendingTool = initialTool;
 	}
 	editing = false;
-	onMoved.add([this]() { if (editing) layoutTools(); });
+	opacityPercent = Setting::get()->getPinOpacity();
+	onMoved.add([this]() { if (editing) layoutTools(); refreshOcrPanel(); });
 	onDpiChanged.add([this]() { dpiChanged = true; });
 	onSizeChanged.add([this]() {
 		if (!dpiChanged) return;
@@ -78,14 +83,32 @@ WinPin::WinPin(int x, int y, int w, int h, const std::vector<BYTE>* data, const 
 	onMouseMove.add([this](POINT pos) { this->onMove(pos); });
 	onMouseUp.add([this](POINT pos, BOOL isRight) { this->onUp(pos, isRight); });
 	onMouseWheel.add([this](POINT pos, float space) {
-		if (locked) return;
+		if (locked || thumbnail) return;
 		if (GetKeyState(VK_CONTROL) & 0x8000) {
 			applyScale(scale * (space > 0 ? 1.1f : 1.f / 1.1f), pos);
 			return;
 		}
-		if (!editing || !shapeHover) return;
-		auto imgPos = toImgPos(pos);
-		shapeHover->mouseWheel((float)imgPos.x, (float)imgPos.y, space > 0 ? (short)WHEEL_DELTA : (short)-WHEEL_DELTA);
+		if (editing) {
+			// 编辑态普通滚轮仍归标注（避免与标注交互冲突）
+			if (!shapeHover) return;
+			auto imgPos = toImgPos(pos);
+			shapeHover->mouseWheel((float)imgPos.x, (float)imgPos.y, space > 0 ? (short)WHEEL_DELTA : (short)-WHEEL_DELTA);
+			return;
+		}
+		// 非编辑态：悬停滚轮直接缩放。锚点 = 鼠标所在一侧（边/角），画面朝反向伸缩。
+		const float steps = space / 60.f;   // space = 格数 * 60 * dpi
+		const float factor = std::pow(1.1f, steps);
+		if (zoomMode == ZoomMode::Crop) {
+			cropScale = std::clamp(cropScale * factor, 1.f, 10.f);
+			refresh();
+			return;
+		}
+		// 九宫格取锚点：左/中/右 × 上/中/下 → 边中点或角点（中间带取窗口 1/3）。
+		const int zx = (pos.x < this->w / 3.f) ? 0 : (pos.x > this->w * 2.f / 3.f ? 2 : 1);
+		const int zy = (pos.y < this->h / 3.f) ? 0 : (pos.y > this->h * 2.f / 3.f ? 2 : 1);
+		POINT anchor{ zx == 0 ? 0 : (zx == 2 ? (LONG)std::lround(this->w) : (LONG)std::lround(this->w * 0.5f)),
+					  zy == 0 ? 0 : (zy == 2 ? (LONG)std::lround(this->h) : (LONG)std::lround(this->h * 0.5f)) };
+		applyScale(scale * factor, anchor);
 	});
 	onTimer.add([this](UINT id) { this->onTimerCB(id); });
 	onKeyDown.add([this](UINT key) { this->onKey(key); });
@@ -97,6 +120,13 @@ void WinPin::onClosed()
 	if (isClosed) return;
 	isClosed = true;
 	CaptureEsc::release(hwnd);
+	// 若本贴图处于专注模式，关闭时恢复被它隐藏的其它贴图
+	if (focusMode) {
+		for (auto& p : winPins) {
+			if (p && p.get() != this && p->hiddenByFocus) { p->hiddenByFocus = false; p->show(); }
+		}
+	}
+	if (toolOcr) { toolOcr->close(); toolOcr.reset(); }
 	if (toolSub) toolSub->close();
 	if (toolCap) toolCap->close();
 	shapeHover = nullptr;
@@ -147,7 +177,7 @@ void WinPin::applyScale(float newScale, POINT anchor)
 {
 	auto sz = getImgSize();
 	if (sz.width == 0 || sz.height == 0) return;
-	auto maxScale = std::max(1.f, std::min(8.f, 16000.f / std::max(sz.width, sz.height)));
+	auto maxScale = std::max(1.f, std::min(10.f, 16000.f / std::max(sz.width, sz.height)));
 	newScale = std::clamp(newScale, 0.1f, maxScale);
 	if (std::abs(newScale - scale) < 0.0001f) return;
 	if (editingText) editingText->finishEdit();
@@ -161,6 +191,7 @@ void WinPin::applyScale(float newScale, POINT anchor)
 	setTimer(800, 101);
 	if (editing) layoutTools();
 	refresh();
+	refreshOcrPanel();
 }
 
 void WinPin::paintScaleTip(ID2D1DeviceContext* ctx)
@@ -278,6 +309,13 @@ void WinPin::setEditing(bool on)
 {
 	if (on == editing) return;
 	if (on && locked) return;
+	if (on && thumbnail) exitThumbnail();
+	// 编辑按 1:1 坐标落笔；裁剪放大是取景视图，进编辑前回到「直接放大」避免标注错位。
+	if (on && zoomMode != ZoomMode::Direct) {
+		zoomMode = ZoomMode::Direct;
+		cropScale = 1.f;
+		cropCenterX = -1.f; cropCenterY = -1.f;
+	}
 	editing = on;
 	hoverBtn = HoverBtn::None;
 	hoverChromeVisible = false;
@@ -425,7 +463,7 @@ D2D1_RECT_F WinPin::editBtnRect() const
 
 WinPin::HoverBtn WinPin::hitHoverBtn(POINT pos) const
 {
-	if (editing || !isMouseIn) return HoverBtn::None;
+	if (editing || thumbnail || !isMouseIn) return HoverBtn::None;
 	if (ptInRect(lockBtnRect(), pos)) return HoverBtn::Lock;
 	if (!locked) {
 		if (ptInRect(editBtnRect(), pos)) return HoverBtn::Edit;
@@ -467,24 +505,104 @@ void WinPin::layout()
 	if (!ctx) return;
 	ctx->Clear(0);
 	auto sz = screenImg->GetSize();
+	if (sz.width == 0 || sz.height == 0) { canvas->finishPaint(); return; }
+
+	const int bw = Setting::get()->getPinBorderWidth();
+	const float sw = (bw > 0 ? bw : 1) * dpi;
+	const float hw = sw * 0.5f;
+	const float borderRad = (float)Setting::get()->getPinBorderRadius() * dpi;
+
+	// 取景：Direct = 整图；Crop/缩略图 = 等比 cover 取一块。统一用
+	//   client = f * (img - srcTopLeft)
+	// 这一个变换同时映射底图与标注（标注本就存的是图像坐标）。
+	float f = 1.f;
+	const D2D1_RECT_F src = cropSourceRect(f);
+	const D2D1::Matrix3x2F contentXform = D2D1::Matrix3x2F::Scale(f, f)
+		* D2D1::Matrix3x2F::Translation(-f * src.left, -f * src.top);
+
+	// 画面层不透明度（最外层）：淡「底图 + 标注 + 边框」三者；
+	// 悬停按钮 / 缩放提示留在图层外（不变淡）。
+	const float op = effectiveOpacity();
+	const bool useLayer = op < 0.999f;
+	if (useLayer) {
+		if (!opacityLayer) ctx->CreateLayer(nullptr, opacityLayer.GetAddressOf());
+		D2D1_LAYER_PARAMETERS lp = D2D1::LayerParameters();
+		lp.contentBounds = D2D1::InfiniteRect();
+		lp.opacity = op;
+		ctx->PushLayer(lp, opacityLayer.Get());
+	}
+
+	// 圆角裁剪：边框开启且圆角 > 0 时，把画面裁进与边框外缘一致的圆角形状。
+	// 裁剪层在「单位变换」下推入 —— 蒙版按窗口坐标（不受随后的取景/缩放变换影响），
+	// 再把取景变换设回去、在层内绘制，于是画面四角随边框一起变圆而不是方角。
+	const bool clipRound = borderVisible && borderRad > 0.f;
+	if (clipRound) {
+		ctx->SetTransform(D2D1::Matrix3x2F::Identity());
+		if (!clipLayer) ctx->CreateLayer(nullptr, clipLayer.GetAddressOf());
+		const float outerRad = borderRad + hw;   // 描边以中线为基准，外缘圆角 = 圆角 + 半线宽
+		if (!clipGeo || clipGeoW != w || clipGeoH != h || clipGeoRad != outerRad) {
+			clipGeo = nullptr;   // ID2D1RoundedRectangleGeometry 无法原地改，尺寸/圆角变了就重建
+			Ling::D2D::get()->d2dFactory->CreateRoundedRectangleGeometry(
+				D2D1::RoundedRect(D2D1::RectF(0, 0, w, h), outerRad, outerRad), clipGeo.GetAddressOf());
+			clipGeoW = w; clipGeoH = h; clipGeoRad = outerRad;
+		}
+		D2D1_LAYER_PARAMETERS clp = D2D1::LayerParameters();
+		clp.contentBounds = D2D1::InfiniteRect();
+		clp.geometricMask = clipGeo.Get();
+		clp.maskAntialiasMode = D2D1_ANTIALIAS_MODE_PER_PRIMITIVE;
+		ctx->PushLayer(clp, clipLayer.Get());
+	}
+
+	ctx->SetTransform(contentXform);
 	D2D1_RECT_F destRect = D2D1::RectF(0, 0, sz.width, sz.height);
-	ctx->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
 	ctx->DrawBitmap(screenImg.Get(), destRect);
 	paintShapes(ctx);
 	if (sizePreviewHold || GetTickCount64() < sizePreviewPulseUntil)
 		paintSizePreview(ctx);
+	if (clipRound) ctx->PopLayer();
+
+	// 边框：不参与圆角裁剪（画在圆角形状的外缘），但在透明度层内 → 随画面一起变淡。
 	ctx->SetTransform(D2D1::Matrix3x2F::Identity());
 	if (borderVisible) {
-		const int bw = Setting::get()->getPinBorderWidth();
-		const float sw = (bw > 0 ? bw : 1) * dpi;
-		const float hw = sw * 0.5f;
-		const float rad = (float)Setting::get()->getPinBorderRadius() * dpi;
 		ctx->DrawRoundedRectangle(
-			D2D1::RoundedRect(D2D1::RectF(hw, hw, w - hw, h - hw), rad, rad), borderBrush.Get(), sw);
+			D2D1::RoundedRect(D2D1::RectF(hw, hw, w - hw, h - hw), borderRad, borderRad), borderBrush.Get(), sw);
 	}
-	if (!editing) paintScaleTip(ctx);
-	paintHoverChrome(ctx);
+	if (useLayer) ctx->PopLayer();
+	if (!editing && !thumbnail) paintScaleTip(ctx);
+	if (!thumbnail) paintHoverChrome(ctx);
 	canvas->finishPaint();
+}
+
+D2D1_RECT_F WinPin::cropSourceRect(float& f) const
+{
+	auto sz = getImgSize();
+	const float imgW = (float)sz.width, imgH = (float)sz.height;
+	if (imgW <= 0 || imgH <= 0 || w <= 0 || h <= 0) { f = 1.f; return D2D1::RectF(0, 0, imgW, imgH); }
+	if (zoomMode == ZoomMode::Direct && !thumbnail) {
+		f = w / imgW;
+		return D2D1::RectF(0, 0, imgW, imgH);
+	}
+	const float sW = w / imgW, sH = h / imgH;
+	const float zoom = thumbnail ? 1.f : std::max(1.f, cropScale);
+	const float cover = std::max(sW, sH) * zoom;
+	const float srcW = std::max(1.f, std::floor(w / cover));
+	const float srcH = std::max(1.f, std::floor(h / cover));
+	const bool useCenter = !thumbnail && cropCenterX >= 0 && cropCenterY >= 0;
+	const float cx = useCenter ? cropCenterX : imgW * 0.5f;
+	const float cy = useCenter ? cropCenterY : imgH * 0.5f;
+	const float sx = std::clamp(cx - srcW * 0.5f, 0.f, std::max(0.f, imgW - srcW));
+	const float sy = std::clamp(cy - srcH * 0.5f, 0.f, std::max(0.f, imgH - srcH));
+	f = w / srcW;
+	return D2D1::RectF(sx, sy, sx + srcW, sy + srcH);
+}
+
+float WinPin::effectiveOpacity() const
+{
+	// 悬停显示原图（未编辑时按 100%），移开恢复设定值。
+	// 拖动过程中不恢复原图（否则一拖就变实，手感和观感都很跳）。
+	// 编辑态同样按设定值绘制 —— 否则编辑工具栏里的「透明度」滑条拖了没反应。
+	if (!editing && isMouseIn && !annotMouseDown) return 1.f;
+	return std::clamp(opacityPercent, 10, 100) / 100.f;
 }
 
 void WinPin::onMinMaxInfo(MINMAXINFO* mmi)
@@ -518,12 +636,43 @@ void WinPin::onDown(POINT pos, BOOL isRight)
 	}
 	if (locked) return;
 	if (!editing) {
-		// 非编辑：左键拖窗
-		if (!isRight) {
-			annotPressPos = pos;
-			hasDragged = false;
-			annotMouseDown = true;
+		// 非编辑：右键弹菜单（菜单已开时收起）
+		if (isRight) {
+			if (PinMenu::isOpen()) { PinMenu::closeMenu(); return; }
+			POINT screenPt = pos;
+			ClientToScreen(hwnd, &screenPt);
+			showContextMenu(screenPt);
+			return;
 		}
+		// 双击：按设置 → 缩略图 / 关闭
+		POINT screenPos = pos;
+		ClientToScreen(hwnd, &screenPos);
+		const auto now = GetTickCount64();
+		const bool dbl = (now - annotLastDownTime <= GetDoubleClickTime())
+			&& std::abs(screenPos.x - annotLastDownPos.x) <= GetSystemMetrics(SM_CXDOUBLECLK)
+			&& std::abs(screenPos.y - annotLastDownPos.y) <= GetSystemMetrics(SM_CYDOUBLECLK);
+		annotLastDownTime = now;
+		annotLastDownPos = screenPos;
+		if (dbl) {
+			if (Setting::get()->getPinDoubleClickAction() == 1) close();
+			else if (thumbnail) exitThumbnail();
+			else enterThumbnail(pos);
+			return;
+		}
+		// 拖边缩放（缩略图态禁用）优先于点选拖窗
+		const int edges = thumbnail ? 0 : hitResizeEdges(pos);
+		if (edges) {
+			edgeResize = edges;
+			GetCursorPos(&edgeStartGlobal);
+			edgeStartX = x; edgeStartY = y;
+			edgeStartW = (int)std::lround(w); edgeStartH = (int)std::lround(h);
+			edgeStartScale = scale;
+			SetCapture(hwnd);
+			return;
+		}
+		annotPressPos = pos;
+		hasDragged = false;
+		annotMouseDown = true;
 		return;
 	}
 	annotDown(pos, isRight);
@@ -537,7 +686,29 @@ void WinPin::onMove(POINT pos)
 			hoverChromeVisible = false;
 			refresh();
 		}
+		else {
+			refresh();   // 悬停原图 → 移开恢复设定不透明度
+		}
 		if (editing) annotMove(pos);
+		return;
+	}
+	if (edgeResize) {
+		POINT cur{};
+		GetCursorPos(&cur);
+		const int dx = cur.x - edgeStartGlobal.x;
+		const int dy = cur.y - edgeStartGlobal.y;
+		float newW = (float)edgeStartW, newH = (float)edgeStartH;
+		if (edgeResize & 1) newW -= dx;   // left
+		if (edgeResize & 4) newW += dx;   // right
+		if (edgeResize & 2) newH -= dy;   // top
+		if (edgeResize & 8) newH += dy;   // bottom
+		const bool horiz = (edgeResize & (1 | 4)) != 0;
+		const float ratio = horiz ? newW / std::max(1.f, (float)edgeStartW)
+								  : newH / std::max(1.f, (float)edgeStartH);
+		// 锚点 = 对边/对角（拖动边之外的那一侧固定）
+		POINT anchor{ (edgeResize & 1) ? (LONG)std::lround(w) : 0,
+					  (edgeResize & 2) ? (LONG)std::lround(h) : 0 };
+		applyScale(edgeStartScale * ratio, anchor);
 		return;
 	}
 	if (!editing) {
@@ -559,6 +730,11 @@ void WinPin::onMove(POINT pos)
 
 void WinPin::onUp(POINT pos, BOOL isRight)
 {
+	if (edgeResize) {
+		edgeResize = 0;
+		ReleaseCapture();
+		return;
+	}
 	if (!editing) {
 		annotMouseDown = false;
 		hasDragged = false;
@@ -587,8 +763,7 @@ bool WinPin::annotRightClick()
 
 bool WinPin::annotDoubleClick()
 {
-	if (locked || editing) return true;
-	copyToClipboard();
+	// 双击在非编辑态由 onDown 处理（缩略图 / 关闭）；编辑态双击留给标注（文字重编辑等）。
 	return true;
 }
 
@@ -649,7 +824,7 @@ void WinPin::onKey(UINT key)
 	}
 	else if (key == VK_RETURN) {
 		if (editing) finishEditing(true);
-		else copyToClipboard();
+		else { copyToClipboard(); close(); }
 	}
 	else if (key == VK_ESCAPE) {
 		if (editing) finishEditing(false);
@@ -663,7 +838,7 @@ void WinPin::copyToClipboard()
 	D2D1_SIZE_U size{};
 	if (!getAnnotPixels(pixels, size)) return;
 	Util::saveToClipboard((int)size.width, (int)size.height, pixels.data());
-	close();
+	// 复制不再关闭贴图（用户确认）
 }
 
 void WinPin::saveToFile()
@@ -702,10 +877,29 @@ void WinPin::restoreWindowState(HWND foregroundBeforeDialog)
 
 BOOL WinPin::setCursor()
 {
+	if (thumbnail) {
+		SetCursor(LoadCursor(nullptr, IDC_ARROW));
+		return TRUE;
+	}
 	if (!editing) {
 		if (hoverBtn != HoverBtn::None) SetCursor(LoadCursor(nullptr, IDC_HAND));
 		else if (locked) SetCursor(LoadCursor(nullptr, IDC_ARROW));
-		else SetCursor(LoadCursor(nullptr, IDC_SIZEALL));
+		else {
+			POINT pt{};
+			GetCursorPos(&pt);
+			ScreenToClient(hwnd, &pt);
+			const int e = hitResizeEdges(pt);
+			if (e) {
+				const bool l = (e & 1) != 0, t = (e & 2) != 0, r = (e & 4) != 0, b = (e & 8) != 0;
+				LPCTSTR id = ((l && t) || (r && b)) ? IDC_SIZENWSE
+					: ((r && t) || (l && b)) ? IDC_SIZENESW
+					: (l || r) ? IDC_SIZEWE : IDC_SIZENS;
+				SetCursor(LoadCursor(nullptr, id));
+			}
+			else {
+				SetCursor(LoadCursor(nullptr, IDC_SIZEALL));
+			}
+		}
 		return TRUE;
 	}
 	applyAnnotCursor();
@@ -723,4 +917,255 @@ void WinPin::applyEmptyToolCursor()
 		}
 	}
 	SetCursor(LoadCursor(nullptr, any ? IDC_ARROW : IDC_SIZEALL));
+}
+
+// ============================================================================
+// 本次新增：右键菜单 / 缩略图 / 缩放 / 变换 / 外观 / 识别文字
+// ============================================================================
+
+int WinPin::hitResizeEdges(POINT pos) const
+{
+	if (thumbnail) return 0;
+	const int m = (int)std::lround(7 * dpi);
+	int e = 0;
+	if (pos.x <= m) e |= 1;
+	if (pos.y <= m) e |= 2;
+	if (pos.x >= (int)std::lround(w) - m) e |= 4;
+	if (pos.y >= (int)std::lround(h) - m) e |= 8;
+	return e;
+}
+
+void WinPin::enterThumbnail(POINT cursorClientPos)
+{
+	if (thumbnail) return;
+	if (editing) finishEditing(true);
+	preThumbX = x; preThumbY = y;
+	preThumbW = (int)std::lround(w); preThumbH = (int)std::lround(h);
+	preThumbScale = scale;
+	thumbnail = true;
+	locked = false;
+	hoverBtn = HoverBtn::None;
+	hoverChromeVisible = false;
+
+	const int thumb = std::max(16, (int)std::lround(50 * dpi));
+	POINT g = cursorClientPos;
+	ClientToScreen(hwnd, &g);
+	auto [sx, sy, sw, sh] = App::get()->getScreenArea();
+	int nx = g.x - thumb / 2, ny = g.y - thumb / 2;
+	if (sw >= thumb) nx = std::clamp(nx, sx, sx + sw - thumb);
+	if (sh >= thumb) ny = std::clamp(ny, sy, sy + sh - thumb);
+	setSize((float)thumb / dpi, (float)thumb / dpi);
+	setPosition(nx, ny);
+	refresh();
+	refreshOcrPanel();
+}
+
+void WinPin::exitThumbnail()
+{
+	if (!thumbnail) return;
+	thumbnail = false;
+	setSize((float)preThumbW / dpi, (float)preThumbH / dpi);
+	setPosition(preThumbX, preThumbY);
+	scale = preThumbScale;
+	refresh();
+	refreshOcrPanel();
+}
+
+void WinPin::applyTopMost(bool on)
+{
+	topMost = on;
+	SetWindowPos(hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+		SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+	refresh();
+}
+
+void WinPin::setFocusMode(bool on)
+{
+	focusMode = on;
+	for (auto& p : winPins) {
+		if (!p || p.get() == this) continue;
+		if (on) {
+			if (IsWindowVisible(p->hwnd)) { p->hiddenByFocus = true; p->hide(); }
+		}
+		else if (p->hiddenByFocus) {
+			p->hiddenByFocus = false; p->show();
+		}
+	}
+	refresh();
+}
+
+void WinPin::setZoomMode(ZoomMode m)
+{
+	if (zoomMode == m) return;
+	zoomMode = m;
+	cropScale = 1.f;
+	cropCenterX = -1.f; cropCenterY = -1.f;
+	refresh();
+}
+
+void WinPin::setOpacityPercent(int percent)
+{
+	percent = std::clamp(percent, 10, 100);
+	if (opacityPercent == percent) return;
+	opacityPercent = percent;
+	Setting::get()->setPinOpacity(percent);
+	refresh();
+}
+
+void WinPin::rotateImage90(bool clockwise) { applyImageTransform(clockwise ? 1 : -1, false); }
+void WinPin::mirrorImage(bool horizontal) { applyImageTransform(0, horizontal); }
+
+void WinPin::applyImageTransform(int quarterTurns, bool flipH)
+{
+	if (quarterTurns == 0 && !flipH) return;
+	if (editing) finishEditing(true);
+	std::vector<BYTE> px;
+	D2D1_SIZE_U sz{};
+	if (!getAnnotPixels(px, sz)) return;
+	int W = (int)sz.width, H = (int)sz.height;
+	if (W <= 0 || H <= 0) return;
+
+	if (quarterTurns != 0) {
+		const bool cw = quarterTurns > 0;
+		const int nW = H, nH = W;
+		std::vector<BYTE> out((size_t)nW * nH * 4);
+		for (int y = 0; y < H; ++y) {
+			for (int x = 0; x < W; ++x) {
+				const int dx = cw ? (H - 1 - y) : y;
+				const int dy = cw ? x : (W - 1 - x);
+				memcpy(&out[((size_t)dy * nW + dx) * 4], &px[((size_t)y * W + x) * 4], 4);
+			}
+		}
+		px.swap(out);
+		W = nW; H = nH;
+	}
+	if (flipH) {
+		for (int y = 0; y < H; ++y) {
+			BYTE* row = &px[(size_t)y * W * 4];
+			for (int x = 0; x < W / 2; ++x)
+				for (int c = 0; c < 4; ++c) std::swap(row[x * 4 + c], row[(W - 1 - x) * 4 + c]);
+		}
+	}
+
+	D2D1_BITMAP_PROPERTIES1 props{};
+	props.pixelFormat = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
+	props.bitmapOptions = D2D1_BITMAP_OPTIONS_NONE;
+	props.dpiX = 96.0f; props.dpiY = 96.0f;
+	Microsoft::WRL::ComPtr<ID2D1Bitmap1> bmp;
+	Ling::D2D::get()->deviceContext->CreateBitmap(D2D1::SizeU(W, H), px.data(), W * 4, &props, bmp.GetAddressOf());
+	if (!bmp) return;
+	screenImg = bmp;
+	clearAllShapes();   // 标注已烘焙进底图，清掉矢量层
+
+	// 保持中心，按原比例重排窗口
+	const int cx = x + (int)std::lround(w * 0.5f), cy = y + (int)std::lround(h * 0.5f);
+	const int nWinW = std::max(1, (int)std::lround(W * scale));
+	const int nWinH = std::max(1, (int)std::lround(H * scale));
+	x = cx - nWinW / 2; y = cy - nWinH / 2;
+	w = (float)nWinW; h = (float)nWinH;
+	SetWindowPos(hwnd, nullptr, x, y, nWinW, nWinH, SWP_NOZORDER | SWP_NOACTIVATE);
+	cropCenterX = -1.f; cropCenterY = -1.f;
+	refresh();
+	refreshOcrPanel();
+}
+
+void WinPin::refreshOcrPanel()
+{
+	if (toolOcr && toolOcr->hwnd) {
+		const D2D1_RECT_F r = D2D1::RectF(0, 0, w, h);
+		toolOcr->syncToMask(r, x, y, dpi);
+	}
+}
+
+void WinPin::toggleOcrPanel()
+{
+	if (toolOcr) { toolOcr.reset(); refresh(); return; }
+	std::vector<BYTE> px;
+	D2D1_SIZE_U sz{};
+	if (!getAnnotPixels(px, sz)) return;
+	auto result = OcrService::instance().recognize((int)sz.width, (int)sz.height, px.data());
+	toolOcr = std::make_unique<ToolOcr>(this, result, false, std::move(px), (int)sz.width, (int)sz.height);
+	// 贴图叠加：不显示右上角复制按钮；只有识别文本框吃鼠标（可选中/复制），其余穿透。
+	// 必须在建窗之前设置。
+	toolOcr->setPinOverlay(true);
+	toolOcr->createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP);
+	const D2D1_RECT_F r = D2D1::RectF(0, 0, w, h);
+	toolOcr->syncToMask(r, x, y, dpi);
+	if (result.ok && !result.text.empty()) Ling::Util::setTextToClipboard(result.text);
+	refresh();
+}
+
+void WinPin::showContextMenu(POINT screenPt)
+{
+	std::vector<PinMenu::Item> items;
+	auto add = [&](const std::wstring& t, std::function<void()> a, bool checkable = false, bool checked = false) {
+		PinMenu::Item it;
+		it.text = t;
+		it.action = std::move(a);
+		it.checkable = checkable;
+		it.checked = checked;
+		items.push_back(std::move(it));
+	};
+	// 生成一个子菜单项（文本 + 回调 + 可选勾选态）
+	auto sub = [](const std::wstring& t, std::function<void()> a, bool checkable = false, bool checked = false) {
+		PinMenu::Item it;
+		it.text = t;
+		it.action = std::move(a);
+		it.checkable = checkable;
+		it.checked = checked;
+		return it;
+	};
+	// 生成一个带右侧箭头的子菜单父项
+	auto addSub = [&](const std::wstring& t, std::vector<PinMenu::Item> children) {
+		PinMenu::Item it;
+		it.text = t;
+		it.submenu = std::move(children);
+		items.push_back(std::move(it));
+	};
+	auto sep = [&]() { PinMenu::Item it; it.separator = true; items.push_back(it); };
+
+	add(Lang::get(L"pin.menuCopy"), [this]() { copyToClipboard(); });
+	add(Lang::get(L"pin.menuCopyFile"), [this]() {
+		std::vector<BYTE> pixels;
+		D2D1_SIZE_U size{};
+		if (!getAnnotPixels(pixels, size)) return;
+		const std::wstring path = Util::buildSavePath(
+			Setting::get()->getManualSaveFormat(), Setting::defaultManualSaveFormat(), L"png");
+		if (path.empty() || !Util::saveToFile(path, (int)size.width, (int)size.height, pixels.data())) return;
+		Util::addFileToClipboard(path);
+	});
+	add(Lang::get(L"pin.menuSaveAs"), [this]() { saveToFile(); });
+	add(Lang::get(L"pin.menuOcr"), [this]() { toggleOcrPanel(); }, true, toolOcr != nullptr);
+	sep();
+	add(Lang::get(L"pin.menuEdit"), [this]() { if (thumbnail) exitThumbnail(); setEditing(true); });
+	addSub(Lang::get(L"pin.menuTransform"), {
+		sub(Lang::get(L"pin.menuRotateL"), [this]() { rotateImage90(false); }),
+		sub(Lang::get(L"pin.menuRotateR"), [this]() { rotateImage90(true); }),
+		sub(Lang::get(L"pin.menuFlipH"), [this]() { mirrorImage(true); }),
+		sub(Lang::get(L"pin.menuFlipV"), [this]() { mirrorImage(false); }),
+	});
+	sep();
+	add(Lang::get(L"pin.menuThumb"), [this]() {
+		if (thumbnail) { exitThumbnail(); }
+		else { POINT c{ (LONG)std::lround(w * 0.5f), (LONG)std::lround(h * 0.5f) }; enterThumbnail(c); }
+	}, true, thumbnail);
+	add(Lang::get(L"pin.menuFocus"), [this]() { setFocusMode(!focusMode); }, true, focusMode);
+	add(Lang::get(L"pin.menuTop"), [this]() { applyTopMost(!topMost); }, true, topMost);
+	add(Lang::get(L"pin.showBorder"), [this]() { toggleBorderVisible(); }, true, borderVisible);
+	sep();
+	{
+		std::vector<PinMenu::Item> opItems;
+		for (int v : { 25, 50, 75, 100 })
+			opItems.push_back(sub(std::to_wstring(v) + L"%",
+				[this, v]() { setOpacityPercent(v); }, true, opacityPercent == v));
+		addSub(Lang::get(L"pin.menuOpacity"), std::move(opItems));
+	}
+	addSub(Lang::get(L"pin.menuZoomMode"), {
+		sub(Lang::get(L"pin.zoomDirect"), [this]() { setZoomMode(ZoomMode::Direct); }, true, zoomMode == ZoomMode::Direct),
+		sub(Lang::get(L"pin.zoomCrop"), [this]() { setZoomMode(ZoomMode::Crop); }, true, zoomMode == ZoomMode::Crop),
+	});
+	sep();
+	add(Lang::get(L"pin.menuClose"), [this]() { close(); });
+
+	PinMenu::popup(std::move(items), screenPt);
 }

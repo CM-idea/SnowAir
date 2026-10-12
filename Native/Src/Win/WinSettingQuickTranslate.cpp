@@ -157,11 +157,13 @@ void WinSettingQuickTranslate::showOptionsBox(Ling::Button* anchor,
 		it->setBorderRadius(SettingTheme::radiusInner);   // 内层小框：与外框(10)同心
 		if (i + 1 < (int)options.size()) it->setMarginBottom(itemGap);
 		bool sel = i == current;
-		// 当前项：底色取与其它项 hover 相同的浅灰，hover 底色/文字色取同值 → 悬停不产生任何变化。
-		it->setColor(SettingTheme::textPrimary);
-		it->setBg(sel ? SettingTheme::accent : 0);
-		it->setHoverBg(SettingTheme::accent);
-		if (sel) it->setHoverColor(SettingTheme::textPrimary);
+		// 与其它下拉（SettingUi::selectDdl）保持一致：悬停/选中只换浅色底(popupSelBg)，文字恒用
+		// popupFg 不变色。此前非选中项没设 hoverColor，悬停会退回 Button 默认的深灰文字色 ——
+		// 表现为"停悬时文字变色"而不是浅色底，即本页下拉与其它下拉观感不一致的根因。
+		it->setColor(SettingTheme::popupFg);
+		it->setBg(sel ? SettingTheme::popupSelBg : 0);
+		it->setHoverBg(SettingTheme::popupSelBg);
+		it->setHoverColor(SettingTheme::popupFg);
 		it->onClick.add([this, weak, i, onPick](Ling::Button*) {
 			// 在回调内销毁弹层自身（独立窗口，不触碰宿主 hwnd），随后再触发回调。
 			if (!weak.lock()) return;
@@ -304,7 +306,7 @@ void WinSettingQuickTranslate::buildTranslateTab(Ling::Node* p)
 	srcLangBtn->setMarginLeft(8.f);
 	srcLangBtn->setMarginRight(4.f);
 	srcLangBtn->setBorderRadius(SettingTheme::radiusSm);
-	srcLangBtn->setHoverBg(SettingTheme::accent);
+	srcLangBtn->setHoverBg(SettingTheme::popupSelBg);   // 与其它下拉触发框一致
 	srcLangBtn->onClick.add([this](Ling::Button* btn) {
 		if (optionsPopup) return;
 		showLangBox(btn, false);
@@ -339,7 +341,7 @@ void WinSettingQuickTranslate::buildTranslateTab(Ling::Node* p)
 	tgtLangBtn->setFlexShrink(1.f);   // 允许收缩：窄窗时压缩到可用宽度，不被剪裁
 	tgtLangBtn->setMarginLeft(4.f);
 	tgtLangBtn->setBorderRadius(SettingTheme::radiusSm);
-	tgtLangBtn->setHoverBg(SettingTheme::accent);
+	tgtLangBtn->setHoverBg(SettingTheme::popupSelBg);   // 与其它下拉触发框一致
 	tgtLangBtn->onClick.add([this](Ling::Button* btn) {
 		if (optionsPopup) return;
 		showLangBox(btn, true);
@@ -431,7 +433,7 @@ void WinSettingQuickTranslate::buildTranslateTab(Ling::Node* p)
 	providerBtn->setPadding(10.f, 0, 10.f, 0);
 	providerBtn->setFlexShrink(1.f);   // 允许收缩：窄窗时压缩到可用宽度，不被剪裁
 	providerBtn->setBorderRadius(SettingTheme::radiusSm);
-	providerBtn->setHoverBg(SettingTheme::accent);
+	providerBtn->setHoverBg(SettingTheme::popupSelBg);   // 与其它下拉触发框一致
 	providerBtn->onClick.add([this](Ling::Button* btn) {
 		if (optionsPopup) return;
 		showProviderBox(btn);

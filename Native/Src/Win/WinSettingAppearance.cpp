@@ -174,7 +174,7 @@ WinSettingAppearance::~WinSettingAppearance()
 
 void WinSettingAppearance::buildTabActions(Ling::Node* row)
 {
-    // 与子 Tab 同行的右侧操作：恢复默认 / 预览效果（参考图顶部行）
+    // 与子 Tab 同行的右侧操作：恢复默认 / 预览效果
     auto mkOutline = [](Ling::Node* p, const std::wstring& text) {
         auto* b = p->makeChild<Ling::Button>();
         b->setText(text);
@@ -416,7 +416,7 @@ void WinSettingAppearance::buildToolbarTab(Ling::Node* host)
     tbPreviewWrap->setWidthPercent(100.f);
     tbPreviewWrap->hide();
 
-    // 显示区（无标题，仅卡片分区，与参考图一致；内容区统一不描边）
+    // 显示区（无标题，仅卡片分区；内容区统一不描边）
     auto* activeCard = SettingUi::card(content);
     tbActiveBox = activeCard->makeChild<Ling::Node>();
     tbActiveBox->setFlexDirection(Ling::FlexDirection::Row);
@@ -1255,6 +1255,7 @@ std::wstring WinSettingAppearance::tbTipText(const std::wstring& id) const
         { L"reset-canvas", L"tool.resetCanvas" },
         { L"mouse-through", L"tool.mouseThrough" },
         { L"show-border", L"pin.showBorder" },
+        { L"opacity", L"pin.opacityTool" },
     };
     for (const auto& m : kMap) if (id == m.id) return Lang::get(m.key);
     return {};

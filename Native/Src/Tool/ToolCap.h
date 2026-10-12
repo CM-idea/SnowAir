@@ -57,6 +57,8 @@ private:
 	void updateSlotButton(const std::wstring& slot);
 	void showToolSubForEffective(const std::wstring& eff);
 	void showComingSoon();
+	// 让「识别 / 翻译」两个按钮的选中态与当前浮层（识别 or 翻译 or 无）保持一致
+	void syncOcrTranslateButtons();
 	void applyNormalStyle(Ling::Button* btn);
 	void applySelectedStyle(Ling::Button* btn);
 	void applyActionColors(Ling::Button* btn);
@@ -105,7 +107,7 @@ private:
 	static constexpr float spliterH{ 24.f };
 	void styleToolbarBtn(Ling::Button* btn);
 	std::vector<std::wstring> btnIds = {
-		L"border",L"|",
+		L"border",L"opacity",L"|",
 		L"show-cursor",
 		L"rect",L"arrow",L"pen",L"text",L"number",L"mosaic",L"eraser",L"|",
 		L"undo",L"|",
@@ -113,7 +115,7 @@ private:
 		L"save",L"close",L"clipboard"
 	};
 	std::vector<std::wstring> btnCodes = {
-		Icon::DashRect,L"|",
+		Icon::DashRect,Icon::Opacity,L"|",
 		Icon::Cursor,
 		Icon::Rect,Icon::Arrow,Icon::Pen,Icon::Text,Icon::Number,Icon::Mosaic,Icon::Eraser,L"|",
 		Icon::Undo,L"|",
@@ -121,7 +123,7 @@ private:
 		Icon::Save,Icon::Cancel,Icon::Done
 	};
 	std::vector<std::wstring> btnTips = {
-		L"pin.showBorder",L"",
+		L"pin.showBorder",L"pin.opacityTool",L"",
 		L"tool.showCursor",
 		L"tool.rect",L"tool.arrow",L"tool.pen",L"tool.text",L"tool.number",L"tool.mosaic",L"tool.eraser",L"",
 		L"tool.undo",L"",

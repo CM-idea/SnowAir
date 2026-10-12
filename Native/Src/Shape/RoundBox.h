@@ -4,7 +4,7 @@
 
 // 四角可独立圆角的矩形。
 // D2D 的 DrawRoundedRectangle / FillRoundedRectangle 只吃统一半径，
-// 要做 Adobe AI 那种"单角圆角"就得自己描路径。
+// 要做"单角圆角"就得自己描路径。
 // 注意别叫 RoundRect：wingdi.h 里有个同名的 GDI 函数 ::RoundRect。
 namespace RoundBox
 {

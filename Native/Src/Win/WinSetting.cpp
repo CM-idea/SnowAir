@@ -3,6 +3,7 @@
 #include "../App.h"
 #include "../Lang.h"
 #include "../Setting.h"
+#include "../Util.h"
 #include "WinSetting.h"
 #include "SettingTheme.h"
 #include "SettingWidgets.h"
@@ -18,9 +19,9 @@
 #include "../Tool/IconCodes.h"
 
 // 说明：
-//   shadcn/ui 设计 Token 已统一迁移到 SettingTheme.h（namespace SettingTheme）。
+//   设计 Token 已统一迁移到 SettingTheme.h（namespace SettingTheme）。
 //   构件库统一在 SettingWidgets.h/cpp（namespace SettingUi）。
-//   本文件不再保留任何本地 Shadcn namespace，单一事实源 = SettingTheme。
+//   本文件不再保留任何本地命名空间，单一事实源 = SettingTheme。
 
 std::unique_ptr<WinSetting> winSetting;
 
@@ -141,6 +142,7 @@ void WinSetting::onCreated()
 	helpTip_ = std::make_unique<SettingUi::HoverTip>(this);
 	SettingUi::attachHelpTip(helpTip_.get());
 
+	// 整体背景：画布浅灰（右侧白色内容卡片悬浮其上）
 	body->setBg(SettingTheme::canvas);
 	body->setFlexDirection(Ling::FlexDirection::Row);
 
@@ -198,9 +200,9 @@ void WinSetting::onCreated()
 	// ② 中部：7 菜单
 	initMenuItems(sideNav);
 
-	// ③ 底部：版本号（zinc-400 弱文字）。数字从 exe 资源取，与「关于」页同源；后缀带 Lite 版本标记。
+	// ③ 底部：版本号（zinc-400 弱文字）。数字从当前 exe 的内存版本资源取，与「关于」页同源；后缀带 Lite 版本标记。
 	auto versionLabel = sideNav->makeChild<Ling::Label>();
-	const auto appVer = Ling::Util::getVerNum();
+	const auto appVer = Util::getAppVersion();
 	versionLabel->setText(std::format(L"V{}.{}.{}{}", appVer[0], appVer[1], appVer[2], SettingUi::kEditionTag));
 	versionLabel->setFontSize(SettingTheme::fontXs);
 	versionLabel->setColor(SettingTheme::textTertiary);

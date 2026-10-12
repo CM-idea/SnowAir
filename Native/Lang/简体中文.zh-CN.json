@@ -88,7 +88,26 @@
   "pin": {
     "cancelEdit": "取消编辑",
     "confirmEdit": "确认编辑",
-    "showBorder": "显示边框"
+    "showBorder": "显示边框",
+    "opacityTool": "透明度",
+    "menuCopy": "复制到剪贴板",
+    "menuCopyFile": "以文件复制",
+    "menuSaveAs": "保存为文件…",
+    "menuOcr": "显示识别结果",
+    "menuEdit": "编辑贴图",
+    "menuRotateL": "逆时针旋转 90°",
+    "menuRotateR": "顺时针旋转 90°",
+    "menuFlipH": "水平翻转",
+    "menuFlipV": "垂直翻转",
+    "menuThumb": "缩略模式",
+    "menuFocus": "专注模式",
+    "menuTop": "窗口置顶",
+    "menuOpacity": "不透明度",
+    "menuTransform": "变换",
+    "menuZoomMode": "缩放模式",
+    "menuClose": "关闭贴图",
+    "zoomDirect": "直接放大",
+    "zoomCrop": "裁剪放大"
   },
   "color": {
     "red": "红",

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "../Lang.h"
+#include "../Util.h"
 #include "WinSetting.h"
 #include "WinSettingAbout.h"
 #include "SettingTheme.h"
@@ -16,7 +17,7 @@ WinSettingAbout::WinSettingAbout(Ling::WinBase* parent) : Ling::Node(parent)
 	name->setText(Lang::get(L"about.appName"));
 	name->setFontSize(14.f);
 	name->setColor(SettingTheme::textPrimary);
-	auto ver = Ling::Util::getVerNum();
+	auto ver = Util::getAppVersion();
 	// 版本串带 Lite 标记（与设置页左下角同源），用来区分免费版与专业版
 	auto verStr = std::format(L"{}.{}.{}{}", ver[0], ver[1], ver[2], SettingUi::kEditionTag);
 	auto fmt = Lang::get(L"about.versionFmt");

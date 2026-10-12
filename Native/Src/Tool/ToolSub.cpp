@@ -32,6 +32,7 @@ namespace {
 		{ L"patina",    { L"width",     0.f, 100.f, 15.f } },
 		{ L"watermark", { L"fontSize", 12.f, 120.f, 25.f } },
 		{ L"highlight", { L"width",     1.f, 40.f,  4.f } },
+		{ L"opacity",   { L"percent",  10.f, 100.f, 100.f } },
 	};
 	const SliderCfg* findSliderCfg(const std::wstring& tool)
 	{
@@ -440,6 +441,16 @@ void ToolSub::showEraserTools()
 {
 	win->shapeHover = nullptr;
 	hideTools();
+}
+
+void ToolSub::showOpacityTools()
+{
+	if (curToolId == L"opacity" && hasTools) return;
+	beginTool(L"opacity");
+	// 初始值取当前贴图画面不透明度（而不是会话记忆值），保证与右键菜单/持久化设置一致
+	sliderVal = std::clamp((float)win->pinOpacityPercent(), sliderMin, sliderMax);
+	initSize(0, false, true);   // 只有滑条：无图标、无色板
+	initSlider();
 }
 
 float ToolSub::setShapeSliderVal(const std::wstring& tool, float px)
@@ -856,6 +867,7 @@ void ToolSub::makeRectStyleBtns()
 	roundBtn->onClick.add([this](Ling::Button*) {
 		if (isEllipse) return;
 		closeColorPanel();
+		// 二级已开再点 → 关圆角；否则保证 >0 并弹出滑条
 		if (nestedPanel && nestedPanel->isOpen()
 			&& nestedPanel->kind() == ToolNestedPanel::Kind::Corner) {
 			closeNestedPanel();
@@ -925,6 +937,11 @@ void ToolSub::initSlider()
 	auto pair = PropSlider::mount(contentNode, sliderMin, sliderMax, sliderVal,
 		[this](float val) {
 			sliderVal = val;
+			// 贴图「透明度」：直接改画面不透明度（pin 级属性），不走形状样式管线
+			if (curToolId == L"opacity") {
+				if (!suppressSliderStyleNotify) win->setPinOpacityPercent((int)std::lround(val));
+				return;
+			}
 			const auto key = (curToolId == L"number" && numberStyle == NumberEmoji)
 				? L"numberEmoji" : curToolId;
 			rememberSlider(key, val);
@@ -988,6 +1005,7 @@ std::wstring ToolSub::getSliderTipKey() const
 	if (curToolId == L"patina") return L"tool.patinaSize";
 	if (curToolId == L"watermark") return L"tool.wmSize";
 	if (curToolId == L"highlight") return L"tool.strokeWidth";
+	if (curToolId == L"opacity") return L"pin.opacityTool";
 	return L"tool.strokeWidth";
 }
 

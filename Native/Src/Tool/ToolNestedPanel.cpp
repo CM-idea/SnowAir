@@ -237,6 +237,7 @@ void ToolNestedPanel::rebuildPatinaWmRow()
 
 void ToolNestedPanel::openPatinaWm(const RECT& workArea, Ling::Button* anchor)
 {
+	// 二级栏已开再点 → 关水印；否则开启并弹出（默认 plan=0 右下）
 	if (owner->isPatinaWatermark && open_ && kind_ == Kind::PatinaWm) {
 		owner->isPatinaWatermark = false;
 		owner->refreshNestedTrigger();

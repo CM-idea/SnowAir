@@ -86,7 +86,7 @@ void ShapeArea::paintDragger(ID2D1DeviceContext* ctx)
 		static const int corners[] = { 0, 2, 4, 6 };
 		for (int i : corners) paintHandle(ctx, draggers[i]);
 		if (cornerDotsEnabled()) {
-			// Adobe AI 式圆角点：四角内侧各一个
+			// 圆角点：四角内侧各一个
 			const float inset = 14.f * win->dpi;
 			static const int dotCorners[4]{ 0, 2, 4, 6 };
 			for (int i = 10; i <= 13; i++) {

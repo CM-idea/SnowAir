@@ -12,6 +12,41 @@ namespace {
 	// 收框时文字纵向允许占到的框高比例。识别框本身就是贴着文字的，取 1.0 才等于"还原原来的大小"，
 	// 留白（如 0.9）会把紧框的字又压小一圈。
 	constexpr float kBoxHeightFill = 1.0f;
+	// 墨迹高 → 字号 的换算系数（见 kYaheiInkRatio）。
+	constexpr float kInkToFont = 1.f / kYaheiInkRatio;
+
+	// 叠加用文字块：把文字**按真实排版尺寸**等比缩放并居中到识别框。
+	// TextBox 没有字间距接口，用横向缩放代替（效果等同把单行文字左右拉满）。
+	// 注意：缩放只改视觉，控件自身的命中矩形还是未缩放的位置 —— 这会让"点到的位置"和
+	// 眼睛看到的文字对不上。所以缩放后把节点几何一并改写成**视觉矩形**，命中测试才落在
+	// 真正看得见的文字上；ToolOcr 的跨行选区也直接读这个矩形做坐标映射。
+	struct OcrText : Ling::TextBox
+	{
+		explicit OcrText(Ling::WinBase* win) : Ling::TextBox(win) {}
+		float fitW{ 0.f };   // 识别框宽（物理像素）
+		float fitH{ 0.f };   // 识别框高（物理像素）
+		float boxL{ 0.f };   // 识别框左上角 X（父视觉坐标，物理像素）
+		float boxT{ 0.f };   // 识别框左上角 Y
+		float inkH{ 0.f };   // 当前字号下的字形高度（物理像素）
+	protected:
+		void layout() override
+		{
+			Ling::TextBox::layout();
+			if (fitW <= 0.f || fitH <= 0.f || inkH <= 0.f || w <= 0.f || h <= 0.f) return;
+			// 等比缩放（取"框宽/文字宽"与"框高/字形高"的较小者），横纵同比例，绝不单独拉伸某一轴。
+			const float s = std::min(fitW / w, fitH / inkH);
+			const float ox = boxL + (fitW - w) * 0.5f;
+			const float oy = boxT + (fitH - h) * 0.5f;
+			visual.CenterPoint({ w * 0.5f, h * 0.5f, 0.f });
+			visual.Scale({ s, s, 1.f });
+			visual.Offset({ ox, oy, 0.f });
+			// 以中心为锚缩放后的可见矩形，回写成节点几何（命中测试/选区映射都用它）。
+			x = ox + w * 0.5f - w * s * 0.5f;
+			y = oy + h * 0.5f - h * s * 0.5f;
+			w = w * s;
+			h = h * s;
+		}
+	};
 
 	// 量一段文本按指定字号排成一行（不折行）时的宽度，设备像素。
 	// 字体取 TextBox 的默认族名，保证量出来的宽就是最终渲染的宽。
@@ -146,7 +181,7 @@ namespace {
 	//   正文：取全局「中位框高」统一，再用墨迹高 × K 标定 —— 单个框的高度不可靠（带边距/行高拟合
 	//   不准），逐框按各自框高算就会"一大一小"；而墨迹高跨引擎可比，能给出同一字号。
 	//   标题（框高明显大于正文）保留自身字号，避免把大标题压成正文。
-	std::vector<float> unifiedFontSizes(const std::vector<BYTE>& px, int W, int H,
+	[[maybe_unused]] std::vector<float> unifiedFontSizes(const std::vector<BYTE>& px, int W, int H,
 		const std::vector<OcrRegion>& regions)
 	{
 		std::vector<float> out(regions.size(), 0.f);
@@ -251,17 +286,59 @@ namespace {
 	}
 }
 
-ToolOcr::ToolOcr(WinCap* win, OcrResult result, bool translateMode,
+ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 	std::vector<BYTE> image, int imageW, int imageH)
-	: Ling::WinBase(), win(win), result_(std::move(result)), translateMode_(translateMode),
+	: Ling::WinBase(), host(host), result_(std::move(result)), translateMode_(translateMode),
 	  imgW(std::max(1, imageW)), imgH(std::max(1, imageH)), srcImage_(std::move(image))
 {
-	dpi = win->dpi;
+	dpi = host ? host->dpi : 1.f;
 	sampleLayerPalette(srcImage_, imgW, imgH, result_.regions, palBg_, palFg_);
+	// 每行是独立控件，跨行选中由本类统一接管（见 hitSelPoint/applySelection）：禁用各行
+	// 自身的鼠标选区，避免"点到的位置"和"眼睛看到的文字"各算各的。
+	onMouseDown.add([this](POINT pos, bool isRight) {
+		if (isRight) return;
+		const SelPoint sp = hitSelPoint(pos);
+		if (sp.line < 0) return;
+		selActive_ = true;
+		selALine_ = selBLine_ = sp.line;
+		selAIdx_ = selBIdx_ = sp.index;
+		SetFocus(hwnd);
+		SetCapture(hwnd);
+		applySelection();
+	});
+	onMouseMove.add([this](POINT pos) {
+		if (!selActive_) return;
+		const SelPoint sp = hitSelPoint(pos);
+		if (sp.line < 0) return;
+		selBLine_ = sp.line;
+		selBIdx_ = sp.index;
+		applySelection();
+	});
+	onMouseUp.add([this](POINT, bool) {
+		if (!selActive_) return;
+		selActive_ = false;
+		ReleaseCapture();
+		applySelection();
+	});
 	onKeyDown.add([this](UINT key) {
-		if ((GetKeyState(VK_CONTROL) & 0x8000) && (key == 'A' || key == 'C' || key == 'X'))
+		const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+		if (ctrl && key == 'A') {   // 全选（跨行）
+			if (!editors.empty()) {
+				selActive_ = true;
+				selALine_ = 0; selAIdx_ = 0;
+				selBLine_ = (int)editors.size() - 1;
+				selBIdx_ = (int)editors.back()->getText().size();
+				applySelection();
+			}
 			return;
-		this->win->onKeyDown(key);
+		}
+		if (ctrl && key == 'C') { copyAll(); return; }
+		if (ctrl && key == 'X') return;   // 只读展示，剪切忽略
+		if (this->host) this->host->onKeyDown(key);
+	});
+	// 拖选中保持 I 形光标：此时鼠标可能已经离开某些行，各行的 hover 态不生效。
+	onCursor.add([this](bool* handled) {
+		if (selActive_) { SetCursor(LoadCursor(nullptr, IDC_IBEAM)); *handled = true; }
 	});
 }
 
@@ -277,26 +354,28 @@ void ToolOcr::onCreated()
 	body->setBg(0);   // 透明面板：只盖住识别到的文字块，其余区域直接露出原图
 	body->setBorderRadius(0.f);
 
-	copyBtn = body->makeChild<Ling::Button>();
-	copyBtn->setText(Icon::Copy);
-	copyBtn->setSize(34.f, 34.f);
-	copyBtn->setPositionType(Ling::Position::Absolute);
-	copyBtn->setPosition(Ling::Edge::Right, 4.f);
-	copyBtn->setPosition(Ling::Edge::Top, 4.f);
-	copyBtn->setBg(0xFFFFFFB0);          // 半透明浅底：底图深浅不定，按钮自身要有一点底色才看得见
-	copyBtn->setHoverBg(0xFFFFFFF2);
-	copyBtn->setBorderRadius(ToolbarTheme::hoverRadius);
-	copyBtn->setAlignItems(Ling::Align::Center);
-	copyBtn->setJustifyContent(Ling::Justify::Center);
-	copyBtn->setFontFamily(Icon::Family);
-	copyBtn->setFontSize(Icon::Size);
-	copyBtn->setColor(0x262626FF);
-	copyBtn->setHoverColor(0x262626FF);
-	copyBtn->onClick.add([this](Ling::Button*) { copyAll(); });
+	if (!pinOverlay_) {
+		copyBtn = body->makeChild<Ling::Button>();
+		copyBtn->setText(Icon::Copy);
+		copyBtn->setSize(34.f, 34.f);
+		copyBtn->setPositionType(Ling::Position::Absolute);
+		copyBtn->setPosition(Ling::Edge::Right, 4.f);
+		copyBtn->setPosition(Ling::Edge::Top, 4.f);
+		copyBtn->setBg(0xFFFFFFB0);          // 半透明浅底：底图深浅不定，按钮自身要有一点底色才看得见
+		copyBtn->setHoverBg(0xFFFFFFF2);
+		copyBtn->setBorderRadius(ToolbarTheme::hoverRadius);
+		copyBtn->setAlignItems(Ling::Align::Center);
+		copyBtn->setJustifyContent(Ling::Justify::Center);
+		copyBtn->setFontFamily(Icon::Family);
+		copyBtn->setFontSize(Icon::Size);
+		copyBtn->setColor(0x262626FF);
+		copyBtn->setHoverColor(0x262626FF);
+		copyBtn->onClick.add([this](Ling::Button*) { copyAll(); });
 
-	// 悬停提示（与其他工具条按钮一致：停悬 1 秒后弹出）
-	tip = std::make_unique<Tip>(this);
-	tip->bind(copyBtn, Lang::get(L"ocr.copy"));
+		// 悬停提示（与其他工具条按钮一致：停悬 1 秒后弹出）
+		tip = std::make_unique<Tip>(this);
+		tip->bind(copyBtn, Lang::get(L"ocr.copy"));
+	}
 
 	bannerNode = body->makeChild<Ling::Node>();
 	bannerNode->setPositionType(Ling::Position::Absolute);
@@ -309,6 +388,10 @@ void ToolOcr::onCreated()
 	bannerLabel->setFontSize(12.f);
 
 	rebuildEditors();
+	// 标注镜像层：盖在识别文字之上的透明画布（宿主注入 annotPainter_ 后才有内容）
+	annotCanvas_ = body->makeChild<Ling::Canvas>();
+	annotCanvas_->enableSwapChain();
+	annotCanvas_->setSizePercent(100.f, 100.f);
 	show();
 }
 
@@ -318,6 +401,10 @@ void ToolOcr::rebuildEditors()
 		if (e) body->removeChild(e);
 	}
 	editors.clear();
+	for (auto* n : bgs_) {
+		if (n) body->removeChild(n);
+	}
+	bgs_.clear();
 
 	if (!result_.ok) {
 		showBanner(result_.error.empty() ? Lang::get(L"ocr.fail") : result_.error, true);
@@ -327,40 +414,56 @@ void ToolOcr::rebuildEditors()
 
 	const float scaleX = (imgW > 0) ? (w / (float)imgW) : 1.f;
 	const float scaleY = (imgH > 0) ? (h / (float)imgH) : 1.f;
-	// 逐框字号统一标定（见 unifiedFontSizes）：正文一个字号、标题保留，避免"一大一小"
-	const std::vector<float> fonts = unifiedFontSizes(srcImage_, imgW, imgH, result_.regions);
-	constexpr float kPad = 2.f;
 
 	for (size_t i = 0; i < result_.regions.size(); ++i) {
 		auto& reg = result_.regions[i];
-		auto* box = body->makeChild<Ling::TextBox>();
-		box->setPositionType(Ling::Position::Absolute);
-		box->setPosition(Ling::Edge::Left, reg.x * scaleX / dpi);
-		box->setPosition(Ling::Edge::Top, reg.y * scaleY / dpi);
-		box->setPadding(kPad);
-		box->setBg(palBg_);
-		box->setBorderRadius(2.f);
-		const float fpx = (i < fonts.size() && fonts[i] > 0.f) ? fonts[i] : 16.f;
+		const float rx = reg.x * scaleX / dpi;
+		const float ry = reg.y * scaleY / dpi;
+		const float rw = std::max(1.f, reg.w * scaleX) / dpi;
+		const float rh = std::max(1.f, reg.h * scaleY) / dpi;
+
+		// 该框自己的底色（按框外圈中位色采样）+ 按底色亮度反相的文字色。
+		// 逐框取色而不是整层一个色 —— 底色有渐变/多块时才能"贴"住原来那块背景。
+		uint32_t bg = palBg_, fg = palFg_;
+		int r = 0, g = 0, b = 0;
+		if (regionBg(srcImage_, imgW, imgH, reg.x, reg.y, reg.w, reg.h, r, g, b)) {
+			bg = ((uint32_t)r << 24) | ((uint32_t)g << 16) | ((uint32_t)b << 8) | 0xFFu;
+			const int lum = (r * 299 + g * 587 + b * 114) / 1000;
+			fg = (lum > 150) ? 0x14181CFF : 0xF8FBFBFF;
+		}
+
+		// 1) 背景块：**严格等于识别框**，整块盖住原文字 —— 这是"覆盖到位"的关键。
+		auto* bgNode = body->makeChild<Ling::Node>();
+		bgNode->setPositionType(Ling::Position::Absolute);
+		bgNode->setPosition(Ling::Edge::Left, rx);
+		bgNode->setPosition(Ling::Edge::Top, ry);
+		bgNode->setSize(rw, rh);
+		bgNode->setBg(bg);
+		bgNode->setBorderRadius(2.f);
+		bgs_.push_back(bgNode);
+
+		// 2) 文字：字号按"字形高度 = 识别框高"取，再交给 OcrText 在 layout() 里
+		//    按**真实排版尺寸**缩放并居中到识别框（字形与框上下齐平、左右拉满）。
 		const std::wstring text = reg.displayText.empty() ? reg.text : reg.displayText;
-		// 字号单位是 image 像素，随缩放回到屏幕（逻辑像素）
-		float fLogical = std::clamp(fpx * scaleY, 7.f, 96.f) / dpi;
-		// 收进识别框：TextBox 开了 autoSize 会跟着文字长，不约束就会整段溢出框、盖到框外去。
-		// 宽度和高度各给一条上限，取更紧的那个等比缩小（只缩不放）——
-		// 宽度约束对长行是主导项，等于让"文字宽度 = 识别框宽度"。
-		const float textW = measureTextWidth(text, fLogical, dpi);
-		const float textH = fLogical * dpi * kYaheiInkRatio;
-		const float boxW = reg.w * scaleX;
-		const float boxH = reg.h * scaleY * kBoxHeightFill;
-		float shrink = 1.f;
-		if (textW > 0.f && boxW > 0.f) shrink = std::min(shrink, boxW / textW);
-		if (textH > 0.f && boxH > 0.f) shrink = std::min(shrink, boxH / textH);
-		if (shrink < 1.f) fLogical = std::max(7.f, fLogical * shrink);
+		const float boxW = std::max(1.f, reg.w * scaleX);   // 面板物理像素
+		const float boxH = std::max(1.f, reg.h * scaleY);
+		const float fLogical = std::clamp(boxH / (kYaheiInkRatio * dpi), 7.f / dpi, 300.f / dpi);
+
+		auto* box = body->makeChild<OcrText>();
+		box->fitW = boxW;
+		box->fitH = boxH;
+		box->boxL = reg.x * scaleX;
+		box->boxT = reg.y * scaleY;
+		box->inkH = fLogical * dpi * kYaheiInkRatio;
+		box->setPositionType(Ling::Position::Absolute);
+		// 节点自身几何按识别框摆放（文字命中选择用）；实际绘制位置由 layout() 精确定位。
+		box->setPosition(Ling::Edge::Left, rx);
+		box->setPosition(Ling::Edge::Top, ry);
 		box->setFontSize(fLogical);
-		box->setColor(palFg_);
-		// 框体跟着文字走（不折行、永不出现滚动条）：识别框尺寸本身不准，硬按它定尺寸会让
-		// 内容溢出、冒出滚动条；位置仍取识别框左上角，底色也就刚好吃住原来的那行字。
+		box->setColor(fg);
 		box->setAutoSize(true);
 		box->setText(text);
+		box->setMouseSelectionEnabled(false);   // 选区由 ToolOcr 统一接管
 		editors.push_back(box);
 	}
 	if (editors.empty() && !result_.text.empty()) {
@@ -374,6 +477,11 @@ void ToolOcr::rebuildEditors()
 		box->setText(result_.text);
 		editors.push_back(box);
 	}
+	// 选区状态跟着重建作废；镜像层保持在最上层
+	selActive_ = false;
+	selALine_ = selBLine_ = -1;
+	selAIdx_ = selBIdx_ = 0;
+	if (annotCanvas_) body->bringToFront(annotCanvas_);
 	// 不自动选中/聚焦：结果只是"叠在原图上供阅读"，一进来就整段高亮并不合适；点哪块再编辑哪块。
 }
 
@@ -419,10 +527,13 @@ void ToolOcr::clearBanner()
 
 void ToolOcr::copyAll()
 {
-	std::wstring text;
-	for (size_t i = 0; i < editors.size(); i++) {
-		if (i) text += L'\n';
-		text += editors[i]->getText();
+	// 有选区就只复制选中的部分；没有就整段
+	std::wstring text = selectedText();
+	if (text.empty()) {
+		for (size_t i = 0; i < editors.size(); i++) {
+			if (i) text += L'\n';
+			text += editors[i]->getText();
+		}
 	}
 	if (text.empty()) text = result_.text;
 	if (OpenClipboard(hwnd)) {
@@ -438,30 +549,139 @@ void ToolOcr::copyAll()
 	}
 }
 
+// —— 跨行选区 ——
+// 每行是一个独立控件，命中落点/选区范围都由本类统一计算（各行自身的鼠标选区已关闭），
+// 因此"点到的位置"与"看到的文字"始终一致，且可以跨行拖选。
+
+ToolOcr::SelPoint ToolOcr::hitSelPoint(POINT p) const
+{
+	SelPoint sp;
+	if (editors.empty()) return sp;
+	// 先按 Y 定行：落在某行内就用它，否则取纵向最近的一行
+	int best = 0;
+	float bestDist = FLT_MAX;
+	for (size_t i = 0; i < editors.size(); ++i) {
+		auto* e = editors[i];
+		if (!e) continue;
+		if ((float)p.y >= e->y && (float)p.y <= e->y + e->h) { best = (int)i; bestDist = 0.f; break; }
+		const float d = std::fabs((float)p.y - (e->y + e->h * 0.5f));
+		if (d < bestDist) { bestDist = d; best = (int)i; }
+	}
+	auto* e = editors[best];
+	if (!e) return sp;
+	sp.line = best;
+	const int n = (int)e->getText().size();   // 命中矩形已是缩放后的视觉矩形（见 OcrText::layout）
+	if (n > 0 && e->w > 1.f) {
+		const float f = std::clamp(((float)p.x - e->x) / e->w, 0.f, 1.f);
+		sp.index = std::clamp((int)std::lround(f * n), 0, n);
+	}
+	return sp;
+}
+
+void ToolOcr::applySelection()
+{
+	const int n = (int)editors.size();
+	if (n == 0) return;
+	if (selALine_ < 0 || selBLine_ < 0) { clearSelection(); return; }
+	// 阅读顺序（行优先）归一化
+	int sl = selALine_, si = selAIdx_, el = selBLine_, ei = selBIdx_;
+	if (sl > el || (sl == el && si > ei)) { std::swap(sl, el); std::swap(si, ei); }
+	for (int i = 0; i < n; ++i) {
+		auto* e = editors[i];
+		if (!e) continue;
+		if (i < sl || i > el) { e->setSelectionRange(0, 0); continue; }
+		const int len = (int)e->getText().size();
+		int a = 0, b = 0;
+		if (sl == el) { a = si; b = ei; }
+		else if (i == sl) { a = si; b = len; }
+		else if (i == el) { a = 0; b = ei; }
+		else { a = 0; b = len; }
+		e->setSelectionRange(a, b);
+	}
+}
+
+void ToolOcr::clearSelection()
+{
+	for (auto* e : editors) if (e) e->setSelectionRange(0, 0);
+	selActive_ = false;
+	selALine_ = selBLine_ = -1;
+	selAIdx_ = selBIdx_ = 0;
+}
+
+std::wstring ToolOcr::selectedText() const
+{
+	const int n = (int)editors.size();
+	if (n == 0 || selALine_ < 0 || selBLine_ < 0) return L"";
+	int sl = selALine_, si = selAIdx_, el = selBLine_, ei = selBIdx_;
+	if (sl > el || (sl == el && si > ei)) { std::swap(sl, el); std::swap(si, ei); }
+	if (sl < 0 || el >= n) return L"";
+	std::wstring out;
+	for (int i = sl; i <= el; ++i) {
+		auto* e = editors[i];
+		if (!e) continue;
+		const std::wstring t = e->getText();
+		const int len = (int)t.size();
+		int a = (i == sl) ? si : 0;
+		int b = (i == el) ? ei : len;
+		a = std::clamp(a, 0, len);
+		b = std::clamp(b, 0, len);
+		if (b <= a) continue;
+		if (!out.empty()) out += L'\n';
+		out += t.substr((size_t)a, (size_t)(b - a));
+	}
+	return out;
+}
+
+void ToolOcr::layout()
+{
+	Ling::WinBase::layout();
+	// 标注镜像：把宿主画在它自己窗口里的标注，按与选区一致的平移画到本窗口顶层 ——
+	// 两个窗口无法互相穿插，这样"后画的标注"看起来就盖在识别文字上面。
+	if (!annotCanvas_ || !annotPainter_ || !hasMask_) return;
+	auto* ctx = annotCanvas_->startPaint();
+	if (!ctx) return;
+	ctx->Clear(0);
+	ctx->SetTransform(D2D1::Matrix3x2F::Translation(-maskRect_.left, -maskRect_.top));
+	annotPainter_(ctx);
+	annotCanvas_->finishPaint();
+}
+
 void ToolOcr::syncToMask(const D2D1_RECT_F& maskRect, int hostX, int hostY, float hostDpi)
 {
 	dpi = hostDpi;
+	maskRect_ = maskRect;
+	hasMask_ = true;
 	const int left = (int)std::lround(maskRect.left);
 	const int top = (int)std::lround(maskRect.top);
 	const int right = (int)std::lround(maskRect.right);
 	const int bottom = (int)std::lround(maskRect.bottom);
-	imgW = std::max(1, right - left);
-	imgH = std::max(1, bottom - top);
-	setSize((float)imgW / dpi, (float)imgH / dpi);
+	// 面板尺寸取「覆盖矩形」；识别源图尺寸 imgW/imgH 保持不变 ——
+	// rebuildEditors 用 w/imgW 求缩放比，贴图缩放后识别框才会跟着一起放大。
+	const int panelW = std::max(1, right - left);
+	const int panelH = std::max(1, bottom - top);
+	const bool sizeChanged = (panelW != panelW_ || panelH != panelH_);
+	if (sizeChanged) {
+		panelW_ = panelW;
+		panelH_ = panelH;
+		setSize((float)panelW / dpi, (float)panelH / dpi);
+	}
 	setPosition(hostX + left, hostY + top);
-	rebuildEditors();
+	// 只在尺寸变化时重建编辑框：拖动只是挪窗口，逐帧重建（还带整图字号分析）会明显卡。
+	if (sizeChanged) rebuildEditors();
 }
 
 LRESULT ToolOcr::onHitTest(const POINT screenPos)
 {
-	if (win && win->hwnd && win->cutMask && win->cutMask->hasRect()) {
-		POINT client = screenPos;
-		ScreenToClient(win->hwnd, &client);
-		const auto& r = win->cutMask->maskRect;
-		if (client.x < r.left || client.x >= r.right || client.y < r.top || client.y >= r.bottom)
-			return HTTRANSPARENT;
+	// 只有识别文本框（及右上角复制按钮）吃鼠标：可选中/复制文字；其余区域一律穿透。
+	//  - 贴图模式：穿透后贴图仍能右键弹菜单 / 滚轮缩放；
+	//  - 截图模式：穿透后主画布照常收到鼠标 —— 识别面板开着也能继续画标注，不必先取消识别。
+	POINT client = screenPos;
+	ScreenToClient(hwnd, &client);
+	for (auto* e : editors) {
+		if (e && e->isPosIn(client)) return HTCLIENT;
 	}
-	return HTCLIENT;
+	if (copyBtn && copyBtn->isPosIn(client)) return HTCLIENT;
+	return HTTRANSPARENT;
 }
 
 void ToolOcr::onMinMaxInfo(MINMAXINFO* mmi)

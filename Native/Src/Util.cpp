@@ -1,6 +1,7 @@
 #include "pch.h"
 #include <wincodec.h>
 #include <shobjidl.h>
+#include <winver.h>
 #include <format>
 #include <fstream>
 #include "Util.h"
@@ -11,6 +12,28 @@
 #include "ReadBarcode.h"
 
 using Microsoft::WRL::ComPtr;
+
+std::array<int, 3> Util::getAppVersion()
+{
+	std::array<int, 3> result{ 0, 0, 0 };
+	// 从当前进程已加载的主模块里读 RT_VERSION 资源（在内存里），不按路径读磁盘上的 exe。
+	HMODULE mod = GetModuleHandleW(nullptr);
+	if (!mod) return result;
+	// VS_VERSION_INFO 的资源 id 就是 1（winres.h 里 VS_VERSION_INFO = 1）
+	HRSRC res = FindResourceW(mod, MAKEINTRESOURCEW(1), RT_VERSION);
+	if (!res) return result;
+	HGLOBAL glob = LoadResource(mod, res);
+	if (!glob) return result;
+	const void* data = LockResource(glob);
+	if (!data) return result;
+	VS_FIXEDFILEINFO* ffi = nullptr;
+	UINT size = 0;
+	if (!VerQueryValueW(data, L"\\", reinterpret_cast<void**>(&ffi), &size) || !ffi) return result;
+	result[0] = static_cast<int>((ffi->dwFileVersionMS >> 16) & 0xFFFF);
+	result[1] = static_cast<int>(ffi->dwFileVersionMS & 0xFFFF);
+	result[2] = static_cast<int>((ffi->dwFileVersionLS >> 16) & 0xFFFF);
+	return result;
+}
 
 namespace {
 	// 把 BGRA top-down 像素编码成 PNG 写进 stream。saveToClipboard 和 saveToFile 共用这段。
@@ -263,6 +286,51 @@ std::vector<BYTE> Util::captureScreen(const int x, const int y, const int w, con
 	DeleteDC(hDC);
 	DeleteObject(hBitmap);
 	return data;
+}
+
+std::vector<BYTE> Util::scaleBGRA(const BYTE* src, int sw, int sh, int dw, int dh)
+{
+	std::vector<BYTE> out;
+	if (!src || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return out;
+	out.resize((size_t)dw * dh * 4);
+	// Catmull-Rom（a = -0.5）双三次插值：比双线性锐利。小图/小字放大后笔画更清楚 ——
+	// 双线性会把笔画糊开，Windows OCR 这类对小字敏感的场景常因此把字形认成别的字（甚至乱码）。
+	auto kernel = [](float d) -> float {
+		d = std::fabs(d);
+		constexpr float a = -0.5f;
+		if (d <= 1.f) return (a + 2.f) * d * d * d - (a + 3.f) * d * d + 1.f;
+		if (d < 2.f) return a * d * d * d - 5.f * a * d * d + 8.f * a * d - 4.f * a;
+		return 0.f;
+	};
+	for (int y = 0; y < dh; ++y) {
+		const float fy = (sh == 1) ? 0.f : (y + 0.5f) * sh / dh - 0.5f;
+		const int iy = (int)std::floor(fy);
+		const float ty = fy - iy;
+		float wy[4]; float wsumY = 0.f;
+		for (int j = 0; j < 4; ++j) { wy[j] = kernel((float)(j - 1) - ty); wsumY += wy[j]; }
+		if (wsumY == 0.f) wsumY = 1.f;
+		for (int x = 0; x < dw; ++x) {
+			const float fx = (sw == 1) ? 0.f : (x + 0.5f) * sw / dw - 0.5f;
+			const int ix = (int)std::floor(fx);
+			const float tx = fx - ix;
+			float wx[4]; float wsumX = 0.f;
+			for (int i = 0; i < 4; ++i) { wx[i] = kernel((float)(i - 1) - tx); wsumX += wx[i]; }
+			if (wsumX == 0.f) wsumX = 1.f;
+			const float inv = 1.f / (wsumX * wsumY);
+			for (int c = 0; c < 4; ++c) {
+				float acc = 0.f;
+				for (int j = 0; j < 4; ++j) {
+					const int yy = std::clamp(iy - 1 + j, 0, sh - 1);
+					for (int i = 0; i < 4; ++i) {
+						const int xx = std::clamp(ix - 1 + i, 0, sw - 1);
+						acc += src[((size_t)yy * sw + xx) * 4 + c] * wx[i] * wy[j];
+					}
+				}
+				out[((size_t)y * dw + x) * 4 + c] = (BYTE)std::clamp(acc * inv + 0.5f, 0.f, 255.f);
+			}
+		}
+	}
+	return out;
 }
 
 void Util::addFileToClipboard(const std::wstring& filePath)

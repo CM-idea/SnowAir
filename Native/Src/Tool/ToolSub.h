@@ -22,6 +22,7 @@ public:
 	void showWatermarkTools();
 	void showHighlightTools();
 	void showEraserTools();
+	void showOpacityTools();   // 贴图「透明度」：仅滑条，无图标/色板
 
 	void hideTools();
 	// 拖选区时临时藏起（不拆内容）；抬手 resume 再跟新位置

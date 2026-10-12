@@ -8,19 +8,19 @@
 #include <vector>
 
 // ============================================================================
-//  SettingUi 构件库 · shadcn/ui 风格（严格对齐 shadcn 组件文档）
+//  SettingUi 构件库 · 现代扁平风格（严格对齐组件文档）
 //
 //  涵盖组件：
 //    sectionHeader / groupCard        → 页面级标题 + 分组卡片
 //    optionRow / descRow / toggleRow / selectRow / textRow
-//                                    → shadcn 通用 Settings Row（label + 可选 desc + 控件）
+//                                    → 通用 Settings Row（label + 可选 desc + 控件）
 //    inputField / textareaField       → Input / Textarea
-//    subTabs                           → Tabs（shadcn TabsList + TabsTrigger）
+//    subTabs                           → Tabs（TabsList + TabsTrigger）
 //    card / separator                  → Card / 水平分割线
 //    pill                              → Badge（variant: default / outline / secondary）
 //    dashedAdd                         → dashed 幽灵按钮 "＋ 添加项"
-//    btnPrimary / btnOutline / btnGhost / btnDestructive → shadcn Button 四变体
-//    callout                           → shadcn Callout 提示卡
+//    btnPrimary / btnOutline / btnGhost / btnDestructive → Button 四变体
+//    callout                           → Callout 提示卡
 //    closePopup / hasPopup             → 全局下拉浮层管理
 // ============================================================================
 
@@ -204,13 +204,13 @@ private:
 void adoptChild(Ling::Node* parent, Ling::Node* child);
 
 // ─── Section Header：页面标题 + 描述 ────────────────────────────────────
-//   shadcn: PageHeader → h1(22/28 bold) + p(muted)
+//   PageHeader → h1(22/28 bold) + p(muted)
 Ling::Node* sectionHeader(Ling::Node* parent,
     const std::wstring& title,
     const std::wstring& desc = L"",
     const std::wstring& tip = L"");
 
-// ─── Group Card：shadcn Card 分组容器（带可选 cardHeader / cardContent）──
+// ─── Group Card：卡片分组容器（带可选 cardHeader / cardContent）──
 //   白底 + zinc-200 描边 + radiusLg(10px) + 16px pad
 Ling::Node* groupCard(Ling::Node* parent,
     const std::wstring& cardTitle = L"",
@@ -266,7 +266,7 @@ inline Ling::Node* optionRowSimple(Ling::Node* parent, bool chrome = false)
 }
 
 // ─── 双栏网格容器：把多个 optionRow/toggleRow/selectRow 以 2 列排布 ───
-//   视觉：每个选项 = 独立白底描边圆角卡片，两两一行（shadcn grid-cols-2）。
+//   视觉：每个选项 = 独立白底描边圆角卡片，两两一行（两列网格）。
 //   用法：auto* g = SettingUi::grid2(p); 然后往 g 里连续 add toggleRow/selectRow(..., chrome=true)，
 //   最后调用 SettingUi::grid2Cells(g)。grid 为 Column，grid2Cells 把子行按两两一组塞进
 //   独立 Row，行内两列用 flexGrow(1)+widthPercent(0) 严格等分剩余空间，右列右缘恰好贴
@@ -370,7 +370,7 @@ Ling::TextBox* inputField(Ling::Node* parent,
     std::function<void(const std::wstring&)> onCommit,
     float height = 0.f);
 
-// ─── Sub Tabs：shadcn Tabs 样式 ────────────────────────────────────────
+// ─── Sub Tabs：页签样式 ────────────────────────────────────────
 //   variant="solid"（默认）: active = primary(黑底白字) / inactive = white+border
 //   支持 onRight 回调（行尾自定义操作按钮区，右侧对齐）
 std::vector<Ling::Button*> subTabs(Ling::Node* parent,
@@ -408,7 +408,7 @@ void stylePill(Ling::Button* btn, bool selected);
 Ling::Button* dashedAdd(Ling::Node* parent, const std::wstring& label,
     std::function<void()> onClick);
 
-// ─── shadcn Button 四大变体（直接创建按钮） ─────────────────────────────
+// ─── Button 四大变体（直接创建按钮） ─────────────────────────────
 //   Primary: 黑底白字（zinc-900 / zinc-50）
 //   Outline: 白底 + border(zinc-200) + 黑字，hover→zinc-100
 //   Ghost:   无背无边，黑字，hover→zinc-100
@@ -422,7 +422,7 @@ Ling::Button* btnGhost(Ling::Node* parent, const std::wstring& text,
 Ling::Button* btnDestructive(Ling::Node* parent, const std::wstring& text,
     std::function<void()> onClick, float w = 0.f);
 
-// ─── Callout：提示卡（shadcn Callout variant=default/green/red/yellow）─
+// ─── Callout：提示卡（variant=default/green/red/yellow）─
 enum class CalloutVariant { Info, Success, Warning, Destructive };
 Ling::Node* callout(Ling::Node* parent,
     const std::wstring& message,

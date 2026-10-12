@@ -61,6 +61,7 @@ public:
 	float strokeWidth{ 2.f };
 	// 选区定死之后（录屏 / 滚动截图）标签就没用了，而它可能压在选区内部被录进去
 	bool hideLabel{ false };
+	// 查找元素悬停：只画描边；拖框/已框选才压暗+控点
 	bool showDim{ true };
 	bool showHandles{ true };
 	bool showBorder{ true }; // 长图编辑态可关，只留内容区

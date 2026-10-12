@@ -22,7 +22,7 @@ public:
 protected:
 	virtual void onGeometrySettled() {}
 	virtual void onGeometryChanged() {}
-	// 是否支持"四角独立圆角点"（对齐 AI 的 live corner widget）：
+	// 是否支持"四角独立圆角点"：
 	// 只有矩形系（高亮矩形）开，马赛克/包浆/水印不开
 	virtual bool cornerDotsEnabled() const { return false; }
 	void updateDraggers();

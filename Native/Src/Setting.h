@@ -78,6 +78,8 @@ public:
 	void setPinAutoFit(bool on);
 	int getPinDoubleClickAction();
 	void setPinDoubleClickAction(int v);
+	int getPinOpacity();
+	void setPinOpacity(int v);
 	int getDemoDefaultTool();
 	void setDemoDefaultTool(int v);
 	int getDemoEdgeBehavior();

@@ -64,7 +64,7 @@ protected:
 	// 设置旋转光标（图标字体四角旋转字形，随标注角度一起转）
 	void setRotateCursor(int corner, float angleRad);
 	void setIconCursor(wchar_t code, float angleRad = 0.f);
-	// —— 圆角点（对齐 Adobe AI 的 live corner widget）——
+	// —— 圆角点 ——
 	// 四角内侧各一个圆点：未选中该点时向内拖 = 四角一起调；单击选中后再拖 = 只调这一个角。
 	// 返回 10..13（左上/右上/右下/左下），未命中 -1
 	int hitCornerDot(float lx, float ly, const D2D1_RECT_F& r) const;
