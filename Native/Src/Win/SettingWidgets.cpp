@@ -885,15 +885,13 @@ Ling::Button* helpTipButton(Ling::Node* parent, const std::wstring& text)
     if (!Setting::get() || !Setting::get()->getFeatureTips()) return nullptr;  // 总开关关闭
 
     // 问号按钮：用图标字库里的「问题」字形（无圆底/描边）。
-    // 颜色随主题：浅色 #1E1E1E（白卡片上看得清）；深色 #E5E5E5（深卡片上看得清）。
-    // 悬停只弹统一气泡（HoverTip），按钮本身颜色不变。
-    const uint32_t qc = SettingTheme::isDark() ? 0xE5E5E5FF : 0x1E1E1EFF;
+    // 常态用次级灰（不抢眼），悬停提亮到前景色 —— 深色下即变白；浅色下变深（否则白字在白卡片上看不见）。
     auto* btn = parent->makeChild<Ling::Button>();
     btn->setText(Icon::Problem);
     btn->setFontFamily(Icon::Family);
     btn->setFontSize(16.f);
-    btn->setColor(qc);
-    btn->setHoverColor(qc);           // 保持颜色不变
+    btn->setColor(SettingTheme::textMuted);
+    btn->setHoverColor(SettingTheme::textPrimary);
     btn->setSize(18.f, 18.f);
     btn->setPadding(0.f, 0.f, 0.f, 0.f);
     btn->setMarginLeft(6.f);

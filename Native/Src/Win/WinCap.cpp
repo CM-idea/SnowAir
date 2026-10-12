@@ -74,6 +74,75 @@ namespace
 		return std::abs(a.left - b.left) < 0.5f && std::abs(a.top - b.top) < 0.5f
 			&& std::abs(a.right - b.right) < 0.5f && std::abs(a.bottom - b.bottom) < 0.5f;
 	}
+
+	// 「录制中显示按键」：低级键盘钩子。由装了消息泵的 UI 线程安装，回调也在该线程执行，
+	// 所以可以直接回调 WinCap，不需要跨线程投递。
+	HHOOK g_keyHook{ nullptr };
+
+	std::wstring keyComboText(DWORD vk)
+	{
+		// 纯修饰键不单独显示（否则按住 Ctrl 时会先冒一个"Ctrl +"）
+		switch (vk) {
+		case VK_LCONTROL: case VK_RCONTROL: case VK_CONTROL:
+		case VK_LSHIFT:   case VK_RSHIFT:   case VK_SHIFT:
+		case VK_LMENU:    case VK_RMENU:    case VK_MENU:
+		case VK_LWIN:     case VK_RWIN:
+			return L"";
+		default: break;
+		}
+		std::wstring s;
+		if (GetAsyncKeyState(VK_CONTROL) & 0x8000) s += L"Ctrl + ";
+		if (GetAsyncKeyState(VK_SHIFT) & 0x8000) s += L"Shift + ";
+		if (GetAsyncKeyState(VK_MENU) & 0x8000) s += L"Alt + ";
+		if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN)) & 0x8000) s += L"Win + ";
+		UINT sc = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+		LONG lp = (LONG)(sc << 16);
+		wchar_t nameW[64]{};
+		if (GetKeyNameTextW(lp, nameW, 64) > 0) {
+			s += nameW;
+			return s;
+		}
+		s += (wchar_t)vk;
+		return s;
+	}
+
+	LRESULT CALLBACK keyHookProc(int code, WPARAM wp, LPARAM lp)
+	{
+		if (code == HC_ACTION && (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN)) {
+			auto* kb = reinterpret_cast<KBDLLHOOKSTRUCT*>(lp);
+			if (kb && !(kb->flags & LLKHF_INJECTED)) {
+				std::wstring t = keyComboText(kb->vkCode);
+				if (!t.empty()) {
+					if (auto* cap = WinCap::get()) cap->onGlobalKeyCombo(t);
+				}
+			}
+		}
+		return CallNextHookEx(g_keyHook, code, wp, lp);
+	}
+
+	// 「录制中显示按键」也要能反映鼠标操作（做教程时点按比键盘更需要被看见）
+	HHOOK g_mouseHook{ nullptr };
+
+	LRESULT CALLBACK mouseHookProc(int code, WPARAM wp, LPARAM lp)
+	{
+		if (code == HC_ACTION) {
+			auto* ms = reinterpret_cast<MSLLHOOKSTRUCT*>(lp);
+			if (ms && !(ms->flags & LLMHF_INJECTED)) {
+				const wchar_t* t = nullptr;
+				switch (wp) {
+				case WM_LBUTTONDOWN: t = L"鼠标左键"; break;
+				case WM_RBUTTONDOWN: t = L"鼠标右键"; break;
+				case WM_MBUTTONDOWN: t = L"鼠标中键"; break;
+				case WM_MOUSEWHEEL:  t = ((short)HIWORD(ms->mouseData) > 0) ? L"滚轮 ↑" : L"滚轮 ↓"; break;
+				default: break;
+				}
+				if (t) {
+					if (auto* cap = WinCap::get()) cap->onGlobalKeyCombo(t);
+				}
+			}
+		}
+		return CallNextHookEx(g_mouseHook, code, wp, lp);
+	}
 }
 
 std::unique_ptr<WinCap> winCap;
@@ -81,6 +150,8 @@ std::unique_ptr<WinCap> winCap;
 WinCap::WinCap() : AnnotHost()
 {
 	setTitle(L"SnowAir 轻雪");
+	// 覆盖窗还没建，此刻的前台窗口就是用户当时正在用的 App —— 留给 {{FOCUS_WINDOW_APP_NAME}}
+	focusAppName_ = Util::foregroundAppName();
     auto [x1, y1, w1, h1] = App::get()->getScreenArea();
 	this->x = x1;this->y = y1;this->w = (float)w1;this->h = (float)h1;
     onMouseDown.add([this](POINT pos, bool isRight) { this->onDown(pos, isRight); });
@@ -92,6 +163,7 @@ WinCap::WinCap() : AnnotHost()
 		if (capLong) capLong->onTimerCB(id);
 		if (cutMask) cutMask->onHoverDwellTimer(id);
 		if (cutMask) cutMask->onHoverAnimTick(id);
+		if (id == keyOverlayTimerId) onKeyOverlayTimer();
 	});
     onMouseWheel.add([this](POINT pos, float space) { this->onWheel(pos, space); });
     onDestroy.add([this]() { this->onClosed(); });
@@ -357,6 +429,7 @@ void WinCap::layout()
     }
     paintPix(ctx);
     paintCursor(ctx);
+    paintKeyOverlay(ctx);
     canvas->finishPaint();
     // 识别浮层里的"标注镜像"跟着本窗口一起重画（标注一变就同步，避免两个窗口错帧）
     if (toolOcr) toolOcr->repaintOverlay();
@@ -1079,6 +1152,7 @@ void WinCap::onDown(POINT pos, bool isRight)
     if (stage == CapStage::Select) {
         isPress = true;
         selectDragging_ = false;
+        selectionFromElement_ = false;
         cutMask->startMakeRect(pos);
         refresh();
     }
@@ -1293,6 +1367,8 @@ void WinCap::onUp(POINT pos, bool isRight)
         // 托盘「屏幕录制」更是一路冲进录制 —— 表现就是"没有查找元素和框选，点了就没了"。
         // 所以这里必须要求"这一次确实按下过"。
         if (!isPress) return;
+        // 没有拖拽、悬停停在窗口元素上 → 这次是"点选窗口"，按焦点窗口处理（文件名/历史来源）
+        selectionFromElement_ = !selectDragging_ && cutMask->hoverPicked();
         isPress = false;
         selectDragging_ = false;
         if (!cutMask->hasRect()) return;
@@ -1344,6 +1420,7 @@ void WinCap::onClosed()
     deferExitAfterRightUp = false;
     CaptureEsc::release(hwnd);
     annotLive = false;
+    stopKeyOverlay();
     if (capVideo) capVideo->dispose();
     if (capLong) capLong->dispose();
     if (toolQrcode) { toolQrcode->close(); toolQrcode.reset(); }
@@ -1654,6 +1731,7 @@ void WinCap::enterReselect()
 	stage = CapStage::Select;
 	isPress = false;
 	selectDragging_ = false;
+	selectionFromElement_ = false;
 	refresh();
 }
 
@@ -1865,12 +1943,14 @@ void WinCap::startMp4(bool useSpeaker, bool useMic)
 {
     beginVideoCapture();
     if (capVideo) capVideo->startMp4(useSpeaker, useMic);
+    if (Setting::get()->getShowKeystrokes()) startKeyOverlay();
 }
 
 void WinCap::startGif()
 {
     beginVideoCapture();
     if (capVideo) capVideo->startGif();
+    if (Setting::get()->getShowKeystrokes()) startKeyOverlay();
 }
 
 std::wstring WinCap::stopRecord()
@@ -1879,6 +1959,7 @@ std::wstring WinCap::stopRecord()
 	if (toolSub) toolSub->hideTools();
 	clearForcedToolId();
 	annotLive = false;
+	stopKeyOverlay();
 	return capVideo ? capVideo->stop() : L"";
 }
 
@@ -2133,14 +2214,22 @@ void WinCap::saveToFile(bool keepOpen)
             0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     };
     setToolTopmost(false);
-    auto path = Util::getSaveFilePath(hwnd);
+    // 「保存格式」决定扩展名；文件名默认给「手动保存 / 焦点窗口文件名格式」的末段
+    const std::wstring saveExt = Util::extensionFromSaveFormat(Setting::get()->getSaveFormat());
+    const std::wstring defFmt = selectionFromElement_ ? Setting::get()->getFocusedWindowFormat()
+                                                      : Setting::get()->getManualSaveFormat();
+    const std::wstring defFallback = selectionFromElement_ ? Setting::defaultFocusedWindowFormat()
+                                                           : Setting::defaultManualSaveFormat();
+    std::wstring defName = Util::previewFileName(defFmt, defFallback, focusAppName_);
+    if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos) defName = defName.substr(slash + 1);
+    auto path = Util::getSaveFilePath(hwnd, saveExt, defName);
     if (path.empty()) {
         setToolTopmost(true);
         return;
     }
     if (Util::saveToFile(path, cw, ch, pixels.data())) {
         // 记一条截图历史（只在会话收工时；keepOpen 的中间态复制不算）
-        if (!keepOpen) Setting::get()->addHistoryItem(pixels, cw, ch, L"capture");
+        if (!keepOpen) Setting::get()->addHistoryItem(pixels, cw, ch, selectionFromElement_ ? L"focused" : L"capture");
         if (!keepOpen) close();
     }
     else {
@@ -2160,8 +2249,10 @@ void WinCap::copyToClipboard(bool keepOpen)
     int cw{ 0 }, ch{ 0 };
     if (!exportSelection(pixels, cw, ch)) return;
     Util::saveToClipboard(cw, ch, pixels.data());
+    // 「截图后自动保存」：收工时静默落盘（点选窗口按「焦点窗口文件名格式」命名）
+    if (!keepOpen) Util::quietSaveCapture(pixels, cw, ch, selectionFromElement_, focusAppName_);
     // 记一条截图历史（只在会话收工时；演示画布 keepOpen=true 不算）
-    if (!keepOpen) Setting::get()->addHistoryItem(pixels, cw, ch, L"capture");
+    if (!keepOpen) Setting::get()->addHistoryItem(pixels, cw, ch, selectionFromElement_ ? L"focused" : L"capture");
     if (!keepOpen) close();
 }
 
@@ -2367,6 +2458,74 @@ void WinCap::paintCursor(ID2D1DeviceContext* ctx)
     const float t = (float)(local.y - cursorHotspot.y);
     ctx->DrawBitmap(cursorBmp.Get(), D2D1::RectF(l, t, l + cursorW, t + cursorH),
         1.f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+}
+
+// ---- 「录制中显示按键」----
+void WinCap::startKeyOverlay()
+{
+	auto mod = GetModuleHandleW(nullptr);
+	// WH_KEYBOARD_LL / WH_MOUSE_LL 的钩子过程在本进程、装它的线程（UI 线程）上执行，不需要注入 DLL。
+	// 键盘 + 鼠标都要：教程里"点了哪里/按了什么键"同等重要
+	if (!g_keyHook) g_keyHook = SetWindowsHookExW(WH_KEYBOARD_LL, keyHookProc, mod, 0);
+	if (!g_mouseHook) g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, mouseHookProc, mod, 0);
+}
+
+void WinCap::stopKeyOverlay()
+{
+	if (g_keyHook) {
+		UnhookWindowsHookEx(g_keyHook);
+		g_keyHook = nullptr;
+	}
+	if (g_mouseHook) {
+		UnhookWindowsHookEx(g_mouseHook);
+		g_mouseHook = nullptr;
+	}
+	keyOverlayText_.clear();
+	keyOverlayUntil_ = 0;
+	killTimer(keyOverlayTimerId);
+}
+
+void WinCap::onGlobalKeyCombo(const std::wstring& text)
+{
+	if (text.empty()) return;
+	keyOverlayText_ = text;
+	keyOverlayUntil_ = GetTickCount64() + 1500;
+	setTimer(1500, keyOverlayTimerId);   // 每来一个键就续期，停手 1.5s 后消失
+	refresh();
+}
+
+void WinCap::onKeyOverlayTimer()
+{
+	killTimer(keyOverlayTimerId);
+	keyOverlayUntil_ = 0;
+	keyOverlayText_.clear();
+	refresh();
+}
+
+void WinCap::paintKeyOverlay(ID2D1DeviceContext* ctx)
+{
+	if (!ctx || keyOverlayText_.empty() || GetTickCount64() > keyOverlayUntil_) return;
+	auto layout = Ling::D2D::makeTextLayout(keyOverlayText_, 18.f * dpi);
+	if (!layout) return;
+	DWRITE_TEXT_METRICS tm{};
+	if (FAILED(layout->GetMetrics(&tm))) return;
+	const float padX = 14.f * dpi, padY = 9.f * dpi;
+	// 画在选区左下角内侧；没有选区时贴屏幕左下角
+	float anchorLeft = 20.f * dpi;
+	float anchorBottom = h - 20.f * dpi;
+	if (cutMask && cutMask->hasRect()) {
+		anchorLeft = cutMask->maskRect.left + 14.f * dpi;
+		anchorBottom = cutMask->maskRect.bottom - 14.f * dpi;
+	}
+	D2D1_RECT_F rect{
+		anchorLeft,
+		anchorBottom - (tm.height + padY * 2.f),
+		anchorLeft + tm.width + padX * 2.f,
+		anchorBottom
+	};
+	const float r = 8.f * dpi;
+	ctx->FillRoundedRectangle(D2D1::RoundedRect(rect, r, r), brushBg.Get());
+	ctx->DrawTextLayout(D2D1::Point2F(rect.left + padX, rect.top + padY), layout.Get(), brushText.Get());
 }
 
 void WinCap::compositeCursor(std::vector<BYTE>& pixels, int w, int h, int originX, int originY)

@@ -83,7 +83,7 @@ private:
 	D2D1_RECT_F cropSourceRect(float& f) const;    // 取景源矩形（图像像素）+ 缩放因子
 	int hitResizeEdges(POINT pos) const;           // 命中的边位（0=无）
 	void refreshOcrPanel();
-	void toggleOcrPanel();
+	void toggleOcrPanel(bool copyText = true);
 private:
 	Ling::Canvas* canvas{ nullptr };
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> borderBrush;

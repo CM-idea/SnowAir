@@ -3,6 +3,7 @@
 #include "../Win/WinPin.h"
 #include "../History.h"
 #include "../Lang.h"
+#include "../Setting.h"
 #include "../Tip.h"
 #include "ToolPicker.h"
 #include "ToolSub.h"
@@ -11,6 +12,7 @@
 #include "ToolbarTheme.h"
 #include "../Win/AnnotHost.h"
 #include "../Win/PinMenu.h"
+#include "../Win/SettingWidgets.h"
 
 ToolCap::ToolCap(WinCap* capWin) : Ling::WinBase(), winCap(capWin)
 {
@@ -567,6 +569,7 @@ void ToolCap::onCreated()
 	};
 	onTimer.add([this](UINT id) {
 		if (id == pickerHideTimerId) onPickerHideTimer();
+		else if (id == demoEdgeTimerId) onDemoEdgeTimer();
 	});
 	body->setBg(0);
 	auto d2d = Ling::D2D::get();
@@ -669,6 +672,10 @@ void ToolCap::onDragDown(POINT pos, bool isRight)
 		return;
 	}
 	if (!dragHandle || !dragHandle->isPosIn(pos)) return;
+	// 新一次拖动：先撤掉自动隐藏态，免得拖动途中被探测定时器拉回
+	demoAutoHide = false;
+	demoCollapsed = false;
+	killTimer(demoEdgeTimerId);
 	draggingBar = true;
 	dragGrabOffset = pos;
 	if (hwnd) SetCapture(hwnd);
@@ -700,6 +707,83 @@ void ToolCap::onDragUp(POINT, bool)
 	draggingBar = false;
 	if (GetCapture() == hwnd) ReleaseCapture();
 	if (auto* host = annotHost()) host->markMainToolUserPlaced();
+	applyDemoEdgeBehavior();
+}
+
+// 演示模式：拖动结束后按「工具栏贴边」设置处理：
+//   0 吸附边缘 —— 停手即贴到最近的上/下屏幕边；
+//   1 自动隐藏 —— 先贴边，再把工具条收起（移出屏幕），鼠标移回该边缘时临时弹出。
+// 非演示模式（截图 / 贴图工具条）不走这套，保持落哪算哪。
+void ToolCap::applyDemoEdgeBehavior()
+{
+	if (!demoLayout || !winCap) return;
+	const int behavior = Setting::get()->getDemoEdgeBehavior();
+
+	const RECT wa = ToolbarChrome::workAreaNear(RECT{ x, y, x + (int)w, y + (int)h });
+	const int barW = (int)w, barH = (int)h;
+	const int distTop = y - wa.top;
+	const int distBottom = wa.bottom - (y + barH);
+	demoEdge = (distTop <= distBottom) ? 0 : 1;
+	demoExpandX = std::clamp(x, (int)wa.left, (int)wa.right - barW);
+	demoExpandY = (demoEdge == 0) ? wa.top : wa.bottom - barH;
+
+	if (behavior != 1) {
+		// 吸附边缘
+		demoAutoHide = false;
+		demoCollapsed = false;
+		killTimer(demoEdgeTimerId);
+		setPosition(demoExpandX, demoExpandY);
+		return;
+	}
+	// 自动隐藏
+	demoAutoHide = true;
+	demoCollapseToEdge();
+}
+
+void ToolCap::demoCollapseToEdge()
+{
+	if (!hwnd || !demoAutoHide) return;
+	demoCollapsed = true;
+	RECT rc{ demoExpandX, demoExpandY, demoExpandX + (int)w, demoExpandY + (int)h };
+	MONITORINFO mi{ sizeof(MONITORINFO) };
+	RECT mon = rc;
+	if (GetMonitorInfo(MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST), &mi)) mon = mi.rcMonitor;
+	// 沿贴的那条边挪出屏幕：上边贴顶往上、下边贴底往下
+	const int offY = (demoEdge == 0) ? mon.top - (int)h : mon.bottom;
+	setPosition(demoExpandX, offY);
+	if (auto* host = annotHost(); host && host->toolSub) host->toolSub->hideTools();
+	setTimer(120, demoEdgeTimerId);
+}
+
+void ToolCap::demoExpandFromEdge()
+{
+	if (!demoAutoHide) return;
+	demoCollapsed = false;
+	setPosition(demoExpandX, demoExpandY);
+	// 收起时一并藏了属性栏，弹回来时按当前工具恢复
+	if (auto* host = annotHost()) host->layoutTools();
+}
+
+void ToolCap::onDemoEdgeTimer()
+{
+	if (!demoAutoHide || !hwnd) { killTimer(demoEdgeTimerId); return; }
+	POINT pt{};
+	if (!GetCursorPos(&pt)) return;
+	RECT rc{ demoExpandX, demoExpandY, demoExpandX + (int)w, demoExpandY + (int)h };
+	MONITORINFO mi{ sizeof(MONITORINFO) };
+	RECT mon = rc;
+	if (GetMonitorInfo(MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST), &mi)) mon = mi.rcMonitor;
+	const int pad = (int)(8.f * dpi + 0.5f);
+	const int trigger = (int)(4.f * dpi + 0.5f);
+	const bool inX = pt.x >= demoExpandX - pad && pt.x <= demoExpandX + (int)w + pad;
+	const bool nearEdge = (demoEdge == 0) ? (pt.y <= mon.top + trigger) : (pt.y >= mon.bottom - trigger);
+	if (demoCollapsed) {
+		if (nearEdge && inX) demoExpandFromEdge();
+	}
+	else {
+		RECT cur{ x, y, x + (int)w, y + (int)h };
+		if (!PtInRect(&cur, pt)) demoCollapseToEdge();
+	}
 }
 
 void ToolCap::paintChrome()
@@ -902,8 +986,28 @@ void ToolCap::onClickCap(Ling::Button* btn)
 		winCap->copyToClipboard();
 	}
 	else if (btn->id == L"close") {
-		winCap->close();
+		requestCaptureClose();
 	}
+}
+
+// 「取消」关掉截图窗口。已经画了标注时先确认（受「功能设置 > “取消”弹窗」开关控制），
+// 避免误触直接丢失刚画的内容；没画标注就直接关，不打扰。
+void ToolCap::requestCaptureClose()
+{
+	if (!winCap) return;
+	const bool hasAnnot = winCap->history && !winCap->history->shapes.empty();
+	auto* s = Setting::get();
+	if (hasAnnot && (!s || s->getCancelConfirmDialog())) {
+		// 确认框是异步的：回调时工具条可能已随窗口销毁，借 body 的存活哨兵判断
+		auto weak = body ? body->getWeakThis() : std::weak_ptr<bool>{};
+		SettingUi::ConfirmDialog::ask(winCap, Lang::get(L"setting.cancelCaptureConfirm"),
+			[this, weak](bool ok) {
+				if (!ok || !weak.lock()) return;
+				if (winCap) winCap->close();
+			});
+		return;
+	}
+	winCap->close();
 }
 
 void ToolCap::onClickPin(Ling::Button* btn)

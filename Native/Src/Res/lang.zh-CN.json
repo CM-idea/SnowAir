@@ -174,6 +174,7 @@
     "clearHistory": "清空历史",
     "clearHistoryConfirm": "确定清空全部截图历史吗？",
     "deleteHistoryConfirm": "确定删除这条截图历史吗？",
+    "cancelCaptureConfirm": "已有标注，确定取消并关闭吗？",
     "confirm": "确认",
     "cancel": "取消",
     "plugins": "插件集成",

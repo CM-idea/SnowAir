@@ -442,17 +442,14 @@ void WinSettingHistory::refreshGrid()
 			[this, id]() { Util::pinHistoryFile(id); });
 		auto* delBtn = mkIconBtn(thumbHost, Icon::Remove, 6.f, true,
 			[this, id]() {
-				SettingUi::ConfirmDialog::ask(win, Lang::get(L"setting.deleteHistoryConfirm"),
-					[this, id](bool ok) {
-						if (!ok) return;
-						Setting::get()->removeHistoryItem(id);
-						// 延后一拍重建：这个按钮自己就在要被拆掉的格子里，同步重建会在它自己的
-						// 点击回调里把它销毁；
-						auto weak = getWeakThis();
-						auto reload = [this, weak]() { if (weak.lock()) this->refreshGrid(); };
-						if (auto* app = Ling::App::get()) app->dq.TryEnqueue(reload);
-						else reload();
-					});
+				// 删单张不弹确认：历史只是一份副本，误删代价小（清空历史才需要确认）。
+				Setting::get()->removeHistoryItem(id);
+				// 延后一拍重建：这个按钮自己就在要被拆掉的格子里，同步重建会在它自己的
+				// 点击回调里把它销毁；
+				auto weak = getWeakThis();
+				auto reload = [this, weak]() { if (weak.lock()) this->refreshGrid(); };
+				if (auto* app = Ling::App::get()) app->dq.TryEnqueue(reload);
+				else reload();
 			});
 		// 三个按钮默认收起，停悬到这张缩略图上才浮出
 		copyBtn->hide(); pinBtn->hide(); delBtn->hide();

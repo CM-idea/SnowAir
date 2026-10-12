@@ -473,7 +473,7 @@ void WinSettingFeatures::buildRecord(Ling::Node* p)
 		{ L"10", L"15", L"24" }, s->getGifFps(),
 		[](int i, const std::wstring&) { Setting::get()->setGifFps(i); }, true);
 	SettingUi::selectRow(g, Lang::get(L"setting.fnRecGifFormat"),
-		{ L"GIF (*.gif)", L"WebP (*.webp)", L"APNG (*.png)" }, s->getGifFormat(),
+		{ L"GIF (*.gif)", L"WebP (*.webp)", L"APNG (*.png)" }, std::clamp(s->getGifFormat(), 0, 2),
 		[](int i, const std::wstring&) { Setting::get()->setGifFormat(i); }, true);
 	SettingUi::selectRow(g, Lang::get(L"setting.fnRecMic"),
 		{ Lang::get(L"setting.fnRecMicDefault"), Lang::get(L"setting.fnRecMicOff") }, s->getRecordMic(),

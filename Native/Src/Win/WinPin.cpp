@@ -95,12 +95,18 @@ WinPin::WinPin(int x, int y, int w, int h, const std::vector<BYTE>* data, const 
 			shapeHover->mouseWheel((float)imgPos.x, (float)imgPos.y, space > 0 ? (short)WHEEL_DELTA : (short)-WHEEL_DELTA);
 			return;
 		}
-		// 非编辑态：悬停滚轮直接缩放。锚点 = 鼠标所在一侧（边/角），画面朝反向伸缩。
+		// 非编辑态：悬停滚轮直接缩放。
+		// 锚点默认取鼠标所在一侧（边/角），画面朝反向伸缩；开启「以鼠标为中心缩放」时
+		// 直接以光标点为锚（光标下的像素保持不动）。
 		const float steps = space / 60.f;   // space = 格数 * 60 * dpi
 		const float factor = std::pow(1.1f, steps);
 		if (zoomMode == ZoomMode::Crop) {
 			cropScale = std::clamp(cropScale * factor, 1.f, 10.f);
 			refresh();
+			return;
+		}
+		if (Setting::get()->getPinZoomAtCursor()) {
+			applyScale(scale * factor, pos);
 			return;
 		}
 		// 九宫格取锚点：左/中/右 × 上/中/下 → 边中点或角点（中间带取窗口 1/3）。
@@ -435,6 +441,29 @@ void WinPin::onCreated()
 	iconUnlock = makeHoverIcon(Icon::Unlock);
 	iconEdit = makeHoverIcon(Icon::Pen);
 	iconClose = makeHoverIcon(Icon::Cancel);
+	// 功能设置 · 贴图：自动缩放窗口 —— 图比工作区大时等比缩到工作区内（只缩不放）
+	if (Setting::get()->getPinAutoFit()) {
+		const auto imgSz = getImgSize();
+		RECT rc{ x, y, x + (int)std::lround(w), y + (int)std::lround(h) };
+		MONITORINFO mi{ .cbSize = sizeof(MONITORINFO) };
+		HMONITOR mon = MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST);
+		if (imgSz.width > 0 && imgSz.height > 0 && mon && GetMonitorInfo(mon, &mi)) {
+			const float availW = (float)(mi.rcWork.right - mi.rcWork.left);
+			const float availH = (float)(mi.rcWork.bottom - mi.rcWork.top);
+			const float fit = (std::min)(availW / (float)imgSz.width, availH / (float)imgSz.height);
+			if (fit < 1.f) {
+				scale = (std::max)(0.1f, fit);
+				applyWinSize();
+				const int maxX = (std::max)((int)mi.rcWork.left, (int)mi.rcWork.right - (int)std::lround(w));
+				const int maxY = (std::max)((int)mi.rcWork.top, (int)mi.rcWork.bottom - (int)std::lround(h));
+				x = std::clamp(x, (int)mi.rcWork.left, maxX);
+				y = std::clamp(y, (int)mi.rcWork.top, maxY);
+				setPosition(x, y);
+			}
+		}
+	}
+	// 功能设置 · 贴图：自动文本识别 —— 钉好后直接出识别结果（不抢剪贴板）
+	if (Setting::get()->getPinAutoOcr()) toggleOcrPanel(false);
 	show();
 	if (!WinCap::get()) CaptureEsc::claim(hwnd);
 }
@@ -844,7 +873,12 @@ void WinPin::copyToClipboard()
 void WinPin::saveToFile()
 {
 	auto foregroundBeforeDialog = GetForegroundWindow();
-	auto path = Util::getSaveFilePath(hwnd);
+	// 「保存格式」决定扩展名；文件名默认给「手动保存文件名格式」的末段
+	const std::wstring saveExt = Util::extensionFromSaveFormat(Setting::get()->getSaveFormat());
+	std::wstring defName = Util::previewFileName(
+		Setting::get()->getManualSaveFormat(), Setting::defaultManualSaveFormat(), L"");
+	if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos) defName = defName.substr(slash + 1);
+	auto path = Util::getSaveFilePath(hwnd, saveExt, defName);
 	if (path.empty()) {
 		restoreWindowState(foregroundBeforeDialog);
 		return;
@@ -1077,7 +1111,7 @@ void WinPin::refreshOcrPanel()
 	}
 }
 
-void WinPin::toggleOcrPanel()
+void WinPin::toggleOcrPanel(bool copyText)
 {
 	if (toolOcr) { toolOcr.reset(); refresh(); return; }
 	std::vector<BYTE> px;
@@ -1091,7 +1125,8 @@ void WinPin::toggleOcrPanel()
 	toolOcr->createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP);
 	const D2D1_RECT_F r = D2D1::RectF(0, 0, w, h);
 	toolOcr->syncToMask(r, x, y, dpi);
-	if (result.ok && !result.text.empty()) Ling::Util::setTextToClipboard(result.text);
+	// 自动识别（钉图即识别）不抢剪贴板，避免把用户剪贴板里的东西冲掉
+	if (copyText && result.ok && !result.text.empty()) Ling::Util::setTextToClipboard(result.text);
 	refresh();
 }
 
@@ -1130,7 +1165,8 @@ void WinPin::showContextMenu(POINT screenPt)
 		D2D1_SIZE_U size{};
 		if (!getAnnotPixels(pixels, size)) return;
 		const std::wstring path = Util::buildSavePath(
-			Setting::get()->getManualSaveFormat(), Setting::defaultManualSaveFormat(), L"png");
+			Setting::get()->getManualSaveFormat(), Setting::defaultManualSaveFormat(),
+			Util::extensionFromSaveFormat(Setting::get()->getSaveFormat()));
 		if (path.empty() || !Util::saveToFile(path, (int)size.width, (int)size.height, pixels.data())) return;
 		Util::addFileToClipboard(path);
 	});

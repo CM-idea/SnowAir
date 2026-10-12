@@ -19,6 +19,8 @@ public:
 	~CutMask();
 	// 鼠标悬停时吸附到光标下的窗口矩形，选区真的变了才返回 true
 	bool highlight(POINT pos);
+	// 悬停是否停在有效目标上（区别于"自由拖框"：点一下即选中的窗口元素框）
+	bool hoverPicked() const { return hoverTarget_.right > hoverTarget_.left && hoverTarget_.bottom > hoverTarget_.top; }
 	void startMakeRect(POINT pos);
 	void makeRect(POINT pos);
 	// 选区边框附近环带命中；远离选区为 None（不再把整屏切成八块）

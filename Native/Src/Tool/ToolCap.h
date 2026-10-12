@@ -49,6 +49,8 @@ private:
 	void onClick(Ling::Button* btn);
 	void onClickCap(Ling::Button* btn);
 	void onClickPin(Ling::Button* btn);
+	// 「取消」：已画标注时按「功能设置 > “取消”弹窗」先确认，避免误触丢内容
+	void requestCaptureClose();
 	void onHoverMove(POINT pos);
 	void scheduleHidePicker();
 	void cancelHidePicker();
@@ -68,6 +70,11 @@ private:
 	void onDragDown(POINT pos, bool isRight);
 	void onDragMove(POINT pos);
 	void onDragUp(POINT pos, bool isRight);
+	// 演示模式「工具栏贴边」：拖动结束后按设置吸附边缘 / 自动隐藏
+	void applyDemoEdgeBehavior();
+	void demoCollapseToEdge();
+	void demoExpandFromEdge();
+	void onDemoEdgeTimer();
 	float contentLeadWidth() const;
 	float dragMarginRight() const;
 	float contentPadRight() const;
@@ -88,6 +95,12 @@ private:
 	bool dpiChanged{ false };
 	bool draggingBar{ false };
 	POINT dragGrabOffset{};
+	// 演示模式「工具栏贴边」（demoEdgeBehavior）：0 吸附边缘 / 1 自动隐藏（贴边收起、鼠标到边缘弹出）
+	bool demoAutoHide{ false };
+	bool demoCollapsed{ false };
+	int demoEdge{ -1 };              // 0 上 / 1 下
+	int demoExpandX{ 0 }, demoExpandY{ 0 };
+	static constexpr UINT demoEdgeTimerId{ 211 };
 	std::unique_ptr<Tip> tip;
 	std::unique_ptr<ToolPicker> picker;
 	std::map<std::wstring, std::wstring> pickedSub;

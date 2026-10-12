@@ -12,6 +12,8 @@
 using namespace Microsoft::WRL;
 #include "VideoMp4.hpp"
 #include "VideoGif.hpp"
+#include <algorithm>
+#include <vector>
 
 namespace {
     // MP4 录制失败以前是静默 return，用户那边就是"录完什么都没有"，连缓存文件都不生成。
@@ -91,7 +93,8 @@ void CapVideo::makeTool()
     SetWindowLongPtr(tool->hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(win->hwnd));
     layoutTool();
     SetWindowPos(tool->hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    App::excludeFromCapture(tool->hwnd);
+    // 「录制时隐藏工具栏」= 把工具栏排除在录制画面之外（录制画面里看不到它），不是把工具栏藏起来
+    if (Setting::get()->getHideToolbarInRecord()) App::excludeFromCapture(tool->hwnd);
 }
 
 void CapVideo::layoutTool()
@@ -164,7 +167,8 @@ bool CapVideo::queryBarAnchor(float& x, float& y, float& w, float& h, float& btn
 void CapVideo::startMp4(bool useSpeaker, bool useMic)
 {
     auto& cutMask = win->cutMask;
-    auto videoTempPath = Setting::get()->getDataPath();
+    auto* st = Setting::get();
+    auto videoTempPath = st->getDataPath();
     mp4Param = std::make_unique<VideoMp4::DESKTOPCAPTUREPARAMS>();
     // 编码格式不在这里定，交给下面采集线程里那个"HEVC 不行就退 H.264"的循环
     // 录制区域先夹回桌面范围，再做对齐 —— 只会往里缩，不会越出桌面。
@@ -185,16 +189,34 @@ void CapVideo::startMp4(bool useSpeaker, bool useMic)
     mp4Param->rx = { rcLeft, rcTop, rcLeft + rcW, rcTop + rcH };
     mp4Param->f = videoTempPath.append(L"temp.mp4").wstring();
     mp4Param->EndMS = 0;
-    mp4Param->fps = 30;
-    mp4Param->vbrm = 2;
-    mp4Param->vbrq = 50;
+    // 「功能设置 → 录制」：分辨率 / 帧率 / 码率质量 / 硬件加速
+    static const int kMaxOutH[]{ 480, 720, 1080, 1440, 2160 };
+    mp4Param->MaxOutHeight = kMaxOutH[std::clamp(st->getVideoQuality(), 0, 4)];
+    static const int kFps[]{ 24, 30, 60 };
+    mp4Param->fps = kFps[std::clamp(st->getVideoFps(), 0, 2)];
+    // 码率档（kbps）+ 质量档（0~100）：vbrm=2 时编码器按 vbrq 定画质，BR 作为平均码率目标
+    static const int kBitrate[]{ 2500, 6000, 12000 };
+    static const int kQuality[]{ 40, 50, 60 };
+    const int speed = std::clamp(st->getEncodeSpeed(), 0, 2);
+    mp4Param->BR = kBitrate[speed];
+    mp4Param->vbrq = kQuality[speed];
     mp4Param->Qu = 50;
+    mp4Param->HwTransforms = st->getHwAccel();
     mp4Param->MustEnd = false;
-    VideoMp4::setAudio(mp4Param.get(), useSpeaker, useMic);
+    // 麦克风：设置为「关闭」时，无视工具条上的麦克风开关
+    const bool mic = useMic && st->getRecordMic() != 1;
+    VideoMp4::setAudio(mp4Param.get(), useSpeaker, mic);
+    // 编码器偏好：0 自动（HEVC 优先、失败退 H.264）/ 1 仅 H.264 / 2 仅 H.265
+    std::vector<GUID> codecs;
+    switch (st->getVideoEncoder()) {
+    case 1: codecs = { MFVideoFormat_H264 }; break;
+    case 2: codecs = { MFVideoFormat_HEVC }; break;
+    default: codecs = { MFVideoFormat_HEVC, MFVideoFormat_H264 }; break;
+    }
     // 文案在这里先取出来按值带进线程：langObj 是 WinRT 对象，不往采集线程里带
     auto errText = Lang::get(L"video.recordFailed");
     auto errTitle = Lang::get(L"about.sysTip");
-    captureThread = std::jthread([this, errText, errTitle](std::stop_token st) {
+    captureThread = std::jthread([this, errText, errTitle, codecs](std::stop_token st2) {
         HRESULT hr = MFStartup(MF_VERSION);
         if (FAILED(hr)) {
             showRecordError(errText, errTitle);
@@ -216,7 +238,7 @@ void CapVideo::startMp4(bool useSpeaker, bool useMic)
         // 有的只带解码，有的靠显卡的硬件 MFT 而显卡没有。缺了的时候 AddStream 照样成功
         //（那一步只是记下输出类型），要到 SetInputMediaType 解析编码器时才失败(-10)。
         // 退回 H.264：它从 Win7 起就带软件编码器，没有装不上的道理，代价是同画质下文件更大
-        for (auto codec : { MFVideoFormat_HEVC, MFVideoFormat_H264 }) {
+        for (auto codec : codecs) {
             mp4Param->VIDEO_ENCODING_FORMAT = codec;
             if (targets.empty()) {
                 mp4Param->rx = deskRx;
@@ -251,7 +273,26 @@ void CapVideo::startGif()
     gifParam->y = (int)(win->y + cutMask->maskRect.top);
     gifParam->w = (int)(cutMask->maskRect.right - cutMask->maskRect.left);
     gifParam->h = (int)(cutMask->maskRect.bottom - cutMask->maskRect.top);
-    gifParam->path = videoTempPath.append(L"temp.gif").wstring();
+    // 「动图格式」：0 = GIF / 1 = WebP / 2 = APNG。
+    // WebP 依赖系统的 WIC WebP 编码器，缺失时退回 GIF —— 否则会写出与扩展名不符的内容
+    int gifFmt = std::clamp(Setting::get()->getGifFormat(), 0, 2);
+    if (gifFmt == 1 && !VideoGif::webpEncoderAvailable()) gifFmt = 0;
+    static const wchar_t* kGifTemp[]{ L"temp.gif", L"temp.webp", L"temp.png" };
+    gifParam->format = gifFmt;
+    gifParam->path = videoTempPath.append(kGifTemp[gifFmt]).wstring();
+    // 「功能设置 → 录制 → 动图帧率」：10 / 15 / 24
+    static const int kGifFps[]{ 10, 15, 24 };
+    gifParam->fps = (UINT)kGifFps[std::clamp(Setting::get()->getGifFps(), 0, 2)];
+    // 「动图分辨率」：480P / 720P / 1080P，只缩不放
+    static const int kGifMaxH[]{ 480, 720, 1080 };
+    const int gifMaxH = kGifMaxH[std::clamp(Setting::get()->getGifQuality(), 0, 2)];
+    if (gifParam->h > gifMaxH) {
+        const double f = (double)gifMaxH / gifParam->h;
+        gifParam->outW = std::max(2, (int)(gifParam->w * f + 0.5) & ~1);
+        gifParam->outH = gifMaxH & ~1;
+        if (gifParam->outW > gifParam->w) gifParam->outW = gifParam->w;
+        if (gifParam->outH > gifParam->h) gifParam->outH = gifParam->h;
+    }
     captureThread = std::jthread([this](std::stop_token st) {
         VideoGif::createGif(gifParam.get());
     });

@@ -1020,10 +1020,14 @@ struct DESKTOPCAPTUREPARAMS
     int vbrm = 0;
     int vbrq = 0;
     int BR = 4000;
+    // 输出分辨率上限（高度像素；0 = 按选区原生分辨率直出）。超过时按比例缩到该高度
+    int MaxOutHeight = 0;
     int NCH = 2;
     int SR = 44100;
     int ABR = 192;
     bool Cursor = true;
+    // 是否允许 SinkWriter 使用硬件 MFT（编码器）。关掉即只走软件编码
+    bool HwTransforms = true;
     RECT rx = { 0,0,0,0 };
     HWND hWnd = 0;
     IDXGIAdapter1* ad = 0;
@@ -1328,6 +1332,37 @@ inline void setAudio(DESKTOPCAPTUREPARAMS* dp,bool useSpeaker, bool useMic)
     }
 }
 
+// 桌面复制帧的 BGRA 面积平均缩放。源/目标都是紧凑排列（stride = w*4），行序一致，
+// 所以这里只按"行索引比例"映射，不做翻转。仅在需要缩小时使用（画质档位）。
+inline void scaleBGRABox(const BYTE* src, int sw, int sh, BYTE* dst, int dw, int dh)
+{
+    for (int j = 0; j < dh; ++j) {
+        int sy0 = (int)((long long)j * sh / dh);
+        int sy1 = (int)(((long long)(j + 1) * sh + dh - 1) / dh);
+        if (sy1 <= sy0) sy1 = sy0 + 1;
+        if (sy1 > sh) sy1 = sh;
+        BYTE* drow = dst + (size_t)j * dw * 4;
+        for (int i = 0; i < dw; ++i) {
+            int sx0 = (int)((long long)i * sw / dw);
+            int sx1 = (int)(((long long)(i + 1) * sw + dw - 1) / dw);
+            if (sx1 <= sx0) sx1 = sx0 + 1;
+            if (sx1 > sw) sx1 = sw;
+            unsigned int b = 0, g = 0, r = 0, a = 0, n = 0;
+            for (int y = sy0; y < sy1; ++y) {
+                const BYTE* srow = src + ((size_t)y * sw + sx0) * 4;
+                for (int x = sx0; x < sx1; ++x) {
+                    b += srow[0]; g += srow[1]; r += srow[2]; a += srow[3];
+                    srow += 4; ++n;
+                }
+            }
+            drow[i * 4 + 0] = (BYTE)(b / n);
+            drow[i * 4 + 1] = (BYTE)(g / n);
+            drow[i * 4 + 2] = (BYTE)(r / n);
+            drow[i * 4 + 3] = (BYTE)(a / n);
+        }
+    }
+}
+
 inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
 {
     HRESULT hr = S_OK;
@@ -1527,9 +1562,21 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
         }
     }
 
+    // 「视频质量」输出分辨率上限：只缩不放，宽对齐 4、高对齐 2（与选区对齐要求一致）。
+    // HDR(FP16) 那条路像素格式特殊且极少用，不做缩放，保持原生。
+    int encW = wi, encH = he;
+    if (dp.HasVideo && !cap.InHDR && dp.MaxOutHeight > 0 && he > dp.MaxOutHeight)
+    {
+        const double f = (double)dp.MaxOutHeight / (double)he;
+        encW = std::max(4, (int)(wi * f + 0.5) & ~3);
+        encH = std::max(2, (int)(he * f + 0.5) & ~1);
+        if (encW > wi) encW = wi;
+        if (encH > he) encH = he;
+    }
+
     CComPtr<IMFAttributes> attrs;
     MFCreateAttributes(&attrs, 0);
-    attrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, true);
+    attrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, dp.HwTransforms ? 1u : 0u);
 
     VectorStreamX2 bs;
     bs.func = dp.Streamer;
@@ -1569,7 +1616,7 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
         pMediaTypeOutVideo->SetGUID(MF_MT_SUBTYPE, dp.VIDEO_ENCODING_FORMAT);
 
         pMediaTypeOutVideo->SetUINT32(MF_MT_AVG_BITRATE, dp.BR * 1000);
-        MFSetAttributeSize(pMediaTypeOutVideo, MF_MT_FRAME_SIZE, wi, he);
+        MFSetAttributeSize(pMediaTypeOutVideo, MF_MT_FRAME_SIZE, encW, encH);
         MFSetAttributeRatio(pMediaTypeOutVideo, MF_MT_FRAME_RATE, dp.fps, 1);
         MFSetAttributeRatio(pMediaTypeOutVideo, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
         pMediaTypeOutVideo->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
@@ -1773,7 +1820,7 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
         return -9;
     pMediaTypeVideoIn->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
 
-    MFSetAttributeSize(pMediaTypeVideoIn, MF_MT_FRAME_SIZE, wi,he);
+    MFSetAttributeSize(pMediaTypeVideoIn, MF_MT_FRAME_SIZE, encW, encH);
     MFSetAttributeRatio(pMediaTypeVideoIn, MF_MT_FRAME_RATE, dp.fps, 1);
     MFSetAttributeRatio(pMediaTypeVideoIn, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
 
@@ -1920,8 +1967,8 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
         if (FAILED(hr)) return -13;
     }
 
-    const LONG cbWidth = multi * wi;
-    DWORD VideoBufferSize = cbWidth * he;
+    const LONG cbWidth = multi * encW;
+    DWORD VideoBufferSize = cbWidth * encH;
     CComPtr<IMFMediaBuffer> pVideoBuffer = NULL;
     CComPtr<IMFSample> pVideoSampleS = NULL;
 
@@ -2244,13 +2291,17 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
             {
                 memcpy(pData, hdrout.data(), VideoBufferSize);
             }
+            else if (encW != wi || encH != he)
+            {
+                // 「视频质量」缩到目标分辨率后再交给编码器
+                scaleBGRABox(cap.buf.data(), wi, he, (BYTE*)pData, encW, encH);
+            }
             else
             {
                 memcpy(pData, cap.buf.data(), std::min(cap.buf.size(), (size_t)VideoBufferSize));
             }
             if (dp.Framer)
                 hrf = dp.Framer(cap.InHDR,wi,he,pData, std::min(cap.buf.size(), (size_t)VideoBufferSize), dp.cb);
-
             hr = pVideoBuffer->Unlock();
             if (FAILED(hr)) break;
 

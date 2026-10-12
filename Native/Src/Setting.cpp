@@ -513,7 +513,7 @@ bool Setting::getFindWindowElements() { return featBool(L"findWindowElements", t
 void Setting::setFindWindowElements(bool on) { setFeatBool(L"findWindowElements", on); }
 int Setting::getTrayClickAction() { return featInt(L"trayClickAction", 0); }
 void Setting::setTrayClickAction(int v) { setFeatInt(L"trayClickAction", v); }
-bool Setting::getPinZoomAtCursor() { return featBool(L"pinZoomAtCursor", true); }
+bool Setting::getPinZoomAtCursor() { return featBool(L"pinZoomAtCursor", false); }
 void Setting::setPinZoomAtCursor(bool on) { setFeatBool(L"pinZoomAtCursor", on); }
 bool Setting::getPinAutoOcr() { return featBool(L"pinAutoOcr", false); }
 void Setting::setPinAutoOcr(bool on) { setFeatBool(L"pinAutoOcr", on); }
@@ -533,13 +533,13 @@ std::wstring Setting::getSaveFormat() { return featStr(L"saveFormat", L"PNG (*.p
 void Setting::setSaveFormat(const std::wstring& v) { setFeatStr(L"saveFormat", v); }
 bool Setting::getCopyAsFile() { return featBool(L"copyAsFile", false); }
 void Setting::setCopyAsFile(bool on) { setFeatBool(L"copyAsFile", on); }
-bool Setting::getCancelConfirmDialog() { return featBool(L"cancelConfirmDialog", true); }
+bool Setting::getCancelConfirmDialog() { return featBool(L"cancelConfirmDialog", false); }
 void Setting::setCancelConfirmDialog(bool on) { setFeatBool(L"cancelConfirmDialog", on); }
 
 void Setting::restoreFunctionScreenshotDefaults()
 {
 	setFindWindowElements(true);
-	setCancelConfirmDialog(true);
+	setCancelConfirmDialog(false);
 	setAutoSaveAfterCapture(false);
 	setCopyAsFile(false);
 	setSaveFormat(L"PNG (*.png)");
@@ -551,14 +551,14 @@ void Setting::restoreFunctionScreenshotDefaults()
 	setTrayClickAction(0);
 	setDemoDefaultTool(0);
 	setDemoEdgeBehavior(0);
-	setPinZoomAtCursor(true);
+	setPinZoomAtCursor(false);
 	setPinAutoOcr(false);
 	setPinAutoFit(true);
 	setPinDoubleClickAction(0);
 	setPinOpacity(100);
 }
 
-int Setting::getVideoQuality() { return featInt(L"videoQuality", 2); }
+int Setting::getVideoQuality() { return featInt(L"videoQuality", 4); }
 void Setting::setVideoQuality(int v) { setFeatInt(L"videoQuality", v); }
 int Setting::getVideoFps() { return featInt(L"videoFps", 0); }
 void Setting::setVideoFps(int v) { setFeatInt(L"videoFps", v); }
@@ -578,7 +578,7 @@ bool Setting::getHwAccel() { return featBool(L"hwAccel", true); }
 void Setting::setHwAccel(bool on) { setFeatBool(L"hwAccel", on); }
 bool Setting::getHideToolbarInRecord() { return featBool(L"hideToolbarInRecord", true); }
 void Setting::setHideToolbarInRecord(bool on) { setFeatBool(L"hideToolbarInRecord", on); }
-bool Setting::getShowKeystrokes() { return featBool(L"showKeystrokes", true); }
+bool Setting::getShowKeystrokes() { return featBool(L"showKeystrokes", false); }
 void Setting::setShowKeystrokes(bool on) { setFeatBool(L"showKeystrokes", on); }
 
 std::wstring Setting::defaultManualSaveFormat() { return L"SnowAir_{{YYYY-MM-DD_HH-mm-ss}}"; }

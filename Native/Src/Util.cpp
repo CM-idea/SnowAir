@@ -36,34 +36,93 @@ std::array<int, 3> Util::getAppVersion()
 }
 
 namespace {
-	// 把 BGRA top-down 像素编码成 PNG 写进 stream。saveToClipboard 和 saveToFile 共用这段。
-	bool encodePng(IStream* stream, const int w, const int h, BYTE* data)
+	// 把 BGRA top-down 像素按指定容器编码写进 stream。
+	// PNG/BMP 原生支持 32bppBGRA；JPEG 等只接受 24bppBGR，交给 WIC 格式转换器转一道。
+	// quality < 0 表示该编码器不设质量（无损 / 用默认）。
+	bool encodeImage(IStream* stream, const int w, const int h, BYTE* data,
+		REFGUID container, const float quality)
 	{
-		UINT rowBytes = (UINT)w * 4;
-		UINT imgBytes = rowBytes * (UINT)h;
 		ComPtr<IWICImagingFactory> factory;
 		auto hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.GetAddressOf()));
 		if (FAILED(hr)) return false;
 		ComPtr<IWICBitmapEncoder> encoder;
-		hr = factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, encoder.GetAddressOf());
+		hr = factory->CreateEncoder(container, nullptr, encoder.GetAddressOf());
 		if (FAILED(hr)) return false;
 		hr = encoder->Initialize(stream, WICBitmapEncoderNoCache);
 		if (FAILED(hr)) return false;
 		ComPtr<IWICBitmapFrameEncode> frame;
-		hr = encoder->CreateNewFrame(frame.GetAddressOf(), nullptr);
+		ComPtr<IPropertyBag2> props;
+		hr = encoder->CreateNewFrame(frame.GetAddressOf(), props.GetAddressOf());
 		if (FAILED(hr)) return false;
-		hr = frame->Initialize(nullptr);
+		if (props && quality >= 0.f) {
+			// 有损编码器认 ImageQuality；不认的（PNG/BMP）会返回错误，忽略即可
+			PROPBAG2 opt{};
+			opt.pstrName = const_cast<LPOLESTR>(L"ImageQuality");
+			VARIANT val; VariantInit(&val);
+			val.vt = VT_R4; val.fltVal = quality;
+			props->Write(1, &opt, &val);
+		}
+		hr = frame->Initialize(props.Get());
 		if (FAILED(hr)) return false;
 		hr = frame->SetSize((UINT)w, (UINT)h);
 		if (FAILED(hr)) return false;
 		WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppBGRA;
 		hr = frame->SetPixelFormat(&fmt);
-		if (FAILED(hr) || !IsEqualGUID(fmt, GUID_WICPixelFormat32bppBGRA)) return false;
-		hr = frame->WritePixels((UINT)h, rowBytes, imgBytes, data);
+		if (FAILED(hr)) return false;
+
+		ComPtr<IWICBitmap> src;
+		hr = factory->CreateBitmapFromMemory((UINT)w, (UINT)h, GUID_WICPixelFormat32bppBGRA,
+			(UINT)w * 4, (UINT)w * 4 * (UINT)h, data, src.GetAddressOf());
+		if (FAILED(hr)) return false;
+
+		if (IsEqualGUID(fmt, GUID_WICPixelFormat32bppBGRA)) {
+			hr = frame->WriteSource(src.Get(), nullptr);
+		}
+		else {
+			// 编码器把像素格式改成了它支持的那种（JPEG→24bppBGR 等），先转再写
+			ComPtr<IWICFormatConverter> conv;
+			hr = factory->CreateFormatConverter(conv.GetAddressOf());
+			if (SUCCEEDED(hr))
+				hr = conv->Initialize(src.Get(), fmt, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
+			if (SUCCEEDED(hr)) hr = frame->WriteSource(conv.Get(), nullptr);
+		}
 		if (FAILED(hr)) return false;
 		hr = frame->Commit();
 		if (FAILED(hr)) return false;
 		return SUCCEEDED(encoder->Commit());
+	}
+
+	// 保存路径的扩展名 → WIC 容器 + 有损质量（认不出来按 PNG 无损）
+	void containerForExt(const std::wstring& ext, GUID& container, float& quality)
+	{
+		std::wstring e;
+		e.reserve(ext.size());
+		for (auto c : ext) e.push_back((wchar_t)towlower(c));
+		if (e == L"jpg" || e == L"jpeg") { container = GUID_ContainerFormatJpeg; quality = 0.92f; }
+		else if (e == L"bmp") { container = GUID_ContainerFormatBmp; quality = -1.f; }
+		else if (e == L"webp") { container = GUID_ContainerFormatWebp; quality = 0.9f; }
+		else { container = GUID_ContainerFormatPng; quality = -1.f; }
+	}
+
+	// 把 BGRA top-down 像素编码成 PNG 写进 stream。剪切板固定用 PNG（浏览器/Electron 认）。
+	bool encodePng(IStream* stream, const int w, const int h, BYTE* data)
+	{
+		return encodeImage(stream, w, h, data, GUID_ContainerFormatPng, -1.f);
+	}
+
+	// 取进程可执行文件名（不含扩展名），用于文件名模板里的 {{FOCUS_WINDOW_APP_NAME}}
+	std::wstring processBaseName(DWORD pid)
+	{
+		if (!pid) return L"";
+		HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+		if (!h) return L"";
+		wchar_t buf[MAX_PATH]{};
+		DWORD n = MAX_PATH;
+		std::wstring result;
+		if (QueryFullProcessImageNameW(h, 0, buf, &n))
+			result = std::filesystem::path(buf).stem().wstring();
+		CloseHandle(h);
+		return result;
 	}
 
 	// quirc 交出来的是裸字节流：BYTE 类型的二维码现实中基本都是 UTF-8（微信、支付宝
@@ -212,18 +271,31 @@ void Util::saveToClipboard(const int w, const int h, BYTE* data)
 bool Util::saveToFile(const std::wstring& path, const int w, const int h, BYTE* data)
 {
 	if (path.empty() || w <= 0 || h <= 0 || !data) return false;
+	// 按扩展名选编码容器（PNG/JPEG/WebP/BMP）。临时文件与历史缩略图固定走 .png，
+	// 所以这里的格式切换只影响用户可见的落盘文件。
+	GUID container{}; float quality = -1.f;
+	containerForExt(std::filesystem::path(path).extension().wstring(), container, quality);
 	ComPtr<IWICImagingFactory> factory;
 	auto hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.GetAddressOf()));
 	if (FAILED(hr)) return false;
+	// 目标编码器不可用（如系统没装 WebP 编解码器）：退回 PNG 无损，至少把图存下来
+	{
+		ComPtr<IWICBitmapEncoder> probe;
+		if (FAILED(factory->CreateEncoder(container, nullptr, probe.GetAddressOf()))) {
+			container = GUID_ContainerFormatPng;
+			quality = -1.f;
+		}
+	}
 	ComPtr<IWICStream> stream;
 	hr = factory->CreateStream(stream.GetAddressOf());
 	if (FAILED(hr)) return false;
 	hr = stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE);
 	if (FAILED(hr)) return false;
-	return encodePng(stream.Get(), w, h, data);
+	return encodeImage(stream.Get(), w, h, data, container, quality);
 }
 
-std::wstring Util::getSaveFilePath(HWND hwnd, const std::wstring& ext)
+std::wstring Util::getSaveFilePath(HWND hwnd, const std::wstring& ext, const std::wstring& defaultName,
+	const std::wstring& defaultDir)
 {
 	std::wstring result;
 	ComPtr<IFileSaveDialog> saveDialog;
@@ -238,8 +310,13 @@ std::wstring Util::getSaveFilePath(HWND hwnd, const std::wstring& ext)
 	saveDialog->SetFileTypes(_countof(filterSpec), filterSpec);
 	saveDialog->SetFileTypeIndex(1);
 	saveDialog->SetDefaultExtension(ext.c_str());
-	auto fileName = createFileName(ext);
+	auto fileName = defaultName.empty() ? createFileName(ext) : defaultName;
 	saveDialog->SetFileName(fileName.c_str());
+	if (!defaultDir.empty()) {
+		ComPtr<IShellItem> folder;
+		if (SUCCEEDED(SHCreateItemFromParsingName(defaultDir.c_str(), nullptr, IID_PPV_ARGS(folder.GetAddressOf()))))
+			saveDialog->SetDefaultFolder(folder.Get());
+	}
 	// 用户取消时 Show 返回 HRESULT_FROM_WIN32(ERROR_CANCELLED)，一样走 FAILED 分支
 	hr = saveDialog->Show(hwnd);
 	if (FAILED(hr)) return result;
@@ -676,9 +753,39 @@ std::wstring Util::extensionFromSaveFormat(const std::wstring& fmt)
 	for (auto& c : lower) c = (wchar_t)towlower(c);
 	if (lower.find(L"jpg") != std::wstring::npos || lower.find(L"jpeg") != std::wstring::npos) return L"jpg";
 	if (lower.find(L"webp") != std::wstring::npos) return L"webp";
+	if (lower.find(L"bmp") != std::wstring::npos) return L"bmp";
 	if (lower.find(L"avif") != std::wstring::npos) return L"avif";
 	if (lower.find(L"jxl") != std::wstring::npos) return L"jxl";
 	return L"png";
+}
+
+// 当前前台窗口所属进程名（不含扩展名）；本进程自己（截图覆盖窗等）返回空。
+// 需在覆盖窗出现前调用，否则前台已是本程序。
+std::wstring Util::foregroundAppName()
+{
+	HWND fg = GetForegroundWindow();
+	if (!fg) return L"";
+	DWORD pid = 0;
+	GetWindowThreadProcessId(fg, &pid);
+	if (!pid || pid == GetCurrentProcessId()) return L"";
+	return processBaseName(pid);
+}
+
+// 截图会话收工后按「截图后自动保存」静默落盘（不弹对话框）。
+// fromWindow=true（点选到了窗口元素）用「焦点窗口文件名格式」，否则用「自动保存文件名格式」，
+// 扩展名统一取「保存格式」。返回落盘路径（空 = 未开启 / 失败）。
+std::wstring Util::quietSaveCapture(const std::vector<BYTE>& bgra, const int w, const int h,
+	const bool fromWindow, const std::wstring& focusAppName)
+{
+	auto* s = Setting::get();
+	if (!s || !s->getAutoSaveAfterCapture() || w <= 0 || h <= 0 || bgra.empty()) return {};
+	const std::wstring ext = extensionFromSaveFormat(s->getSaveFormat());
+	const std::wstring fmt = fromWindow ? s->getFocusedWindowFormat() : s->getAutoSaveFormat();
+	const std::wstring def = fromWindow ? Setting::defaultFocusedWindowFormat() : Setting::defaultAutoSaveFormat();
+	const std::wstring path = buildSavePath(fmt, def, ext, focusAppName);
+	if (path.empty()) return {};
+	if (!saveToFile(path, w, h, const_cast<BYTE*>(bgra.data()))) return {};
+	return path;
 }
 
 

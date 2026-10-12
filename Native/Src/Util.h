@@ -14,8 +14,10 @@ public:
 	//（浏览器 / Electron 程序认），两份都带 alpha
 	static void saveToClipboard(const int w, const int h, BYTE* data);
 	static bool saveToFile(const std::wstring& path, const int w, const int h, BYTE* data);
-	// 弹系统另存为对话框，返回空串表示用户取消
-	static std::wstring getSaveFilePath(HWND hwnd, const std::wstring& ext = L"png");
+	// 弹系统另存为对话框，返回空串表示用户取消。defaultName 非空时作为默认文件名（不含扩展名），
+	// defaultDir 非空时作为对话框初始目录
+	static std::wstring getSaveFilePath(HWND hwnd, const std::wstring& ext = L"png",
+		const std::wstring& defaultName = L"", const std::wstring& defaultDir = L"");
 	// 以当前时间生成默认文件名，精确到毫秒，避免连续保存时重名
 	static std::wstring createFileName(const std::wstring& ext);
 	// GDI 抓屏。返回 BGRA、top-down、行紧凑（步长 = w*4），与本类其他函数的入参格式一致
@@ -58,4 +60,12 @@ public:
 		const std::wstring& focusAppName = L"");
 	// 「保存格式」设置（如 "JPEG (*.jpg)"）→ 扩展名；认不出来一律 png
 	static std::wstring extensionFromSaveFormat(const std::wstring& fmt);
+	// 当前前台窗口所属进程名（不含扩展名），本进程自己（截图覆盖窗等）返回空。
+	// 供「焦点窗口文件名格式」的 {{FOCUS_WINDOW_APP_NAME}} 用，需在覆盖窗出现前调用。
+	static std::wstring foregroundAppName();
+	// 截图会话收工后按「截图后自动保存」静默落盘（不弹对话框）：
+	// fromWindow=true 用「焦点窗口文件名格式」，否则用「自动保存文件名格式」，扩展名取「保存格式」。
+	// 返回落盘路径（空 = 未开启 / 失败）。
+	static std::wstring quietSaveCapture(const std::vector<BYTE>& bgra, const int w, const int h,
+		const bool fromWindow, const std::wstring& focusAppName = L"");
 };

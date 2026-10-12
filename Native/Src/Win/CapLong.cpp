@@ -1141,13 +1141,16 @@ void CapLong::copyToClipboard()
 	if (!exportPixels(pixels)) return;
 	Util::saveToClipboard(imgW, resultH, pixels.data());
 	Setting::get()->addHistoryItem(pixels, imgW, resultH, L"capture");
+	// 「截图后自动保存」：长图收工同样静默落盘
+	Util::quietSaveCapture(pixels, imgW, resultH, false, win ? win->focusAppName() : L"");
 }
 
 bool CapLong::saveToFile()
 {
 	std::vector<BYTE> pixels;
 	if (!exportPixels(pixels)) return false;
-	auto path = Util::getSaveFilePath(win->hwnd);
+	auto path = Util::getSaveFilePath(win->hwnd,
+		Util::extensionFromSaveFormat(Setting::get()->getSaveFormat()));
 	if (path.empty()) return false;
 	if (!Util::saveToFile(path, imgW, resultH, pixels.data())) return false;
 	Setting::get()->addHistoryItem(pixels, imgW, resultH, L"capture");

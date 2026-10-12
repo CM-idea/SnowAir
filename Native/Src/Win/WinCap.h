@@ -39,6 +39,10 @@ public:
 	void forwardKey(UINT key) override;
 	void setMouseTransparent(bool transparent);
 	bool mouseTransparent() const { return isMouseTransparent; }
+	// 会话开始那一刻前台窗口的应用名（不含扩展名）；供「焦点窗口文件名格式」用
+	const std::wstring& focusAppName() const { return focusAppName_; }
+	// 「录制中显示按键」：全局键盘钩子把按键组合写进来（钩子回调在 UI 线程，可直接调用）
+	void onGlobalKeyCombo(const std::wstring& text);
 	// 「显示光标」工具按钮：截图/导出时把会话开始那一刻的系统光标一起拍进去
 	void toggleShowCursor();
 	bool showCursorEnabled() const { return showCursor; }
@@ -136,6 +140,11 @@ private:
 	// 「显示光标」：会话开始抓一次系统光标位图；屏幕上/导出图里按开关叠加
 	void captureCursorSnapshot();
 	void paintCursor(ID2D1DeviceContext* ctx);
+	// 「录制中显示按键」：装/摘全局键盘钩子 + 画浮层
+	void startKeyOverlay();
+	void stopKeyOverlay();
+	void paintKeyOverlay(ID2D1DeviceContext* ctx);
+	void onKeyOverlayTimer();
 	void compositeCursor(std::vector<BYTE>& pixels, int w, int h, int originX, int originY);
 private:
 	enum class CapStage { Select, Adjust, Long, Video };
@@ -162,6 +171,14 @@ private:
 	Microsoft::WRL::ComPtr<ID2D1Bitmap1> cursorBmp;
 	// 框选：仅真正拖动后才显示放大镜（单击不触发）
 	bool selectDragging_{ false };
+	// 「查找元素」点选到的窗口元素（无拖拽即确认）→ 命中「焦点窗口文件名格式」与历史来源 focused
+	bool selectionFromElement_{ false };
+	// 会话开始前记录的前台应用名（用于 {{FOCUS_WINDOW_APP_NAME}}）
+	std::wstring focusAppName_;
+	// 「录制中显示按键」浮层：文本 + 过期时刻；约 1.5s 后自动清掉
+	std::wstring keyOverlayText_;
+	ULONGLONG keyOverlayUntil_{ 0 };
+	static constexpr UINT keyOverlayTimerId{ 0x5301 };
 	ULONGLONG lastDownTime{ 0 };
 	POINT lastDownPos{ 0, 0 };
 	bool hideScreenImg{ false };

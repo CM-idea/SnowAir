@@ -9,6 +9,7 @@
 #include "IconCodes.h"
 #include "ToolbarChrome.h"
 #include "ToolbarTheme.h"
+#include "../Setting.h"
 
 ToolVideo::ToolVideo(WinCap* win) : Ling::WinBase(), win(win)
 {
@@ -504,7 +505,16 @@ void ToolVideo::saveFile()
 		win->close();
 		return;
 	}
-	auto tarPath = Util::getSaveFilePath(nullptr, selectIndex == 1 ? L"gif" : L"mp4");
+	// 「功能设置 → 输出 → 视频」：文件名默认给「视频文件名格式」的末段，目录用「录屏文件路径」。
+	// 扩展名按实际临时文件取（录屏 mp4 / 动图 gif 或 apng→png）
+	auto* st = Setting::get();
+	std::wstring ext = std::filesystem::path(srcPath).extension().wstring();
+	if (!ext.empty() && ext[0] == L'.') ext.erase(0, 1);
+	if (ext.empty()) ext = selectIndex == 1 ? L"gif" : L"mp4";
+	std::wstring defName = Util::previewFileName(
+		st->getVideoRecordFormat(), Setting::defaultVideoRecordFormat(), L"");
+	if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos) defName = defName.substr(slash + 1);
+	auto tarPath = Util::getSaveFilePath(nullptr, ext, defName, st->getRecordDir());
 	if (!tarPath.empty()) CopyFile(srcPath.data(), tarPath.data(), false);
 	DeleteFile(srcPath.data());
 	win->close();
