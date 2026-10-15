@@ -120,12 +120,15 @@ void TranslateService::translateSegments(const std::vector<std::wstring>& segmen
 		TranslateResult r;
 		r.ok = true;
 		r.providerUsed = resolveProvider(base.provider);
+		size_t okCount = 0;
+		std::wstring lastErr;
 		for (size_t i = 0; i < segments.size(); i++) {
 			std::wstring line;
 			// ① 这一段本身就是目标语（脚本可确认：目标为中日韩时）→ 原样保留：
 			//    既不浪费一次请求，也不会被"反向翻译"翻坏。多语混排的选区就靠这条各按各的。
 			if (TranslateLangs::isSameLang(req.targetLang, segments[i])) {
 				line = segments[i];
+				okCount++;
 			}
 			else {
 				TranslateRequest one = req;
@@ -137,15 +140,28 @@ void TranslateService::translateSegments(const std::vector<std::wstring>& segmen
 					if (!d.empty()) one.sourceLang = d;
 				}
 				auto tr = runChain(one, chain);
-				if (!tr.ok) {
-					if (cb) cb(tr);
-					return;
+				if (tr.ok) {
+					r.providerUsed = tr.providerUsed;
+					line = tr.text;
+					okCount++;
 				}
-				r.providerUsed = tr.providerUsed;
-				line = tr.text;
+				else {
+					// 这一行失败：保留原文，不拖垮其它已经翻好的行
+					line = segments[i];
+					if (lastErr.empty()) lastErr = tr.error.empty() ? L"未知错误" : tr.error;
+				}
 			}
 			if (i) r.text += L'\n';
 			r.text += line;
+		}
+		// 全失败 → 报失败（面板退回显示原文 + 红条）；部分失败 → 出结果，另给个提示
+		if (okCount == 0) {
+			r.ok = false;
+			r.error = lastErr;
+		}
+		else if (!lastErr.empty()) {
+			r.partial = true;
+			r.error = lastErr;
 		}
 		if (cb) cb(r);
 	}).detach();

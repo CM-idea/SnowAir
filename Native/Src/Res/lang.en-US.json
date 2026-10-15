@@ -462,6 +462,7 @@
   "ocr": {
     "fail": "Recognition failed",
     "copy": "Copy text",
-    "translating": "Translating…"
+    "translating": "Translating…",
+    "partial": "Some lines failed to translate; original text kept"
   }
 }

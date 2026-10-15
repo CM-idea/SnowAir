@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "TranslateModelManager.h"
+#include "BergamotEngine.h"
 #include "../Ocr/PluginPaths.h"
 #include "../Net/HttpClient.h"
 #include <thread>
@@ -332,6 +333,8 @@ void TranslateModelManager::uninstallPack(const std::wstring& packId)
 {
 	const PackSpec* pack = packById(packId);
 	if (!pack) return;
+	// 先卸掉常驻的离线引擎，否则 bergamot.dll 被占用，删/覆盖都会失败
+	BergamotEngine::release();
 	std::error_code ec;
 	auto models = PluginPaths::translateModels();
 	for (const auto& pr : pack->pairs)
@@ -400,6 +403,8 @@ void TranslateModelManager::download(const std::wstring& packId,
 			st.stage = 1;
 			st.got = st.total = 0;
 			report(0.f);
+			// 解压会删掉并覆盖 bergamot.dll：先卸掉常驻引擎，否则文件被占用、覆盖失败
+			BergamotEngine::release();
 			if (!extractBergamotDll(nupkg, root, [&](float part) {
 					report(part * (float)wDllExtract);
 				})) {

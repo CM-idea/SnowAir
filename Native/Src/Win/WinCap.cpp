@@ -2315,7 +2315,7 @@ void WinCap::storeOcrCache(const OcrResult& r, const D2D1_RECT_F& rect)
 void WinCap::storeTranslateCache(const OcrResult& merged, const D2D1_RECT_F& rect,
 	const std::wstring& key, const TranslateResult& tr)
 {
-	if (!tr.ok) return;   // 失败的结果不缓存，下一次仍要重试
+	if (!tr.ok || tr.partial) return;   // 失败/部分失败的结果不缓存，下一次仍要重试
 	g_trCache = tr;
 	g_trCacheRect = rect;
 	g_trCacheKey = key;
@@ -2343,7 +2343,9 @@ void WinCap::finishOcrTranslate(const OcrResult& merged, const TranslateResult& 
 	}
 	toolOcr->setTranslatedResult(merged, lines);
 	Ling::Util::setTextToClipboard(tr.text);
-	toolOcr->clearBanner();
+	// 部分行失败：结果照出（失败行已保留原文），单给一条提示，别让用户以为全翻好了
+	if (tr.partial) toolOcr->showBanner(Lang::get(L"ocr.partial"), false);
+	else toolOcr->clearBanner();
 	toolOcr->repaint();   // 译文与"收提示条"一次刷出来
 }
 

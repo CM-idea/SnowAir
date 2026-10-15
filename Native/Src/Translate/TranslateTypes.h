@@ -48,6 +48,7 @@ struct TranslateRequest {
 
 struct TranslateResult {
 	bool ok{ false };
+	bool partial{ false };   // ok=true 但部分行翻译失败（失败行保留原文）
 	std::wstring text;
 	std::wstring detectedSourceLang;
 	std::wstring providerUsed;

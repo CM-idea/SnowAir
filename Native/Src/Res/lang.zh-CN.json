@@ -462,6 +462,7 @@
   "ocr": {
     "fail": "识别失败",
     "copy": "复制文字",
-    "translating": "正在翻译…"
+    "translating": "正在翻译…",
+    "partial": "部分行翻译失败，已保留原文"
   }
 }
