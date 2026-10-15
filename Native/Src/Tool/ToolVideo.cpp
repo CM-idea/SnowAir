@@ -9,7 +9,35 @@
 #include "IconCodes.h"
 #include "ToolbarChrome.h"
 #include "ToolbarTheme.h"
+#include "ToolbarStore.h"
 #include "../Setting.h"
+
+namespace {
+	// 录屏栏运行时 id ↔ 设置页（ToolbarStore kind=1）id：设置页里穿透/录制/音频/麦克风/
+	// 动图叫 mouse-through / video-play / video-audio / video-mic / video-gif，运行时是简写。
+	std::wstring videoRuntimeId(const std::wstring& sid)
+	{
+		if (sid.rfind(L"split", 0) == 0) return L"|";
+		if (sid == L"mouse-through") return L"pierce";
+		if (sid == L"video-play" || sid == L"video-pause") return L"play";
+		if (sid == L"video-audio") return L"audio";
+		if (sid == L"video-mic") return L"mic";
+		if (sid == L"video-gif") return L"gif";
+		if (sid == L"confirm") return L"done";
+		if (sid == L"serial-number") return L"number";
+		return sid;
+	}
+	// 内置默认顺序（与旧版手写 buildBar 一字不差）
+	const std::vector<std::wstring>& defaultVideoSlots()
+	{
+		static const std::vector<std::wstring> k{
+			L"pierce", L"|", L"play", L"record-time", L"audio", L"mic",
+			L"rect", L"arrow", L"pen", L"text", L"number", L"mosaic", L"eraser", L"|",
+			L"undo", L"|", L"gif", L"save", L"cancel", L"done"
+		};
+		return k;
+	}
+}
 
 ToolVideo::ToolVideo(WinCap* win) : Ling::WinBase(), win(win)
 {
@@ -56,39 +84,32 @@ float ToolVideo::contentPadRight() const
 float ToolVideo::contentWidth() const
 {
 	const float sep = spliterW + (ToolbarTheme::splitterGap - hoverInset) * 2.f;
-	// 拖拽 + 穿透 + | + 播放 + 时间 + 音频 + 麦 + 7 标注 + | + 撤销 + | + GIF + 保存 + 取消 + 完成
-	constexpr float iconBtns = 16.f; // pierce + play audio mic +7 annot + undo gif save cancel done
+	// 按当前槽位表累加：图标格 + 时长格 + 分隔符（默认布局下与旧版硬编码的 16 图标 + 时长 + 3 分隔一致）
+	float icons = 0.f, timer = 0.f, splits = 0.f;
+	for (const auto& id : resolveSlots()) {
+		if (id == L"|") splits += 1.f;
+		else if (id == L"record-time") timer += timerW;
+		else icons += btnSize;
+	}
 	const float drag = ToolbarTheme::paddingLeft + ToolbarTheme::dragIconSize + dragMarginRight();
-	return drag + btnSize * iconBtns + timerW + sep * 3.f + contentPadRight();
+	return drag + icons + timer + sep * splits + contentPadRight();
 }
 
 float ToolVideo::getBtnCenterX() const
 {
-	// 物理像素：相对工具条左缘到当前标注按钮中心
+	// 物理像素：相对工具条左缘到当前标注按钮中心；未选标注时对准播放钮
 	const float sep = (spliterW + (ToolbarTheme::splitterGap - hoverInset) * 2.f) * dpi;
 	float x = (ToolbarTheme::shadowPad + ToolbarTheme::paddingLeft
 		+ ToolbarTheme::dragIconSize + dragMarginRight()) * dpi;
-	x += btnSize * dpi; // pierce
-	x += sep;
-	x += btnSize * dpi; // play
-	x += timerW * dpi;
-	x += btnSize * dpi * 2.f; // audio + mic
-	static const wchar_t* kAnnot[] = {
-		L"rect", L"arrow", L"pen", L"text", L"number", L"mosaic", L"eraser"
-	};
-	for (const auto* id : kAnnot) {
-		if (curAnnotId_ == id) {
-			x += btnSize * dpi * 0.5f;
-			return x;
-		}
-		x += btnSize * dpi;
+	float playCenter = -1.f;
+	for (const auto& id : resolveSlots()) {
+		if (id == L"|") { x += sep; continue; }
+		const float slotW = (id == L"record-time") ? timerW * dpi : btnSize * dpi;
+		if (id == L"play") playCenter = x + slotW * 0.5f;
+		if (id == curAnnotId_) return x + slotW * 0.5f;
+		x += slotW;
 	}
-	// 未选标注：箭头对准播放钮
-	return (ToolbarTheme::shadowPad + ToolbarTheme::paddingLeft
-		+ ToolbarTheme::dragIconSize + dragMarginRight()) * dpi
-		+ btnSize * dpi // pierce
-		+ sep
-		+ btnSize * dpi * 0.5f;
+	return playCenter >= 0.f ? playCenter : x;
 }
 
 void ToolVideo::onCreated()
@@ -224,98 +245,144 @@ void ToolVideo::buildBar()
 	dragHandle->setJustifyContent(Ling::Justify::Center);
 	tip->bind(dragHandle, L"拖动");
 
-	btnPierce = makeIconBtn(Icon::Pierce, L"pierce");
-	btnPierce->onClick.add([this](Ling::Button*) { togglePierce(); });
-	tip->bind(btnPierce, Lang::get(L"video.mouseThrough"));
-	applyToggleStyle(btnPierce, pierceOn);
-
-	makeSpliter();
-
-	btnPlay = makeIconBtn(Icon::Play, L"play");
-	btnPlay->onClick.add([this](Ling::Button*) { togglePlayPause(); });
-	tip->bind(btnPlay, Lang::get(L"video.startRecord"));
-
-	timerLabel = contentNode->makeChild<Ling::Label>();
-	timerLabel->setWidth(timerW);
-	timerLabel->setHeightPercent(100.f);
-	timerLabel->setAlignItems(Ling::Align::Center);
-	timerLabel->setJustifyContent(Ling::Justify::Center);
-	timerLabel->setColor(Icon::ColorNormal);
-	updateTimerText();
-
-	btnAudio = makeIconBtn(Icon::Audio, L"audio");
-	btnAudio->onClick.add([this](Ling::Button*) {
-		if (selectIndex != 0) return;
-		selectSpeaker = !selectSpeaker;
-		updateAudioButtons();
-	});
-	tip->bind(btnAudio, Lang::get(L"video.recordSystem"));
-
-	btnMic = makeIconBtn(Icon::MicOn, L"mic");
-	btnMic->onClick.add([this](Ling::Button*) {
-		if (selectIndex != 0) return;
-		selectMic = !selectMic;
-		updateAudioButtons();
-	});
-	tip->bind(btnMic, Lang::get(L"video.recordMic"));
-	updateAudioButtons();
-
-	struct AnnotItem { const wchar_t* id; const wchar_t* icon; const wchar_t* tip; };
-	const AnnotItem annots[] = {
-		{ L"rect", Icon::Rect, L"tool.rect" },
-		{ L"arrow", Icon::Arrow, L"tool.arrow" },
-		{ L"pen", Icon::Pen, L"tool.pen" },
-		{ L"text", Icon::Text, L"tool.text" },
-		{ L"number", Icon::Number, L"tool.number" },
-		{ L"mosaic", Icon::Mosaic, L"tool.mosaic" },
-		{ L"eraser", Icon::Eraser, L"tool.eraser" },
-	};
-	for (const auto& a : annots) {
-		auto* btn = makeIconBtn(a.icon, a.id);
-		tip->bind(btn, Lang::get(a.tip));
-		btn->onClick.add([this, id = std::wstring(a.id)](Ling::Button*) { onAnnotClick(id); });
-		annotBtns.push_back(btn);
+	for (const auto& id : resolveSlots()) {
+		if (id == L"|") makeSpliter();
+		else makeSlot(id);
 	}
+	updateAudioButtons();
+}
 
-	makeSpliter();
+// 运行时槽位顺序：用户存过「录屏工具栏外观」就按它排，否则用内置默认。
+std::vector<std::wstring> ToolVideo::resolveSlots() const
+{
+	const auto& def = defaultVideoSlots();
+	if (!ToolbarStore::hasSavedLayout(1)) return def;
+	auto st = ToolbarStore::loadLayout(1);
+	std::vector<std::wstring> out;
+	for (const auto& sid : st.active) {
+		std::wstring rid = videoRuntimeId(sid);
+		if (rid == L"|") {
+			// 相邻分隔符并成一个（运行时不做折叠，得在这儿收）
+			if (!out.empty() && out.back() != L"|") out.push_back(L"|");
+			continue;
+		}
+		// 只收运行时认识的槽位（设置页里可能还留着别的类型的历史项）
+		bool known = false;
+		for (const auto& d : def) if (d == rid) { known = true; break; }
+		if (!known) continue;
+		bool dup = false;
+		for (const auto& o : out) if (o == rid) { dup = true; break; }
+		if (dup) continue;
+		out.push_back(rid);
+	}
+	while (!out.empty() && out.back() == L"|") out.pop_back();
+	return out.empty() ? def : out;
+}
 
-	btnUndo = makeIconBtn(Icon::Undo, L"undo");
-	btnUndo->onClick.add([this](Ling::Button*) {
-		if (win->history && win->history->canUndo())
-			win->history->undo();
-		updateUndoEnabled();
-	});
-	tip->bind(btnUndo, Lang::get(L"tool.undo"));
-
-	makeSpliter();
-
-	btnGif = makeIconBtn(Icon::Gif, L"gif");
-	btnGif->onClick.add([this](Ling::Button*) { onGifClick(); });
-	tip->bind(btnGif, Lang::get(L"video.outputGif"));
-	applyToggleStyle(btnGif, selectIndex == 1);
-
-	auto btnSave = makeIconBtn(Icon::Save, L"save");
-	btnSave->onClick.add([this](Ling::Button*) {
-		if (isRecording) saveFile();
-	});
-	tip->bind(btnSave, Lang::get(L"video.stopFile"));
-
-	auto btnCancel = makeIconBtn(Icon::Cancel, L"cancel");
-	btnCancel->setColor(Icon::ColorCancel);
-	btnCancel->setHoverColor(Icon::ColorCancel);
-	btnCancel->onClick.add([this](Ling::Button*) {
-		if (isRecording) finishRecord(false);
-		else win->close();
-	});
-	tip->bind(btnCancel, Lang::get(isRecording ? L"video.stopExit" : L"video.exit"));
-
-	auto btnDone = makeIconBtn(Icon::Done, L"done");
-	btnDone->setColor(Icon::ColorDone);
-	btnDone->setHoverColor(Icon::ColorDone);
-	btnDone->onClick.add([this](Ling::Button*) {
-		if (isRecording) finishRecord(true);
-	});
-	tip->bind(btnDone, Lang::get(L"video.stopClipboard"));
+// 建一个槽位控件。锁定项（录制/时长/取消/完成）设置页不允许删，所以这里必有；
+// 其余槽位被用户移到隐藏区时就不会被调用，对应的成员指针保持 nullptr，
+// 相关函数都已做空判断。
+void ToolVideo::makeSlot(const std::wstring& id)
+{
+	if (id == L"pierce") {
+		btnPierce = makeIconBtn(Icon::Pierce, L"pierce");
+		btnPierce->onClick.add([this](Ling::Button*) { togglePierce(); });
+		tip->bind(btnPierce, Lang::get(L"video.mouseThrough"));
+		applyToggleStyle(btnPierce, pierceOn);
+	}
+	else if (id == L"play") {
+		btnPlay = makeIconBtn(Icon::Play, L"play");
+		btnPlay->onClick.add([this](Ling::Button*) { togglePlayPause(); });
+		tip->bind(btnPlay, Lang::get(isRecording ? L"video.pauseRecord" : L"video.startRecord"));
+	}
+	else if (id == L"record-time") {
+		timerLabel = contentNode->makeChild<Ling::Label>();
+		timerLabel->setWidth(timerW);
+		timerLabel->setHeightPercent(100.f);
+		timerLabel->setAlignItems(Ling::Align::Center);
+		timerLabel->setJustifyContent(Ling::Justify::Center);
+		timerLabel->setColor(Icon::ColorNormal);
+		updateTimerText();
+	}
+	else if (id == L"audio") {
+		btnAudio = makeIconBtn(Icon::Audio, L"audio");
+		btnAudio->onClick.add([this](Ling::Button*) {
+			if (selectIndex != 0) return;
+			selectSpeaker = !selectSpeaker;
+			updateAudioButtons();
+		});
+		tip->bind(btnAudio, Lang::get(L"video.recordSystem"));
+	}
+	else if (id == L"mic") {
+		btnMic = makeIconBtn(Icon::MicOn, L"mic");
+		btnMic->onClick.add([this](Ling::Button*) {
+			if (selectIndex != 0) return;
+			selectMic = !selectMic;
+			updateAudioButtons();
+		});
+		tip->bind(btnMic, Lang::get(L"video.recordMic"));
+	}
+	else if (id == L"undo") {
+		btnUndo = makeIconBtn(Icon::Undo, L"undo");
+		btnUndo->onClick.add([this](Ling::Button*) {
+			if (win->history && win->history->canUndo())
+				win->history->undo();
+			updateUndoEnabled();
+		});
+		tip->bind(btnUndo, Lang::get(L"tool.undo"));
+	}
+	else if (id == L"gif") {
+		btnGif = makeIconBtn(Icon::Gif, L"gif");
+		btnGif->onClick.add([this](Ling::Button*) { onGifClick(); });
+		tip->bind(btnGif, Lang::get(L"video.outputGif"));
+		applyToggleStyle(btnGif, selectIndex == 1);
+	}
+	else if (id == L"save") {
+		auto* btnSave = makeIconBtn(Icon::Save, L"save");
+		btnSave->onClick.add([this](Ling::Button*) {
+			if (isRecording) saveFile();
+		});
+		tip->bind(btnSave, Lang::get(L"video.stopFile"));
+	}
+	else if (id == L"cancel") {
+		auto* btnCancel = makeIconBtn(Icon::Cancel, L"cancel");
+		btnCancel->setColor(Icon::ColorCancel);
+		btnCancel->setHoverColor(Icon::ColorCancel);
+		btnCancel->onClick.add([this](Ling::Button*) {
+			if (isRecording) finishRecord(false);
+			else win->close();
+		});
+		tip->bind(btnCancel, Lang::get(isRecording ? L"video.stopExit" : L"video.exit"));
+	}
+	else if (id == L"done") {
+		auto* btnDone = makeIconBtn(Icon::Done, L"done");
+		btnDone->setColor(Icon::ColorDone);
+		btnDone->setHoverColor(Icon::ColorDone);
+		btnDone->onClick.add([this](Ling::Button*) {
+			if (isRecording) finishRecord(true);
+		});
+		tip->bind(btnDone, Lang::get(L"video.stopClipboard"));
+	}
+	else {
+		// 标注类：矩形 / 箭头 / 画笔 / 文字 / 序号 / 马赛克 / 橡皮擦
+		static const struct { const wchar_t* id; const wchar_t* icon; const wchar_t* tip; } kAnnots[] = {
+			{ L"rect", Icon::Rect, L"tool.rect" },
+			{ L"arrow", Icon::Arrow, L"tool.arrow" },
+			{ L"pen", Icon::Pen, L"tool.pen" },
+			{ L"text", Icon::Text, L"tool.text" },
+			{ L"number", Icon::Number, L"tool.number" },
+			{ L"mosaic", Icon::Mosaic, L"tool.mosaic" },
+			{ L"eraser", Icon::Eraser, L"tool.eraser" },
+		};
+		for (const auto& a : kAnnots) {
+			if (id != a.id) continue;
+			auto* btn = makeIconBtn(a.icon, a.id);
+			tip->bind(btn, Lang::get(a.tip));
+			btn->onClick.add([this, id = std::wstring(a.id)](Ling::Button*) { onAnnotClick(id); });
+			annotBtns.push_back(btn);
+			break;
+		}
+	}
 }
 
 void ToolVideo::onDragDown(POINT pos, bool isRight)

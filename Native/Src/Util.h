@@ -43,6 +43,15 @@ public:
 	// 表现为设置页左下角版本号对、而「关于」页（每次打开都重新读）对不上。
 	static std::array<int, 3> getAppVersion();
 
+	// —— 管理员 / 提权判定 ——
+	// 当前登录账户是否为内置 Administrator（域内 SID 的 RID == 500）。该账户默认不受 UAC 过滤，
+	// 进程天然就是管理员：自启直接写 Run 键即可，既不需要 runas 提权、也不需要计划任务。
+	static bool isBuiltinAdminAccount();
+	// 当前进程是否已处于管理员提权状态。
+	static bool isElevated();
+	// 用 runas 拉起一个提权的新实例（params 为附加命令行，不含 exe 路径）。用户取消 UAC 时返回 false。
+	static bool spawnElevated(const std::wstring& params);
+
 	// —— 截图输出路径 ——
 	// 默认输出根目录：图片\SnowAir；取不到「图片」文件夹时退回空路径（不建目录）
 	static std::filesystem::path defaultOutputDir();

@@ -145,6 +145,8 @@
     "about": "About",
     "autoStart": "Launch at startup",
     "runAsAdmin": "Run as administrator",
+    "runAsAdminLockedTip": "You are signed in as the built-in Administrator, which already has full administrator rights. This cannot be turned off for now.",
+    "runAsAdminConfirm": "SnowAir needs to restart with administrator privileges. Continue?",
     "language": "Language:",
     "getMoreLang": "Get more languages",
     "hotkeys": "Global Hotkeys",

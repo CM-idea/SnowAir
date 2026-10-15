@@ -58,8 +58,23 @@ void WinSetting::init()
 
 void WinSetting::init(int pageIndex)
 {
-	if (!winSetting) winSetting.reset(new WinSetting());
-	else SetForegroundWindow(winSetting->hwnd);
+	if (!winSetting) {
+		winSetting.reset(new WinSetting());
+	}
+	else if (winSetting->hwnd) {
+		// 已经开着：最小化就还原，并把它抬到最前、抢回焦点。否则用户点托盘「设置」时，
+		// 窗口可能还缩在任务栏里或压在别的窗口后面，看着像"点了没反应"。
+		HWND hwnd = winSetting->hwnd;
+		ShowWindow(hwnd, IsIconic(hwnd) ? SW_RESTORE : SW_SHOW);
+		SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+		if (!SetForegroundWindow(hwnd)) {
+			// 前台锁可能挡下 SetForegroundWindow：借"临时置顶再取消置顶"把它顶到前台
+			SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+			SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+			SetForegroundWindow(hwnd);
+		}
+		SetFocus(hwnd);
+	}
 	winSetting->showPage(pageIndex);
 }
 

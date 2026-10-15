@@ -22,6 +22,8 @@ private:
 	void layout() override;
 	void onMinMaxInfo(MINMAXINFO* mmi) override;
 	void buildBar();
+	void makeSlot(const std::wstring& id);          // 按槽位 id 建一个控件（分隔符走 makeSpliter）
+	std::vector<std::wstring> resolveSlots() const; // 运行时槽位顺序（自定义布局优先）
 	void onTimerCB(UINT id);
 	void togglePlayPause();
 	void togglePierce();

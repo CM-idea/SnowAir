@@ -145,6 +145,8 @@
     "about": "关于",
     "autoStart": "开机自启",
     "runAsAdmin": "以管理员身份运行",
+    "runAsAdminLockedTip": "当前为 Administrator 账户，已拥有管理员权限，暂无法关闭。",
+    "runAsAdminConfirm": "开启后需以管理员身份重新启动 SnowAir，是否继续？",
     "language": "语言：",
     "getMoreLang": "获取更多语言",
     "hotkeys": "全局热键",

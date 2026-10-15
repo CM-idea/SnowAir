@@ -98,6 +98,12 @@ namespace ToolbarStore {
 		Setting::get()->setToolStr(L"toolbarLayout", key + L"i", joinIds(st.inactive));
 	}
 
+	bool hasSavedLayout(int kind)
+	{
+		std::wstring key = std::to_wstring(kind);
+		return !Setting::get()->getToolStr(L"toolbarLayout", key + L"a", L"").empty();
+	}
+
 	bool isDefault(int kind)
 	{
 		auto def = defaultLayout(kind);
@@ -107,7 +113,12 @@ namespace ToolbarStore {
 
 	void restoreDefaults(int kind)
 	{
-		saveLayout(kind, defaultLayout(kind));
+		// 「恢复默认」= 把用户的覆盖项删掉，而不是写一份等于默认的配置：
+		// 删掉之后 loadLayout 会回落到 defaultLayout，运行时也会因 hasSavedLayout=false
+		// 而继续用工具栏自己的内置默认，两边口径天然一致。
+		std::wstring key = std::to_wstring(kind);
+		Setting::get()->removeToolKey(L"toolbarLayout", key + L"a");
+		Setting::get()->removeToolKey(L"toolbarLayout", key + L"i");
 	}
 
 	// ==================== 主题色板 ====================

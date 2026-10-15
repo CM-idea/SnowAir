@@ -35,6 +35,51 @@ std::array<int, 3> Util::getAppVersion()
 	return result;
 }
 
+bool Util::isElevated()
+{
+	HANDLE token = nullptr;
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+	TOKEN_ELEVATION elevation{};
+	DWORD size = 0;
+	BOOL ok = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size)
+		&& elevation.TokenIsElevated != 0;
+	CloseHandle(token);
+	return ok != FALSE;
+}
+
+bool Util::isBuiltinAdminAccount()
+{
+	HANDLE token = nullptr;
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+	DWORD size = 0;
+	GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+	std::vector<BYTE> buf(size);
+	bool isAdmin = false;
+	if (GetTokenInformation(token, TokenUser, buf.data(), size, &size)) {
+		PSID sid = reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid;
+		const BYTE subCount = *GetSidSubAuthorityCount(sid);
+		// 内置 Administrator 的 RID 固定为 500（本地账户 SID 形如 S-1-5-21-...-500）；
+		// 子权限个数 <4 的是 S-1-5-... 这类服务/组 SID，没有 500 这个用户，直接排除
+		if (subCount >= 4) {
+			isAdmin = (*GetSidSubAuthority(sid, subCount - 1) == 500);
+		}
+	}
+	CloseHandle(token);
+	return isAdmin;
+}
+
+bool Util::spawnElevated(const std::wstring& params)
+{
+	wchar_t exePath[MAX_PATH];
+	GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+	SHELLEXECUTEINFOW sei{ sizeof(sei) };
+	sei.lpVerb = L"runas";
+	sei.lpFile = exePath;
+	sei.lpParameters = params.c_str();
+	sei.nShow = SW_SHOWNORMAL;
+	return ShellExecuteExW(&sei) != FALSE;
+}
+
 namespace {
 	// 把 BGRA top-down 像素按指定容器编码写进 stream。
 	// PNG/BMP 原生支持 32bppBGRA；JPEG 等只接受 24bppBGR，交给 WIC 格式转换器转一道。

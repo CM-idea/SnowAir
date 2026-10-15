@@ -24,6 +24,16 @@
 
 using namespace Microsoft::WRL;
 
+namespace {
+	// 文本工具下，马赛克这类"整块铺满的背景"不参与命中判定：否则点它会先被当成选中/拖动，
+	// 文字落不下去。马赛克与普通标注是同一套按创建顺序叠加的模型，后画的盖住先画的，
+	// 所以光标停在这儿应当能直接打字（文字创建后就压在它上面）。
+	bool textToolIgnoresShape(const std::wstring& tool, ShapeBase* shape)
+	{
+		return tool == L"text" && shape && dynamic_cast<ShapeMosaic*>(shape) != nullptr;
+	}
+}
+
 AnnotHost::AnnotHost() = default;
 
 AnnotHost::~AnnotHost()
@@ -678,7 +688,7 @@ void AnnotHost::applyAnnotCursor()
 	// "没选工具 = 普通箭头"说的是**选框里的空白处**（那条走 applyEmptyToolCursor）
 	if (!annotSkipHitSelect()) {
 		if (auto* under = probeShapeUnder(ix, iy, nullptr)) {
-			if (under != shapeHover) {
+			if (under != shapeHover && !textToolIgnoresShape(getCurToolId(), under)) {
 				under->setCursor();
 				return;
 			}
@@ -1110,16 +1120,20 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 	}
 	if (!annotSkipHitSelect() && !textOnShaft && !linkFromShape) {
 		if (auto* hit = hitShapeAt((float)imgPos.x, (float)imgPos.y)) {
-			newShape = nullptr;
-			if (shapeHover != hit) {
-				if (auto* a = dynamic_cast<ShapeArrow*>(shapeHover)) a->resetFree();
-				else if (auto* l = dynamic_cast<ShapeLine*>(shapeHover)) l->resetFree();
-				shapeHover = hit;
-				refresh();
+			// 文本工具：马赛克这类"整块铺满的背景"不抢这一下，直接往下走"落笔造文字"，
+			// 于是"先马赛克、后文字"能正常叠起来（文字压在马赛克上）。
+			if (!textToolIgnoresShape(tool, hit)) {
+				newShape = nullptr;
+				if (shapeHover != hit) {
+					if (auto* a = dynamic_cast<ShapeArrow*>(shapeHover)) a->resetFree();
+					else if (auto* l = dynamic_cast<ShapeLine*>(shapeHover)) l->resetFree();
+					shapeHover = hit;
+					refresh();
+				}
+				shapeHover->mouseDown((float)imgPos.x, (float)imgPos.y);
+				lockAnnotDragFromHover();
+				return true;
 			}
-			shapeHover->mouseDown((float)imgPos.x, (float)imgPos.y);
-			lockAnnotDragFromHover();
-			return true;
 		}
 	}
 

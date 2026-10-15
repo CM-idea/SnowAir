@@ -153,38 +153,75 @@ namespace {
 					}
 				}
 
-				const UINT cmd = row.id;
-				btn->onClick.add([cmd](Ling::Button*) {
-					Ling::App::get()->dq.TryEnqueue([cmd]() {
-						closeTrayMenu();
-						runTrayCommand(cmd);
-						});
-					});
+				// 行 → 命令记下来；按下/抬起由窗口级处理（见下面 onMouseDown/onMouseUp）
+				rows.push_back({ btn, row.id });
 			}
-		}
-	};
+
+		// 菜单「抬起才派发」：Ling 的按钮是在**按下**时就派发 onClick 的，那样命令一执行菜单
+		// 就被关掉，紧接着的抬起不再被菜单吃掉，可能落到托盘图标上，再触发一次托盘单击动作
+		//（默认就是「截图」）—— 表现就是"点了设置又弹截图"。所以按下只记行，抬起才执行。
+		onMouseDown.add([this](POINT pos, bool isRight) {
+			pressedRow = nullptr;
+			pressedCmd = 0;
+			if (isRight) return;
+			for (auto& r : rows) {
+				if (r.btn && r.btn->isPosIn(pos)) { pressedRow = r.btn; pressedCmd = r.cmd; break; }
+			}
+			});
+		onMouseUp.add([this](POINT pos, bool isRight) {
+			auto* row = pressedRow;
+			const UINT cmd = pressedCmd;
+			pressedRow = nullptr;
+			pressedCmd = 0;
+			if (!row || isRight || !row->isPosIn(pos)) return;   // 按下与抬起不在同一行：不派发
+			Ling::App::get()->dq.TryEnqueue([cmd]() {
+				closeTrayMenu();
+				runTrayCommand(cmd);
+				});
+			});
+	}
+
+private:
+	struct RowHit { Ling::Button* btn; UINT cmd; };
+	std::vector<RowHit> rows;
+	Ling::Button* pressedRow{ nullptr };
+	UINT pressedCmd{ 0 };
+};
 
 	std::unique_ptr<TrayMenuWindow> g_trayMenu;
 	HHOOK g_menuMouseHook{ nullptr };
+	// 「吞一次点击」：菜单打开时，点在菜单外的那一下（含配对的抬起）不再往下传。用于关菜单，
+	// 同时保证它不会落到托盘图标上再触发一次托盘单击动作（默认就是「截图」）。
+	bool g_swallowUp{ false };
 
 	void closeTrayMenu()
 	{
 		if (g_menuMouseHook) { UnhookWindowsHookEx(g_menuMouseHook); g_menuMouseHook = nullptr; }
 		if (g_trayMenu) { g_trayMenu->close(); g_trayMenu.reset(); }
+		g_swallowUp = false;
 	}
 
 	LRESULT CALLBACK menuMouseProc(int code, WPARAM wp, LPARAM lp)
 	{
-		if (code == HC_ACTION && g_trayMenu
-			&& (wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN || wp == WM_MBUTTONDOWN)) {
-			auto* ms = reinterpret_cast<MSLLHOOKSTRUCT*>(lp);
-			if (ms) {
-				RECT rc{};
-				GetWindowRect(g_trayMenu->hwnd, &rc);
-				if (!PtInRect(&rc, ms->pt)) Ling::App::get()->dq.TryEnqueue([]() { closeTrayMenu(); });
-			}
-		}
-		return CallNextHookEx(nullptr, code, wp, lp);
+		if (code != HC_ACTION) return CallNextHookEx(nullptr, code, wp, lp);
+		const bool down = (wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN || wp == WM_MBUTTONDOWN);
+		const bool up = (wp == WM_LBUTTONUP || wp == WM_RBUTTONUP || wp == WM_MBUTTONUP);
+		if (!down && !up) return CallNextHookEx(nullptr, code, wp, lp);
+		// 关菜单那一下配对的抬起：吃掉，别漏给下面
+		if (up && g_swallowUp) { g_swallowUp = false; return 1; }
+		if (!g_trayMenu) return CallNextHookEx(nullptr, code, wp, lp);
+
+		auto* ms = reinterpret_cast<MSLLHOOKSTRUCT*>(lp);
+		if (!ms) return CallNextHookEx(nullptr, code, wp, lp);
+		RECT rc{};
+		GetWindowRect(g_trayMenu->hwnd, &rc);
+		// 菜单内：交给菜单自己处理（行按钮的按下/抬起在 TrayMenuWindow 里派发）
+		if (PtInRect(&rc, ms->pt)) return CallNextHookEx(nullptr, code, wp, lp);
+
+		// 菜单外：这一下只用来关菜单，吞掉不往下传（按下时连配对的抬起一起吞）
+		Ling::App::get()->dq.TryEnqueue([]() { closeTrayMenu(); });
+		if (down) g_swallowUp = true;
+		return 1;
 	}
 
 	void openOutputDir()
@@ -247,5 +284,6 @@ void Tray::onTrayRightClick()
 	g_trayMenu = std::make_unique<TrayMenuWindow>();
 	if (!g_trayMenu->hwnd) { g_trayMenu.reset(); return; }
 	g_trayMenu->openAt(pt);
+	g_swallowUp = false;
 	g_menuMouseHook = SetWindowsHookExW(WH_MOUSE_LL, menuMouseProc, GetModuleHandleW(nullptr), 0);
 }

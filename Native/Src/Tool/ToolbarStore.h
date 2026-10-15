@@ -18,6 +18,9 @@ namespace ToolbarStore {
 	LayoutState defaultLayout(int kind);
 	LayoutState loadLayout(int kind);
 	void saveLayout(int kind, const LayoutState& st);
+	// 用户是否在设置页存过这一类的布局（有覆盖项）。运行时要据此决定是否套用自定义布局，
+	// 没存过就保持内置默认，避免被 ToolbarStore 的默认被动改写。
+	bool hasSavedLayout(int kind);
 	bool isDefault(int kind);
 	void restoreDefaults(int kind);
 

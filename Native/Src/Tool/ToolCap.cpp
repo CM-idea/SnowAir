@@ -10,6 +10,7 @@
 #include "ToolCap.h"
 #include "ToolbarChrome.h"
 #include "ToolbarTheme.h"
+#include "ToolbarStore.h"
 #include "../Win/AnnotHost.h"
 #include "../Win/PinMenu.h"
 #include "../Win/SettingWidgets.h"
@@ -17,6 +18,7 @@
 ToolCap::ToolCap(WinCap* capWin) : Ling::WinBase(), winCap(capWin)
 {
 	dpi = capWin->dpi;
+	applyStoredLayout(0);   // 套用「截图工具栏外观」里保存的槽位顺序（没存过则为内置默认）
 	refreshSize();
 	onKeyDown.add([this](UINT key) {
 		if (winPin) winPin->forwardKey(key);
@@ -54,6 +56,7 @@ void ToolCap::hideHoverTip()
 ToolCap::ToolCap(WinPin* pin) : Ling::WinBase(), winPin(pin)
 {
 	dpi = pin->dpi;
+	applyStoredLayout(3);   // 套用「贴图工具栏外观」里保存的槽位顺序（没存过则为内置默认）
 	refreshSize();
 	onKeyDown.add([this](UINT key) { this->winPin->forwardKey(key); });
 	onDpiChanged.add([this]() { dpiChanged = true; });
@@ -186,6 +189,81 @@ void ToolCap::applySlotVisibility()
 	}
 }
 
+namespace {
+	// 运行时槽位 id ↔ 设置页（ToolbarStore）槽位 id 的互转。两边历史上命名不统一
+	// （number/serial-number、pin/fixed、long/scroll-screenshot、close/cancel、
+	// clipboard/confirm、laser/laser-pointer、border/show-border），集中映射；
+	// 分隔符 | 在设置页里叫 split-*。
+	std::wstring storeIdOfRuntime(const std::wstring& rid)
+	{
+		if (rid == L"number") return L"serial-number";
+		if (rid == L"pin") return L"fixed";
+		if (rid == L"long") return L"scroll-screenshot";
+		if (rid == L"close") return L"cancel";
+		if (rid == L"clipboard") return L"confirm";
+		if (rid == L"laser") return L"laser-pointer";
+		if (rid == L"border") return L"show-border";
+		return rid;
+	}
+	std::wstring runtimeIdOfStore(const std::wstring& sid)
+	{
+		if (sid.rfind(L"split", 0) == 0) return L"|";
+		if (sid == L"serial-number") return L"number";
+		if (sid == L"fixed") return L"pin";
+		if (sid == L"scroll-screenshot") return L"long";
+		if (sid == L"cancel") return L"close";
+		if (sid == L"confirm") return L"clipboard";
+		if (sid == L"laser-pointer") return L"laser";
+		if (sid == L"show-border") return L"border";
+		return sid;
+	}
+}
+
+// 按设置页保存的布局重排运行时槽位表。没存过就保持内置默认（ToolbarStore 的默认
+// 与运行时默认未必逐字相同，未自定义的用户不该被动改变）。
+void ToolCap::applyStoredLayout(int kind)
+{
+	if (!ToolbarStore::hasSavedLayout(kind)) return;
+	auto st = ToolbarStore::loadLayout(kind);
+
+	struct Slot { std::wstring id, code, tip; };
+	std::vector<Slot> pool;   // 设置页里存在的槽位：按设置页顺序重排
+	std::vector<Slot> kept;   // 设置页里没有的槽位（如截图栏里贴图专属的 border/opacity）：保持原位、放最前
+	for (size_t i = 0; i < btnIds.size(); i++) {
+		if (btnIds[i] == L"|") continue;   // 分隔符位置改由设置页的 split-* 决定
+		Slot s{ btnIds[i], i < btnCodes.size() ? btnCodes[i] : L"", i < btnTips.size() ? btnTips[i] : L"" };
+		const auto sid = storeIdOfRuntime(s.id);
+		bool known = false;
+		for (const auto& a : st.active) if (a == sid) { known = true; break; }
+		if (!known) for (const auto& h : st.inactive) if (h == sid) { known = true; break; }
+		(known ? pool : kept).push_back(std::move(s));
+	}
+
+	std::vector<Slot> ordered;
+	for (const auto& sid : st.active) {
+		if (sid.rfind(L"split", 0) == 0) {
+			ordered.push_back({ L"|", L"", L"" });
+			continue;
+		}
+		const auto rid = runtimeIdOfStore(sid);
+		for (auto& s : pool) {
+			if (s.id == rid) { ordered.push_back(s); break; }
+		}
+	}
+	// 收一遍多余分隔符（visibleSlots 运行时还会再折一次）；空布局则原样保留，别把工具栏弄空
+	std::vector<Slot> merged;
+	for (auto& s : ordered) {
+		if (s.id == L"|" && (merged.empty() || merged.back().id == L"|")) continue;
+		merged.push_back(std::move(s));
+	}
+	while (!merged.empty() && merged.back().id == L"|") merged.pop_back();
+	if (merged.empty()) return;
+
+	btnIds.clear(); btnCodes.clear(); btnTips.clear();
+	for (auto& s : kept) { btnIds.push_back(s.id); btnCodes.push_back(s.code); btnTips.push_back(s.tip); }
+	for (auto& s : merged) { btnIds.push_back(s.id); btnCodes.push_back(s.code); btnTips.push_back(s.tip); }
+}
+
 // 演示模式（全屏画布）工具条：槽位与图标严格照默认全屏布局
 // （ToolbarLayoutStore kind=2 默认布局）：
 //   矩形 / 箭头 / 画笔 / 文字 / 序号 / 马赛克 / 橡皮擦 / 渐隐画笔 ┊ 撤销 ┊ 重置画布 / 穿透 / 取消
@@ -212,6 +290,7 @@ void ToolCap::applyDemoLayout()
 	};
 	// 槽位换了必须重算窗口宽度：构造函数里那次 refreshSize 用的是默认（截图栏）槽位表，
 	// 不重算的话演示栏会带着截图栏的宽度留一大截空白（"工具栏宽度没自适应"）。
+	applyStoredLayout(2);   // 设置页若自定义过「全屏画布」布局，覆盖上面的内置默认
 	refreshSize();
 }
 

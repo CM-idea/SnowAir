@@ -13,6 +13,9 @@ class App
 		// 表现为读取访问权限冲突
 		static void dispose();
 		static App* get();
+		// 以管理员身份重新启动（runas 拉起提权新实例，本进程退出）。
+		// 用户取消 UAC 时返回 false 且不退出。
+		static bool restartAsAdmin();
 		void takeScreenShot(int x, int y, int w, int h,ID2D1Bitmap1** img);
 		// 由 BGRA 缓冲（top-down，w*4*h）在 **UI 线程**建 D2D 位图。
 		// 抓屏的 GDI 部分（BitBlt+GetDIBits，整屏分辨率下要几十~几百毫秒）可放到工作线程做，

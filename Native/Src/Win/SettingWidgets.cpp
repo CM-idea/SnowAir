@@ -1089,7 +1089,6 @@ void grid2Cells(Ling::Node* grid)
 // ============================================================================
 //  Toggle Row：Switch 行
 // ============================================================================
-constexpr float    kToggleH{ 24.f };   // 胶囊开关高度（比 ctrlH 矮，行的右内边距要按它算才与上下留白一致）
 // 轨道色随主题（关：浅色 E5E5E5 / 深色 3A3A3A；开：0FDC78）—— 见 SettingTheme
 
 void styleToggle(Ling::Button* btn, bool on)
@@ -1699,7 +1698,12 @@ ConfirmDialog::ConfirmDialog(Ling::WinBase* host, std::wstring message,
     onResult(std::move(onResult))
 {
     if (host) dpi = host->dpi;
-    createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP);
+    // 置顶属性跟随宿主：宿主本身是置顶窗口（如全屏截图覆盖窗）才置顶，否则做成普通弹窗，
+    // 免得软件失焦后还压在别的程序上面。普通宿主下靠 owned 关系依旧盖在宿主之上。
+    DWORD exStyle = WS_EX_TOOLWINDOW;
+    if (host && host->hwnd && (GetWindowLongPtrW(host->hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST))
+        exStyle |= WS_EX_TOPMOST;
+    createNativeWindow(exStyle, WS_POPUP);
 }
 
 ConfirmDialog::~ConfirmDialog()
@@ -1808,6 +1812,9 @@ void ConfirmDialog::onCreated()
     keyTok = onKeyDown.add([this](UINT key) {
         if (key == VK_ESCAPE) this->finish(false);
     });
+    // 失焦即取消：点到别的程序 / Alt+Tab 失去键盘焦点时自动收掉弹窗（等同取消），
+    // 不缠着把窗口一直挂在最上面。
+    blurTok = onBlur.add([this]() { this->finish(false); });
 
     // 宿主销毁时跟着收掉：不执行回调（调用方页面也在销毁），并置空 host 免得析构里回访
     if (host) {

@@ -25,6 +25,9 @@ public:
 	void applyPinLayout();
 	// 演示模式（全屏画布）：按默认全屏布局的槽位重建工具条
 	void applyDemoLayout();
+	// 按设置页保存的布局（ToolbarStore）重排运行时槽位表。仅当用户确实存过该布局时才生效，
+	// 未自定义过就保持内置默认，避免被动改变。
+	void applyStoredLayout(int kind);
 	// 演示模式：穿透开关按钮的选中态
 	void setDemoThroughState(bool on);
 	bool isDemoLayout() const { return demoLayout; }

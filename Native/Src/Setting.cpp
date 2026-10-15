@@ -87,6 +87,24 @@ std::filesystem::path Setting::getDataPath()
     return dataPath; //复制一份路径对象，不允许就地修改
 }
 
+std::wstring Setting::getPluginDir()
+{
+    auto common = configObj.GetNamedObject(L"common", nullptr);
+    if (!common) return L"";
+    return std::wstring{ common.GetNamedString(L"pluginDir", L"") };
+}
+
+void Setting::setPluginDir(const std::wstring& dir)
+{
+    auto common = configObj.GetNamedObject(L"common", nullptr);
+    if (!common) {
+        common = JsonObject();
+        configObj.SetNamedValue(L"common", common);
+    }
+    common.SetNamedValue(L"pluginDir", JsonValue::CreateStringValue(dir));
+    save();
+}
+
 const JsonObject Setting::getConfigObj()
 {
     return configObj;
@@ -171,19 +189,23 @@ void Setting::setAutoStart(bool autoStart)
     }
     runQuiet(L"schtasks /Delete /TN \"SnowAir\" /F");
 
+    std::wstring selfPath;   // 当前 exe 路径：登记后记进配置，供启动时判断是否需要接管
     if (autoStart) {
         wchar_t buffer[MAX_PATH];
         GetModuleFileName(nullptr, buffer, MAX_PATH);
         auto curPath = std::filesystem::path(buffer);
+        selfPath = curPath.wstring();
         std::wstring commandLine = std::format(L"\"{}\" --auto-start", curPath.wstring());
 
-        if (getRunAsAdmin()) {
-            // 以管理员身份运行：通过计划任务（最高权限）在登录时启动。
+        if (getRunAsAdmin() && !Util::isBuiltinAdminAccount()) {
+            // 需要静默提权（普通管理员账户 + UAC 过滤）：用计划任务（最高权限）在登录时启动。
+            // 计划任务不会出现在「启动项」里，这是系统的取舍。
             runQuiet(std::format(
                 L"schtasks /Create /TN \"SnowAir\" /SC ONLOGON /RL HIGHEST /F /TR \"{}\"", commandLine));
         }
         else {
-            // 普通自启：写入当前用户注册表 Run 键。
+            // 普通自启，或内置 Administrator 账户（天然提权，无需计划任务）：写当前用户 Run 键，
+            // 这样会出现在「任务管理器 → 启动」里。
             HKEY hKey;
             if (RegOpenKeyEx(HKEY_CURRENT_USER, runKey.data(), 0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
                 RegSetValueEx(hKey, L"SnowAir", 0, REG_SZ, (const BYTE*)commandLine.data(), (DWORD)((commandLine.size() + 1) * sizeof(wchar_t)));
@@ -197,6 +219,9 @@ void Setting::setAutoStart(bool autoStart)
         configObj.SetNamedValue(L"common", common);
     }
     common.SetNamedValue(L"autoStart", JsonValue::CreateBooleanValue(autoStart));
+    // 记账：这次为哪个 exe 登记的自启。启动时据此判断登记项是否还指着自己（换目录/升级后接管）
+    if (autoStart) common.SetNamedValue(L"autoStartExe", JsonValue::CreateStringValue(selfPath));
+    else if (common.HasKey(L"autoStartExe")) common.Remove(L"autoStartExe");
     save();
 }
 
@@ -206,14 +231,35 @@ bool Setting::getAutoStart()
     return common && common.GetNamedBoolean(L"autoStart", false);
 }
 
+// 启动时调用：开了自启就确保登记项指向当前这个 exe。软件的配置落在 %AppData%（除非 exe 同目录
+// 放了便携 config.json），所以"换目录/重装/升级"后，旧的自启项（Run 项或计划任务）仍可能指着
+// 老 exe —— 老 exe 要么已被删、要么是旧版本。这里按当前 exe 重登记一次，把旧项接管过来。
+// 只在配置里记下的 exe 与当前不一致时动作，正常情况下零开销。
+void Setting::takeOverAutoStart()
+{
+    if (!getAutoStart()) return;
+    wchar_t buffer[MAX_PATH]{};
+    if (!GetModuleFileName(nullptr, buffer, MAX_PATH)) return;
+    const std::wstring cur{ buffer };
+    auto common = configObj.GetNamedObject(L"common", nullptr);
+    const std::wstring recorded = common
+        ? std::wstring{ common.GetNamedString(L"autoStartExe", L"") } : L"";
+    if (!recorded.empty() && _wcsicmp(recorded.c_str(), cur.c_str()) == 0) return;
+    setAutoStart(true);
+}
+
 bool Setting::getRunAsAdmin()
 {
+    // 内置 Administrator 账户天然就是管理员（不受 UAC 过滤），恒视为开启。
+    if (Util::isBuiltinAdminAccount()) return true;
     auto common = configObj.GetNamedObject(L"common", nullptr);
     return common && common.GetNamedBoolean(L"runAsAdmin", false);
 }
 
 void Setting::setRunAsAdmin(bool on)
 {
+    // 内置 Administrator 账户天然提权，开关关不掉：直接忽略（UI 侧点关闭也只会弹通知）。
+    if (Util::isBuiltinAdminAccount()) return;
     auto common = configObj.GetNamedObject(L"common", nullptr);
     if (!common) {
         common = JsonObject();
@@ -344,6 +390,17 @@ std::wstring Setting::getToolStr(const std::wstring& tool, const std::wstring& k
 void Setting::setToolStr(const std::wstring& tool, const std::wstring& key, const std::wstring& val)
 {
     getToolObj(tool).SetNamedValue(key, JsonValue::CreateStringValue(val));
+    save();
+}
+
+void Setting::removeToolKey(const std::wstring& tool, const std::wstring& key)
+{
+    // 只删已有的键，不顺手创建 toolPin/<tool> 这类空对象
+    auto root = configObj.GetNamedObject(L"toolPin", nullptr);
+    if (!root) return;
+    auto obj = root.GetNamedObject(tool, nullptr);
+    if (!obj || !obj.HasKey(key)) return;
+    obj.Remove(key);
     save();
 }
 

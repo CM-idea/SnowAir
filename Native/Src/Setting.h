@@ -13,11 +13,18 @@ public:
 	static void dispose();
 	static Setting* get();
 	std::filesystem::path getDataPath();
+	// 插件（OCR / 翻译模型等）根目录。留空 = 自动：exe 同目录下已有 plugin 文件夹就用它
+	// （绿色包 / 不想占用 C 盘），否则退回 %AppData%\SnowAir\plugin。见 Ocr/PluginPaths.h。
+	std::wstring getPluginDir();
+	void setPluginDir(const std::wstring& dir);
 	const JsonObject getConfigObj();
 	void setShortcutKey(const std::wstring& type, const std::vector<std::wstring>& keys);
 	std::wstring getShortcutKey(const std::wstring& type);
 	void setAutoStart(bool autoStart);
 	bool getAutoStart();
+	// 启动时调用：开了「开机自启」就确保登记项指向当前这个 exe。换了安装目录 / 升级更换版本后，
+	// 旧的自启（Run 项或计划任务）还指着老 exe，这里按当前 exe 重登记一次把它接管过来。
+	void takeOverAutoStart();
 	bool getRunAsAdmin();
 	void setRunAsAdmin(bool on);
 	std::wstring getLang();
@@ -42,6 +49,8 @@ public:
 	void setToolUInt(const std::wstring& tool, const std::wstring& key, UINT32 val);
 	std::wstring getToolStr(const std::wstring& tool, const std::wstring& key, const std::wstring& def);
 	void setToolStr(const std::wstring& tool, const std::wstring& key, const std::wstring& val);
+	// 删除 toolPin/<tool>/<key>（键不存在时什么都不做）。用于「恢复默认」时把覆盖项清掉。
+	void removeToolKey(const std::wstring& tool, const std::wstring& key);
 	long long getUpdateCheckDay();
 	void setUpdateCheckDay(long long day);
 

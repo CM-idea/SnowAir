@@ -194,7 +194,7 @@ private:
     Ling::Canvas* blurCanvas{ nullptr };                       // 自绘模糊背景
     Microsoft::WRL::ComPtr<ID2D1Bitmap1> blurBmp;
     bool done{ false };
-    winrt::event_token downTok{}, keyTok{}, hostDestroyTok{};
+    winrt::event_token downTok{}, keyTok{}, blurTok{}, hostDestroyTok{};
     static ConfirmDialog* s_open;
 };
 
@@ -275,6 +275,8 @@ Ling::Node* grid2(Ling::Node* parent);
 void grid2Cells(Ling::Node* grid);
 
 // ─── Toggle Row：Switch 行 ──────────────────────────────────────────────
+// 胶囊开关高度（比 ctrlH 矮，行的右内边距要按它算才与上下留白一致）
+inline constexpr float kToggleH{ 24.f };
 //   重载 1（详尽）: toggleRow(parent, label, desc, on, onChange [, chrome])
 Ling::Button* toggleRow(Ling::Node* parent,
     const std::wstring& label,

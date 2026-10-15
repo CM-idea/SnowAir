@@ -11,34 +11,6 @@
 
 std::unique_ptr<App> app;
 
-namespace {
-	// 当前进程是否已处于管理员提权状态（供"以管理员身份运行"开局自举判断，避免无限循环）。
-	bool isElevated()
-	{
-		HANDLE token = nullptr;
-		if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
-		TOKEN_ELEVATION elevation{};
-		DWORD size = 0;
-		BOOL ok = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size)
-			&& elevation.TokenIsElevated != 0;
-		CloseHandle(token);
-		return ok != FALSE;
-	}
-
-	// 用 runas 提权重启当前进程（携带原始参数 + --elevated）。UAC 被取消时返回 false。
-	bool relaunchElevated(const std::wstring& params)
-	{
-		wchar_t exePath[MAX_PATH];
-		GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-		SHELLEXECUTEINFOW sei{ sizeof(sei) };
-		sei.lpVerb = L"runas";
-		sei.lpFile = exePath;
-		sei.lpParameters = params.c_str();
-		sei.nShow = SW_SHOWNORMAL;
-		return ShellExecuteExW(&sei) != FALSE;
-	}
-}
-
 
 App::~App()
 {
@@ -65,6 +37,26 @@ void App::dispose()
 App* App::get()
 {
     return app.get();
+}
+
+// 以管理员身份重新启动：先以 runas 拉起一个提权新实例（带上本进程 PID 让它等我们退干净），
+// 本进程随即退出。新实例起步时会先等这个 PID 消失，再去抢单实例，避免被旧实例的
+// 单实例标记窗口挡掉（窗口销毁在进程退出之后，直接抢会输）。
+bool App::restartAsAdmin()
+{
+    auto* la = Ling::App::get();
+    std::wstring params;
+    if (la) {
+        for (const auto& [key, val] : la->args) {
+            if (key == L"--elevated" || key == L"--wait-pid") continue;
+            params += L" " + key;
+            if (val != L"true") params += L"=" + val;
+        }
+    }
+    params += L" --elevated --wait-pid=" + std::to_wstring(GetCurrentProcessId());
+    if (!Util::spawnElevated(params)) return false;
+    if (la) la->quit(0);
+    return true;
 }
 
 void App::createBitmapFromBGRA(int w, int h, const std::vector<BYTE>& data, ID2D1Bitmap1** img)
@@ -149,19 +141,44 @@ App::App()
     Setting::init();
     Lang::init();
 
+    // 用 find 读，别用 operator[]：后者会把没传的键以空值插进 args，
+    // 后面重建命令行时会混进 --elevated= / --auto-quit= 这类空值噪声。
+    auto elevIt = app->args.find(L"--elevated");
+    const bool launchedElevated = elevIt != app->args.end() && elevIt->second == L"true";
+
     // 以管理员身份运行：开局自举。配置开启、当前进程尚未提权、且本次启动不是提权进程时，
     // 用 runas 重启自身并退出，让"下一次打开软件"（限手工重开 / 开机自启等）都以管理员身份运行。
-    if (Setting::get()->getRunAsAdmin() && app->args[L"--elevated"] != L"true" && !isElevated()) {
+    if (Setting::get()->getRunAsAdmin() && !launchedElevated && !Util::isElevated()) {
         std::wstring params;
         for (const auto& [key, val] : app->args) {
             params += L" " + key;
             if (val != L"true") params += L"=" + val;
         }
         params += L" --elevated";
-        if (relaunchElevated(params)) app->exit(0); // 提权进程已拉起，原进程退出
+        if (Util::spawnElevated(params)) app->exit(0); // 提权进程已拉起，原进程退出
     }
 
-    if (app->args[L"--auto-quit"] == L"true") {
+    // 由「设置里打开以管理员身份运行」触发的重启：上一实例还在退出中，先等它退干净再去抢单实例，
+    // 否则会被上一实例的单实例标记窗口当成"重复启动"直接挡掉（见 App::restartAsAdmin）。
+    if (auto it = app->args.find(L"--wait-pid"); it != app->args.end()) {
+        DWORD pid = static_cast<DWORD>(std::stoul(it->second));
+        if (HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid)) {
+            WaitForSingleObject(h, 15000);
+            CloseHandle(h);
+        }
+    }
+
+    // 提权重启后，用提权身份把自启补登记一次：非提权进程建不出"最高权限"的计划任务，
+    // 打开开关时那一次登记可能已被系统拒绝，这里补上，免得自启悄悄失效。
+    if (launchedElevated && Setting::get()->getAutoStart()) {
+        Setting::get()->setAutoStart(true);
+    }
+    // 开了自启就确保登记项指向当前这个 exe：换目录 / 重装 / 升级换版本后，旧的自启项
+    // 还指着老 exe，这里按当前 exe 重登记一次把它接管过来（路径没变则什么都不做）。
+    Setting::get()->takeOverAutoStart();
+
+    auto autoQuitIt = app->args.find(L"--auto-quit");
+    if (autoQuitIt != app->args.end() && autoQuitIt->second == L"true") {
         WinCap::init();
     }
     else {
