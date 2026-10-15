@@ -2204,7 +2204,8 @@ void WinCap::startOcrInternal(bool translateMode)
 		pending.ok = true;   // ok=true 才不会由 rebuildEditors 判成「识别失败」
 		makePanel(std::move(pending), std::move(pixels));
 		if (toolOcr) {
-			toolOcr->showBanner(Lang::get(L"ocr.translating"), false);
+			// 置忙：从这一刻起提示条不允许被任何面板重建收掉，直到 finishOcrTranslate 落地结果
+			toolOcr->setBusy(Lang::get(L"ocr.translating"));
 			toolOcr->repaint();   // 主动刷一次面板，别只刷截图窗
 		}
 		refresh();
@@ -2264,6 +2265,7 @@ void WinCap::startOcrInternal(bool translateMode)
 					if (!cap.toolOcr) return;
 					const std::wstring msg = (merged.ok || merged.error.empty())
 						? Lang::get(L"ocr.fail") : merged.error;
+					cap.toolOcr->clearBusy();   // 识别就失败了，别再顶着"正在翻译…"
 					cap.toolOcr->showBanner(msg, true);
 					cap.toolOcr->repaint();
 				});
@@ -2326,6 +2328,8 @@ void WinCap::storeTranslateCache(const OcrResult& merged, const D2D1_RECT_F& rec
 void WinCap::finishOcrTranslate(const OcrResult& merged, const TranslateResult& tr)
 {
 	if (!toolOcr) return;
+	// 先解忙：结果落地这一刻起，"正在翻译…"不再强制顶着，由下面按结果收/换
+	toolOcr->clearBusy();
 	std::vector<std::wstring> lines;
 	if (tr.ok) {
 		std::wistringstream ss(tr.text);
@@ -2341,8 +2345,10 @@ void WinCap::finishOcrTranslate(const OcrResult& merged, const TranslateResult& 
 		toolOcr->repaint();
 		return;
 	}
-	toolOcr->setTranslatedResult(merged, lines);
+	// 剪贴板先写：它最多重试 ~100ms，夹在"收提示条"和"出结果"之间只会拉长空档
 	Ling::Util::setTextToClipboard(tr.text);
+	// 装译文（重建编辑框）与"收条"在同一次调用里完成，中间不留空档
+	toolOcr->setTranslatedResult(merged, lines);
 	// 部分行失败：结果照出（失败行已保留原文），单给一条提示，别让用户以为全翻好了
 	if (tr.partial) toolOcr->showBanner(Lang::get(L"ocr.partial"), false);
 	else toolOcr->clearBanner();

@@ -437,13 +437,12 @@ void ToolOcr::rebuildEditors()
 	bgs_.clear();
 
 	if (!result_.ok) {
-		showBanner(result_.error.empty() ? Lang::get(L"ocr.fail") : result_.error, true);
+		// 正在翻译时依然顶着忙碌提示（识别失败也不能把"正在翻译…"换成红条）
+		showBanner(!busyMsg_.empty() ? busyMsg_
+			: (result_.error.empty() ? Lang::get(L"ocr.fail") : result_.error), busyMsg_.empty());
 		if (bannerNode) body->bringToFront(bannerNode);
 		return;
 	}
-	// 有结果才收起提示条：面板还空着时（例如翻译模式刚建好、译文未到）保留提示，
-	// 免得重建一次就把"正在翻译…"收掉、面板却什么都没显示。
-	if (!result_.regions.empty()) clearBanner();
 
 	const float scaleX = (imgW > 0) ? (w / (float)imgW) : 1.f;
 	const float scaleY = (imgH > 0) ? (h / (float)imgH) : 1.f;
@@ -619,9 +618,12 @@ void ToolOcr::rebuildEditors()
 	selALine_ = selBLine_ = -1;
 	selAIdx_ = selBIdx_ = 0;
 	if (annotCanvas_) body->bringToFront(annotCanvas_);
-	// 提示条：已经设过就重新顶一次（既压最上面，也保证每次重建后它还在 ——
-	// 否则重建一次提示就没了，用户看到"字没了、结果也没来"）。
-	if (!banner_.empty()) showBanner(banner_, bannerError_);
+	// 提示条的收/顶一律放在**编辑框都建好之后**：先收条、再建框，中间那段（建框 + 首帧排版）
+	// 就是用户看到的"正在翻译…没了、结果还没出来"。顺序换过来，收条的同一帧结果已在场。
+	// 翻译进行中（busyMsg_ 非空）则无论如何都顶着，只有 finishOcrTranslate 落地结果时才清。
+	if (!busyMsg_.empty()) showBanner(busyMsg_, false);
+	else if (!result_.regions.empty()) clearBanner();
+	else if (!banner_.empty()) showBanner(banner_, bannerError_);
 	// 不自动选中/聚焦：结果只是"叠在原图上供阅读"，一进来就整段高亮并不合适；点哪块再编辑哪块。
 }
 
@@ -676,6 +678,17 @@ void ToolOcr::clearBanner()
 {
 	banner_.clear();
 	if (bannerNode) bannerNode->hide();
+}
+
+void ToolOcr::setBusy(const std::wstring& msg)
+{
+	busyMsg_ = msg;
+	showBanner(msg, false);
+}
+
+void ToolOcr::clearBusy()
+{
+	busyMsg_.clear();
 }
 
 void ToolOcr::copyAll()

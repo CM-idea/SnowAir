@@ -23,6 +23,10 @@ public:
 	void setResult(OcrResult result);
 	void showBanner(const std::wstring& msg, bool error);
 	void clearBanner();
+	// 翻译进行中：置上后"正在翻译…"会一直顶着，直到结果落地由 finishOcrTranslate 清掉。
+	// 期间任何一次面板重建都不会把它收掉 —— 否则会出现"提示没了、结果还没出来"的空档。
+	void setBusy(const std::wstring& msg);
+	void clearBusy();
 	bool translateMode() const { return translateMode_; }
 	const OcrResult& result() const { return result_; }
 	// 选区原图（BGRA）。翻译模式先建面板、后识别，识别直接复用这份像素，省掉再留一份。
@@ -65,6 +69,8 @@ private:
 	bool translateMode_{ false };
 	std::wstring banner_;
 	bool bannerError_{ false };
+	// 非空 = 正在翻译：提示条在此期间必须一直可见（见 setBusy）
+	std::wstring busyMsg_;
 	Ling::Node* bannerNode{ nullptr };
 	Ling::Label* bannerLabel{ nullptr };
 	std::vector<Ling::TextBox*> editors;
