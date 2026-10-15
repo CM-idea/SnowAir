@@ -49,6 +49,20 @@ namespace
 	OcrResult g_ocrCache;
 	D2D1_RECT_F g_ocrCacheRect{};
 	bool g_ocrCacheValid{ false };
+	// 译文缓存：选区没动 + 识别出来的文字一致 + 翻译服务/方向一致 → 直接复用上次译文。
+	// 只在 UI 线程读写（后台线程通过回投的 lambda 调用 WinCap::storeTranslateCache）。
+	TranslateResult g_trCache;
+	D2D1_RECT_F g_trCacheRect{};
+	std::wstring g_trCacheKey;
+	std::wstring g_trCacheText;
+	bool g_trCacheValid{ false };
+
+	// 译文缓存的"设置键"：换服务 / 换翻译方向 / 换识别引擎，缓存都要作废
+	std::wstring translateCacheKey(const TranslateRequest& req)
+	{
+		return req.provider + L"|" + req.sourceLang + L"|" + req.targetLang + L"|"
+			+ std::to_wstring(Setting::get()->getOcrEngine());
+	}
 
 	// 「显示光标」：会话开始那一刻鼠标下面那个**真实窗口**正在用的光标。
 	// 不能只靠 GetCursorInfo —— 上一次截图退出时我们的框选十字光标（IDC_CROSS）可能还残留在
@@ -342,8 +356,9 @@ void WinCap::dispose()
 
 void WinCap::onCreated()
 {
-    // 新一次截图会话：底图换了，OCR 临时缓存作废
+    // 新一次截图会话：底图换了，OCR / 译文临时缓存一并作废
     g_ocrCacheValid = false;
+    g_trCacheValid = false;
     // 底图：优先用工作线程抓好的 BGRA（init 里已抓完，UI 线程只做 CreateBitmap）；
     // 失败/未就绪则兜底同步抓一次。演示画布不画静帧，直接跳过。
     if (pendingGrab_ && !pendingGrab_->empty()) {
@@ -2072,6 +2087,83 @@ void WinCap::startTranslate()
 bool WinCap::isTranslatePanel() const { return toolOcr && toolOcr->translateMode(); }
 bool WinCap::isOcrPanel() const { return toolOcr && !toolOcr->translateMode(); }
 
+namespace {
+	// —— 翻译前把 OCR 碎片并成整行 ——
+	// OCR 有时把一行切成好几个框（按词/短语），逐框送去翻译会得到"逐词直译 + 按原框摆放"的散句。
+	// 这里把纵向重叠的碎片按视觉行合并：翻译和展示都用合并后的区域；识别面板的原始分块不受影响
+	// （缓存里仍是原始区域，翻译只作用在这一次的展示上）。
+	bool isCjkW(wchar_t c)
+	{
+		return (c >= 0x3000 && c <= 0x303F) || (c >= 0x3040 && c <= 0x30FF)
+			|| (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0xAC00 && c <= 0xD7AF)
+			|| (c >= 0xFF00 && c <= 0xFFEF);
+	}
+
+	// 拼接两段：两侧都不是 CJK 才补一个空格（"open"+"source"→"open source"，"手绘的"+"风格"→不加）
+	void appendFragment(std::wstring& dst, const std::wstring& add)
+	{
+		if (add.empty()) return;
+		if (!dst.empty() && !isCjkW(dst.back()) && !isCjkW(add.front())) dst += L' ';
+		dst += add;
+	}
+
+	OcrResult ocrResultMergedToLines(const OcrResult& in)
+	{
+		OcrResult out = in;
+		if (in.regions.size() < 2) return out;   // 本来就一行一块：不动
+
+		struct Line { float x0, y0, x1, y1; std::vector<size_t> idx; };
+		std::vector<Line> lines;
+		// 判"同一视觉行"：纵向重叠超过较矮一方的一半；或几乎不重叠、但两条中线挨得够近
+		// （同一行里基线轻微上下漂移的情况也算）。否则一行会被拆成好几块。
+		auto overlaps = [](const Line& ln, const OcrRegion& r) {
+			const float lh = ln.y1 - ln.y0;
+			const float m = std::min(lh, r.h);
+			const float ov = std::min(ln.y1, r.y + r.h) - std::max(ln.y0, r.y);
+			if (ov > 0.5f * m) return true;
+			const float d = (r.y + r.h * 0.5f) - (ln.y0 + lh * 0.5f);
+			return d <= 0.5f * m && -d <= 0.5f * m;
+		};
+		for (size_t i = 0; i < in.regions.size(); i++) {
+			const auto& r = in.regions[i];
+			Line* hit = nullptr;
+			for (auto& ln : lines) if (overlaps(ln, r)) { hit = &ln; break; }
+			if (!hit) {
+				lines.push_back({ r.x, r.y, r.x + r.w, r.y + r.h, { i } });
+			}
+			else {
+				hit->x0 = std::min(hit->x0, r.x);
+				hit->y0 = std::min(hit->y0, r.y);
+				hit->x1 = std::max(hit->x1, r.x + r.w);
+				hit->y1 = std::max(hit->y1, r.y + r.h);
+				hit->idx.push_back(i);
+			}
+		}
+
+		std::vector<OcrRegion> merged;
+		std::wstring plain;
+		for (auto& ln : lines) {
+			std::sort(ln.idx.begin(), ln.idx.end(),
+				[&](size_t a, size_t b) { return in.regions[a].x < in.regions[b].x; });
+			std::wstring text;
+			for (size_t k : ln.idx) appendFragment(text, in.regions[k].text);
+			OcrRegion reg;
+			reg.text = text;
+			reg.displayText = text;
+			reg.x = ln.x0;
+			reg.y = ln.y0;
+			reg.w = std::max(2.f, ln.x1 - ln.x0);
+			reg.h = std::max(2.f, ln.y1 - ln.y0);
+			merged.push_back(reg);
+			if (!plain.empty()) plain += L'\n';
+			plain += text;
+		}
+		out.regions = std::move(merged);
+		out.text = plain;
+		return out;
+	}
+}
+
 void WinCap::startOcrInternal(bool translateMode)
 {
 	if (!cutMask || !cutMask->hasRect()) return;
@@ -2082,6 +2174,115 @@ void WinCap::startOcrInternal(bool translateMode)
 	// 识别/翻译只看**原始截图内容**，不带上用户画的标注 —— 标注会盖住原文字、干扰识别。
 	if (!exportSelection(pixels, cw, ch, false)) return;
 
+	// 建面板（含建窗、标注镜像、对齐选区）；翻译模式会先建一次空壳，识别完再填内容
+	auto makePanel = [&](OcrResult res, std::vector<BYTE> px) {
+		toolQrcode.reset();
+		toolOcr = std::make_unique<ToolOcr>(this, std::move(res), translateMode, std::move(px), cw, ch);
+		toolOcr->createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP);
+		SetWindowLongPtr(toolOcr->hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(hwnd));
+		// 标注要盖在识别结果上：浮层是独立置顶窗口，标注画在本窗口里，两个窗口没法互相穿插 ——
+		// 把本窗口的标注"镜像"到浮层顶层，视觉上就等于"后画的标注盖在识别结果上面"。
+		// 之后再叠一次选框（边框/控点/尺寸标签）：选框必须始终压在最上层，否则会被标注或识别结果盖住。
+		{
+			WinCap* self = this;
+			toolOcr->setAnnotPainter([self](ID2D1DeviceContext* ctx) {
+				self->paintShapes(ctx, false);
+				if (self->cutMask) self->cutMask->paint(ctx);
+			});
+		}
+		syncOcrPanel();
+		// 这里**不能**给结果面板加「排除出捕获」：用户常要用别的截图/录屏工具把这个识别结果
+		// 拍下来（反馈问题、分享），一旦排除掉，对方的截图里就只剩"被盖住的底图"，看着就像结果没了。
+		// 面板随截图会话结束而销毁，不会残留到下一次截图里，所以不排除不会造成"拍到上次结果"。
+	};
+
+	// 翻译模式：**识别与翻译全部放后台** —— 面板先摆出「正在翻译…」，从点击到出结果提示一直都在，
+	// 中途不再有任何一步去动这个面板（识别结果也不摆到前台），就不会出现"提示没了、结果还没来"。
+	// 顺带好处：识别（首次可能一两秒）不再卡住界面。
+	if (translateMode) {
+		OcrResult pending;
+		pending.ok = true;   // ok=true 才不会由 rebuildEditors 判成「识别失败」
+		makePanel(std::move(pending), std::move(pixels));
+		if (toolOcr) {
+			toolOcr->showBanner(Lang::get(L"ocr.translating"), false);
+			toolOcr->repaint();   // 主动刷一次面板，别只刷截图窗
+		}
+		refresh();
+
+		const bool cached = g_ocrCacheValid && sameOcrRect(g_ocrCacheRect, sel);
+		const OcrResult cachedResult = cached ? g_ocrCache : OcrResult{};
+		const std::vector<BYTE> ocrPixels = toolOcr ? toolOcr->srcImage() : std::vector<BYTE>{};
+
+		TranslateRequest req;
+		req.provider = Setting::get()->getTranslateProvider();
+		req.sourceLang = Setting::get()->getTranslateSourceLang();
+		req.targetLang = Setting::get()->getTranslateTargetLang();
+		const std::wstring trKey = translateCacheKey(req);
+
+		// 选区没动 + 识别出来的文字一致 + 服务/方向一致 → 直接复用上次译文：
+		// 识别与翻译请求都省掉（框选没动，结果必然一样）。
+		if (cached) {
+			const OcrResult mergedNow = ocrResultMergedToLines(cachedResult);
+			if (g_trCacheValid && sameOcrRect(g_trCacheRect, sel)
+				&& g_trCacheKey == trKey && g_trCacheText == mergedNow.text) {
+				const TranslateResult tr = g_trCache;
+				HWND h = hwnd;
+				Ling::App::get()->dq.TryEnqueue([h, mergedNow, tr]() {
+					auto* cap = WinCap::get();
+					if (!cap || cap->hwnd != h) return;
+					cap->finishOcrTranslate(mergedNow, tr);
+				});
+				return;
+			}
+		}
+
+		HWND host = hwnd;
+		std::thread([host, sel, cached, cachedResult, ocrPixels, cw, ch, req, trKey]() {
+			// 后台线程里会碰 WinRT（系统 OCR），先初始化 apartment；已初始化会抛，忽略即可
+			try { winrt::init_apartment(winrt::apartment_type::multi_threaded); } catch (...) {}
+
+			const OcrResult raw = cached ? cachedResult
+				: OcrService::instance().recognize(cw, ch, ocrPixels.data());
+			const OcrResult merged = ocrResultMergedToLines(raw);
+
+			std::vector<std::wstring> segments;
+			segments.reserve(merged.regions.size());
+			for (auto& reg : merged.regions) segments.push_back(reg.text);
+
+			// 回 UI 线程干活（截图会话可能已经结束 → 用 host 校验；识别缓存只在这边写，避免跨线程）
+			auto toUi = [host](std::function<void(WinCap&)> fn) {
+				Ling::App::get()->dq.TryEnqueue([host, fn]() {
+					auto* cap = WinCap::get();
+					if (!cap || cap->hwnd != host) return;
+					fn(*cap);
+				});
+			};
+
+			if (!merged.ok || segments.empty()) {
+				toUi([raw, merged, sel](WinCap& cap) {
+					cap.storeOcrCache(raw, sel);
+					if (!cap.toolOcr) return;
+					const std::wstring msg = (merged.ok || merged.error.empty())
+						? Lang::get(L"ocr.fail") : merged.error;
+					cap.toolOcr->showBanner(msg, true);
+					cap.toolOcr->repaint();
+				});
+				return;
+			}
+
+			TranslateService::instance().translateSegments(segments, req,
+				[raw, merged, sel, trKey, toUi](const TranslateResult& tr) {
+					toUi([raw, merged, sel, trKey, tr](WinCap& cap) {
+						cap.storeOcrCache(raw, sel);
+						cap.storeTranslateCache(merged, sel, trKey, tr);
+						cap.finishOcrTranslate(merged, tr);
+					});
+				});
+		}).detach();
+		return;
+	}
+
+	// —— 识别（非翻译）模式：同步识别 + 直接出结果 ——
 	OcrResult result;
 	if (g_ocrCacheValid && sameOcrRect(g_ocrCacheRect, sel)) {
 		result = g_ocrCache;   // 同一块选区：识别结果直接用临时缓存（省掉识别那几百毫秒）
@@ -2093,69 +2294,57 @@ void WinCap::startOcrInternal(bool translateMode)
 		g_ocrCacheValid = true;
 	}
 
-	toolQrcode.reset();
-	toolOcr = std::make_unique<ToolOcr>(this, result, translateMode, std::move(pixels), cw, ch);
-	toolOcr->createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP);
-	SetWindowLongPtr(toolOcr->hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(hwnd));
-	// 标注要盖在识别结果上：浮层是独立置顶窗口，标注画在本窗口里，两个窗口没法互相穿插 ——
-	// 把本窗口的标注"镜像"到浮层顶层，视觉上就等于"后画的标注盖在识别结果上面"。
-	// 之后再叠一次选框（边框/控点/尺寸标签）：选框必须始终压在最上层，否则会被标注或识别结果盖住。
-	{
-		WinCap* self = this;
-		toolOcr->setAnnotPainter([self](ID2D1DeviceContext* ctx) {
-			self->paintShapes(ctx, false);
-			if (self->cutMask) self->cutMask->paint(ctx);
-		});
-	}
-	syncOcrPanel();
-	// 这里**不能**给结果面板加「排除出捕获」：用户常要用别的截图/录屏工具把这个识别结果
-	// 拍下来（反馈问题、分享），一旦排除掉，对方的截图里就只剩"被盖住的底图"，看着就像结果没了。
-	// 面板随截图会话结束而销毁，不会残留到下一次截图里，所以不排除不会造成"拍到上次结果"。
+	// 先把碎片区域并成视觉行：OCR 常把一整行切成好几块，逐块显示会让拖选断断续续、
+	// 文字上下位置也飘（每块各自居中）；并成整行后每行一个框，选择/复制连续、排版也齐。
+	const OcrResult merged = ocrResultMergedToLines(result);
 
-	if (result.ok && !result.text.empty()) {
-		Ling::Util::setTextToClipboard(result.text);
-	}
-
-	if (translateMode && result.ok) {
-		std::vector<std::wstring> segments;
-		segments.reserve(result.regions.size());
-		for (auto& reg : result.regions) segments.push_back(reg.text);
-		if (segments.empty() && !result.text.empty()) segments.push_back(result.text);
-
-		TranslateRequest req;
-		req.provider = Setting::get()->getTranslateProvider();
-		req.sourceLang = Setting::get()->getTranslateSourceLang();
-		req.targetLang = Setting::get()->getTranslateTargetLang();
-
-		HWND host = hwnd;
-		TranslateService::instance().translateSegments(segments, req,
-			[host](const TranslateResult& tr) {
-				Ling::App::get()->dq.TryEnqueue([host, tr]() {
-					auto* cap = WinCap::get();
-					if (!cap || cap->hwnd != host) return;
-					cap->finishOcrTranslate(tr);
-				});
-			});
+	makePanel(merged, std::move(pixels));
+	if (merged.ok && !merged.text.empty()) {
+		Ling::Util::setTextToClipboard(merged.text);
 	}
 	refresh();
 }
 
-void WinCap::finishOcrTranslate(const TranslateResult& tr)
+void WinCap::storeOcrCache(const OcrResult& r, const D2D1_RECT_F& rect)
+{
+	g_ocrCache = r;
+	g_ocrCacheRect = rect;
+	g_ocrCacheValid = true;
+}
+
+void WinCap::storeTranslateCache(const OcrResult& merged, const D2D1_RECT_F& rect,
+	const std::wstring& key, const TranslateResult& tr)
+{
+	if (!tr.ok) return;   // 失败的结果不缓存，下一次仍要重试
+	g_trCache = tr;
+	g_trCacheRect = rect;
+	g_trCacheKey = key;
+	g_trCacheText = merged.text;
+	g_trCacheValid = true;
+}
+
+void WinCap::finishOcrTranslate(const OcrResult& merged, const TranslateResult& tr)
 {
 	if (!toolOcr) return;
-	if (!tr.ok) {
+	std::vector<std::wstring> lines;
+	if (tr.ok) {
+		std::wistringstream ss(tr.text);
+		std::wstring line;
+		while (std::getline(ss, line)) lines.push_back(line);
+		if (lines.empty()) lines.push_back(tr.text);
+	}
+	if (!tr.ok || lines.empty()) {
+		// 翻译失败：退而显示识别出来的原文，至少让用户拿到 OCR 结果
+		toolOcr->setResult(merged);
 		toolOcr->showBanner(
 			std::wstring(L"翻译失败：") + (tr.error.empty() ? L"未知错误" : tr.error), true);
+		toolOcr->repaint();
 		return;
 	}
-	std::vector<std::wstring> lines;
-	std::wistringstream ss(tr.text);
-	std::wstring line;
-	while (std::getline(ss, line)) lines.push_back(line);
-	if (lines.empty()) lines.push_back(tr.text);
-	toolOcr->applyTranslate(lines);
+	toolOcr->setTranslatedResult(merged, lines);
 	Ling::Util::setTextToClipboard(tr.text);
 	toolOcr->clearBanner();
+	toolOcr->repaint();   // 译文与"收提示条"一次刷出来
 }
 
 void WinCap::syncOcrPanel()

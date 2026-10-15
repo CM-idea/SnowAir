@@ -111,7 +111,12 @@ private:
 	void copyCurrentStage();
 	void onDown(POINT pos, bool isRight);
 	void startOcrInternal(bool translateMode);
-	void finishOcrTranslate(const struct TranslateResult& tr);
+	void finishOcrTranslate(const struct OcrResult& merged, const struct TranslateResult& tr);
+	// 记录"上一次识别结果"缓存（只允许在 UI 线程调用：后台识别线程通过 toUi 回投）
+	void storeOcrCache(const struct OcrResult& r, const D2D1_RECT_F& rect);
+	// 记录"上一次译文"缓存（同上，只在 UI 线程调用；只缓存成功的结果）
+	void storeTranslateCache(const struct OcrResult& merged, const D2D1_RECT_F& rect,
+		const std::wstring& key, const struct TranslateResult& tr);
 	// 把选区设成整屏（演示画布用），并进入"已框选"阶段、弹出工具栏
 	void selectFullScreenRect();
 	// 演示模式专用：建工具条（Fullscreen 布局）并摆到屏幕顶部居中

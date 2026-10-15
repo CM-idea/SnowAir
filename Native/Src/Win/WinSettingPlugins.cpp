@@ -1,5 +1,6 @@
 #include "pch.h"
 #include <filesystem>
+#include <cstdio>
 #include "WinSettingPlugins.h"
 #include "SettingWidgets.h"
 #include "SettingTheme.h"
@@ -424,10 +425,11 @@ void WinSettingPlugins::startTrDownload()
 	const std::wstring packId = kLangPacks[trPackIdx].id;
 	auto weak = getWeakThis();
 	TranslateModelManager::instance().download(packId,
-		[this, weak](float p) {
-			onUi([this, weak, p]() {
+		[this, weak](const TranslateModelManager::DownloadProgress& dp) {
+			onUi([this, weak, dp]() {
 				if (!weak.lock() || cards.size() < 3) return;
-				setCardProgress(cards[CardTr], p);
+				setCardProgress(cards[CardTr], dp.overall);
+				setDownloadStage(dp.stage, dp.item, dp.got, dp.total);
 			});
 		},
 		[this, weak](bool ok, std::wstring err) {
@@ -448,6 +450,42 @@ void WinSettingPlugins::setCardProgress(CardSlot& c, float p)
 	c.dlBtn->setFontFamily(L"");
 	c.dlBtn->setFontSize(12.f);
 	c.dlBtn->setText(std::to_wstring(pct) + L"%");
+}
+
+namespace {
+	std::wstring fmtMb(uint64_t bytes)
+	{
+		wchar_t buf[40]{};
+		swprintf_s(buf, 40, L"%.1f MB", (double)bytes / (1024.0 * 1024.0));
+		return buf;
+	}
+}
+
+// 进度行文案：按钮始终是整体百分比，这里告诉用户"现在在下什么/解压到哪一步"
+void WinSettingPlugins::setDownloadStage(int stage, const std::wstring& item, uint64_t got, uint64_t total)
+{
+	std::wstring text;
+	switch (stage) {
+	case 0:  text = Lang::get(L"setting.plugStageDlEngine"); break;
+	case 1:  text = Lang::get(L"setting.plugStageExEngine"); break;
+	case 3:  text = Lang::get(L"setting.plugStageExPack");   break;
+	default: text = Lang::get(L"setting.plugStageDlPack");   break;
+	}
+	if (!item.empty()) text += L" " + item;
+	// 只有下载阶段有字节数可报；解压没有细分进度
+	if ((stage == 0 || stage == 2) && (got > 0 || total > 0)) {
+		text += L" " + fmtMb(got);
+		if (total > 0) text += L" / " + fmtMb(total);
+	}
+	setDotsPrefix(text);
+}
+
+void WinSettingPlugins::setDotsPrefix(const std::wstring& prefix)
+{
+	if (!dotsRunning) return;
+	dotsPrefix = prefix;
+	dotsSuffix.clear();
+	applyDots();
 }
 
 void WinSettingPlugins::finishDownload(int idx, const std::wstring& err)

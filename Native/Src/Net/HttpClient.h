@@ -19,6 +19,8 @@ namespace SnowHttp {
 	Response post(const std::wstring& url, const std::string& bodyUtf8,
 		const std::wstring& contentType = L"application/x-www-form-urlencoded",
 		const std::map<std::wstring, std::wstring>& headers = {});
+	// 下载到本地文件；内含读超时（20s 无数据即判失败）与自动重试（默认 3 次，失败之间退避）
 	bool downloadFile(const std::wstring& url, const std::filesystem::path& dest,
-		std::function<void(uint64_t got, uint64_t total)> onProgress = nullptr);
+		std::function<void(uint64_t got, uint64_t total)> onProgress = nullptr,
+		int attempts = 3);
 }

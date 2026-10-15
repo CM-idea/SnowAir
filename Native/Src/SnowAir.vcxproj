@@ -390,6 +390,7 @@
     <ClInclude Include="Translate\DictPopup.h" />
     <ClInclude Include="Translate\FreeWebTranslate.h" />
     <ClInclude Include="Translate\TranslateModelManager.h" />
+    <ClInclude Include="Translate\TranslateLangs.h" />
     <ClInclude Include="Translate\TranslateService.h" />
     <ClInclude Include="Translate\TranslateTypes.h" />
     <ClInclude Include="Tray.h" />

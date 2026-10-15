@@ -1,6 +1,7 @@
 #pragma once
 #include <include/Ling.h>
 #include "SettingWidgets.h"
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -52,6 +53,11 @@ private:
 	void deleteCard(int idx);
 	// 下载中：按钮显示「NN%」数字进度（图标字体切回默认 UI 字体）
 	void setCardProgress(CardSlot& c, float p);
+	// 下载进度行：按钮显示「NN%」整体进度，进度行显示"当前在干什么"
+	// （如「正在下载引擎 12.3 / 35.7 MB」「正在解压引擎」「正在下载语言包 en-zh ...」）
+	void setDownloadStage(int stage, const std::wstring& item, uint64_t got, uint64_t total);
+	// 更新省略号动画的文案前缀（阶段变化时调用）
+	void setDotsPrefix(const std::wstring& prefix);
 	// 下载结束：复位按钮图标 / 停掉省略号动画 / 清进度行 / 刷新状态
 	void finishDownload(int idx, const std::wstring& err);
 	// 「正在下载」省略号逐字跳动（. / .. / ... / ...），避免长时间不动像卡死

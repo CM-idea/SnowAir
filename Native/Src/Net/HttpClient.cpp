@@ -1,10 +1,12 @@
 #include "pch.h"
 #include "HttpClient.h"
 #include <fstream>
+#include <chrono>
 #include <winrt/Windows.Web.Http.h>
 #include <winrt/Windows.Web.Http.Headers.h>
 #include <winrt/Windows.Web.Http.Filters.h>
 #include <winrt/Windows.Storage.Streams.h>
+#include <winrt/Windows.System.Threading.h>
 
 namespace {
 	using namespace winrt;
@@ -13,6 +15,10 @@ namespace {
 	using namespace winrt::Windows::Web::Http::Filters;
 	using namespace winrt::Windows::Web::Http::Headers;
 	using namespace winrt::Windows::Storage::Streams;
+	using namespace winrt::Windows::System::Threading;
+
+	// 单次读的最长等待：网络卡住时 ReadAsync 会一直挂着，超时就 Cancel 掉，交给上层重试
+	constexpr int kReadTimeoutSec = 20;
 
 	winrt::Windows::Web::Http::HttpClient makeClient()
 	{
@@ -101,7 +107,8 @@ Response post(const std::wstring& url, const std::string& bodyUtf8,
 	return out;
 }
 
-bool downloadFile(const std::wstring& url, const std::filesystem::path& dest,
+// 单次下载尝试（带读超时）
+static bool downloadOnce(const std::wstring& url, const std::filesystem::path& dest,
 	std::function<void(uint64_t, uint64_t)> onProgress)
 {
 	using namespace winrt;
@@ -123,7 +130,20 @@ bool downloadFile(const std::wstring& url, const std::filesystem::path& dest,
 		Buffer buf(64 * 1024);
 		uint64_t got = 0;
 		for (;;) {
-			auto read = stream.ReadAsync(buf, buf.Capacity(), InputStreamOptions::None).get();
+			auto op = stream.ReadAsync(buf, buf.Capacity(), InputStreamOptions::None);
+			// 读超时看门狗：到点就取消这次读，op.get() 会抛，落到下面的 catch
+			auto guard = ThreadPoolTimer::CreateTimer(
+				[op](const ThreadPoolTimer&) { op.Cancel(); },
+				std::chrono::seconds(kReadTimeoutSec));
+			IBuffer read{ nullptr };
+			try {
+				read = op.get();
+			}
+			catch (...) {
+				guard.Cancel();
+				return false;   // 超时 / 连接被掐断：本次尝试失败，交给上面重试
+			}
+			guard.Cancel();
 			if (!read || read.Length() == 0) break;
 			file.write(reinterpret_cast<const char*>(read.data()), read.Length());
 			got += read.Length();
@@ -134,6 +154,20 @@ bool downloadFile(const std::wstring& url, const std::filesystem::path& dest,
 	catch (...) {
 		return false;
 	}
+}
+
+bool downloadFile(const std::wstring& url, const std::filesystem::path& dest,
+	std::function<void(uint64_t, uint64_t)> onProgress, int attempts)
+{
+	if (attempts < 1) attempts = 1;
+	for (int i = 0; i < attempts; i++) {
+		if (downloadOnce(url, dest, onProgress)) return true;
+		// 半截文件删掉，重试时从头下；退避一下再试，别对端刚掐断就又冲上去
+		std::error_code ec;
+		std::filesystem::remove(dest, ec);
+		if (i + 1 < attempts) Sleep(700 * (DWORD)(i + 1));
+	}
+	return false;
 }
 
 } // namespace SnowHttp

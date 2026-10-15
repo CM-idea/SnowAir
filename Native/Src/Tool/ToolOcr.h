@@ -17,21 +17,30 @@ public:
 	// 且只有识别文本框吃鼠标（可选中/复制文本），其余区域穿透 —— 贴图仍能右键弹菜单 / 滚轮缩放。
 	void setPinOverlay(bool on) { pinOverlay_ = on; }
 	void applyTranslate(const std::vector<std::wstring>& lines);
+	// 翻译模式专用：把"识别出的区域 + 译文"一次性装上并重绘一次 —— 中间不显示识别出来的原文，
+	// 避免"先闪一下原文、再被译文替换"。
+	void setTranslatedResult(OcrResult result, const std::vector<std::wstring>& lines);
 	void setResult(OcrResult result);
 	void showBanner(const std::wstring& msg, bool error);
 	void clearBanner();
 	bool translateMode() const { return translateMode_; }
 	const OcrResult& result() const { return result_; }
+	// 选区原图（BGRA）。翻译模式先建面板、后识别，识别直接复用这份像素，省掉再留一份。
+	const std::vector<BYTE>& srcImage() const { return srcImage_; }
 	// 宿主注入：把（截图/贴图的）标注画到识别文字**之上**。识别结果浮层是独立置顶窗口，
 	// 而标注画在宿主窗口里，两个窗口没法互相穿插 —— 于是把标注"镜像"到本窗口顶层，
 	// 视觉上就变成"标注盖在识别结果上面"。
 	void setAnnotPainter(std::function<void(ID2D1DeviceContext*)> fn) { annotPainter_ = std::move(fn); }
 	// 标注变化时由宿主调用，重画镜像层。
 	void repaintOverlay() { if (hwnd) refresh(); }
+	// 主动重绘本面板（提示条/文字改动后调用，别指望宿主那次 refresh 会带上本窗口）
+	void repaint() { if (hwnd) refresh(); }
 private:
 	void onCreated() override;
 	void layout() override;
 	void rebuildEditors();
+	// 把译文本行填进各区域的 displayText 并重算整段文字（不重绘）
+	void applyTranslateLines(const std::vector<std::wstring>& lines);
 	void copyAll();
 	// —— 跨行选区（每行是独立控件，选中范围由本类统一算）——
 	struct SelPoint { int line{ -1 }; int index{ 0 }; };

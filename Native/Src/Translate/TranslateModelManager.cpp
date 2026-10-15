@@ -169,15 +169,6 @@ namespace {
 		return code == 0;
 	}
 
-	bool unzip(const std::filesystem::path& zip, const std::filesystem::path& dest)
-	{
-		std::error_code ec;
-		std::filesystem::create_directories(dest, ec);
-		std::wstring cmd = L"powershell -NoProfile -Command \"Expand-Archive -LiteralPath '"
-			+ zip.wstring() + L"' -DestinationPath '" + dest.wstring() + L"' -Force\"";
-		return runHidden(cmd);
-	}
-
 	// PowerShell GzipStream 解 gz
 	bool gunzip(const std::filesystem::path& gz, const std::filesystem::path& out)
 	{
@@ -238,52 +229,51 @@ alignment: soft
 		return f.good();
 	}
 
-	// 解压 nupkg，挑 win-x64 的 bergamot.dll 连同同目录依赖一起拷进 runtime 目录
-	bool extractBergamotDll(const std::filesystem::path& nupkg, const std::filesystem::path& runtimeDir)
+	// 只解出某个 RID 的 native 目录（整包解压太慢：包里还有 x86/arm64/其它平台的一大堆东西）。
+	// nupkg 本质是 zip，直接用 .NET ZipFile 按前缀挑条目，比 Expand-Archive 快得多。
+	bool unzipRidNative(const std::filesystem::path& nupkg, const std::wstring& rid,
+		const std::filesystem::path& dest)
 	{
 		std::error_code ec;
+		std::filesystem::create_directories(dest, ec);
+		std::wstring cmd = L"powershell -NoProfile -Command \"Add-Type -AssemblyName System.IO.Compression.FileSystem;";
+		cmd += L"$z=[System.IO.Compression.ZipFile]::OpenRead('" + nupkg.wstring() + L"');";
+		cmd += L"foreach($e in $z.Entries){ if($e.FullName -like 'runtimes/" + rid
+			+ L"/native/*'){ [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e,(Join-Path '"
+			+ dest.wstring() + L"' $e.Name),$true) } };$z.Dispose()\"";
+		return runHidden(cmd);
+	}
+
+	// 取出引擎 DLL：依次试 win-x64 → win-arm64 → win-x86，挑到 bergamot.dll 连同同目录依赖一起拷进 runtime 目录。
+	// onProgress：0~1 反映"取 DLL"这一步内部的进度（含逐 RID 尝试）。
+	bool extractBergamotDll(const std::filesystem::path& nupkg, const std::filesystem::path& runtimeDir,
+		const std::function<void(float)>& onProgress)
+	{
+		static const wchar_t* kRids[] = { L"win-x64", L"win-arm64", L"win-x86" };
 		auto tmp = runtimeDir / L"_bergamot_tmp";
-		std::filesystem::remove_all(tmp, ec);
-		std::filesystem::create_directories(tmp, ec);
-		auto zip = tmp / L"pkg.zip";
-		std::filesystem::copy_file(nupkg, zip, std::filesystem::copy_options::overwrite_existing, ec);
-		if (ec) return false;
-		auto extract = tmp / L"x";
-		if (!unzip(zip, extract)) return false;
-
-		std::filesystem::path found;
-		int bestScore = -1;
-		std::error_code ec2;
-		for (auto it = std::filesystem::recursive_directory_iterator(extract, ec2);
-			it != std::filesystem::recursive_directory_iterator(); it.increment(ec2)) {
-			if (ec2) break;
-			if (!it->is_regular_file(ec2)) continue;
-			if (_wcsicmp(it->path().filename().c_str(), L"bergamot.dll") != 0) continue;
-			std::wstring full = it->path().wstring();
-			int score = 20;
-			if (full.find(L"win-x64") != std::wstring::npos) score = 300;
-			else if (full.find(L"win-arm64") != std::wstring::npos) score = 50;
-			else if (full.find(L"win-x86") != std::wstring::npos || full.find(L"win32") != std::wstring::npos) score = 10;
-			if (score > bestScore) { bestScore = score; found = it->path(); }
-		}
-		if (found.empty() || bestScore < 100) { std::filesystem::remove_all(tmp, ec); return false; }
-
-		std::filesystem::create_directories(runtimeDir, ec);
-		const auto dest = runtimeDir / L"bergamot.dll";
-		std::filesystem::remove(dest, ec);
-		std::filesystem::copy_file(found, dest, std::filesystem::copy_options::overwrite_existing, ec);
-		if (ec) { std::filesystem::remove_all(tmp, ec); return false; }
-		// 同目录依赖（onnxruntime 等）一并拷过去
-		const auto srcDir = found.parent_path();
-		for (auto& e : std::filesystem::directory_iterator(srcDir, ec)) {
-			if (!e.is_regular_file(ec)) continue;
-			auto n = e.path().filename().wstring();
-			if (_wcsicmp(n.c_str(), L"bergamot.dll") == 0) continue;
-			std::filesystem::copy_file(e.path(), runtimeDir / n,
-				std::filesystem::copy_options::overwrite_existing, ec);
+		std::error_code ec;
+		for (int i = 0; i < 3; i++) {
+			std::filesystem::remove_all(tmp, ec);
+			std::filesystem::create_directories(tmp, ec);
+			if (onProgress) onProgress((float)i / 3.f);
+			if (!unzipRidNative(nupkg, kRids[i], tmp)) continue;
+			auto dll = tmp / L"bergamot.dll";
+			if (!std::filesystem::is_regular_file(dll, ec) || std::filesystem::file_size(dll, ec) < 8ull * 1024 * 1024)
+				continue;
+			std::filesystem::create_directories(runtimeDir, ec);
+			std::filesystem::remove(runtimeDir / L"bergamot.dll", ec);
+			// 同目录依赖（onnxruntime 等）一并拷过去
+			for (auto& e : std::filesystem::directory_iterator(tmp, ec)) {
+				if (!e.is_regular_file(ec)) continue;
+				std::filesystem::copy_file(e.path(), runtimeDir / e.path().filename(),
+					std::filesystem::copy_options::overwrite_existing, ec);
+			}
+			std::filesystem::remove_all(tmp, ec);
+			if (onProgress) onProgress(1.f);
+			return std::filesystem::file_size(runtimeDir / L"bergamot.dll", ec) > 8ull * 1024 * 1024;
 		}
 		std::filesystem::remove_all(tmp, ec);
-		return std::filesystem::file_size(dest, ec) > 8ull * 1024 * 1024;
+		return false;
 	}
 }
 
@@ -356,7 +346,7 @@ void TranslateModelManager::uninstallPack(const std::wstring& packId)
 }
 
 void TranslateModelManager::download(const std::wstring& packId,
-	std::function<void(float)> progress,
+	std::function<void(const DownloadProgress&)> progress,
 	std::function<void(bool, std::wstring)> done)
 {
 	std::thread([packId, progress, done]() {
@@ -371,36 +361,56 @@ void TranslateModelManager::download(const std::wstring& packId,
 		auto models = PluginPaths::translateModels();
 		std::filesystem::create_directories(models, ec);
 
-		// 文件总数：DLL（1）+ 每个语言对的 gz（2~4）
-		size_t totalFiles = 1;
+		// 进度权重：引擎 DLL 那一步体积最大（35MB 的 nupkg），单独给 6(下载)+2(解压) 的权重，
+		// 每个模型文件算 1 —— 早先按"文件个数"分摊，DLL 只占 1/N，进度会长时间钉在 12% 那一档
+		// （用户反馈"下载卡到 13%"），实际是下载完在整包解压、还不上报进度。
+		const size_t wDllDown = self.isDllInstalled() ? 0 : 6;
+		const size_t wDllExtract = self.isDllInstalled() ? 0 : 2;
+		size_t totalFiles = wDllDown + wDllExtract;
 		for (const auto& pr : pack->pairs)
 			totalFiles += 2 + (!pr.vocabGz.empty() ? 1 : 0)
 				+ (!pr.srcVocabGz.empty() ? 1 : 0) + (!pr.trgVocabGz.empty() ? 1 : 0);
+
 		size_t step = 0;
-		auto tick = [&](float part) {
-			if (progress) progress((float)(step + part) / (float)totalFiles);
+		DownloadProgress st;
+		// part = 当前这一步内部进度(0~1)；每次上报都带上 overall 与阶段信息
+		auto report = [&](float part) {
+			st.overall = ((float)step + part) / (float)totalFiles;
+			if (progress) progress(st);
 		};
 
-		// 1) 引擎 DLL
+		// 1) 引擎 DLL：下载 → 解压出 win 版 bergamot.dll
 		if (!self.isDllInstalled()) {
 			auto nupkg = root / L"bergamot.nupkg";
 			std::filesystem::create_directories(root, ec);
+			st.stage = 0;
+			st.item.clear();
+			st.got = st.total = 0;
+			report(0.f);
 			if (!SnowHttp::downloadFile(kBergamotNupkg, nupkg, [&](uint64_t g, uint64_t t) {
-					if (t) tick(t ? (float)g / (float)t : 0.f);
+					st.got = g;
+					st.total = t;
+					report(t ? (float)g / (float)t * (float)wDllDown : 0.f);
 				})) {
 				std::filesystem::remove(nupkg, ec);
 				if (done) done(false, L"bergamot 引擎下载失败，请检查网络后重试");
 				return;
 			}
-			if (!extractBergamotDll(nupkg, root)) {
+			step += wDllDown;
+			st.stage = 1;
+			st.got = st.total = 0;
+			report(0.f);
+			if (!extractBergamotDll(nupkg, root, [&](float part) {
+					report(part * (float)wDllExtract);
+				})) {
 				std::filesystem::remove(nupkg, ec);
 				if (done) done(false, L"解压 bergamot.dll 失败");
 				return;
 			}
 			std::filesystem::remove(nupkg, ec);
+			step += wDllExtract;
+			report(0.f);
 		}
-		++step;
-		tick(0.f);
 
 		// 2) 每个语言对的模型（.gz → 解压成 .bin/.spm）
 		for (const auto& pr : pack->pairs) {
@@ -416,15 +426,25 @@ void TranslateModelManager::download(const std::wstring& packId,
 					ok = true;                       // 已解压：跳过
 				}
 				else {
-					tick(0.f);
+					st.stage = 2;
+					st.item = pr.pairId;
+					st.got = st.total = 0;
+					report(0.f);
 					ok = SnowHttp::downloadFile(kGcsBase + rel, gzPath, [&](uint64_t g, uint64_t t) {
-						if (t) tick((float)g / (float)t);
+						st.got = g;
+						st.total = t;
+						report(t ? (float)g / (float)t : 0.f);
 					});
-					if (ok) ok = gunzip(gzPath, outPath);
+					if (ok) {
+						st.stage = 3;
+						st.got = st.total = 0;
+						report(0.f);
+						ok = gunzip(gzPath, outPath);
+					}
 					std::filesystem::remove(gzPath, ec);
 				}
 				++step;
-				tick(0.f);
+				report(0.f);
 				return ok;
 			};
 			if (!fetch(pr.modelGz) || !fetch(pr.lexGz) || !fetch(pr.vocabGz)
@@ -435,7 +455,11 @@ void TranslateModelManager::download(const std::wstring& packId,
 			writeConfigForPairDir(pairDir);
 		}
 
-		if (progress) progress(1.f);
+		st.stage = 2;
+		st.item.clear();
+		st.got = st.total = 0;
+		st.overall = 1.f;
+		if (progress) progress(st);
 		if (done) done(true, {});
 	}).detach();
 }

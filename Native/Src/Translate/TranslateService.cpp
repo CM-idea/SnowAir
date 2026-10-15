@@ -1,10 +1,11 @@
 #include "pch.h"
 #include "TranslateService.h"
+#include "TranslateLangs.h"
 #include "FreeWebTranslate.h"
 #include "BergamotEngine.h"
 #include "../Setting.h"
 #include <thread>
-#include <sstream>
+#include <algorithm>
 #include <future>
 
 TranslateService& TranslateService::instance()
@@ -28,29 +29,66 @@ std::wstring TranslateService::resolveProvider(const std::wstring& preferred)
 	return p;
 }
 
-void TranslateService::dispatch(const TranslateRequest& req, TranslateCallback cb)
+// 服务链：用户选的服务优先；失败再依次退到其它在线服务，最后退离线（装了才有意义）
+std::vector<std::wstring> TranslateService::providerChain(const std::wstring& preferred)
 {
-	TranslateRequest r = req;
-	r.provider = resolveProvider(req.provider);
-	if (r.text.empty()) {
-		TranslateResult out;
-		out.ok = true;
-		out.providerUsed = r.provider;
-		if (cb) cb(out);
-		return;
+	std::vector<std::wstring> chain;
+	auto push = [&chain](const std::wstring& p) {
+		for (auto& c : chain) if (_wcsicmp(c.c_str(), p.c_str()) == 0) return;
+		chain.push_back(p);
+	};
+	push(resolveProvider(preferred));        // 用户设置的翻译服务
+	push(TranslateProvider::Microsoft);      // 在线主力（内部走 Google 接口）
+	push(TranslateProvider::Youdao);         // 另一个在线源
+	if (BergamotEngine::isAvailable()) push(TranslateProvider::Offline);   // 离线兜底
+	return chain;
+}
+
+TranslateResult TranslateService::translateOnce(const TranslateRequest& req)
+{
+	if (resolveProvider(req.provider) == TranslateProvider::Offline)
+		return BergamotEngine::translateSync(req);
+
+	// 在线引擎是异步回调，这里同步等它回来（调用方本来就在工作线程上）
+	std::promise<TranslateResult> prom;
+	auto fut = prom.get_future();
+	FreeWebTranslate::translate(req, [&prom](const TranslateResult& tr) { prom.set_value(tr); });
+	return fut.get();
+}
+
+TranslateResult TranslateService::runChain(const TranslateRequest& base, std::vector<std::wstring>& chain)
+{
+	if (base.text.empty()) {
+		TranslateResult r;
+		r.ok = true;
+		r.providerUsed = resolveProvider(base.provider);
+		return r;
 	}
-	if (r.provider == TranslateProvider::Offline) {
-		std::thread([r, cb]() {
-			if (cb) cb(BergamotEngine::translateSync(r));
-		}).detach();
-		return;
+	TranslateResult last;
+	for (size_t i = 0; i < chain.size(); i++) {
+		TranslateRequest r = base;
+		r.provider = chain[i];
+		auto res = translateOnce(r);
+		if (res.ok) {
+			// 命中的服务提到链首：多段翻译时后续分段直接用它，不再从头逐级试
+			std::rotate(chain.begin(), chain.begin() + i, chain.begin() + i + 1);
+			return res;
+		}
+		last = res;
 	}
-	FreeWebTranslate::translate(r, cb);
+	return last;
 }
 
 void TranslateService::translate(const TranslateRequest& req, TranslateCallback cb)
 {
-	dispatch(req, cb);
+	if (req.text.empty()) {
+		TranslateResult out;
+		out.ok = true;
+		out.providerUsed = resolveProvider(req.provider);
+		if (cb) cb(out);
+		return;
+	}
+	translateSegments(std::vector<std::wstring>{ req.text }, req, cb);
 }
 
 void TranslateService::translateSegments(const std::vector<std::wstring>& segments,
@@ -63,27 +101,51 @@ void TranslateService::translateSegments(const std::vector<std::wstring>& segmen
 		if (cb) cb(r);
 		return;
 	}
-	auto provider = resolveProvider(base.provider);
 
-	// 在线/离线引擎都不支持批量分隔符协议：在工作线程里逐条同步翻译后拼回多行。
-	std::thread([this, segments, base, provider, cb]() {
+	std::thread([segments, base, cb]() {
+		// 先按**整段文本**定"整块"方向（比分段各自判更准）：源是 auto 就检测补上；
+		// 整块已经是目标语时自动换向（治"选中的英文配目标 en，等于没翻"的老问题）。
+		std::wstring joined;
+		for (auto& s : segments) {
+			if (!joined.empty()) joined += L'\n';
+			joined += s;
+		}
+		const bool srcAuto = base.sourceLang.empty()
+			|| _wcsicmp(base.sourceLang.c_str(), L"auto") == 0;
+		TranslateRequest req = base;
+		TranslateLangs::resolveDirection(req.sourceLang, req.targetLang, joined);
+
+		auto chain = providerChain(base.provider);
+
 		TranslateResult r;
 		r.ok = true;
-		r.providerUsed = provider;
+		r.providerUsed = resolveProvider(base.provider);
 		for (size_t i = 0; i < segments.size(); i++) {
-			TranslateRequest req = base;
-			req.provider = provider;
-			req.text = segments[i];
-			std::promise<TranslateResult> prom;
-			auto fut = prom.get_future();
-			dispatch(req, [&prom](const TranslateResult& tr) { prom.set_value(tr); });
-			auto tr = fut.get();
-			if (!tr.ok) {
-				if (cb) cb(tr);
-				return;
+			std::wstring line;
+			// ① 这一段本身就是目标语（脚本可确认：目标为中日韩时）→ 原样保留：
+			//    既不浪费一次请求，也不会被"反向翻译"翻坏。多语混排的选区就靠这条各按各的。
+			if (TranslateLangs::isSameLang(req.targetLang, segments[i])) {
+				line = segments[i];
+			}
+			else {
+				TranslateRequest one = req;
+				one.text = segments[i];
+				// ② 逐段定源语：用户设的是 auto 时按这一段的脚本判（混排时各行方向可以不同）；
+				//    用户显式指定了源语就尊重用户，不覆盖。
+				if (srcAuto) {
+					auto d = TranslateLangs::detect(segments[i]);
+					if (!d.empty()) one.sourceLang = d;
+				}
+				auto tr = runChain(one, chain);
+				if (!tr.ok) {
+					if (cb) cb(tr);
+					return;
+				}
+				r.providerUsed = tr.providerUsed;
+				line = tr.text;
 			}
 			if (i) r.text += L'\n';
-			r.text += tr.text;
+			r.text += line;
 		}
 		if (cb) cb(r);
 	}).detach();

@@ -358,6 +358,10 @@
     "plugNotInstalled": "未安装",
     "plugDownload": "下载",
     "plugDownloading": "正在下载",
+    "plugStageDlEngine": "正在下载引擎",
+    "plugStageExEngine": "正在解压引擎",
+    "plugStageDlPack": "正在下载语言包",
+    "plugStageExPack": "正在解压语言包",
     "plugDelOcrConfirm": "确定删除已安装的离线文字识别组件？删除后需要重新下载才能使用。",
     "plugDelTrConfirm": "确定删除该语言包？不影响其它已安装语言包。",
     "pluginsOpenDir": "打开组件目录",
@@ -457,6 +461,7 @@
   },
   "ocr": {
     "fail": "识别失败",
-    "copy": "复制文字"
+    "copy": "复制文字",
+    "translating": "正在翻译…"
   }
 }
