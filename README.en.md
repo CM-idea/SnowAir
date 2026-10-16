@@ -69,7 +69,7 @@ The following covers how to obtain, run and extend the software; see [`Native/RE
 
 Go to [SnowAir Releases](https://github.com/CM-idea/SnowAir/releases), expand **Assets**, download `SnowAir.exe`, and double-click to run — no installation required.
 
-To run it in portable mode (configuration, language and plugins stay next to the exe instead of `%AppData%`), place an empty file named `config.json` next to `SnowAir.exe`; delete the file to restore the default `%AppData%\SnowAir\`.
+Configuration, language and plugins live in `%AppData%\SnowAir\` by default; to keep them next to the program instead (so you can move the whole folder to a USB drive and keep your settings), place an empty file named `config.json` next to `SnowAir.exe` — delete the file to restore the default.
 
 </details>
 

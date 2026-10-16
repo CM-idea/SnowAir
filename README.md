@@ -69,7 +69,7 @@ SnowAir 分为两个版本，共享同一套使用体验与功能布局：
 
 前往 [SnowAir Releases](https://github.com/CM-idea/SnowAir/releases)，展开 **Assets** 下载 `SnowAir.exe`，双击即可运行，无需安装。
 
-想让软件便携运行（配置、语言与插件都放在 exe 目录，不写入 `%AppData%`）：在 `SnowAir.exe` 同目录放一个空文件 `config.json` 即可，删掉该文件即恢复默认的 `%AppData%\SnowAir\`。
+配置、语言与插件默认放在 `%AppData%\SnowAir\`；想让它们跟着程序放在一起（整个文件夹拷到 U 盘、换机后还是一套配置）：在 `SnowAir.exe` 同目录放一个空文件 `config.json` 即可，删掉该文件即恢复默认。
 
 </details>
 
