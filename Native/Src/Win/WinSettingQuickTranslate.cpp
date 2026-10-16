@@ -12,6 +12,7 @@
 #include "../Translate/TranslateService.h"
 #include "../Translate/TranslateTypes.h"
 #include "../Translate/DictLookup.h"
+#include "../Translate/BergamotEngine.h"
 
 namespace {
 	constexpr float kBubbleMaxW{ 340.f };      // 气泡最大逻辑宽度
@@ -126,6 +127,10 @@ WinSettingQuickTranslate::~WinSettingQuickTranslate()
 	hideOptionsBox();
 	if (histAnimRunning) win->killTimer(kAnimTimerId);
 	win->onTimer.remove(timerTok);
+	// 离开这一页就把离线翻译模型（几百 MB）还回去：截图会话那条链路已在 WinCap::onClosed
+	// 释放过，这里补上缺的那条 —— 否则在这一页翻过一次离线之后，模型会一直常驻到退出。
+	// release() 内部加锁，后台还在翻的那一段会先跑完，不会被抽掉。
+	BergamotEngine::release();
 }
 
 // ============ 语言选项弹层 ============

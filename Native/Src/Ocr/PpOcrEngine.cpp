@@ -228,11 +228,22 @@ Prepared prepareForOcr(int w, int h, const BYTE* bgra)
 
 } // namespace
 
+// 只做文件探测，**绝不 LoadLibrary**：加载了却忘记 FreeLibrary 会把 RapidOCR.dll 的引用计数
+// 永久钉住，之后 recognize 里那次 FreeLibrary 就再也卸不掉它，连带 onnxruntime 和
+// det/cls/rec 三个模型一起常驻（几百 MB 还不回去）。判定口径与 OcrRuntimeManager::isInstalled 一致。
 bool isInstalled(OcrPackVariant v)
 {
 	auto models = PluginPaths::ocrModels() / OcrPack::folderName(v);
-	if (!std::filesystem::exists(models)) return false;
-	return loadDll(v) != nullptr || std::filesystem::exists(PluginPaths::ocrRuntime(v) / L"python.exe");
+	std::error_code ec;
+	if (!std::filesystem::exists(models, ec)) return false;
+
+	if (v == OcrPackVariant::Official)
+		return std::filesystem::exists(PluginPaths::ocrRuntime(v) / L"python.exe", ec);
+
+	auto dll = PluginPaths::ocrRuntime(v) / L"RapidOCR.dll";
+	if (std::filesystem::is_regular_file(dll, ec) && std::filesystem::file_size(dll, ec) > 1024 * 1024)
+		return true;
+	return std::filesystem::exists(PluginPaths::ocrBin() / L"RapidOCR.dll", ec);
 }
 
 OcrResult recognize(int w, int h, const BYTE* bgra, OcrPackVariant v)
@@ -274,7 +285,17 @@ OcrResult recognize(int w, int h, const BYTE* bgra, OcrPackVariant v)
 			r.error = L"无法启动 PP-OCR worker";
 			return r;
 		}
-		WaitForSingleObject(pi.hProcess, 120000);
+		// 等 worker 收工；超时说明它卡住了（模型/依赖异常），直接杀掉再退出 ——
+		// 否则会留下一个几百 MB 的 python.exe 常驻，内存再也还不回来
+		if (WaitForSingleObject(pi.hProcess, 120000) == WAIT_TIMEOUT) {
+			TerminateProcess(pi.hProcess, 1);
+			CloseHandle(pi.hThread);
+			CloseHandle(pi.hProcess);
+			std::filesystem::remove(img, ec);
+			std::filesystem::remove(out, ec);
+			r.error = L"PP-OCR 识别超时";
+			return r;
+		}
 		CloseHandle(pi.hThread);
 		CloseHandle(pi.hProcess);
 		std::ifstream f(out, std::ios::binary);
