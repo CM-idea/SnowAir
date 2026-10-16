@@ -246,29 +246,25 @@ void WinSettingHotkeys::buildGroup(const std::wstring& grpTitle,
         r.row->setPadding(SettingTheme::sp4, 0,
                           (SettingTheme::hotkeyRowH - SettingTheme::ctrlH) * 0.5f, 0);
 
+        // 暂缓实现的项：整行置灰，值框显示「功能开发中」且不响应点击、也不参与录制。
+        // 值框用只读展示框：它不是可点的东西，Button 悬停会给手型是误导
+        if (isPendingHotkey(it.first)) {
+            SettingUi::staticBox(r.ctrlBox, Lang::get(L"cap.comingSoon"), 160.f);
+            if (r.label) r.label->setColor(SettingTheme::textMuted);
+            continue;
+        }
+
         auto* btn = r.ctrlBox->makeChild<Ling::Button>();
         btn->setId(it.first);
         btn->setHeight(SettingTheme::ctrlH);
         btn->setWidth(160.f);
         btn->setBorderRadius(SettingTheme::radiusCtl);   // 与所在行的外框(10)同心
-        if (isPendingHotkey(it.first)) {
-            // 暂缓实现的项：整行置灰，按钮显示「功能开发中」且不响应点击，也不参与录制
-            btn->setText(Lang::get(L"cap.comingSoon"));
-            btn->setBg(SettingTheme::inputBg);
-            btn->setHoverBg(SettingTheme::inputBg);      // 悬停取同值 → 无悬停效果
-            btn->setBorder(1.f, SettingTheme::input);
-            btn->setColor(SettingTheme::textMuted);
-            btn->setHoverColor(SettingTheme::textMuted);
-            if (r.label) r.label->setColor(SettingTheme::textMuted);
-        }
-        else {
-            // 顺序：先定底色与悬停色、再定文字色。styleHotkeyBtn 会把文字色写为 textPrimary，
-            // 若放在 applyShortcutLabel 之后，未绑定行的灰色占位会被冲掉
-            styleHotkeyBtn(btn, false);          // 常态配色（白底 + 描边 + 悬停底色）
-            applyShortcutLabel(btn, it.first);   // 文字色最后定：未绑定 = 灰
-            btn->onClick.add([this](Ling::Button* b) { this->onBtnClick(b); });
-            btns.push_back(btn);
-        }
+        // 顺序：先定底色与悬停色、再定文字色。styleHotkeyBtn 会把文字色写为 textPrimary，
+        // 若放在 applyShortcutLabel 之后，未绑定行的灰色占位会被冲掉
+        styleHotkeyBtn(btn, false);          // 常态配色（白底 + 描边 + 悬停底色）
+        applyShortcutLabel(btn, it.first);   // 文字色最后定：未绑定 = 灰
+        btn->onClick.add([this](Ling::Button* b) { this->onBtnClick(b); });
+        btns.push_back(btn);
     }
 }
 

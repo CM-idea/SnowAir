@@ -140,7 +140,7 @@ protected:
 	// 连线：当前悬停着"叉"的那条线，以及叉的位置（图像坐标）
 	ShapeBase* linkBtn{ nullptr };
 	D2D1_POINT_2F linkBtnPos{ 0.f, 0.f };
-	// 连线提示：
+	// 连线提示（起点"＋"只属于箭头工具；叉是"箭头工具 + 空工具"）：
 	//   linkHoverTarget —— 起点所在的形状（悬停时的可连形状 / 拖动中=起点所属的形状）
 	//   linkAnchorDot / linkShowDot —— 起点那个点（和控点同款）：悬停时画在形状边缘的落点上，
 	//                                 拖动中一直跟着线起点。**目标形状上不画**

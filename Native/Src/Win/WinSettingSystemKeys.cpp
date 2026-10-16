@@ -81,11 +81,12 @@ namespace {
 	}
 
 	// 配色与「全局热键」页同款：
-	//   常态 = 白底 + 1px 描边 + 深字（可录制的行悬停变 accent；只读行悬停取同值 = 无变化）
+	//   常态 = 白底 + 1px 描边 + 深字（悬停变 accent）
 	//   录制中 = #0FDC78 底 + 白字/白转圈，去掉描边，悬停也取同值
+	// 只读 / 未实装行不走这里 —— 它们的键位框不是按钮（见 readOnlyKeyBox）
 	constexpr uint32_t kCaptureBg{ 0x0FDC78FF };
 	constexpr uint32_t kCaptureFg{ 0xFFFFFFFF };
-	void styleKeyBtn(Ling::Button* btn, bool capturing, bool editable)
+	void styleKeyBtn(Ling::Button* btn, bool capturing)
 	{
 		if (capturing) {
 			btn->setBg(kCaptureBg);
@@ -95,7 +96,7 @@ namespace {
 			btn->setHoverColor(kCaptureFg);
 		} else {
 			btn->setBg(SettingTheme::inputBg);
-			btn->setHoverBg(editable ? SettingTheme::accent : SettingTheme::inputBg);
+			btn->setHoverBg(SettingTheme::accent);
 			btn->setBorder(1.f, SettingTheme::input);
 			btn->setColor(SettingTheme::textPrimary);
 			btn->setHoverColor(SettingTheme::textPrimary);
@@ -108,6 +109,10 @@ namespace {
 		Icon::Loading5, Icon::Loading6, Icon::Loading7, Icon::Loading8,
 	};
 	constexpr int kSpinnerFramesCount = 8;
+
+	// 键位框宽度：双栏下窄一点，不然"开启/关闭系统音量"这类长标签会被挤成两行。
+	// 只读框与可编辑框必须等宽，否则同一栏里两行对不齐
+	constexpr float kKeyBoxW{ 116.f };
 }
 
 WinSettingSystemKeys::WinSettingSystemKeys(Ling::WinBase* parent) : Ling::Node(parent)
@@ -149,25 +154,24 @@ WinSettingSystemKeys::WinSettingSystemKeys(Ling::WinBase* parent) : Ling::Node(p
 			r.row->setPadding(SettingTheme::sp4, 0,
 				(SettingTheme::hotkeyRowH - SettingTheme::ctrlH) * 0.5f, 0);
 
+			// 只读 / 未实装行：键位框换成只读展示框（不给手型、不可点），行名称保持正常色
+			if (!editable) {
+				SettingUi::staticBox(r.ctrlBox, chordDisplay(chord), kKeyBoxW);
+				continue;
+			}
+
 			// 键位框：与「全局热键」页的快捷键按钮同款（白底 + 描边 + 圆角 + 定宽定高）
 			auto* key = r.ctrlBox->makeChild<Ling::Button>();
 			key->setId(id);
 			key->setHeight(SettingTheme::ctrlH);
-			// 双栏下窄一点：不然"开启/关闭系统音量"这类长标签会被挤成两行
-			key->setWidth(116.f);
+			key->setWidth(kKeyBoxW);
 			key->setBorderRadius(SettingTheme::radiusCtl);
-			styleKeyBtn(key, false, editable);
+			styleKeyBtn(key, false);
 			key->setText(chordDisplay(chord));
 			// 未绑定的行：占位文案走 muted（与「点击设置」同色）
 			if (chord.empty()) key->setColor(SettingTheme::textMuted);
-			if (!editable) {
-				// 只读 / 未实装：仅键位按钮不可用（置灰、不可点、悬停不变），行名称保持正常色
-				key->setColor(SettingTheme::textMuted);
-				key->setHoverColor(SettingTheme::textMuted);
-			} else {
-				key->onClick.add([this](Ling::Button* b) { this->onBtnClick(b); });
-				rows.push_back({ id, key });
-			}
+			key->onClick.add([this](Ling::Button* b) { this->onBtnClick(b); });
+			rows.push_back({ id, key });
 		}
 		SettingUi::grid2Cells(grid);
 	}
@@ -258,7 +262,7 @@ void WinSettingSystemKeys::beginCapture(Ling::Button* btn)
 	tempKeys.clear();
 	// 清空按钮内置文本，改用自定义「转圈 + 文案」两个子节点（转圈落于文案左侧）
 	btn->setText(L"");
-	styleKeyBtn(btn, true, true);
+	styleKeyBtn(btn, true);
 	// Button 默认 flexDirection 为 column：改为 row 后 spinner 居左、label 居右
 	btn->setFlexDirection(Ling::FlexDirection::Row);
 
@@ -289,7 +293,7 @@ void WinSettingSystemKeys::endCapture()
 	if (curBtn) {
 		if (curSpinner) { curBtn->removeChild(curSpinner); curSpinner = nullptr; }
 		if (curLabel) { curBtn->removeChild(curLabel);   curLabel = nullptr; }
-		styleKeyBtn(curBtn, false, true);   // 结束录制：恢复常态配色
+		styleKeyBtn(curBtn, false);   // 结束录制：恢复常态配色
 		refreshRow(curId);                  // 显示"已落盘"的值（冲突未确认时 = 原值）
 	}
 	curBtn = nullptr;

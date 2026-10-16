@@ -1153,6 +1153,9 @@ void WinPin::toggleOcrPanel(bool copyText)
 	toolOcr->syncToMask(r, x, y, dpi);
 	// 自动识别（钉图即识别）不抢剪贴板，避免把用户剪贴板里的东西冲掉
 	if (copyText && result.ok && !result.text.empty()) Ling::Util::setTextToClipboard(result.text);
+	// 贴图识别的是同一张图，结果出来之后就不会再需要引擎了 —— 立刻还回去（常驻约 100MB），
+	// 换一张贴图或重新识别时再重建，别让它陪着贴图一直挂着。
+	LwPpOcrEngine::release();
 	refresh();
 }
 

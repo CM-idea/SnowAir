@@ -1,5 +1,6 @@
 #include "pch.h"
 #include <dwmapi.h>
+#include <include/D2D.h>
 #include "../App.h"
 #include "../Lang.h"
 #include "../Setting.h"
@@ -32,7 +33,17 @@ WinSetting::WinSetting() : Ling::WinBase()
 	//   所以要在建窗（onCreated → loadPage）之前按设置重写一遍调色板。
 	SettingTheme::apply(Setting::get()->getAppTheme());
 	onDestroy.add([]() {
-		Ling::App::get()->dq.TryEnqueue([]() { winSetting.reset(); });
+		Ling::App::get()->dq.TryEnqueue([]() {
+			winSetting.reset();
+			// 设置页属于"用完即关"的窗口：关掉后若一个窗口都不剩，就把空闲的图形设备放掉，
+			// 并把工作集里的闲页换出去。否则它会一直挂在二十几 MB 不回落 —— 截图会话收工
+			// 是同一套处理（见 WinCap::onClosed）。
+			auto* app = Ling::App::get();
+			if (app && app->windows.empty()) {
+				Ling::D2D::dispose();
+				SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
+			}
+			});
 		});
 	setTitle(Lang::get(L"setting.title"));
 	setSize(880, 600);

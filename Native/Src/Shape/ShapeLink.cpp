@@ -95,17 +95,10 @@ namespace ShapeLink
 		if (!draggingStart && !draggingEnd) return;
 		ArrowLink& link = draggingStart ? poly.linkStart : poly.linkEnd;
 
-		ShapeBase* under = pickTarget(win, x, y);
-		if (under && under != link.shape) {
-			// 落进（另一个）形状：吸附过去
-			bindTo(link, under, x, y);
-		}
-		else if (!under && creating) {
-			// 正在画新线、且离开了形状：脱开，端点跟手（所见即所得）
-			link.shape = nullptr;
-		}
-		else if (link.shape && !creating) {
-			// 改已有线：拖端点 = 沿边缘滑到鼠标方向并钉住（拖不断）。
+		// 拖动**不新建连接**：联动只来自"起笔落在矩形内部/描边上"（见 bindAtEndpoint），
+		// 手动把端点拖进矩形也不会连上。已经连上的端点保持连接，
+		// 拖它只让吸附点沿边缘滑动（拖不断）：
+		if (link.shape && !creating) {
 			// 只挪了几像素不算"用户想挑位置" —— 不钉住，继续自动朝对面贴边
 			const float moved = std::hypot(x - poly.press.x, y - poly.press.y);
 			if (moved > 4.f * win->dpi) {

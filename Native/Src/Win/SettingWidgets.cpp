@@ -1550,6 +1550,25 @@ Ling::Button* pill(Ling::Node* row, const std::wstring& label, bool selected)
 }
 
 // ============================================================================
+//  Static Box：只读展示框（不可点）
+// ============================================================================
+Ling::Node* staticBox(Ling::Node* parent, const std::wstring& text, float w, float h)
+{
+    auto* box = parent->makeChild<Ling::Node>();
+    box->setWidth(w);
+    box->setHeight(h);
+    box->setBorderRadius(SettingTheme::radiusCtl);   // 与所在行的外框(10)同心
+    box->setBg(SettingTheme::inputBg);
+    box->setBorder(1.f, SettingTheme::input);
+    box->setJustifyContent(Ling::Justify::Center);
+    box->setAlignItems(Ling::Align::Center);
+    auto* label = box->makeChild<Ling::Label>();
+    label->setText(text);
+    label->setColor(SettingTheme::textMuted);
+    return box;
+}
+
+// ============================================================================
 //  Dashed Add：虚线添加按钮
 // ============================================================================
 Ling::Button* dashedAdd(Ling::Node* parent, const std::wstring& label,

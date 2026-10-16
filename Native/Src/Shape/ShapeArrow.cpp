@@ -234,7 +234,8 @@ void ShapeArrow::mouseDrag(const float x, const float y)
 		constrainToEightDirections(pivot.x, pivot.y, x, y, mx, my);
 	}
 	poly.dragTo(mx, my);
-	// 连线：端点落进形状就吸附；已连上的端点拖不断，只在边缘上滑
+	// 联动只由"起笔落在矩形里"产生（mouseDown 里那次 bindAtEndpoint），
+	// 所以拖这一端只做两件事：已连上的沿边缘滑，没连上的就跟手。
 	ShapeLink::dragEndpoint(win, poly, creating, mx, my);
 	rebuild();
 }

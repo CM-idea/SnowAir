@@ -95,7 +95,11 @@ bool ShapeRect::hitLinkBody(const float x, const float y) const
 {
 	float lx = 0.f, ly = 0.f;
 	toLocal(x, y, lx, ly);
-	return LinkGeom::insideRect(rect, lx, ly);
+	// 可见的**描边**也算落在形状上：描边骑在边缘线上，外半圈在几何之外，
+	// 不补这点容差，贴着描边起笔就联不上。容差 = 描边半宽 + 1px。
+	const float pad = strokeWidth * 0.5f + 1.f;
+	const D2D1_RECT_F r{ rect.left - pad, rect.top - pad, rect.right + pad, rect.bottom + pad };
+	return LinkGeom::insideRect(r, lx, ly);
 }
 
 D2D1_POINT_2F ShapeRect::linkCenter() const

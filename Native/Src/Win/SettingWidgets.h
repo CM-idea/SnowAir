@@ -18,6 +18,7 @@
 //    subTabs                           → Tabs（TabsList + TabsTrigger）
 //    card / separator                  → Card / 水平分割线
 //    pill                              → Badge（variant: default / outline / secondary）
+//    staticBox                         → 只读展示框（不是按钮 → 悬停不给手型）
 //    dashedAdd                         → dashed 幽灵按钮 "＋ 添加项"
 //    btnPrimary / btnOutline / btnGhost / btnDestructive → Button 四变体
 //    callout                           → Callout 提示卡
@@ -408,6 +409,13 @@ Ling::Node* card(Ling::Node* parent);
 // ─── Pill / Badge：标签胶囊（selected=default / unselected=outline）─────
 Ling::Button* pill(Ling::Node* row, const std::wstring& label, bool selected);
 void stylePill(Ling::Button* btn, bool selected);
+
+// ─── Static Box：只读展示框（不可点）────────────────────────────────────
+//   外观与同尺寸的「键位框 / 输入框」一致（白底 + 1px 描边 + radiusCtl + 文字居中），
+//   用于"只展示、不可点"的值（只读键位、功能开发中…）。**故意不用 Button**：
+//   Button 悬停一律切手型光标，没有可点的东西时手型是误导。
+Ling::Node* staticBox(Ling::Node* parent, const std::wstring& text,
+    float w, float h = SettingTheme::ctrlH);
 
 // ─── Dashed Add：虚线添加按钮 ────────────────────────────────────────────
 Ling::Button* dashedAdd(Ling::Node* parent, const std::wstring& label,

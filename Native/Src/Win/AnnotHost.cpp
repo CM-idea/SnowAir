@@ -354,6 +354,12 @@ void AnnotHost::updateTextMidHint(const POINT& imgPos, const std::wstring& tool)
 
 void AnnotHost::paintTextMidHint(ID2D1DeviceContext* ctx)
 {
+	// 按"当前工具"校验一次：右键层级退出、切到别的工具这两条路径只 refresh、不重算提示，
+	// 状态会一直挂着（表现为工具都取消了，挖空那块提示还留在画面上）
+	if (textMidHintActive && getCurToolId() != L"text") {
+		textMidHintActive = false;
+		textMidHasLabel = false;
+	}
 	if (!textMidHintActive || textMidHasLabel || !ctx || !screenImg) return;
 	// 就是"空白"本身：底图原地抠回来 → 底下的线在这一段等于不存在
 	ctx->PushAxisAlignedClip(textMidHint, D2D1_ANTIALIAS_MODE_ALIASED);
@@ -361,7 +367,7 @@ void AnnotHost::paintTextMidHint(ID2D1DeviceContext* ctx)
 	ctx->PopAxisAlignedClip();
 }
 
-// 连线的提示（都只在箭头/线段工具或空工具=选择态下出现）：
+// 连线的提示（只在箭头工具下出现）：
 //   · 悬停形状时：在"朝鼠标方向"的边缘点画一个和控点同款的小圆点 + 一句"拖动可连线"
 //     —— 这就是**起点**的提示（这个形状可以按住往外拖出连线）；
 //   · 拖动连线中：点**一直待在起点**上（起点贴着边缘随鼠标方向滑，点跟着滑）。
@@ -371,7 +377,11 @@ void AnnotHost::paintTextMidHint(ID2D1DeviceContext* ctx)
 // 不能让它们抢同一处，所以这些提示都不在文本工具下出现
 void AnnotHost::updateLinkHints(const POINT& imgPos, const std::wstring& tool)
 {
+	// 叉的显示范围：箭头工具 + 空工具（选择态也能点掉一条连线）
 	const bool toolOk = (tool == L"arrow" || tool.empty());
+	// 起点"＋"提示只属于箭头工具：空工具（选择态）里按住矩形是把它拖走，拖不出连线，
+	// 再显示"拖动可连线"就是误导
+	const bool dotOk = (tool == L"arrow");
 	const D2D1_POINT_2F cursor{ (float)imgPos.x, (float)imgPos.y };
 
 	// ① 点：悬停时=该形状朝鼠标方向的边缘点（起点提示）；拖动中=这条线的起点
@@ -384,7 +394,7 @@ void AnnotHost::updateLinkHints(const POINT& imgPos, const std::wstring& tool)
 			showDot = true;
 		}
 	}
-	else if (toolOk) {
+	else if (dotOk) {
 		if (ShapeBase* t = ShapeLink::pickTarget(this, cursor.x, cursor.y)) {
 			if (ShapeLink::edgePointToward(t, cursor.x, cursor.y, dot)) {
 				target = t;
@@ -438,6 +448,12 @@ void AnnotHost::paintLinkHints(ID2D1DeviceContext* ctx)
 	// 起点小圆点：**和四周控点一模一样**（同一套半径/配色，中间不加任何符号）。
 	// 悬停时 = 该形状上"朝鼠标方向"的边缘点（起点提示）；拖动中 = 这条线的起点（一直跟着它）。
 	// 目标形状上不会画 —— 拖进目标时 linkShowDot 跟的是起点那头
+	// 再按"当前工具"校验一次：右键层级退出、切到别的工具都只 refresh、不重算提示，
+	// 状态会一直挂着（表现为工具都取消了，"＋"和"拖动可连线"还留在画面上）
+	if (linkShowDot && getCurToolId() != L"arrow") {
+		linkShowDot = false;
+		linkHoverTarget = nullptr;
+	}
 	if (linkShowDot && history) {
 		bool targetAlive = false;
 		for (auto& s : history->shapes) {
@@ -650,6 +666,24 @@ void AnnotHost::applyAnnotCursor()
 	if (textMidHintActive && !annotMouseDown) {
 		SetCursor(LoadCursor(nullptr, IDC_IBEAM));
 		return;
+	}
+	// 光标必须在这里统一给出（而不是只在 annotMove 末尾压一次）：光标有 WM_SETCURSOR 与
+	// WM_MOUSEMOVE 两条设置路径，两处给的不一致时就会轮流 SetCursor，光标来回闪 ——
+	// 箭头工具在**空心矩形内部**移动时闪，就是这个原因。
+	if (!annotMouseDown) {
+		// 停在连线的"断开叉"上：手型，提示可点（那个是真能点掉的）
+		if (linkBtn) {
+			SetCursor(LoadCursor(nullptr, IDC_HAND));
+			return;
+		}
+		// 停在可连形状的"＋"柄范围内：给**工具光标**（箭头工具=十字），不是手型 ——
+		// 按住那里＝起笔画连线，连线也是"画标注"，跟别的工具一样是十字（用户定的）。
+		// 只对箭头工具生效：空工具（选择态）停在标注上仍给手型，那是"能点它"的提示。
+		// 排在下面"未选中标注手型"之前，形状边缘那圈才不会被手型抢走
+		if (linkHoverTarget && getCurToolId() == L"arrow") {
+			applyToolDrawCursor();
+			return;
+		}
 	}
 	if (editingText) {
 		bool handled{ false };
@@ -1220,12 +1254,6 @@ void AnnotHost::annotMove(POINT pos)
 		if (prev != shapeHover->hoverDraggerIndex) setTimer(800, 100);
 	}
 	applyAnnotCursor();
-	// 文本工具停在"线段中间"（含线上已经有字）：语义就是打字，最后再压一次工字型，别被悬停手型盖掉
-	if (textMidHintActive) SetCursor(LoadCursor(nullptr, IDC_IBEAM));
-	// 停在连线的"断开叉"上：手型，提示可点
-	if (linkBtn) SetCursor(LoadCursor(nullptr, IDC_HAND));
-	// 停在可连形状上（起点"＋"柄）：手型，提示"按住就能拖出连线"
-	else if (linkHoverTarget) SetCursor(LoadCursor(nullptr, IDC_HAND));
 	// 序号跟手预览需每帧重绘
 	if (numberCursorFollow || getCurToolId() == L"number") refresh();
 }

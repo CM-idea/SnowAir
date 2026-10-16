@@ -91,7 +91,9 @@ bool ShapeEllipse::hitLinkBody(const float x, const float y) const
 {
 	float lx = 0.f, ly = 0.f;
 	toLocal(x, y, lx, ly);
-	return LinkGeom::insideEllipse(centerPt(), rx, ry, lx, ly);
+	// 同矩形：可见描边（外半圈）也算落在形状上，容差 = 描边半宽 + 1px
+	const float pad = strokeWidth * 0.5f + 1.f;
+	return LinkGeom::insideEllipse(centerPt(), rx + pad, ry + pad, lx, ly);
 }
 
 // 局部方向角 → 椭圆边缘交点，再转回世界坐标
