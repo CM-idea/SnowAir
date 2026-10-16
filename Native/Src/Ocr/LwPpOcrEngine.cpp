@@ -229,13 +229,18 @@ OcrResult LwPpOcrEngine::recognize(int w, int h, const BYTE* bgra)
 				minX = std::min(minX, xs[k]); maxX = std::max(maxX, xs[k]);
 				minY = std::min(minY, ys[k]); maxY = std::max(maxY, ys[k]);
 			}
+			// 按行高向外补一点边距。PP-OCRv6 的检测框比字身只大 1~2px（实测框高≈墨迹×1.13），
+			// 而下游 ToolOcr 的背景取样（取框最外一圈的边框带）与字号标定都是按 PP-OCRv5
+			// "带边距"的框调出来的 —— 当年系统 OCR 也是靠外扩 0.15×行高与 v5 对齐（见 SystemOcr）。
+			// 不补的话最外圈会采到字身：整层底色发灰、墨迹高量不准导致字号偏小。
+			const float pad = (maxY - minY) * 0.15f;
 			OcrRegion reg;
 			reg.text = text;
 			reg.displayText = text;
-			reg.x = std::max(0.f, minX);
-			reg.y = std::max(0.f, minY);
-			reg.w = std::max(2.f, std::min(maxX, (float)w) - reg.x);
-			reg.h = std::max(2.f, std::min(maxY, (float)h) - reg.y);
+			reg.x = std::max(0.f, minX - pad);
+			reg.y = std::max(0.f, minY - pad);
+			reg.w = std::max(2.f, std::min(maxX + pad, (float)w) - reg.x);
+			reg.h = std::max(2.f, std::min(maxY + pad, (float)h) - reg.y);
 			r.regions.push_back(reg);
 
 			if (!joined.empty()) joined += L'\n';

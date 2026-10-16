@@ -21,6 +21,15 @@ void App::init()
 {
     auto ptr = new App();
     app.reset(ptr);
+    // 启动阶段画托盘图标会用一次图形设备（TrayIcon::buildGlyphIcon → Ling::D2D::get()），
+    // 那一刻还没有任何窗口，用完也就没人回收 —— 于是"什么都没操作"也要常驻二十几 MB，
+    // 一直到第一次截图会话结束（窗口数归零触发 ~WinBase 里的 dispose）才降下来。
+    // 这里等启动流程走完补一刀：仍然没有窗口就把设备放掉。下次要用 D2D::get() 会自动重建。
+    SetTimer(nullptr, 0, 1500, +[](HWND, UINT, UINT_PTR id, DWORD) {
+        KillTimer(nullptr, id);
+        auto* lapp = Ling::App::get();
+        if (lapp && lapp->windows.empty()) Ling::D2D::dispose();
+    });
 }
 
 void App::dispose()

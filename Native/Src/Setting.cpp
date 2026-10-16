@@ -1144,6 +1144,43 @@ std::wstring Setting::addHistoryItem(const std::vector<BYTE>& bgra, int width, i
     return it.filePath;
 }
 
+std::wstring Setting::addHistoryMedia(const std::wstring& mediaPath, int width, int height,
+    const std::wstring& source, const std::vector<BYTE>& coverBgra)
+{
+    if (mediaPath.empty()) return L"";
+    HistoryItem it;
+    static UINT64 seq = 0;
+    const auto now = std::chrono::system_clock::now();
+    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    it.id = std::format(L"h{}-{}", nowMs, ++seq);
+    it.source = source.empty() ? L"record" : source;
+    it.width = width;
+    it.height = height;
+    it.createdAt = (long long)nowMs;
+    it.filePath = mediaPath;          // 原视频路径：不复制，历史只记引用
+
+    // 封面：网格拿它当缩略图（视频本身 ImageBox 解不了）。写不进去也不影响这条记录
+    if (!coverBgra.empty() && width > 0 && height > 0
+        && (size_t)width * (size_t)height * 4 <= coverBgra.size()) {
+        auto dir = getHistoryDir();
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        Util::saveToFile((dir / (it.id + L".png")).wstring(), width, height,
+            const_cast<BYTE*>(coverBgra.data()));
+    }
+
+    JsonArray arr;
+    arr.Append(historyItemToJson(it));   // 新的排在前面（与 getHistoryItems 的排序一致）
+    for (auto& old : getHistoryItems()) arr.Append(historyItemToJson(old));
+
+    auto features = featuresObj();
+    auto store = historyStore(features);
+    store.SetNamedValue(L"items", arr);
+    features.SetNamedValue(L"history", store);
+    save();
+    return it.filePath;
+}
+
 void Setting::pruneExpiredHistory()
 {
     int days = getHistoryRetentionDays();
@@ -1181,7 +1218,12 @@ void Setting::removeHistoryItem(const std::wstring& id)
     for (auto& it : list) {
         if (it.id == id) {
             std::error_code ec;
-            if (!it.filePath.empty()) std::filesystem::remove(it.filePath, ec);
+            if (it.source == L"record") {
+                // 录屏条目：视频是用户自己保存的文件，删条目只删封面
+                std::filesystem::remove(getHistoryDir() / (it.id + L".png"), ec);
+            } else if (!it.filePath.empty()) {
+                std::filesystem::remove(it.filePath, ec);
+            }
         } else {
             keep.push_back(it);
         }
@@ -1200,7 +1242,12 @@ void Setting::clearAllHistory()
     auto list = getHistoryItems();
     for (auto& it : list) {
         std::error_code ec;
-        if (!it.filePath.empty()) std::filesystem::remove(it.filePath, ec);
+        if (it.source == L"record") {
+            // 同上：录屏只清封面，不动用户保存的视频
+            std::filesystem::remove(getHistoryDir() / (it.id + L".png"), ec);
+        } else if (!it.filePath.empty()) {
+            std::filesystem::remove(it.filePath, ec);
+        }
     }
     auto features = featuresObj();
     auto store = historyStore(features);

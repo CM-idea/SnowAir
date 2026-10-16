@@ -12,6 +12,8 @@
 #include "PinMenu.h"
 #include "../Tool/ToolOcr.h"
 #include "../Ocr/OcrService.h"
+#include "../Ocr/LwPpOcrEngine.h"
+#include "../Translate/BergamotEngine.h"
 #include "../Lang.h"
 #include "../App.h"
 #include "../Setting.h"
@@ -137,6 +139,10 @@ void WinPin::onClosed()
 	if (toolOcr) { toolOcr->close(); toolOcr.reset(); }
 	if (toolSub) toolSub->close();
 	if (toolCap) toolCap->close();
+	// 贴图上做过识别/翻译时，引擎（PP-OCRv6 约 100MB、离线翻译模型几百 MB）也在本进程常驻。
+	// 与截图窗一致：这张贴图收工就把它们还回去，下次要用再重建（release 内部加锁，安全）。
+	LwPpOcrEngine::release();
+	BergamotEngine::release();
 	shapeHover = nullptr;
 	editingText = nullptr;
 	Ling::App::get()->dq.TryEnqueue([this]() {

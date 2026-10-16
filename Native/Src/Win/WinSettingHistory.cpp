@@ -55,6 +55,8 @@ namespace {
 	{
 		if (src == L"fullscreen") return Lang::get(L"setting.srcFullscreen");
 		if (src == L"focused")    return Lang::get(L"setting.srcFocused");
+		if (src == L"long")       return Lang::get(L"setting.srcLong");
+		if (src == L"record")     return Lang::get(L"setting.srcRecord");
 		return Lang::get(L"setting.srcCapture");
 	}
 	// 下拉外观对齐「插件集成 > 离线翻译」标题行里那个内嵌下拉：去掉描边 + 值文字改灰
@@ -94,6 +96,13 @@ namespace {
 		b->setAlignItems(Ling::Align::Center);
 		b->onClick.add([cb = std::move(onClick)](Ling::Button*) { cb(); });
 		return b;
+	}
+	// 在资源管理器里定位文件（录屏条目用：视频不复制到历史目录，定位的是用户自己保存的那份）
+	void revealInExplorer(const std::wstring& path)
+	{
+		if (path.empty()) return;
+		const std::wstring args = L"/select,\"" + path + L"\"";
+		ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
 	}
 }
 
@@ -422,6 +431,10 @@ void WinSettingHistory::refreshGrid()
 		thumbHost->setBorderRadius(SettingTheme::radiusMd);
 		thumbHost->setPositionType(Ling::Position::Relative);
 
+		// 录屏条目（source=record）：视频文件不能直接当缩略图解码，封面在历史目录的 <id>.png；
+		// 中间那颗按钮也从「贴图」换成「在资源管理器里定位」——贴图对视频没有意义。
+		const bool isMedia = (it.source == L"record");
+
 		auto* img = thumbHost->makeChild<Ling::ImageBox>();
 		img->setWidthPercent(100.f);
 		img->setHeightPercent(100.f);
@@ -429,17 +442,22 @@ void WinSettingHistory::refreshGrid()
 		// （约 33MB）解码位图，内存会很快堆起来。上限取显示尺寸的 2 倍（物理像素）足够清晰。
 		{
 			const float thumbCap = (kThumbH + kPad * 2.f + kCaptionH) * 2.f * win->dpi;
-			img->loadImg(it.filePath, thumbCap * 2.f, thumbCap);
+			const std::wstring thumbPath = isMedia
+				? (Setting::get()->getHistoryDir() / (it.id + L".png")).wstring()
+				: it.filePath;
+			img->loadImg(thumbPath, thumbCap * 2.f, thumbCap);
 		}
 
 		const std::wstring id = it.id;
+		const std::wstring filePath = it.filePath;
 		auto* copyBtn = mkIconBtn(thumbHost, Icon::Copy, 70.f, false,
 			[this, id, thumbHost]() {
 				Util::copyHistoryFileToClipboard(id);
 				this->showCopyToast(thumbHost);   // 在当前这张缩略图上提示「复制成功」
 			});
-		auto* pinBtn = mkIconBtn(thumbHost, Icon::Pin, 38.f, false,
-			[this, id]() { Util::pinHistoryFile(id); });
+		auto* pinBtn = isMedia
+			? mkIconBtn(thumbHost, Icon::Folder, 38.f, false, [filePath]() { revealInExplorer(filePath); })
+			: mkIconBtn(thumbHost, Icon::Pin, 38.f, false, [this, id]() { Util::pinHistoryFile(id); });
 		auto* delBtn = mkIconBtn(thumbHost, Icon::Remove, 6.f, true,
 			[this, id]() {
 				// 删单张不弹确认：历史只是一份副本，误删代价小（清空历史才需要确认）。
@@ -456,7 +474,7 @@ void WinSettingHistory::refreshGrid()
 		cells.push_back({ thumbHost, { copyBtn, pinBtn, delBtn } });
 		if (tip) {
 			tip->bind(copyBtn, Lang::get(L"setting.copy"));
-			tip->bind(pinBtn, Lang::get(L"setting.pin"));
+			tip->bind(pinBtn, Lang::get(isMedia ? L"setting.revealFile" : L"setting.pin"));
 			tip->bind(delBtn, Lang::get(L"setting.delete"));
 		}
 

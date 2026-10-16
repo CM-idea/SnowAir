@@ -608,7 +608,26 @@ void ToolVideo::saveFile()
 		st->getVideoRecordFormat(), Setting::defaultVideoRecordFormat(), L"");
 	if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos) defName = defName.substr(slash + 1);
 	auto tarPath = Util::getSaveFilePath(nullptr, ext, defName, st->getRecordDir());
-	if (!tarPath.empty()) CopyFile(srcPath.data(), tarPath.data(), false);
+	if (!tarPath.empty() && CopyFile(srcPath.data(), tarPath.data(), false)) {
+		// 录屏入历史：视频本身不复制（历史只记路径），封面用收工这一刻的画面 ——
+		// 此时工具条已隐藏，画面就是用户看到的样子；选区取不到就只记条目、不带封面。
+		int vw = 0, vh = 0;
+		std::vector<BYTE> cover;
+		if (win && win->cutMask) {
+			// maskRect 是客户坐标；WinCap 铺满虚拟屏，加 win->x/y 即屏幕坐标
+			const auto& sel = win->cutMask->maskRect;   // D2D1_RECT_F，客户坐标
+			const int cx = win->x + (int)sel.left;
+			const int cy = win->y + (int)sel.top;
+			const int cw2 = (int)(sel.right - sel.left);
+			const int ch2 = (int)(sel.bottom - sel.top);
+			if (cw2 > 0 && ch2 > 0) {
+				cover = Util::captureScreen(cx, cy, cw2, ch2);
+				if (cover.size() == (size_t)cw2 * (size_t)ch2 * 4) { vw = cw2; vh = ch2; }
+				else cover.clear();
+			}
+		}
+		st->addHistoryMedia(tarPath, vw, vh, L"record", cover);
+	}
 	DeleteFile(srcPath.data());
 	win->close();
 }

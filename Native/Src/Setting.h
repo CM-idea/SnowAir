@@ -209,8 +209,11 @@ public:
 	// —— History 目录/条目/过期清理 ——
 	struct HistoryItem {
 		std::wstring id;
+		// 截图条目：历史目录里那份 PNG 的路径；
+		// 录屏条目：用户保存的**原视频**路径（不复制），封面在历史目录的 <id>.png
 		std::wstring filePath;
-		std::wstring source;       // "fullscreen" / "focused" / "capture"
+		// "fullscreen" / "focused" / "capture" / "long" / "record"
+		std::wstring source;
 		int width{ 0 };
 		int height{ 0 };
 		long long createdAt{ 0 };  // ms epoch
@@ -220,6 +223,11 @@ public:
 	// 记一条截图历史：图像写进历史目录（历史条目自带一份，与用户输出目录解耦，
 	// 清空历史不会误删用户自己的截图），返回落盘文件路径（失败返回空）
 	std::wstring addHistoryItem(const std::vector<BYTE>& bgra, int width, int height, const std::wstring& source);
+	// 记一条录屏历史：视频文件**不复制**（避免双份大文件），只记媒体路径；
+	// coverBgra 非空时另存一张封面到 历史目录/<id>.png（网格拿它当缩略图）。
+	// 删条目/清空历史只会删掉这张封面，绝不碰用户保存的视频。
+	std::wstring addHistoryMedia(const std::wstring& mediaPath, int width, int height,
+		const std::wstring& source, const std::vector<BYTE>& coverBgra = {});
 	void pruneExpiredHistory();
 	void removeHistoryItem(const std::wstring& id);
 	void clearAllHistory();

@@ -1589,8 +1589,16 @@ void WinCap::onClosed()
     if (toolQrcode) { toolQrcode->close(); toolQrcode.reset(); }
     if (toolCap) toolCap->close();
     if (toolSub) toolSub->close();
+    // OCR/翻译结果面板也一起收掉：它跟其它子工具一样挂在会话上，之前漏了这一句，
+    // 面板要等下面延迟队列里的 winCap.reset() 才销毁 —— 期间它的选区像素（srcImage_）
+    // 和自绘 D2D 资源还挂着，占用看着就"降不下去"。
+    if (toolOcr) { toolOcr->close(); toolOcr.reset(); }
     Ling::App::get()->dq.TryEnqueue([]() {
         winCap.reset();
+        // 会话彻底收工（窗口对象全销毁、图形设备按需 dispose）之后，主动把工作集里的闲页换出去：
+        // 图形设备/COM 那些常驻页不会自己还给系统，任务管理器里就一直挂着二十几 MB 不回落。
+        // 代价是下次开截图的第一帧要把页换回来，多几十毫秒。
+        SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
         if (!WinPin::hasWindow()) {
             if (Ling::App::get()->args[L"--auto-quit"] == L"true") {
                 Ling::App::get()->quit(0);
@@ -2700,13 +2708,12 @@ void WinCap::saveToFile(bool keepOpen)
             0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     };
     setToolTopmost(false);
-    // 「保存格式」决定扩展名；文件名默认给「手动保存 / 焦点窗口文件名格式」的末段；
+    // 「保存格式」决定扩展名；文件名一律走「手动保存文件名格式」的末段 ——
+    // 点选窗口元素也算普通框选（历史上的「焦点窗口」只留给全局热键那条路径）。
     // 起始目录固定「桌面」——手动保存与「截图文件路径」解耦，后者只作用于自动/静默落盘
     const std::wstring saveExt = Util::extensionFromSaveFormat(Setting::get()->getSaveFormat());
-    const std::wstring defFmt = selectionFromElement_ ? Setting::get()->getFocusedWindowFormat()
-                                                      : Setting::get()->getManualSaveFormat();
-    const std::wstring defFallback = selectionFromElement_ ? Setting::defaultFocusedWindowFormat()
-                                                           : Setting::defaultManualSaveFormat();
+    const std::wstring defFmt = Setting::get()->getManualSaveFormat();
+    const std::wstring defFallback = Setting::defaultManualSaveFormat();
     std::wstring defName = Util::previewFileName(defFmt, defFallback, focusAppName_);
     if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos) defName = defName.substr(slash + 1);
     auto path = Util::getSaveFilePath(hwnd, saveExt, defName, Util::desktopDir().wstring());
@@ -2715,8 +2722,10 @@ void WinCap::saveToFile(bool keepOpen)
         return;
     }
     if (Util::saveToFile(path, cw, ch, pixels.data())) {
-        // 记一条截图历史（只在会话收工时；keepOpen 的中间态复制不算）
-        if (!keepOpen) Setting::get()->addHistoryItem(pixels, cw, ch, selectionFromElement_ ? L"focused" : L"capture");
+        // 记一条截图历史（只在会话收工时；keepOpen 的中间态复制不算）。
+        // 来源一律记 capture：点选窗口元素只是"框选"的一种，历史上不该显示成「焦点窗口」——
+        // 那个标记留给全局热键「截取焦点窗口」那条路径（见 App::captureFocusedWindowSilent）。
+        if (!keepOpen) Setting::get()->addHistoryItem(pixels, cw, ch, L"capture");
         if (!keepOpen) close();
     }
     else {
@@ -2737,10 +2746,12 @@ void WinCap::copyToClipboard(bool keepOpen)
     if (!exportSelection(pixels, cw, ch)) return;
     if (!keepOpen) rememberLastRegion();
     Util::saveToClipboard(cw, ch, pixels.data());
-    // 「截图后自动保存」：收工时静默落盘（点选窗口按「焦点窗口文件名格式」命名）
-    if (!keepOpen) Util::quietSaveCapture(pixels, cw, ch, selectionFromElement_, focusAppName_);
+    // 「截图后自动保存」：收工时静默落盘。点选窗口元素也算普通框选，走「自动保存文件名格式」——
+    // 「焦点窗口文件名格式」只归全局热键那条路径（App::captureFocusedWindowSilent）
+    if (!keepOpen) Util::quietSaveCapture(pixels, cw, ch, false, focusAppName_);
     // 记一条截图历史（只在会话收工时；演示画布 keepOpen=true 不算）
-    if (!keepOpen) Setting::get()->addHistoryItem(pixels, cw, ch, selectionFromElement_ ? L"focused" : L"capture");
+    // 来源一律 capture（点选窗口元素不记 focused，理由见上面保存分支的注释）
+    if (!keepOpen) Setting::get()->addHistoryItem(pixels, cw, ch, L"capture");
     if (!keepOpen) close();
 }
 
