@@ -61,20 +61,15 @@ SnowAir 分为两个版本，共享同一套使用体验与功能布局：
 
 ## 📦 安装
 
-以下为软件的获取与运行方式，详细说明见 [`Native/README.md`](Native/README.md)。想快速上手，从以下方式任选其一：
+以下为软件的获取、运行与扩展组件说明，详细说明见 [`Native/README.md`](Native/README.md)：
 <br/><br/>
 <details open>
-<summary><strong>从 GitHub Releases 下载</strong></summary>
+<summary><strong>软件下载</strong></summary>
 <br/>
 
 前往 [SnowAir Releases](https://github.com/CM-idea/SnowAir/releases)，展开 **Assets** 下载 `SnowAir.exe`，双击即可运行，无需安装。
 
-</details>
-
-<details>
-<summary><strong>便携模式</strong></summary>
-<br/>
-在 `SnowAir.exe` 同目录放置一个空文件 `config.json`，配置、语言与插件即改从 exe 目录读取；删除该文件即恢复为默认的 `%AppData%\SnowAir\`。
+想让软件便携运行（配置、语言与插件都放在 exe 目录，不写入 `%AppData%`）：在 `SnowAir.exe` 同目录放一个空文件 `config.json` 即可，删掉该文件即恢复默认的 `%AppData%\SnowAir\`。
 
 </details>
 
@@ -97,14 +92,14 @@ git clone --depth 1 https://github.com/xland/Ling.git Native/deps/Ling
 </details>
 
 <details>
-<summary><strong>离线文字识别</strong></summary>
+<summary><strong>离线组件</strong></summary>
 <br/>
-离线文字识别按需下载、不随安装包内置：在设置中心的「插件集成」下载 PP-OCRv6 方案，再到「功能设置 → 文字识别」启用，即可离线识别中英文与界面截图，无需保持联网，引擎用完即释放、不会长期占用内存。
+包含离线 OCR、离线翻译等组件，按需下载、不随安装包内置：可在设置中心的「插件集成」下载对应组件与所需语言包，再到「功能设置」中启用，即可离线识别中英文与界面截图，无需保持联网，引擎用完即释放、不会长期占用内存。
 
 </details>
 
 <details>
-<summary><strong>命令行参数</strong></summary>
+<summary><strong>命令行</strong></summary>
 <br/>
 不带参数启动时**只挂托盘图标待命**，不会自动进入截图模式：
 

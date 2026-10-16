@@ -61,20 +61,15 @@ SnowAir comes in two editions that share the same experience and feature layout:
 
 ## 📦 Installation
 
-The following covers how to obtain and run the software; see [`Native/README.md`](Native/README.md) for details. To get started quickly, pick one of the options below:
+The following covers how to obtain, run and extend the software; see [`Native/README.md`](Native/README.md) for details:
 <br/><br/>
 <details open>
-<summary><strong>Download from GitHub Releases</strong></summary>
+<summary><strong>Software Download</strong></summary>
 <br/>
 
 Go to [SnowAir Releases](https://github.com/CM-idea/SnowAir/releases), expand **Assets**, download `SnowAir.exe`, and double-click to run — no installation required.
 
-</details>
-
-<details>
-<summary><strong>Portable Mode</strong></summary>
-<br/>
-Place an empty file named `config.json` next to `SnowAir.exe`, and configuration, language, and plugins will be read from the exe directory instead; delete the file to restore the default `%AppData%\SnowAir\`.
+To run it in portable mode (configuration, language and plugins stay next to the exe instead of `%AppData%`), place an empty file named `config.json` next to `SnowAir.exe`; delete the file to restore the default `%AppData%\SnowAir\`.
 
 </details>
 
@@ -97,14 +92,14 @@ Output: `Native/x64/Release/SnowAir.exe`.
 </details>
 
 <details>
-<summary><strong>Offline Text Recognition</strong></summary>
+<summary><strong>Offline Components</strong></summary>
 <br/>
-Offline text recognition is downloaded on demand and not bundled with the installer: download the PP-OCRv6 package under "Plugin Integrations" and enable it under "Feature Settings → Text Recognition" to recognize Chinese, English and UI screenshots offline — no internet connection needed, and the engine is released as soon as it is done, so it never holds memory long-term.
+Includes offline OCR, offline translation and other components, downloaded on demand and not bundled with the installer: you can download the required components and language packs under "Plugin Integrations", then enable them in "Feature Settings" to recognize Chinese, English and UI screenshots offline — no internet connection needed, and the engine is released as soon as it is done, so it never holds memory long-term.
 
 </details>
 
 <details>
-<summary><strong>Command-Line Arguments</strong></summary>
+<summary><strong>Command Line</strong></summary>
 <br/>
 When launched without arguments, it **only sits in the system tray on standby** and does not automatically enter capture mode:
 
