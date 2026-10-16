@@ -360,7 +360,10 @@ std::wstring Util::getSaveFilePath(HWND hwnd, const std::wstring& ext, const std
 	if (!defaultDir.empty()) {
 		ComPtr<IShellItem> folder;
 		if (SUCCEEDED(SHCreateItemFromParsingName(defaultDir.c_str(), nullptr, IID_PPV_ARGS(folder.GetAddressOf()))))
-			saveDialog->SetDefaultFolder(folder.Get());
+			// 必须用 SetFolder 而不是 SetDefaultFolder：后者只是"没有历史记录时才用"的兜底，
+			// 用户上次在别处保存过之后，对话框会重开在上次那个目录，而不是这里指定的目录。
+			// 手动保存要求"一打开就在桌面"，所以要每次强制初始目录。
+			saveDialog->SetFolder(folder.Get());
 	}
 	// 用户取消时 Show 返回 HRESULT_FROM_WIN32(ERROR_CANCELLED)，一样走 FAILED 分支
 	hr = saveDialog->Show(hwnd);
@@ -744,6 +747,19 @@ std::filesystem::path Util::defaultOutputDir()
 	std::filesystem::path dir{ pictures };
 	CoTaskMemFree(pictures);
 	dir.append(L"SnowAir");
+	return dir;
+}
+
+// 手动保存（工具栏「保存」）对话框的起始目录：桌面。用户仍可在对话框里改到别处
+std::filesystem::path Util::desktopDir()
+{
+	PWSTR desktop{ nullptr };
+	if (FAILED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &desktop)) || !desktop) {
+		if (desktop) CoTaskMemFree(desktop);
+		return {};
+	}
+	std::filesystem::path dir{ desktop };
+	CoTaskMemFree(desktop);
 	return dir;
 }
 

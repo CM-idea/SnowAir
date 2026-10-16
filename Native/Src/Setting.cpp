@@ -697,7 +697,6 @@ void Setting::restoreFunctionScreenshotDefaults()
 	setSaveFormat(L"PNG (*.png)");
 	setManualSaveFormat(L"");
 	setAutoSaveFormat(L"");
-	setFullScreenFormat(L"");
 	setFocusedWindowFormat(L"");
 	setVideoRecordFormat(L"");
 	setTrayClickAction(0);
@@ -763,7 +762,7 @@ bool Setting::functionScreenshotAtDefaults()
 	return getFindWindowElements() && !getCancelConfirmDialog() && !getAutoSaveAfterCapture()
 		&& !getCopyAsFile() && getSaveFormat() == L"PNG (*.png)"
 		&& getManualSaveFormat().empty() && getAutoSaveFormat().empty()
-		&& getFullScreenFormat().empty() && getFocusedWindowFormat().empty()
+		&& getFocusedWindowFormat().empty()
 		&& getVideoRecordFormat().empty() && getTrayClickAction() == 0
 		&& getDemoDefaultTool() == 0 && getDemoEdgeBehavior() == 0
 		&& !getPinZoomAtCursor() && !getPinAutoOcr() && getPinAutoFit()
@@ -836,7 +835,6 @@ void Setting::setMouseHighlightColor(UINT32 rgba)
 
 std::wstring Setting::defaultManualSaveFormat() { return L"SnowAir_{{YYYY-MM-DD_HH-mm-ss}}"; }
 std::wstring Setting::defaultAutoSaveFormat() { return L"SnowAir_auto_{{YYYY-MM-DD_HH-mm-ss}}"; }
-std::wstring Setting::defaultFullScreenFormat() { return L"SnowAir_full_{{YYYY-MM-DD_HH-mm-ss}}"; }
 std::wstring Setting::defaultFocusedWindowFormat() { return L"{{FOCUS_WINDOW_APP_NAME}}/SnowAir_{{YYYY-MM-DD_HH-mm-ss}}"; }
 std::wstring Setting::defaultVideoRecordFormat() { return L"SnowAir_Video_{{YYYY-MM-DD_HH-mm-ss}}"; }
 
@@ -844,8 +842,6 @@ std::wstring Setting::getManualSaveFormat() { return featStr(L"manualSaveFormat"
 void Setting::setManualSaveFormat(const std::wstring& v) { setFeatStr(L"manualSaveFormat", v); }
 std::wstring Setting::getAutoSaveFormat() { return featStr(L"autoSaveFormat", L""); }
 void Setting::setAutoSaveFormat(const std::wstring& v) { setFeatStr(L"autoSaveFormat", v); }
-std::wstring Setting::getFullScreenFormat() { return featStr(L"fullScreenFormat", L""); }
-void Setting::setFullScreenFormat(const std::wstring& v) { setFeatStr(L"fullScreenFormat", v); }
 std::wstring Setting::getFocusedWindowFormat() { return featStr(L"focusedWindowFormat", L""); }
 void Setting::setFocusedWindowFormat(const std::wstring& v) { setFeatStr(L"focusedWindowFormat", v); }
 std::wstring Setting::getVideoRecordFormat() { return featStr(L"videoRecordFormat", L""); }

@@ -253,7 +253,6 @@
     "focusAppVar": "Focused app name variable",
     "manualSaveFmt": "Manual save filename format",
     "autoSaveFmt": "Auto-save filename format",
-    "fullScreenFmt": "Fullscreen capture filename format",
     "focusedWindowFmt": "Focused window filename format",
     "videoRecordFmt": "Video recording filename format",
     "screenshotOutput": "Screenshot output",

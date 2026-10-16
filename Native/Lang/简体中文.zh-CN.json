@@ -254,7 +254,6 @@
     "focusAppVar": "焦点窗口应用名",
     "manualSaveFmt": "手动保存文件名格式",
     "autoSaveFmt": "自动保存文件名格式",
-    "fullScreenFmt": "截取全屏文件名格式",
     "focusedWindowFmt": "焦点窗口文件名格式",
     "videoRecordFmt": "视频录制文件名格式",
     "screenshotOutput": "截图输出",

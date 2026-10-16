@@ -1154,8 +1154,12 @@ bool CapLong::saveToFile()
 {
 	std::vector<BYTE> pixels;
 	if (!exportPixels(pixels)) return false;
+	// 与截图/贴图的手动保存一致：默认名取「手动保存文件名格式」的末段，起始目录 = 桌面
+	std::wstring defName = Util::previewFileName(
+		Setting::get()->getManualSaveFormat(), Setting::defaultManualSaveFormat(), L"");
+	if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos) defName = defName.substr(slash + 1);
 	auto path = Util::getSaveFilePath(win->hwnd,
-		Util::extensionFromSaveFormat(Setting::get()->getSaveFormat()));
+		Util::extensionFromSaveFormat(Setting::get()->getSaveFormat()), defName, Util::desktopDir().wstring());
 	if (path.empty()) return false;
 	if (!Util::saveToFile(path, imgW, resultH, pixels.data())) return false;
 	Setting::get()->addHistoryItem(pixels, imgW, resultH, L"capture");

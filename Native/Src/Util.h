@@ -15,7 +15,7 @@ public:
 	static void saveToClipboard(const int w, const int h, BYTE* data);
 	static bool saveToFile(const std::wstring& path, const int w, const int h, BYTE* data);
 	// 弹系统另存为对话框，返回空串表示用户取消。defaultName 非空时作为默认文件名（不含扩展名），
-	// defaultDir 非空时作为对话框初始目录
+	// defaultDir 非空时作为对话框的初始目录（每次都强制从这里开始，不留用"上次保存过的目录"）
 	static std::wstring getSaveFilePath(HWND hwnd, const std::wstring& ext = L"png",
 		const std::wstring& defaultName = L"", const std::wstring& defaultDir = L"");
 	// 以当前时间生成默认文件名，精确到毫秒，避免连续保存时重名
@@ -62,6 +62,8 @@ public:
 	// —— 截图输出路径 ——
 	// 默认输出根目录：图片\SnowAir；取不到「图片」文件夹时退回空路径（不建目录）
 	static std::filesystem::path defaultOutputDir();
+	// 手动保存（工具栏「保存」）对话框的起始目录：桌面；取不到时退回空路径（对话框用系统默认位置）
+	static std::filesystem::path desktopDir();
 	// 截屏输出根目录：用户在「文件输出」自定义了截图目录就用它，否则用 defaultOutputDir()；不存在就建
 	static std::filesystem::path outputDir();
 	// 文件名模板 → 绝对路径。

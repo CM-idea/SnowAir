@@ -2696,7 +2696,8 @@ void WinCap::saveToFile(bool keepOpen)
             0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     };
     setToolTopmost(false);
-    // 「保存格式」决定扩展名；文件名默认给「手动保存 / 焦点窗口文件名格式」的末段
+    // 「保存格式」决定扩展名；文件名默认给「手动保存 / 焦点窗口文件名格式」的末段；
+    // 起始目录固定「桌面」——手动保存与「截图文件路径」解耦，后者只作用于自动/静默落盘
     const std::wstring saveExt = Util::extensionFromSaveFormat(Setting::get()->getSaveFormat());
     const std::wstring defFmt = selectionFromElement_ ? Setting::get()->getFocusedWindowFormat()
                                                       : Setting::get()->getManualSaveFormat();
@@ -2704,7 +2705,7 @@ void WinCap::saveToFile(bool keepOpen)
                                                            : Setting::defaultManualSaveFormat();
     std::wstring defName = Util::previewFileName(defFmt, defFallback, focusAppName_);
     if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos) defName = defName.substr(slash + 1);
-    auto path = Util::getSaveFilePath(hwnd, saveExt, defName);
+    auto path = Util::getSaveFilePath(hwnd, saveExt, defName, Util::desktopDir().wstring());
     if (path.empty()) {
         setToolTopmost(true);
         return;

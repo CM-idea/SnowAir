@@ -893,12 +893,12 @@ void WinPin::copyToClipboard()
 void WinPin::saveToFile()
 {
 	auto foregroundBeforeDialog = GetForegroundWindow();
-	// 「保存格式」决定扩展名；文件名默认给「手动保存文件名格式」的末段
+	// 「保存格式」决定扩展名；文件名默认给「手动保存文件名格式」的末段；起始目录固定「桌面」
 	const std::wstring saveExt = Util::extensionFromSaveFormat(Setting::get()->getSaveFormat());
 	std::wstring defName = Util::previewFileName(
 		Setting::get()->getManualSaveFormat(), Setting::defaultManualSaveFormat(), L"");
 	if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos) defName = defName.substr(slash + 1);
-	auto path = Util::getSaveFilePath(hwnd, saveExt, defName);
+	auto path = Util::getSaveFilePath(hwnd, saveExt, defName, Util::desktopDir().wstring());
 	if (path.empty()) {
 		restoreWindowState(foregroundBeforeDialog);
 		return;

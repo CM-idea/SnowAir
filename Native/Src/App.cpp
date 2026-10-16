@@ -119,11 +119,11 @@ void App::captureFullScreenSilent()
 	auto pixels = Util::captureScreen(sx, sy, sw, sh);
 	if (pixels.empty()) return;
 
-	// 文件名走「功能设置 → 文件输出 → 截取全屏」的模板（默认 SnowAir_full_{{YYYY-MM-DD_HH-mm-ss}}），
+	// 文件名与「功能设置 → 文件输出 → 手动保存文件名格式」同一套模板（默认 SnowAir_{{YYYY-MM-DD_HH-mm-ss}}），
 	// 落到 图片\SnowAir 下；扩展名与编码取「保存格式」（PNG/JPEG/WebP/BMP）。
 	const std::wstring ext = Util::extensionFromSaveFormat(Setting::get()->getSaveFormat());
 	const std::wstring path = Util::buildSavePath(
-		Setting::get()->getFullScreenFormat(), Setting::defaultFullScreenFormat(), ext);
+		Setting::get()->getManualSaveFormat(), Setting::defaultManualSaveFormat(), ext);
 	const bool saved = !path.empty() && Util::saveToFile(path, sw, sh, pixels.data());
 
 	if (Setting::get()->getCopyAsFile() && saved) Util::addFileToClipboard(path);

@@ -157,8 +157,6 @@ public:
 	void setManualSaveFormat(const std::wstring& v);
 	std::wstring getAutoSaveFormat();
 	void setAutoSaveFormat(const std::wstring& v);
-	std::wstring getFullScreenFormat();
-	void setFullScreenFormat(const std::wstring& v);
 	std::wstring getFocusedWindowFormat();
 	void setFocusedWindowFormat(const std::wstring& v);
 	std::wstring getVideoRecordFormat();
@@ -171,7 +169,6 @@ public:
 
 	static std::wstring defaultManualSaveFormat();
 	static std::wstring defaultAutoSaveFormat();
-	static std::wstring defaultFullScreenFormat();
 	static std::wstring defaultFocusedWindowFormat();
 	static std::wstring defaultVideoRecordFormat();
 	int getHistoryRetentionDays();
