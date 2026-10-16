@@ -339,7 +339,7 @@
     "fnTargetLang": "Target language",
     "pluginsSummary": "Installed components: %1",
     "plugOcrTitle": "Offline OCR",
-    "plugOcrDesc": "PP-OCRv5 is a new-generation PP-OCR text recognition solution, covering 5 major script types: Simplified Chinese, Chinese pinyin, Traditional Chinese, English and Japanese.",
+    "plugOcrDesc": "PP-OCRv6 is a new-generation PP-OCR text recognition solution, covering 5 major script types: Simplified Chinese, Chinese pinyin, Traditional Chinese, English and Japanese.",
     "plugPlan": "Plan",
     "plugInstalled": "Installed",
     "plugNotInstalled": "Not installed",

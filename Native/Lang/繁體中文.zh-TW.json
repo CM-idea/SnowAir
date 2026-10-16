@@ -254,7 +254,7 @@
     "fnTargetLang": "目標語言",
     "pluginsSummary": "已安裝元件：%1",
     "plugOcrTitle": "離線文字辨識",
-    "plugOcrDesc": "PP-OCRv5 是 PP-OCR 新一代文字辨識解決方案，支援簡體中文、中文拼音、繁體中文、英文、日文 5 大主流文字類型。",
+    "plugOcrDesc": "PP-OCRv6 是 PP-OCR 新一代文字辨識解決方案，支援簡體中文、中文拼音、繁體中文、英文、日文 5 大主流文字類型。",
     "plugPlan": "方案",
     "plugInstalled": "已安裝",
     "plugNotInstalled": "未安裝",

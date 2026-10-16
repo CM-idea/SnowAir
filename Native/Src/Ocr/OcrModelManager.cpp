@@ -1,43 +1,20 @@
 #include "pch.h"
 #include "OcrModelManager.h"
+#include "OcrPackVariant.h"
+#include "OcrPackFetch.h"
 #include "PluginPaths.h"
-#include "../Net/HttpClient.h"
+#include "LwPpOcrEngine.h"
 #include <thread>
-#include <vector>
 
 namespace {
-	// 单个模型文件：落盘名 + 下载地址
-	struct OcrFile {
-		const wchar_t* name;
-		const wchar_t* url;
-	};
+	// lw.PPOCR.C 官方模型包（PP-OCRv6 Tiny：det + cls + rec + 字典）。
+	// 固定到发布号，避免与运行时版本串味（其文档明确要求"一个发布号的整套一起用"）。
+	const std::wstring kTinyPackUrl =
+		L"https://github.com/lxw112190/lw.PPOCR.C/releases/download/v1.2.0/"
+		L"lw.PPOCR.C-1.2.0-ppocrv6-tiny-runtime.zip";
 
-	// PP-OCRv5 mobile（RapidOCR.dll v1.3.0 只注册了 mobile 那套算子/版本，server 权重会加载失败）
-	const std::vector<OcrFile> kV5Files = {
-		{ L"ch_PP-OCRv5_det_mobile.onnx",
-		  L"https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/det/ch_PP-OCRv5_det_mobile.onnx" },
-		{ L"ch_PP-OCRv5_rec_mobile.onnx",
-		  L"https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/rec/ch_PP-OCRv5_rec_mobile.onnx" },
-		{ L"ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx",
-		  L"https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/cls/ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx" },
-	};
-
-	// PP-OCRv6 small（官方便携 Python 方案使用；无 cls，方向分类不跑）
-	const std::vector<OcrFile> kV6Files = {
-		{ L"PP-OCRv6_det_small.onnx",
-		  L"https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx" },
-		{ L"PP-OCRv6_rec_small.onnx",
-		  L"https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx" },
-		{ L"ppocrv6_dict.txt",
-		  L"https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv6/rec/PP-OCRv6_rec_small/ppocrv6_dict.txt" },
-	};
-
-	// 每个方案需要的文件清单。PP-OCRv4 已下架（2 号方案被删除并归一到 v5），
-	// 这里沿用 v5 的 mobile 权重，保证老设置里选到 v4 也能装出一份可用的模型。
-	const std::vector<OcrFile>& filesFor(OcrPackVariant v)
-	{
-		return (v == OcrPackVariant::Official) ? kV6Files : kV5Files;
-	}
+	// 装好后模型目录里应有的文件（从包内摊平到 ocr-models/ppocr-v6/）
+	const wchar_t* const kFiles[] = { L"det.lwm", L"cls.lwm", L"rec.lwm", L"ppocr_keys.txt" };
 }
 
 OcrModelManager& OcrModelManager::instance()
@@ -53,6 +30,8 @@ std::wstring OcrModelManager::modelsDir(OcrPackVariant v) const
 
 void OcrModelManager::uninstall(OcrPackVariant v)
 {
+	// 引擎读着模型文件，先把它（连同 DLL）放掉再删，否则删除会失败/半截
+	LwPpOcrEngine::release();
 	std::error_code ec;
 	std::filesystem::remove_all(PluginPaths::ocrModels() / OcrPack::folderName(v), ec);
 }
@@ -63,8 +42,8 @@ bool OcrModelManager::isInstalled(OcrPackVariant v) const
 	std::error_code ec;
 	if (!std::filesystem::is_directory(dir, ec)) return false;
 	// 清单里的文件齐了才算装好（半截下载不该显示「已安装」）
-	for (const auto& f : filesFor(v)) {
-		auto p = dir / f.name;
+	for (const auto* name : kFiles) {
+		auto p = dir / name;
 		if (!std::filesystem::is_regular_file(p, ec)) return false;
 		if (std::filesystem::file_size(p, ec) == 0) return false;
 	}
@@ -76,34 +55,54 @@ void OcrModelManager::download(OcrPackVariant v,
 	std::function<void(bool, std::wstring)> done)
 {
 	std::thread([v, progress, done]() {
-		const auto& files = filesFor(v);
 		auto destRoot = PluginPaths::ocrModels() / OcrPack::folderName(v);
 		std::error_code ec;
 		std::filesystem::create_directories(destRoot, ec);
-		if (files.empty()) {
-			if (done) done(false, L"没有可用的模型清单");
+
+		if (OcrModelManager::instance().isInstalled(v)) {
+			if (progress) progress(1.f);
+			if (done) done(true, {});
 			return;
 		}
-		const size_t n = files.size();
-		for (size_t i = 0; i < n; i++) {
-			auto dest = destRoot / files[i].name;
-			// 已存在且非空：跳过（重复点下载不必重来）
-			if (std::filesystem::is_regular_file(dest, ec) && std::filesystem::file_size(dest, ec) > 0) {
-				if (progress) progress((float)(i + 1) / (float)n);
-				continue;
+
+		// 下载官方模型包 → 解压 → 把 4 个文件摊到模型目录（不重下已存在的单个文件）
+		auto tmp = destRoot / L"_pkg";
+		std::filesystem::remove_all(tmp, ec);
+		std::filesystem::create_directories(tmp, ec);
+		auto zip = tmp / L"ppocrv6-tiny-runtime.zip";   // Expand-Archive 只认 .zip 扩展名
+
+		if (!OcrPackFetch::tryDownload(OcrPackFetch::githubMirrors(kTinyPackUrl), zip,
+			[&](float p) { if (progress) progress(p * 0.7f); })) {
+			std::filesystem::remove_all(tmp, ec);
+			if (done) done(false, L"PP-OCRv6 模型包下载失败，请检查网络后重试");
+			return;
+		}
+		auto extract = tmp / L"x";
+		if (!OcrPackFetch::extractZip(zip, extract)) {
+			std::filesystem::remove_all(tmp, ec);
+			if (done) done(false, L"PP-OCRv6 模型包解压失败");
+			return;
+		}
+		if (progress) progress(0.85f);
+
+		for (const auto* name : kFiles) {
+			auto dst = destRoot / name;
+			if (std::filesystem::is_regular_file(dst, ec) && std::filesystem::file_size(dst, ec) > 0)
+				continue;   // 已有且非空：跳过
+			auto src = OcrPackFetch::findFile(extract, name, L"");
+			if (src.empty()) {
+				std::filesystem::remove_all(tmp, ec);
+				if (done) done(false, std::wstring(L"模型包里缺少 ") + name);
+				return;
 			}
-			bool ok = SnowHttp::downloadFile(files[i].url, dest, [&](uint64_t got, uint64_t total) {
-				if (!progress) return;
-				float base = (float)i / (float)n;
-				float part = total ? (float)got / (float)total : 0.f;
-				progress(base + part / (float)n);
-			});
-			if (!ok) {
-				std::filesystem::remove(dest, ec);
-				if (done) done(false, std::wstring(L"模型下载失败：") + files[i].name);
+			std::filesystem::copy_file(src, dst, std::filesystem::copy_options::overwrite_existing, ec);
+			if (ec) {
+				std::filesystem::remove_all(tmp, ec);
+				if (done) done(false, std::wstring(L"模型文件写入失败：") + name);
 				return;
 			}
 		}
+		std::filesystem::remove_all(tmp, ec);
 		if (progress) progress(1.f);
 		if (done) done(true, {});
 	}).detach();

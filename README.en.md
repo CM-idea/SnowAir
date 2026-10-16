@@ -99,9 +99,9 @@ Output: `Native/x64/Release/SnowAir.exe`.
 <details>
 <summary><strong>Offline Text Recognition</strong></summary>
 <br/>
-Offline text recognition is downloaded on demand and not bundled with the installer: in the settings center under "Plugin Integrations", download the PP-OCRv5 package, then enable it under "Feature Settings → Text Recognition".
+Offline text recognition is downloaded on demand and not bundled with the installer: in the settings center under "Plugin Integrations", download the PP-OCRv6 package, then enable it under "Feature Settings → Text Recognition".
 
-PP-OCRv5 bundles the PaddlePaddle models and a local inference engine, and can recognize Chinese, English, and UI screenshots offline — no internet connection is needed once installed.
+PP-OCRv6 bundles the PaddlePaddle models and a local inference engine (lw.PPOCR.C, a pure C runtime), and can recognize Chinese, English, and UI screenshots offline — no internet connection is needed once installed. The engine is created on demand and released as soon as a capture session ends, so it never holds memory long-term.
 
 </details>
 

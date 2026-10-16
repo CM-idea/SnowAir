@@ -248,7 +248,7 @@
         "fnTargetLang": "Bahasa target",
         "pluginsSummary": "Komponen terinstal: %1",
         "plugOcrTitle": "OCR Offline",
-        "plugOcrDesc": "PP-OCRv5 adalah solusi pengenalan teks generasi baru dari PP-OCR, mendukung 5 jenis aksara utama: Tionghoa Sederhana, pinyin Tionghoa, Tionghoa Tradisional, Inggris, dan Jepang.",
+        "plugOcrDesc": "PP-OCRv6 adalah solusi pengenalan teks generasi baru dari PP-OCR, mendukung 5 jenis aksara utama: Tionghoa Sederhana, pinyin Tionghoa, Tionghoa Tradisional, Inggris, dan Jepang.",
         "plugPlan": "Paket",
         "plugInstalled": "Terinstal",
         "plugNotInstalled": "Belum terinstal",

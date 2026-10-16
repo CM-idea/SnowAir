@@ -1,42 +1,23 @@
 #pragma once
 #include <string>
 
+// 离线文字识别的方案标识。
+// 历史上这里有 PP-OCRv6/v5/v4 三档（v4/v5 走 RapidOCR.dll + onnxruntime），v5/v4 已整体移除：
+// 那个 DLL 没有引擎句柄/释放接口，实测「LoadLibrary + 调用 + FreeLibrary」既不回收内存、
+// 每次调用还继续涨（单次 400MB 量级），留在进程里就是白占几百 MB。
+// 现在统一走 lw.PPOCR.C（纯 C 运行时，见 LwPpOcrEngine）：create 一次常驻复用，结束时
+// lw_ocr_free 能把内存真正还回去。
 enum class OcrPackVariant {
-	Official = 0,   // PP-OCRv6 (python / optional)
-	Embedded = 1,   // PP-OCRv5 RapidOCR.dll
-	StableV4 = 2,   // PP-OCRv4 RapidOCR.dll
+	Official = 0,   // PP-OCRv6（lw.PPOCR.C）
 };
 
 namespace OcrPack {
-	inline OcrPackVariant clampVariant(int v)
-	{
-		if (v < 0) return OcrPackVariant::Official;
-		if (v > 2) return OcrPackVariant::StableV4;
-		return static_cast<OcrPackVariant>(v);
-	}
-	inline OcrPackVariant fromEngineId(int e)
-	{
-		if (e == 0) return OcrPackVariant::Official;
-		if (e == 1) return OcrPackVariant::Embedded;
-		if (e == 2) return OcrPackVariant::StableV4;
-		return OcrPackVariant::Embedded;
-	}
-	inline const wchar_t* label(OcrPackVariant v)
-	{
-		switch (v) {
-		case OcrPackVariant::Official: return L"PP-OCRv6";
-		case OcrPackVariant::Embedded: return L"PP-OCRv5";
-		case OcrPackVariant::StableV4: return L"PP-OCRv4";
-		}
-		return L"PP-OCR";
-	}
-	inline const wchar_t* folderName(OcrPackVariant v)
-	{
-		switch (v) {
-		case OcrPackVariant::Official: return L"ppocr-v6";
-		case OcrPackVariant::Embedded: return L"ppocr-v5";
-		case OcrPackVariant::StableV4: return L"ppocr-v4";
-		}
-		return L"ppocr";
-	}
+	inline OcrPackVariant clampVariant(int) { return OcrPackVariant::Official; }
+
+	// 旧配置里选过 1(v5)/2(v4)/5(其它) 的引擎：一律归到 v6。
+	// 注意 4 = 系统 OCR、5 = 云识别由 OcrEngineKind 解释，这里只处理"PP-OCR 系"的映射。
+	inline OcrPackVariant fromEngineId(int) { return OcrPackVariant::Official; }
+
+	inline const wchar_t* label(OcrPackVariant) { return L"PP-OCRv6"; }
+	inline const wchar_t* folderName(OcrPackVariant) { return L"ppocr-v6"; }
 }

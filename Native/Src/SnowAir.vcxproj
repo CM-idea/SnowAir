@@ -221,7 +221,7 @@
     <ClCompile Include="Ocr\OcrModelManager.cpp" />
     <ClCompile Include="Ocr\OcrRuntimeManager.cpp" />
     <ClCompile Include="Ocr\OcrService.cpp" />
-    <ClCompile Include="Ocr\PpOcrEngine.cpp" />
+    <ClCompile Include="Ocr\LwPpOcrEngine.cpp" />
     <ClCompile Include="Ocr\SystemOcr.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
@@ -344,7 +344,9 @@
     <ClInclude Include="Ocr\OcrService.h" />
     <ClInclude Include="Ocr\OcrTypes.h" />
     <ClInclude Include="Ocr\PluginPaths.h" />
-    <ClInclude Include="Ocr\PpOcrEngine.h" />
+    <ClInclude Include="Ocr\LwPpOcrEngine.h" />
+    <ClInclude Include="Ocr\lw_infer.h" />
+    <ClInclude Include="Ocr\OcrPackFetch.h" />
     <ClInclude Include="Ocr\SystemOcr.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="quirc\quirc.h" />

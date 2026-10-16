@@ -21,8 +21,8 @@ namespace {
 		auto it = std::filesystem::directory_iterator(p, ec);
 		return !ec && it != std::filesystem::directory_iterator();
 	}
-	// 离线文字识别只提供 PP-OCRv5 一个方案
-	constexpr OcrPackVariant kOcrVariant = OcrPackVariant::Embedded;
+	// 离线文字识别只提供 PP-OCRv6（v5/v4 的 RapidOCR.dll 方案已下架，见 OcrPackVariant.h）
+	constexpr OcrPackVariant kOcrVariant = OcrPackVariant::Official;
 
 	// 「正在下载」省略号动画的定时器（本页独用；WM_APP + id 交给 onTimer）。
 	// 取 0x3C00：低于 TextBox 的 timerId 基数 0x4200，绝不与其自增 id 撞车。
@@ -263,7 +263,7 @@ void WinSettingPlugins::build()
 	SettingUi::sectionHeader(this, Lang::get(L"setting.plugins"),
 		Lang::get(L"setting.pluginsDesc"), Lang::get(L"setting.pluginsTip"));
 
-	// —— 离线文字识别（固定 PP-OCRv5，无方案下拉）——
+	// —— 离线文字识别（固定 PP-OCRv6，无方案下拉）——
 	auto ocr = makePack(this, Lang::get(L"setting.plugOcrTitle"), Lang::get(L"setting.plugOcrDesc"));
 	ocrBadgeRow = ocr.badgeRow;
 	ocrProgress = ocr.progress;

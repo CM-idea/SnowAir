@@ -16,6 +16,7 @@
 #include "../Ocr/OcrService.h"
 #include "../Translate/TranslateService.h"
 #include "../Translate/BergamotEngine.h"
+#include "../Ocr/LwPpOcrEngine.h"
 #include "../CommandKeys.h"
 #include "../Tool/ToolVideo.h"
 #include "../Tool/ToolLong.h"
@@ -1577,6 +1578,9 @@ void WinCap::onClosed()
     // 但这一次截图已经收工，没有继续留着的理由 —— 下次要用再重新加载。
     // release() 内部加锁：若还有后台翻译在跑会等它收尾，不会把正在用的引擎抽掉。
     BergamotEngine::release();
+    // 同理把离线识别引擎（PP-OCRv6，常驻约 100MB）还回去：一次截图已经收工，
+    // 没有继续留着的理由 —— lw_ocr_free 会把引擎内存真正交还，下次要用再重建。
+    LwPpOcrEngine::release();
     // 会话结束：把那几条临时全局键从钩子上撤掉（幂等，本来没挂也安全）
     syncGlobalCommandKeys(0);
     stopKeyOverlay();

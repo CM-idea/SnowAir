@@ -4,9 +4,8 @@
 
 enum class OcrEngineKind {
 	PpOcrV6 = 0,
-	PpOcrV5 = 1,
-	PpOcrV4 = 2,
-	// 3 原为 Tesseract，已移除。空出来不用，避免旧配置里的数值错位。
+	// 1 原为 PP-OCRv5、2 原为 PP-OCRv4（RapidOCR.dll），3 原为 Tesseract：都已移除。
+	// 空出来不用，避免旧配置里的数值错位。
 	System = 4,
 	Cloud = 5,
 };

@@ -767,15 +767,7 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 	std::vector<std::wstring> cloudIds;
 	if (OcrModelManager::instance().isInstalled(OcrPackVariant::Official)
 		&& OcrRuntimeManager::instance().isInstalled(OcrPackVariant::Official)) {
-		labels.push_back(L"PP-OCRv6"); engines.push_back(0); cloudIds.push_back(L"");
-	}
-	if (OcrModelManager::instance().isInstalled(OcrPackVariant::Embedded)
-		&& OcrRuntimeManager::instance().isInstalled(OcrPackVariant::Embedded)) {
-		labels.push_back(L"PP-OCRv5"); engines.push_back(1); cloudIds.push_back(L"");
-	}
-	if (OcrModelManager::instance().isInstalled(OcrPackVariant::StableV4)
-		&& OcrRuntimeManager::instance().isInstalled(OcrPackVariant::StableV4)) {
-		labels.push_back(L"PP-OCRv4"); engines.push_back(2); cloudIds.push_back(L"");
+		labels.push_back(OcrPack::label(OcrPackVariant::Official)); engines.push_back(0); cloudIds.push_back(L"");
 	}
 	// 文本识别模型默认只有「系统 OCR」
 	labels.push_back(Lang::get(L"setting.fnOcrSystem")); engines.push_back(4); cloudIds.push_back(L"");

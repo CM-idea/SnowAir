@@ -10,7 +10,7 @@ public:
 	void download(OcrPackVariant v,
 		std::function<void(float)> progress,
 		std::function<void(bool ok, std::wstring err)> done);
-	/** 卸载：删除该方案的运行时（含共享 ocr-bin 里的 RapidOCR/ONNX 依赖） */
+	/** 卸载：删除 PP-OCRv6 运行时目录（含老版本遗留的 RapidOCR/ONNX 依赖目录） */
 	void uninstall(OcrPackVariant v);
 private:
 	OcrRuntimeManager() = default;

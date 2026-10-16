@@ -339,7 +339,7 @@
     "fnTargetLang": "目标语言",
     "pluginsSummary": "已安装组件：%1",
     "plugOcrTitle": "离线文字识别",
-    "plugOcrDesc": "PP-OCRv5 是 PP-OCR 新一代文字识别解决方案，支持简体中文、中文拼音、繁体中文、英文、日文 5 大主流文字类型。",
+    "plugOcrDesc": "PP-OCRv6 是 PP-OCR 新一代文字识别解决方案，支持简体中文、中文拼音、繁体中文、英文、日文 5 大主流文字类型。",
     "plugPlan": "方案",
     "plugInstalled": "已安装",
     "plugNotInstalled": "未安装",
