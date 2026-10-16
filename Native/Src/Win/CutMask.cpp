@@ -813,9 +813,9 @@ namespace {
 			RECT drilled{};
 			const bool drilledOk = drillWindowTree(automation, creq, ctx.automation2, anchor,
 				screen, budgetMs, drilled);
-			// 下钻回"整块级"矩形 = 其实没钻进去（多数情况是无障碍树还没建好）。这时绝不能当
-			// 答案发布：那层壳会盖住真实元素，而且发布之后命中测试与无障碍脉冲两个真正能救场
-			// 的分支就再也走不到了。
+			// 下钻结果为"整块级"矩形 = 未能继续下钻（多数情况是无障碍树尚未建立）。此时不能
+			// 作为结果发布：该层外壳会盖住真实元素，且发布后命中测试与无障碍脉冲这两个可纠正
+			// 结果的分支将不再执行。
 			if (drilledOk && !isPageLevelRect(drilled, anchorBounds)) {
 				out = drilled;
 				return true;
@@ -1555,6 +1555,8 @@ void CutMask::makeRect(POINT pos)
 	maskRect.right = (float)right;
 	maskRect.top = (float)top;
 	maskRect.bottom = (float)bottom;
+	// 录制期：框选按"起点所在那块屏"约束，框不能跨到交界上去
+	clampToSingleMonitor(maskRect, &pressPos);
 	makeLayout();
 	win->refresh();
 }
@@ -1562,6 +1564,87 @@ void CutMask::makeRect(POINT pos)
 bool CutMask::hasRect() const
 {
 	return maskRect.right > maskRect.left && maskRect.bottom > maskRect.top;
+}
+
+// 录制期开关：打开时收集一次显示器列表（会话期间不跟踪热插拔 —— 录制过程中不会改变屏幕布局）
+void CutMask::setSingleMonitorMode(bool on)
+{
+	monitorLocked_ = on;
+	if (!on) return;
+	monitorsDesk_.clear();
+	EnumDisplayMonitors(nullptr, nullptr,
+		[](HMONITOR mon, HDC, LPRECT, LPARAM lp) -> BOOL {
+			auto* out = reinterpret_cast<std::vector<D2D1_RECT_F>*>(lp);
+			MONITORINFO mi{ sizeof(MONITORINFO) };
+			if (GetMonitorInfoW(mon, &mi)) {
+				out->push_back(D2D1::RectF((float)mi.rcMonitor.left, (float)mi.rcMonitor.top,
+					(float)mi.rcMonitor.right, (float)mi.rcMonitor.bottom));
+			}
+			return TRUE;
+		}, reinterpret_cast<LPARAM>(&monitorsDesk_));
+}
+
+bool CutMask::clampToSingleMonitor(D2D1_RECT_F& r, const POINT* hostPoint,
+	const D2D1_RECT_F* keepIfNoFit) const
+{
+	if (!monitorLocked_ || monitorsDesk_.empty() || !win) return false;
+	// 选区坐标是宿主客户区坐标，显示器矩形是虚拟桌面坐标：先换算再加回去
+	const float ox = (float)win->x, oy = (float)win->y;
+	// 找"该归属的那块屏"：优先调用方给的定屏点（光标 / 框选起点），否则用选区中心
+	auto monitorAt = [this](float x, float y) -> const D2D1_RECT_F* {
+		for (const auto& m : monitorsDesk_) {
+			if (x >= m.left && x < m.right && y >= m.top && y < m.bottom) return &m;
+		}
+		return nullptr;
+	};
+	float cx = 0.f, cy = 0.f;
+	if (hostPoint) { cx = ox + (float)hostPoint->x;          cy = oy + (float)hostPoint->y; }
+	else           { cx = ox + (r.left + r.right) * 0.5f;    cy = oy + (r.top + r.bottom) * 0.5f; }
+	const D2D1_RECT_F* host = monitorAt(cx, cy);
+	// 该屏换不过去（与采集目标不同显卡）→ 退回**上一位置**所在的那块屏，表现为停留在原屏边缘；
+	// 与录制侧同一条取舍，避免出现"选区已移过去、录制画面仍在原屏"
+	if (host && canSwitchToMonitor) {
+		const RECT hostRect{ (LONG)host->left, (LONG)host->top, (LONG)host->right, (LONG)host->bottom };
+		if (!canSwitchToMonitor(hostRect)) {
+			const D2D1_RECT_F* prev = keepIfNoFit
+				? monitorAt(ox + (keepIfNoFit->left + keepIfNoFit->right) * 0.5f,
+					oy + (keepIfNoFit->top + keepIfNoFit->bottom) * 0.5f)
+				: nullptr;
+			if (!prev) return false;   // 无法判定归属时不施加约束（避免把选区移到预料之外的位置）
+			host = prev;
+		}
+	}
+	if (!host) return false;
+	const float w0 = r.right - r.left;
+	const float h0 = r.bottom - r.top;
+	// 选区比目标屏还大：录制侧换不过去（采集帧尺寸不可变，装不下就会录进屏外），
+	// 所以这里也不让它挪过去 —— 整体拖动/鼠标跟随时原样退回；框选/跨屏进录屏时收小
+	if (w0 > host->right - host->left || h0 > host->bottom - host->top) {
+		if (keepIfNoFit) {
+			if (rectEq(*keepIfNoFit, r, 0.01f)) return false;
+			r = *keepIfNoFit;
+			return true;
+		}
+	}
+	const float w = std::min(w0, host->right - host->left);
+	const float h = std::min(h0, host->bottom - host->top);
+	const float l = std::clamp(ox + r.left, host->left, host->right - w);
+	const float t = std::clamp(oy + r.top, host->top, host->bottom - h);
+	const D2D1_RECT_F out{ l - ox, t - oy, l - ox + w, t - oy + h };
+	if (rectEq(out, r, 0.01f)) return false;
+	r = out;
+	return true;
+}
+
+bool CutMask::snapToSingleMonitor()
+{
+	if (!monitorLocked_) return false;
+	D2D1_RECT_F r = maskRect;
+	if (!clampToSingleMonitor(r)) return false;
+	maskRect = r;
+	makeLayout();
+	win->refresh();
+	return true;
 }
 
 void CutMask::clearRect()
@@ -1602,9 +1685,10 @@ void CutMask::endAdjust()
 	makeLayout();
 }
 
-bool CutMask::translateBy(float dx, float dy)
+bool CutMask::translateBy(float dx, float dy, const POINT* hostPoint)
 {
 	if (!hasRect()) return false;
+	const D2D1_RECT_F prev = maskRect;   // 挪到"装不下它的屏"上时原样退回（与录制侧同一取舍）
 	const float bw = maskRect.right - maskRect.left;
 	const float bh = maskRect.bottom - maskRect.top;
 	float nl = maskRect.left + dx;
@@ -1616,7 +1700,10 @@ bool CutMask::translateBy(float dx, float dy)
 	maskRect.top = nt;
 	maskRect.right = nl + bw;
 	maskRect.bottom = nt + bh;
+	// 录制期：整体平移按"该归属的那块屏"约束 —— 跨屏时整块贴到新屏里，不会横跨交界
+	clampToSingleMonitor(maskRect, hostPoint, &prev);
 	makeLayout();
+	if (onRectMoved) onRectMoved();   // 录制中：把平移同步给采集线程的裁剪框
 	return true;
 }
 
@@ -1695,10 +1782,15 @@ void CutMask::adjust(POINT pos)
 		}
 		applyAspectLock(r);
 	}
+	// 录制期：整体拖动按"光标所在那块屏"约束（鼠标一到另一块屏，选区整块过去）；
+	// 拖边/拖角按中心定屏（正在改尺寸时不该被光标带得整块跳）
+	const bool movingInside = (adjustHit == MaskHit::Inside);
+	clampToSingleMonitor(r, movingInside ? &pos : nullptr, movingInside ? &maskRect : nullptr);
 	if (r.left == maskRect.left && r.top == maskRect.top &&
 		r.right == maskRect.right && r.bottom == maskRect.bottom) return;
 	maskRect = r;
 	makeLayout();
+	if (onRectMoved) onRectMoved();   // 录制中：整体拖动时的平移同步（尺寸在录制期是锁死的）
 }
 
 void CutMask::refreshLabel()

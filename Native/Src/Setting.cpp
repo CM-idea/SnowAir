@@ -5,6 +5,7 @@
 #include "Util.h"
 #include "Lang.h"
 #include "Win/WinCap.h"
+#include "Win/WinPin.h"
 #include "Win/HotkeyHook.h"
 #include "Win/WinSetting.h"
 #include "App.h"
@@ -12,11 +13,40 @@
 
 namespace {
     std::unique_ptr<Setting> setting;
-    constexpr int capShortcutMsgId{ 100 };
-    constexpr UINT_PTR kCaptureRetryTimerId{ 0x5A18 };
+    // 全局热键表：id（配置键 = 设置页那一行）→ msgId（RegisterHotKey 的 id，也是 onHotKey 收到的值）。
+    // ⚠ 只有**真正接了动作**的行才在这里；设置页里其余几行（show_cursor / translate_selection /
+    //   toggle_pins）目前没有对应实现，不注册 —— 否则就是"按键被吞掉却什么都不发生"。
+    struct HotkeyEntry { const wchar_t* id; UINT msgId; };
+    const HotkeyEntry kHotkeys[] = {
+        { L"capture",                100 },
+        { L"capture_fullscreen",     101 },
+        { L"capture_focused_window", 102 },
+        { L"fullscreen_canvas",      103 },
+        { L"record",                 104 },
+        { L"toggle_pins",            105 },
+        { L"show_main",              106 },
+        { L"open_screenshot_dir",    107 },
+        { L"open_history",           108 },
+        { L"capture_repeat",         109 },
+    };
+    bool isGlobalHotkeyId(const std::wstring& id)
+    {
+        for (const auto& hk : kHotkeys) if (id == hk.id) return true;
+        return false;
+    }
+    // 全局热键的内置默认键位：配置里没有这一项（从没设过）时用它
+    const wchar_t* defaultShortcutOf(const std::wstring& type)
+    {
+        if (type == L"capture") return L"F1";
+        if (type == L"record") return L"F2";
+        if (type == L"fullscreen_canvas") return L"F3";
+        return L"";
+    }
+    constexpr UINT_PTR kHotkeyRetryTimerId{ 0x5A18 };
     // 配置文件的默认内容。空文件、坏 JSON、缺键都拿它兜底，所以这里列出的每一项
-    // 都是代码里会直接按名字取的（见 getLang / getAutoStart / initShortcutKeys）
-    constexpr std::wstring_view defaultConfig{ LR"""({"common":{"autoStart":false,"runAsAdmin":false,"language":"zh-CN"},"shortcutKey":{"cap":"Ctrl+Alt+A"}})""" };
+    // 都是代码里会直接按名字取的（见 getLang / getAutoStart）。
+    // 全局热键**不在这里**给默认值 —— 键位统一由 getShortcutKey 的内置默认表决定（defaultShortcutOf）
+    constexpr std::wstring_view defaultConfig{ LR"""({"common":{"autoStart":false,"runAsAdmin":false,"language":"zh-CN"}})""" };
 
     // 静默执行一条命令行（不弹出控制台窗口），用于 schtasks 注册/删除管理员自启任务。
     void runQuiet(std::wstring cmd)
@@ -70,6 +100,8 @@ void Setting::init()
     setting.reset(ptr);
     // 启动时清理旧版本遗留的 AI 配置（AI 对话 / AI 视觉 OCR / AI 翻译）
     setting->purgeRemovedAiSettings();
+    // 启动时清理旧程序（ScreenCapture）留下的历史键位
+    setting->purgeLegacyShortcutKeys();
 }
 
 void Setting::dispose()
@@ -121,10 +153,8 @@ void Setting::setShortcutKey(const std::wstring& type, const std::vector<std::ws
     auto shortcutKey = configObj.GetNamedObject(L"shortcutKey");
     shortcutKey.SetNamedValue(type, JsonValue::CreateStringValue(str));
     save();
-    // 目前只有「截图」这一项真的接了全局热键实现（其余各行先只落配置），
-    // 所以这里只对 capture 重新注册 —— 旧代码不管设的是哪一行都去注册 cap 那个 id：
-    // 在会话里"看起来生效了"，可配置写的是另一行，下次启动读 cap 又回到老组合。
-    if (type == L"capture") applyCaptureHotkey(str);
+    // 改的是哪一行就整体重注册 —— 现在设置页里已实现的行全都真注册了
+    if (isGlobalHotkeyId(type)) applyHotkeys();
 }
 
 std::wstring Setting::getShortcutKey(const std::wstring& type)
@@ -132,17 +162,62 @@ std::wstring Setting::getShortcutKey(const std::wstring& type)
     // 一路用带默认值的重载：启动时 ensureDefaults 已经补齐过，这里只是别让运行期
     // 意外（配置被外部改动、问了个没配过的 type）变成一次崩溃
     auto obj = configObj.GetNamedObject(L"shortcutKey", nullptr);
-    if (!obj) return L"";
-    std::wstring val{ obj.GetNamedString(type, L"") };
-    // 老配置里截图热键叫 cap，设置页写的是 capture：统一按 capture 走，读不到再回退老键名
-    if (val.empty() && type == L"capture") val = std::wstring{ obj.GetNamedString(L"cap", L"") };
+    std::wstring val;
+    if (obj) {
+        val = std::wstring{ obj.GetNamedString(type, L"") };
+    }
+    // 配置里没有（从没设过）→ 用内置默认键位
+    if (val.empty()) val = defaultShortcutOf(type);
     return val;
+}
+
+// 「全局热键」页的恢复默认：清空整个 shortcutKey 对象。
+// 清空后 getShortcutKey 会逐条回落到内置默认表（capture=F1 / record=F2 / fullscreen_canvas=F3，
+// 其余默认不绑）。保留空对象而不是删掉这个键 —— setShortcutKey 取它时不做"缺键"兜底。
+void Setting::restoreShortcutKeyDefaults()
+{
+    configObj.SetNamedValue(L"shortcutKey", JsonObject{});
+    save();
+    applyHotkeys();
+}
+
+// 没有任何键位覆盖项 = 仍是出厂键位。设置页没有"清空某一行"的入口，所以存过的值必是用户改过的。
+bool Setting::shortcutKeyAtDefaults()
+{
+    auto obj = configObj.GetNamedObject(L"shortcutKey", nullptr);
+    return !obj || obj.Size() == 0;
+}
+
+// 全局热键「重复截图」：记住的上一块选区（屏幕坐标），存成 "x,y,w,h"。
+bool Setting::getLastCaptureRect(int& x, int& y, int& w, int& h)
+{
+    const std::wstring v = featStr(L"lastCaptureRect", L"");
+    if (v.empty()) return false;
+    int a[4]{ 0, 0, 0, 0 };
+    size_t idx = 0, pos = 0;
+    while (idx < 4) {
+        const size_t comma = v.find(L',', pos);
+        const std::wstring part = v.substr(pos, comma == std::wstring::npos ? std::wstring::npos : comma - pos);
+        try { a[idx] = std::stoi(part); } catch (...) { return false; }
+        ++idx;
+        if (comma == std::wstring::npos) break;
+        pos = comma + 1;
+    }
+    if (idx != 4) return false;
+    x = a[0]; y = a[1]; w = a[2]; h = a[3];
+    return w > 0 && h > 0;
+}
+
+void Setting::setLastCaptureRect(int x, int y, int w, int h)
+{
+    if (w <= 0 || h <= 0) return;
+    setFeatStr(L"lastCaptureRect", std::format(L"{},{},{},{}", x, y, w, h));
 }
 
 // 旧版本写入的 AI 相关配置：AI 对话（模型 / 新建会话 / 对话 API 配置）、AI 视觉 OCR
 // （视觉理解模型 / HTML、Markdown 提示词）、AI 翻译（翻译提示词 / 领域 / 自定义 API）。
-// 这些功能已整体移除，启动时顺手从 config.json 里删掉——既不留无效键，也不把用户填过的
-// API Key 之类敏感项长期留在磁盘上。只在确实删到了东西时才回写文件。
+// 这些功能已整体移除，启动时从 config.json 中删除 —— 既不留无效键，也不让用户填过的
+// API Key 等敏感项长期留在磁盘上。仅在确实删除到内容时才回写文件。
 void Setting::purgeRemovedAiSettings()
 {
     static const wchar_t* const kRemovedFeatKeys[] = {
@@ -172,6 +247,24 @@ void Setting::purgeRemovedAiSettings()
     if (toolRoot && toolRoot.HasKey(L"chat")) {
         toolRoot.Remove(L"chat");
         changed = true;
+    }
+    if (changed) save();
+}
+
+// 旧程序 ScreenCapture（本工程前身）写入 shortcutKey 的历史键位只有一条 `cap`（区域截图，
+// 默认 Ctrl+Alt+A）。现用 id 为 capture（见 kHotkeys），`cap` 不在表内、永不会被注册，
+// 启动时删除，避免残留随 config.json 长期留存。
+void Setting::purgeLegacyShortcutKeys()
+{
+    static const wchar_t* const kLegacyIds[] = { L"cap" };
+    auto obj = configObj.GetNamedObject(L"shortcutKey", nullptr);
+    if (!obj) return;
+    bool changed = false;
+    for (auto* id : kLegacyIds) {
+        if (obj.HasKey(id)) {
+            obj.Remove(id);
+            changed = true;
+        }
     }
     if (changed) save();
 }
@@ -395,7 +488,7 @@ void Setting::setToolStr(const std::wstring& tool, const std::wstring& key, cons
 
 void Setting::removeToolKey(const std::wstring& tool, const std::wstring& key)
 {
-    // 只删已有的键，不顺手创建 toolPin/<tool> 这类空对象
+    // 只删已存在的键，不额外创建 toolPin/<tool> 这类空对象
     auto root = configObj.GetNamedObject(L"toolPin", nullptr);
     if (!root) return;
     auto obj = root.GetNamedObject(tool, nullptr);
@@ -565,6 +658,8 @@ bool Setting::getTranslateDictMode() { return featBool(L"translateDictMode", fal
 void Setting::setTranslateDictMode(bool on) { setFeatBool(L"translateDictMode", on); }
 bool Setting::getFeatureTips() { return featBool(L"featureTips", true); }
 void Setting::setFeatureTips(bool on) { setFeatBool(L"featureTips", on); }
+bool Setting::getHotkeyTip() { return featBool(L"hotkeyTip", false); }
+void Setting::setHotkeyTip(bool on) { setFeatBool(L"hotkeyTip", on); }
 
 bool Setting::getFindWindowElements() { return featBool(L"findWindowElements", true); }
 void Setting::setFindWindowElements(bool on) { setFeatBool(L"findWindowElements", on); }
@@ -615,6 +710,92 @@ void Setting::restoreFunctionScreenshotDefaults()
 	setPinOpacity(100);
 }
 
+// 「功能设置」各子页的「恢复默认」：把该子页的每一项写回出厂值。
+// 视频录制：编码/画质/帧率/GIF/声音/录制附加项，外加高亮圆颜色（删覆盖项 → 回落默认品牌绿）
+void Setting::restoreFunctionRecordDefaults()
+{
+	setVideoQuality(4);
+	setVideoFps(0);
+	setGifQuality(1);
+	setGifFps(1);
+	setGifFormat(0);
+	setRecordMic(0);
+	setVideoEncoder(0);
+	setEncodeSpeed(1);
+	setHwAccel(true);
+	setHideToolbarInRecord(true);
+	setShowKeystrokes(false);
+	setSelFollowMouse(false);
+	setMouseHighlight(false);
+	featuresObj().Remove(L"mouseHighlightColor");
+	save();
+}
+
+// 文件输出：文件名模板与目录清空即"没改过"，界面回到灰占位符（默认模板 / 默认目录）
+void Setting::restoreFunctionOutputDefaults()
+{
+	setManualSaveFormat(L"");
+	setAutoSaveFormat(L"");
+	setFocusedWindowFormat(L"");
+	setScreenshotDir(L"");
+	setVideoRecordFormat(L"");
+	setRecordDir(L"");
+}
+
+// 文本识别：回到内置的「系统 OCR」；云端配置（含 Key）属于用户数据，不在此列，由各自的删除按钮处理
+void Setting::restoreFunctionOcrDefaults()
+{
+	setOcrEngine(4);
+	setOcrCloudConfigId(L"");
+}
+
+// 翻译：回到默认在线服务与「非」字典模式；语种不在本子页里，不动
+void Setting::restoreFunctionTranslateDefaults()
+{
+	setTranslateProvider(L"microsoft");
+	setTranslateDictMode(false);
+}
+
+// —— 与上面的 restore* 成对：判断该子页是否**仍是出厂值**（供「恢复默认」按钮置灰）——
+// 判据统一取"restore* 会不会真的改动什么"：每项都与 restore 写回的值比一遍。改默认值时两处一起改。
+bool Setting::functionScreenshotAtDefaults()
+{
+	return getFindWindowElements() && !getCancelConfirmDialog() && !getAutoSaveAfterCapture()
+		&& !getCopyAsFile() && getSaveFormat() == L"PNG (*.png)"
+		&& getManualSaveFormat().empty() && getAutoSaveFormat().empty()
+		&& getFullScreenFormat().empty() && getFocusedWindowFormat().empty()
+		&& getVideoRecordFormat().empty() && getTrayClickAction() == 0
+		&& getDemoDefaultTool() == 0 && getDemoEdgeBehavior() == 0
+		&& !getPinZoomAtCursor() && !getPinAutoOcr() && getPinAutoFit()
+		&& getPinDoubleClickAction() == 0 && getPinOpacity() == 100;
+}
+
+bool Setting::functionRecordAtDefaults()
+{
+	return getVideoQuality() == 4 && getVideoFps() == 0 && getGifQuality() == 1
+		&& getGifFps() == 1 && getGifFormat() == 0 && getRecordMic() == 0
+		&& getVideoEncoder() == 0 && getEncodeSpeed() == 1 && getHwAccel()
+		&& getHideToolbarInRecord() && !getShowKeystrokes() && !getSelFollowMouse()
+		&& !getMouseHighlight() && getMouseHighlightColor() == 0x0FDC78FF;
+}
+
+bool Setting::functionOutputAtDefaults()
+{
+	return getManualSaveFormat().empty() && getAutoSaveFormat().empty()
+		&& getFocusedWindowFormat().empty() && getScreenshotDir().empty()
+		&& getVideoRecordFormat().empty() && getRecordDir().empty();
+}
+
+bool Setting::functionOcrAtDefaults()
+{
+	return getOcrEngine() == 4 && getOcrCloudConfigId().empty();
+}
+
+bool Setting::functionTranslateAtDefaults()
+{
+	return getTranslateProvider() == L"microsoft" && !getTranslateDictMode();
+}
+
 int Setting::getVideoQuality() { return featInt(L"videoQuality", 4); }
 void Setting::setVideoQuality(int v) { setFeatInt(L"videoQuality", v); }
 int Setting::getVideoFps() { return featInt(L"videoFps", 0); }
@@ -637,6 +818,21 @@ bool Setting::getHideToolbarInRecord() { return featBool(L"hideToolbarInRecord",
 void Setting::setHideToolbarInRecord(bool on) { setFeatBool(L"hideToolbarInRecord", on); }
 bool Setting::getShowKeystrokes() { return featBool(L"showKeystrokes", false); }
 void Setting::setShowKeystrokes(bool on) { setFeatBool(L"showKeystrokes", on); }
+bool Setting::getSelFollowMouse() { return featBool(L"selFollowMouse", false); }
+void Setting::setSelFollowMouse(bool on) { setFeatBool(L"selFollowMouse", on); }
+bool Setting::getMouseHighlight() { return featBool(L"mouseHighlight", false); }
+void Setting::setMouseHighlight(bool on) { setFeatBool(L"mouseHighlight", on); }
+UINT32 Setting::getMouseHighlightColor()
+{
+	auto f = featuresObj();
+	if (!f.HasKey(L"mouseHighlightColor")) return 0x0FDC78FF;   // 默认品牌绿
+	return static_cast<UINT32>(f.GetNamedNumber(L"mouseHighlightColor"));
+}
+void Setting::setMouseHighlightColor(UINT32 rgba)
+{
+	featuresObj().SetNamedValue(L"mouseHighlightColor", JsonValue::CreateNumberValue(static_cast<double>(rgba)));
+	save();
+}
 
 std::wstring Setting::defaultManualSaveFormat() { return L"SnowAir_{{YYYY-MM-DD_HH-mm-ss}}"; }
 std::wstring Setting::defaultAutoSaveFormat() { return L"SnowAir_auto_{{YYYY-MM-DD_HH-mm-ss}}"; }
@@ -665,90 +861,106 @@ void Setting::setHistoryRetentionDays(int days) { setFeatInt(L"historyRetentionD
 int Setting::getAppTheme() { return featInt(L"appTheme", 0); }
 void Setting::setAppTheme(int v) { setFeatInt(L"appTheme", v); }
 
-// 全局截图热键。RegisterHotKey 是"先注册先独占"：组合键已被别的程序（浏览器插件、聊天工具、
+// 全局热键。RegisterHotKey 是"先注册先独占"：组合键已被别的程序（浏览器插件、聊天工具、
 // 输入法…）占着时我们这次注册直接失败，系统里也没有"提高优先级"这回事。所以这里的策略是：
-//   1) 先正常 RegisterHotKey；
-//   2) 失败就装低级键盘钩子兜底 —— 钩子比任何程序的热键/加速键都先拿到按键，匹配上就吃掉，
-//      效果上等于"这个组合归我们"，浏览器抢不走；
+//   1) 每条都先正常 RegisterHotKey；
+//   2) 失败的那些攒起来，整体装一个低级键盘钩子兜底 —— 钩子比任何程序的热键/加速键都先拿到
+//      按键，匹配上就吃掉，效果上等于"这个组合归我们"，浏览器抢不走；
 //   3) 同时起一个低频重试，等对方把组合让出来再切回干净的 RegisterHotKey（并摘掉钩子）。
-void Setting::applyCaptureHotkey(const std::wstring& chord)
+void Setting::applyHotkeys()
 {
-    captureChord = chord;
-    auto lingApp = Ling::App::get();
+    auto* lingApp = Ling::App::get();
     if (!lingApp) return;
-    lingApp->unRegHotKey(capShortcutMsgId);
-    const bool ok = !chord.empty() && lingApp->regHotKey(chord, capShortcutMsgId);
-    if (ok) {
-        HotkeyHook::uninstall();
-        stopCaptureHotkeyRetry();
+    // 先全部注销，再按当前配置重注册（配置改过、或从钩子兜底切回都要走这一遍）
+    for (const auto& hk : kHotkeys) lingApp->unRegHotKey(hk.msgId);
+
+    std::vector<HotkeyHook::Binding> fallback;
+    for (const auto& hk : kHotkeys) {
+        const std::wstring chord = getShortcutKey(hk.id);
+        if (chord.empty()) continue;   // 用户清空过这一行 = 不绑
+        if (lingApp->regHotKey(chord, hk.msgId)) continue;
+        const std::wstring id{ hk.id };
+        fallback.push_back({ chord, [id]() {
+            if (auto* self = get()) self->runHotkeyAction(id);
+        } });
+    }
+    HotkeyHook::setBindings(std::move(fallback));
+    if (HotkeyHook::installed()) startHotkeyRetry();
+    else stopHotkeyRetry();
+}
+
+// 一条全局热键要执行的动作。id 取自 kHotkeys。
+void Setting::runHotkeyAction(const std::wstring& id)
+{
+    if (id == L"capture") { WinCap::init(); return; }
+    if (id == L"capture_repeat") { if (auto* app = App::get()) app->captureLastRegionSilent(); return; }
+    if (id == L"capture_fullscreen") { if (auto* app = App::get()) app->captureFullScreenSilent(); return; }
+    if (id == L"capture_focused_window") { if (auto* app = App::get()) app->captureFocusedWindowSilent(); return; }
+    if (id == L"fullscreen_canvas") { WinCap::beginDemoCanvas(); return; }
+    if (id == L"record") { WinCap::beginRecordPick(); return; }
+    if (id == L"show_main") { WinSetting::init(0); return; }
+    if (id == L"toggle_pins") { WinPin::toggleAllHidden(); return; }
+    if (id == L"open_history") { WinSetting::init(5); return; }
+    if (id == L"open_screenshot_dir") {
+        const auto dir = Util::outputDir();
+        if (!dir.empty()) ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         return;
     }
-    HotkeyHook::install(chord, []() { WinCap::init(); });
-    startCaptureHotkeyRetry();
 }
 
-// 设置页开始录制热键前调用：临时注销系统热键、摘掉低级钩子，让按键能正常落到设置窗口。
-// 只挂起不忘记组合键 —— captureChord 仍保留，resumeShortcutKeys() 据此原样恢复。
+// 设置页开始录制热键前调用：临时注销全部系统热键、摘掉低级钩子，让按键能正常落到设置窗口。
 void Setting::suspendShortcutKeys()
 {
-    auto lingApp = Ling::App::get();
-    if (lingApp) lingApp->unRegHotKey(capShortcutMsgId);
+    if (auto* lingApp = Ling::App::get())
+        for (const auto& hk : kHotkeys) lingApp->unRegHotKey(hk.msgId);
     HotkeyHook::uninstall();
-    stopCaptureHotkeyRetry();
+    stopHotkeyRetry();
 }
 
-// 录制结束（保存或取消）后调用：按挂起前的组合键重新注册/装钩子
+// 录制结束（保存或取消）后调用：按配置重新注册全部全局热键
 void Setting::resumeShortcutKeys()
 {
-    if (captureChord.empty()) return;
-    applyCaptureHotkey(captureChord);
+    applyHotkeys();
 }
 
-void Setting::startCaptureHotkeyRetry()
+void Setting::startHotkeyRetry()
 {
-    if (captureRetryTimer) return;
-    captureRetryTick = 0;
+    if (hotkeyRetryTimer) return;
+    hotkeyRetryTick = 0;
     // hwnd 传 NULL 的定时器：回调在装它的线程（UI 线程）的消息泵里跑，不需要窗口
-    captureRetryTimer = SetTimer(nullptr, kCaptureRetryTimerId, 4000, &Setting::onCaptureHotkeyRetry);
+    hotkeyRetryTimer = SetTimer(nullptr, kHotkeyRetryTimerId, 4000, &Setting::onHotkeyRetry);
 }
 
-void Setting::stopCaptureHotkeyRetry()
+void Setting::stopHotkeyRetry()
 {
-    if (!captureRetryTimer) return;
-    KillTimer(nullptr, captureRetryTimer);
-    captureRetryTimer = 0;
-    captureRetryTick = 0;
+    if (!hotkeyRetryTimer) return;
+    KillTimer(nullptr, hotkeyRetryTimer);
+    hotkeyRetryTimer = 0;
+    hotkeyRetryTick = 0;
 }
 
-void CALLBACK Setting::onCaptureHotkeyRetry(HWND, UINT, UINT_PTR id, DWORD)
+void CALLBACK Setting::onHotkeyRetry(HWND, UINT, UINT_PTR id, DWORD)
 {
-    if (id != kCaptureRetryTimerId) return;
+    if (id != kHotkeyRetryTimerId) return;
     auto* self = get();
     if (!self) return;
     // 试满 ~1 分钟就停：钩子还在兜着，热键照样能用，不用一直占着定时器
-    if (++self->captureRetryTick > 15) {
-        self->stopCaptureHotkeyRetry();
+    if (++self->hotkeyRetryTick > 15) {
+        self->stopHotkeyRetry();
         return;
     }
-    auto lingApp = Ling::App::get();
-    if (!lingApp || self->captureChord.empty()) return;
-    if (lingApp->regHotKey(self->captureChord, capShortcutMsgId)) {
-        HotkeyHook::uninstall();
-        self->stopCaptureHotkeyRetry();
-    }
+    // 重新走一遍注册：让出组合键的会从钩子兜底切回干净的 RegisterHotKey，
+    // 仍被占着的继续留在钩子里 —— 全好了时 applyHotkeys 会把定时器停掉
+    self->applyHotkeys();
 }
 
 void Setting::initShortcutKeys()
 {
-    auto lingApp = Ling::App::get();
-    // 取不到就用默认的那个组合：热键注册不上顶多是快捷键不好用，不该让程序起不来
-    std::wstring capStr{ getShortcutKey(L"capture") };
-    if (capStr.empty()) capStr = L"Ctrl+Alt+A";
-    applyCaptureHotkey(capStr);
-
+    auto* lingApp = Ling::App::get();
+    // 先挂派发，再注册：热键一注册就能命中回调，不留"注册好了但还没人接"的缝
     lingApp->onHotKey.add([this](UINT msg) {
-        if (msg == capShortcutMsgId) {
-            WinCap::init();
+        for (const auto& hk : kHotkeys) {
+            if (msg == hk.msgId) { runHotkeyAction(hk.id); return; }
         }
     });
     // 已经有一个实例在托盘里时，再运行一次 exe：打开设置中心，而不是直接进截图模式。
@@ -756,6 +968,7 @@ void Setting::initShortcutKeys()
     lingApp->onSecondInstance.add([this]() {
         WinSetting::init();
     });
+    applyHotkeys();
 }
 
 // ================ 贴图边框外观 ================

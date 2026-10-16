@@ -103,6 +103,7 @@ namespace Icon
 	inline constexpr const wchar_t* Quick = L"\ue64e";          // 快捷翻译
 	inline constexpr const wchar_t* Collapse = L"\ue650";       // 折叠
 	inline constexpr const wchar_t* Expand = L"\ue651";         // 展开
+	inline constexpr const wchar_t* SystemKeys = L"\ue66f";     // 系统快捷键（设置页「系统按键」）
 
 	// —— 加载动画（热键设置「转圈圈」，8 帧顺时针，加载1→加载8）——
 	inline constexpr const wchar_t* Loading1 = L"\ue663";       // 加载1

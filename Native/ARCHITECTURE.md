@@ -200,7 +200,7 @@ inputArea->setPadding(0.f, 8.f, 0.f, 0.f);
 | `--auto-quit=true` | 立即进入截图、截完即退（脚本 / 命令行用） | `App::App()` / `WinCap`、`WinPin` |
 | 托盘图标**左键单击** | 按设置 `Setting::getTrayClickAction()`：0 截图 / 1 打开设置 / 2 无操作 | `Tray::Tray()` |
 | 托盘图标**右键** | 弹出菜单：截图 / 截取全屏 / 屏幕录制 / 演示画布 / 快捷翻译 / 截图历史 / 打开目录 / 设置 / 退出（见第 9 节） | `Tray::onTrayRightClick()` |
-| 全局热键（默认 `Ctrl+Alt+A`） | 进入截图 | `Setting::initShortcutKeys()` |
+| 全局热键（默认 `F1`） | 进入截图 | `Setting::initShortcutKeys()` |
 | **再次运行 exe**（已有实例在托盘） | 打开设置中心（`WinSetting::init()`） | `Setting::initShortcutKeys()` 的 `onSecondInstance` |
 
 - `main.cpp` 不调用 `WinSetting::init()`：启动时不弹设置窗口，设置中心由托盘左键（设置为「打开设置」时）、托盘右键菜单或再次运行 exe 打开

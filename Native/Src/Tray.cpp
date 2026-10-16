@@ -27,13 +27,17 @@ namespace {
 
 	struct MenuRow { UINT id; const wchar_t* langKey; const wchar_t* shortcutId; };
 
+	// 功能尚未实装的托盘项：置灰且不可点，与「全局热键」页的"功能开发中"一致。
+	// 快捷翻译实装后删除本函数的判断即可，行与命令派发都不必改
+	bool trayRowDisabled(UINT cmd) { return cmd == kCmdQuickTranslate; }
+
 	const MenuRow kMenuRows[] = {
 		{ kCmdCapture,           L"tray.capture",           L"capture" },
 		{ kCmdCaptureFullscreen, L"tray.captureFullscreen", L"capture_fullscreen" },
 		{ kCmdRecord,            L"tray.record",            L"record" },
 		{ kCmdDemoCanvas,        L"tray.demoCanvas",        L"fullscreen_canvas" },
 		{ 0,                     nullptr,                   nullptr },
-		{ kCmdQuickTranslate,    L"tray.quickTranslate",    L"quick_translate" },
+		{ kCmdQuickTranslate,    L"tray.quickTranslate",    nullptr },
 		{ 0,                     nullptr,                   nullptr },
 		{ kCmdHistory,           L"tray.history",           L"open_history" },
 		{ kCmdOpenDir,           L"tray.openDir",           L"open_screenshot_dir" },
@@ -112,6 +116,8 @@ namespace {
 			shell->setBorder(1.f, p.border);
 			shell->setBorderRadius((float)kMenuRadius);
 
+			// 置灰项的"灰"：同前景色、只把 alpha 压到 0x66（配色跟着主题走，别写死颜色）
+			const uint32_t fgDisabled = (p.fg & 0xFFFFFF00u) | 0x66u;
 			for (const auto& row : kMenuRows) {
 				if (row.id == 0) {
 					auto* line = shell->makeChild<Ling::Node>();
@@ -131,12 +137,14 @@ namespace {
 				btn->setMargin((float)kItemMarginX, 0.f, (float)kItemMarginX, 0.f);
 				btn->setBorderRadius((float)kItemRadius);
 				btn->setBg(0);
-				btn->setHoverBg(p.hover);
+				const bool disabled = trayRowDisabled(row.id);
+				// 置灰行悬停也不高亮（悬停底色取 0 = 与常态同色），点也不派发（不进 rows）
+				btn->setHoverBg(disabled ? 0u : p.hover);
 
 				auto* title = btn->makeChild<Ling::Label>();
 				title->setText(Lang::get(row.langKey));
 				title->setFontSize(12.f);
-				title->setColor(p.fg);
+				title->setColor(disabled ? fgDisabled : p.fg);
 				title->setFlexShrink(0.f);
 
 				auto* grow = btn->makeChild<Ling::Node>();
@@ -154,7 +162,8 @@ namespace {
 				}
 
 				// 行 → 命令记下来；按下/抬起由窗口级处理（见下面 onMouseDown/onMouseUp）
-				rows.push_back({ btn, row.id });
+				// ⚠ 置灰行不入表：它连"按下"都不记，自然也不会派发
+				if (!disabled) rows.push_back({ btn, row.id });
 			}
 
 		// 菜单「抬起才派发」：Ling 的按钮是在**按下**时就派发 onClick 的，那样命令一执行菜单
@@ -239,7 +248,7 @@ private:
 		case kCmdRecord:             WinCap::beginRecordPick(); break;
 		case kCmdDemoCanvas:         WinCap::beginDemoCanvas(); break;
 		case kCmdQuickTranslate:     WinSetting::init(1); break;
-		case kCmdHistory:            WinSetting::init(2); break;
+		case kCmdHistory:            WinSetting::init(5); break;
 		case kCmdOpenDir:            openOutputDir(); break;
 		case kCmdSettings:           WinSetting::init(0); break;
 		case kCmdExit:               if (auto* app = Ling::App::get()) app->quit(0); break;

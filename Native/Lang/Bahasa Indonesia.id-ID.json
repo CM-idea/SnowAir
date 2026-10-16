@@ -76,6 +76,7 @@
         "getMoreLang": "Unduh bahasa lainnya",
         "hotkeys": "Hotkey",
         "hotkeysDesc": "Kelola pintasan sistem",
+        "systemKeys": "Tombol Sistem",
         "hotkeysTip": "Klik sisi kanan untuk mulai merekam (maks 3 tombol); lepas untuk simpan. Backspace/Delete hapus, Esc batal.",
         "quick": "Terjemah Cepat",
         "quickDesc": "Terjemahkan teks dengan cepat (Microsoft / Google / Youdao / Baidu / Offline)",
@@ -290,10 +291,10 @@
         "sysTip": "Informasi"
     },
     "shortcut": {
-        "cap": "Jalankan Aplikasi:",
         "pressKey": "Tekan tombol...",
         "capture": "Tangkap Area",
         "capture_fullscreen": "Tangkap Layar Penuh",
+        "capture_repeat": "Tangkap Ulang",
         "capture_focused_window": "Tangkap Jendela Aktif",
         "fullscreen_canvas": "Kanvas Demo",
         "record": "Rekam Layar",

@@ -212,6 +212,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="App.cpp" />
+    <ClCompile Include="CommandKeys.cpp" />
     <ClCompile Include="History.cpp" />
     <ClCompile Include="Lang.cpp" />
     <ClCompile Include="main.cpp" />
@@ -290,6 +291,7 @@
     <ClCompile Include="Win\WinSettingFeatures.cpp" />
     <ClCompile Include="Win\WinSettingHistory.cpp" />
     <ClCompile Include="Win\WinSettingHotkeys.cpp" />
+    <ClCompile Include="Win\WinSettingSystemKeys.cpp" />
     <ClCompile Include="Win\WinSettingPlugins.cpp" />
     <ClCompile Include="Win\WinSettingQuickTranslate.cpp" />
     <ClCompile Include="quirc\decode.c">
@@ -330,6 +332,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="App.h" />
+    <ClInclude Include="CommandKeys.h" />
     <ClInclude Include="compat\CComPtr.h" />
     <ClInclude Include="History.h" />
     <ClInclude Include="Lang.h" />
@@ -418,6 +421,7 @@
     <ClInclude Include="Win\WinSettingFeatures.h" />
     <ClInclude Include="Win\WinSettingHistory.h" />
     <ClInclude Include="Win\WinSettingHotkeys.h" />
+    <ClInclude Include="Win\WinSettingSystemKeys.h" />
     <ClInclude Include="Win\WinSettingPlugins.h" />
     <ClInclude Include="Win\WinSettingQuickTranslate.h" />
   </ItemGroup>

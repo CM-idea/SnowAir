@@ -4,6 +4,7 @@
 
 namespace SettingUi { class HoverTip; }   // SettingWidgets.h：设置项「?」的停悬气泡
 class WinSettingHotkeys;
+class WinSettingSystemKeys;
 class WinSettingQuickTranslate;
 class WinSettingHistory;
 class WinSettingPlugins;
@@ -16,7 +17,7 @@ class WinSetting :public Ling::WinBase
 public:
 	~WinSetting();
 	static void init();
-	// 打开设置中心并切到指定菜单页（0 热键 / 1 快捷翻译 / 2 截图历史 / 3 插件 / 4 外观 / 5 功能 / 6 关于）
+	// 打开设置中心并切到指定菜单页（0 全局热键 / 1 快捷翻译 / 2 系统按键 / 3 外观 / 4 功能 / 5 截图历史 / 6 插件 / 7 关于）
 	static void init(int pageIndex);
 	static void dispose();
 private:
@@ -37,6 +38,7 @@ private:
 
 	// 子页实例（切换时自动销毁旧页）—— 各子页继承 Ling::Node，作为 content 的唯一子节点
 	WinSettingHotkeys*        pageHotkeys{ nullptr };
+	WinSettingSystemKeys*     pageSysKeys{ nullptr };
 	WinSettingQuickTranslate* pageQuick{ nullptr };
 	WinSettingHistory*        pageHistory{ nullptr };
 	WinSettingPlugins*        pagePlugins{ nullptr };

@@ -16,6 +16,9 @@ public:
 	void setEditMode(bool on);
 	void cancelAnnotSelect();
 	void updateUndoEnabled();
+	// —— 「系统按键」用：绘图工具命令键 / 工具循环（长图阶段的绘图工具在本条工具条上）——
+	void cmdAnnotTool(const std::wstring& id);   // 选中某件绘图工具（等同点击该按钮）
+	void cycleAnnotTool();                       // 工具循环（Tab）
 	float getBtnCenterX() const;
 private:
 	void onCreated() override;

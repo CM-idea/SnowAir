@@ -14,6 +14,7 @@
 #include "../Win/AnnotHost.h"
 #include "../Win/PinMenu.h"
 #include "../Win/SettingWidgets.h"
+#include "../CommandKeys.h"
 
 ToolCap::ToolCap(WinCap* capWin) : Ling::WinBase(), winCap(capWin)
 {
@@ -388,7 +389,7 @@ void ToolCap::updateSlotButton(const std::wstring& slot)
 		for (const auto& item : *subs) {
 			if (item.id != eff) continue;
 			b->setText(item.icon);
-			if (item.tipKey) tip->bind(b, Lang::get(item.tipKey));
+			if (item.tipKey) bindTip(b, Lang::get(item.tipKey), item.id);
 			break;
 		}
 		break;
@@ -698,7 +699,7 @@ void ToolCap::onCreated()
 				tip->bind(btn, Lang::get(L"pin.confirmEdit"));
 			}
 			else if (!btnTips[i].empty()) {
-				tip->bind(btn, Lang::get(btnTips[i]));
+				bindTip(btn, Lang::get(btnTips[i]));
 			}
 			btns.push_back(btn);
 		}
@@ -879,6 +880,21 @@ void ToolCap::paintChrome()
 	chromeCanvas->finishPaint();
 }
 
+// 停悬气泡：按「快捷键提示」(外观设置 > 其他外观) 决定是否把该按钮当前的键位拼进文字，
+// 如 "矩形" → "矩形（1）"。贴图布局不属于命令表（贴图/镜像组已取消），故不提示。
+void ToolCap::bindTip(Ling::Button* btn, const std::wstring& text, const std::wstring& lookup)
+{
+	if (!tip || !btn) return;
+	std::wstring full = text;
+	if (!winPin && Setting::get() && Setting::get()->getHotkeyTip()) {
+		const unsigned surface = demoLayout ? CommandKeys::SurfaceFullscreen : CommandKeys::SurfaceCapture;
+		const std::wstring eff = lookup.empty() ? resolveToolId(btn->id) : lookup;
+		const std::wstring chord = CommandKeys::hintChord(btn->id, eff, surface);
+		if (!chord.empty()) full += L"（" + chord + L"）";
+	}
+	tip->bind(btn, full);
+}
+
 void ToolCap::styleToolbarBtn(Ling::Button* btn)
 {
 	const float inner{ btnSize - hoverInset * 2.f };
@@ -958,6 +974,31 @@ void ToolCap::selectTool(const std::wstring& id)
 	}
 }
 
+// 「工具循环」(系统按键 Tab)：在可见的绘图工具槽位之间循环切换一个。
+// 顺序即工具栏从左到右（btnIds 顺序）；隐藏的槽位不参与。
+// 包浆/水印/高亮属 mosaic 槽的子工具，不单独计数（判据 isAnnotationTool）。
+void ToolCap::cycleTool()
+{
+	const auto vis = visibleSlots();
+	std::vector<Ling::Button*> tools;
+	size_t bi = 0;   // btns 与 btnIds 里**非分隔符**的项一一对应
+	for (size_t i = 0; i < btnIds.size(); i++) {
+		if (btnIds[i] == L"|") continue;
+		Ling::Button* b = (bi < btns.size()) ? btns[bi] : nullptr;
+		++bi;
+		if (!b || !isAnnotationTool(btnIds[i])) continue;
+		if (i < vis.size() && !vis[i]) continue;
+		tools.push_back(b);
+	}
+	if (tools.empty()) return;
+	// 当前选中的若不是绘图工具（还没选/停在撤销之类上）→ 从第一个开始
+	size_t next = 0;
+	for (size_t k = 0; k < tools.size(); k++) {
+		if (tools[k]->id == curId) { next = (k + 1) % tools.size(); break; }
+	}
+	onClickCap(tools[next]);
+}
+
 void ToolCap::onClick(Ling::Button* btn)
 {
 	tip->hide();
@@ -1015,7 +1056,7 @@ void ToolCap::onClickCap(Ling::Button* btn)
 		if (winCap) winCap->toggleShowCursor();
 		const bool on = winCap && winCap->showCursorEnabled();
 		if (on) applySelectedStyle(btn); else applyNormalStyle(btn);
-		if (tip) tip->bind(btn, Lang::get(on ? L"tool.hideCursor" : L"tool.showCursor"));
+		bindTip(btn, Lang::get(on ? L"tool.hideCursor" : L"tool.showCursor"));
 		return;
 	}
 	if (hasSubTools(btn->id)) {

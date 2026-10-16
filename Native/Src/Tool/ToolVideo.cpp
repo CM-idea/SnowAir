@@ -306,20 +306,12 @@ void ToolVideo::makeSlot(const std::wstring& id)
 	}
 	else if (id == L"audio") {
 		btnAudio = makeIconBtn(Icon::Audio, L"audio");
-		btnAudio->onClick.add([this](Ling::Button*) {
-			if (selectIndex != 0) return;
-			selectSpeaker = !selectSpeaker;
-			updateAudioButtons();
-		});
+		btnAudio->onClick.add([this](Ling::Button*) { cmdToggleSystemAudio(); });
 		tip->bind(btnAudio, Lang::get(L"video.recordSystem"));
 	}
 	else if (id == L"mic") {
 		btnMic = makeIconBtn(Icon::MicOn, L"mic");
-		btnMic->onClick.add([this](Ling::Button*) {
-			if (selectIndex != 0) return;
-			selectMic = !selectMic;
-			updateAudioButtons();
-		});
+		btnMic->onClick.add([this](Ling::Button*) { cmdToggleMic(); });
 		tip->bind(btnMic, Lang::get(L"video.recordMic"));
 	}
 	else if (id == L"undo") {
@@ -442,6 +434,20 @@ void ToolVideo::updateAudioButtons()
 	applyToggleStyle(btnMic, selectMic);
 }
 
+void ToolVideo::cmdToggleSystemAudio()
+{
+	if (selectIndex != 0) return;   // 只有 mp4 分轨，GIF 没有音轨
+	selectSpeaker = !selectSpeaker;
+	updateAudioButtons();
+}
+
+void ToolVideo::cmdToggleMic()
+{
+	if (selectIndex != 0) return;
+	selectMic = !selectMic;
+	updateAudioButtons();
+}
+
 void ToolVideo::togglePlayPause()
 {
 	if (!isRecording) {
@@ -522,6 +528,26 @@ void ToolVideo::onAnnotClick(const std::wstring& id)
 	applyAnnotSelect(id);
 	win->startVideoAnnotate(id);
 	win->presentSelectedAnnotStyle();
+}
+
+// 「系统按键」用：绘图工具命令键（与点击按钮同一实现，但不做"再点一次取消"的切换）
+void ToolVideo::cmdAnnotTool(const std::wstring& id)
+{
+	if (id.empty()) return;
+	applyAnnotSelect(id);
+	win->startVideoAnnotate(id);
+	win->presentSelectedAnnotStyle();
+}
+
+// 「系统按键」用：工具循环（Tab）—— 在可见的绘图工具按钮之间循环切换一个
+void ToolVideo::cycleAnnotTool()
+{
+	if (annotBtns.empty()) return;
+	size_t next = 0;
+	for (size_t i = 0; i < annotBtns.size(); i++) {
+		if (annotBtns[i] && annotBtns[i]->id == curAnnotId_) { next = (i + 1) % annotBtns.size(); break; }
+	}
+	if (annotBtns[next]) cmdAnnotTool(annotBtns[next]->id);
 }
 
 void ToolVideo::updateUndoEnabled()

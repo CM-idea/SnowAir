@@ -1,26 +1,39 @@
 #include "pch.h"
 #include "HotkeyHook.h"
+#include <atomic>
 
 namespace
 {
 	constexpr const wchar_t* kHookClass{ L"SnowAirHotkeyHook" };
 	constexpr UINT kMsgFire{ WM_APP + 0x422 };
 
+	// 钩子线程独占的可变状态（mods/key/按键边沿）。回调不放这里 —— 回调由 UI 线程持有，
+	// 避免钩子线程与 UI 线程同时碰同一个对象。
+	struct HookBinding
+	{
+		UINT mods{ 0 };
+		UINT key{ 0 };
+		bool keyDown{ false };    // 主键已按下：长按只触发一次
+		bool swallowUp{ false };  // 这一次抬起也要吃掉
+	};
+
 	HWND g_wnd{ nullptr };            // UI 线程上的隐藏窗口：钩子线程 Post 到这里，回调在 UI 线程跑
 	HANDLE g_thread{ nullptr };
 	DWORD  g_tid{ 0 };
 	HANDLE g_ready{ nullptr };
-	// 下面这些只被钩子线程读写（install/uninstall 在起停前后设置，天然有先后）
+	// 下面这些只被钩子线程读写（setBindings/uninstall 在起停前后设置，天然有先后）
 	HHOOK g_hook{ nullptr };
 	bool g_hookOk{ false };
-	UINT g_mods{ 0 };
-	UINT g_key{ 0 };
 	UINT g_liveMods{ 0 };             // 当前物理按下的修饰键
-	bool g_keyDown{ false };          // 主键已按下：长按只触发一次
-	bool g_swallowUp{ false };        // 这一次抬起也要吃掉
-	std::function<void()> g_onFire;
+	std::vector<HookBinding> g_bindings;
+	// 回调表：只在 UI 线程读（hookWndProc），setBindings 里一次性整体替换
+	std::vector<std::function<void()>> g_callbacks;
+	// 绑定换代号：换代前 Post 出去、换代后才到 UI 线程的旧 kMsgFire 一律丢弃
+	std::atomic<unsigned> g_generation{ 0 };
 
-	// 与 Ling::App::regHotKey 同一套键名解析口径
+	// 与 Ling::App::regHotKey 同一套键名解析口径，且**不要求带修饰键**：
+	// 只挡 keyCode == 0。F1、` 等裸键（三条临时全局键即为此形态）必须能被装进钩子，
+	// 否则会话绑定整条失效。
 	bool parseChord(const std::wstring& s, UINT& mods, UINT& key)
 	{
 		mods = 0;
@@ -34,7 +47,7 @@ namespace
 			else if (part == L"win" || part == L"lwin" || part == L"rwin") mods |= MOD_WIN;
 			else key = Ling::Util::strToKey(part);
 		}
-		return mods != 0 && key != 0;
+		return key != 0;
 	}
 
 	UINT modBit(DWORD vk)
@@ -60,22 +73,34 @@ namespace
 			else g_liveMods |= bit;
 			return CallNextHookEx(nullptr, code, wp, lp);
 		}
-		if (kb->vkCode == g_key && (g_liveMods & g_mods) == g_mods) {
+		const unsigned gen = g_generation.load(std::memory_order_relaxed);
+		bool swallowed = false;
+		for (size_t i = 0; i < g_bindings.size(); ++i) {
+			auto& b = g_bindings[i];
+			if (b.key != kb->vkCode) continue;
 			if (!up) {
-				if (!g_keyDown) {
-					g_keyDown = true;
-					g_swallowUp = true;
-					if (g_wnd) PostMessageW(g_wnd, kMsgFire, 0, 0);
+				// 按下：要求修饰键齐备
+				if ((g_liveMods & b.mods) != b.mods) continue;
+				if (!b.keyDown) {
+					b.keyDown = true;
+					b.swallowUp = true;
+					if (g_wnd) PostMessageW(g_wnd, kMsgFire, (WPARAM)i, (LPARAM)gen);
 				}
-				return 1;   // 吃掉：别的程序（含浏览器）看不到这个组合
+				swallowed = true;
 			}
-			g_keyDown = false;
-			if (g_swallowUp) {
-				g_swallowUp = false;
-				return 1;
+			else {
+				// 抬起：只按主键匹配 —— 用户先松修饰键再松主键时，此刻 g_liveMods 已经变了，
+				// 再拿组合去匹配会匹配不到，于是"该吞的抬起"漏出去
+				if (!b.keyDown) continue;
+				b.keyDown = false;
+				if (b.swallowUp) {
+					b.swallowUp = false;
+					swallowed = true;
+				}
 			}
+			break;
 		}
-		return CallNextHookEx(nullptr, code, wp, lp);
+		return swallowed ? 1 : CallNextHookEx(nullptr, code, wp, lp);
 	}
 
 	DWORD WINAPI hookThread(LPVOID)
@@ -99,7 +124,17 @@ namespace
 	LRESULT CALLBACK hookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	{
 		if (msg == kMsgFire) {
-			if (g_onFire) g_onFire();
+			// 换代前的旧消息直接丢；否则按索引回调（索引在 setBindings 时与回调表一起换）
+			if ((unsigned)lp == g_generation.load(std::memory_order_relaxed)) {
+				const size_t idx = (size_t)wp;
+				// ⚠ 必须先把闭包**拷贝**出来再调用：回调内部可能触发钩子重装（例如「开始/暂停录制」
+				// 经 startRecord → syncGlobalCommandKeys → setSessionBindings），那一步会整体替换
+				// g_callbacks —— 若直接写 g_callbacks[idx]()，等于在执行期间析构该闭包自身
+				//（其捕获的 wstring 随之释放），构成 use-after-free。
+				std::function<void()> cb;
+				if (idx < g_callbacks.size()) cb = g_callbacks[idx];
+				if (cb) cb();
+			}
 			return 0;
 		}
 		return DefWindowProcW(hwnd, msg, wp, lp);
@@ -121,24 +156,41 @@ namespace
 			HWND_MESSAGE, nullptr, GetModuleHandleW(nullptr), nullptr);
 		return g_wnd != nullptr;
 	}
-}
+	// 主绑定（全局热键那侧给的）与会话临时绑定：只在 UI 线程读写。
+	// uninstall() 只清"已装进钩子的"那份，这两份列表要留着，好在下一次 installMerged() 里合并。
+	std::vector<HotkeyHook::Binding> g_main;
+	std::vector<HotkeyHook::Binding> g_session;
 
-namespace HotkeyHook
-{
-	void install(const std::wstring& chord, std::function<void()> onFire)
+	void installMerged()
 	{
-		uninstall();
-		if (!parseChord(chord, g_mods, g_key)) return;
+		HotkeyHook::uninstall();
+		std::vector<HookBinding> parsed;
+		std::vector<std::function<void()>> callbacks;
+		auto add = [&](const std::vector<HotkeyHook::Binding>& src) {
+			for (const auto& b : src) {
+				HookBinding hb;
+				if (!parseChord(b.chord, hb.mods, hb.key)) continue;
+				parsed.push_back(hb);
+				callbacks.push_back(b.onFire);
+			}
+		};
+		// 会话绑定在前：录屏时的 F1 必须先归"开始/暂停录制"，不能被全局热键的"区域截图"截走
+		add(g_session);
+		add(g_main);
+		if (parsed.empty()) return;
 		if (!ensureWindow()) return;
+
 		g_liveMods = 0;
-		g_keyDown = false;
-		g_swallowUp = false;
-		g_onFire = std::move(onFire);
+		g_bindings = std::move(parsed);
+		g_callbacks = std::move(callbacks);
+		g_generation.fetch_add(1, std::memory_order_relaxed);
+
 		g_ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 		g_thread = CreateThread(nullptr, 0, hookThread, nullptr, 0, &g_tid);
 		if (!g_thread) {
 			if (g_ready) { CloseHandle(g_ready); g_ready = nullptr; }
-			g_onFire = nullptr;
+			g_bindings.clear();
+			g_callbacks.clear();
 			return;
 		}
 		if (g_ready) {
@@ -146,8 +198,23 @@ namespace HotkeyHook
 			CloseHandle(g_ready);
 			g_ready = nullptr;
 		}
-		// 钩子没装上：别留一个"看着装了其实没用"的状态（重试定时器那边还在转，会继续试 RegisterHotKey）
-		if (!g_hookOk) uninstall();
+		// 钩子未安装成功：不留"看似已安装但无效"的状态（重试定时器仍在运行，会继续尝试 RegisterHotKey）
+		if (!g_hookOk) HotkeyHook::uninstall();
+	}
+}
+
+namespace HotkeyHook
+{
+	void setBindings(std::vector<Binding> bindings)
+	{
+		g_main = std::move(bindings);
+		installMerged();
+	}
+
+	void setSessionBindings(std::vector<Binding> bindings)
+	{
+		g_session = std::move(bindings);
+		installMerged();
 	}
 
 	void uninstall()
@@ -159,7 +226,10 @@ namespace HotkeyHook
 			g_thread = nullptr;
 			g_tid = 0;
 		}
-		g_onFire = nullptr;
+		// 换代：把还压在消息队列里的旧 kMsgFire 全部作废
+		g_generation.fetch_add(1, std::memory_order_relaxed);
+		g_bindings.clear();
+		g_callbacks.clear();
 		if (g_wnd) {
 			DestroyWindow(g_wnd);
 			g_wnd = nullptr;

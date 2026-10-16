@@ -749,7 +749,8 @@ void trimTrailingGap(Ling::Node* content)
 Ling::Node* sectionHeader(Ling::Node* parent,
                           const std::wstring& title,
                           const std::wstring& desc,
-                          const std::wstring& tip)
+                          const std::wstring& tip,
+                          Ling::Node** outTitleRow)
 {
     auto* box = parent->makeChild<Ling::Node>();
     box->setFlexDirection(Ling::FlexDirection::Column);
@@ -775,6 +776,7 @@ Ling::Node* sectionHeader(Ling::Node* parent,
         d->setColor(SettingTheme::textSecondary);
         d->setMarginTop(SettingTheme::titleDescGap);
     }
+    if (outTitleRow) *outTitleRow = titleRow;
     return box;
 }
 
@@ -867,6 +869,15 @@ namespace {
             { L"截图文件路径", L"截图与「以文件形式复制」的保存位置，留空用默认目录" },
             { L"录屏文件路径", L"录屏与动图的保存位置，留空用默认目录" },
             { L"字典模式", L"点击译文中的英文单词，即可查看详细释义" },
+            { L"快捷键提示", L"显示当前工具快捷键" },
+            { L"排除系统工具栏", L"避免录屏工具栏被录入画面" },
+            { L"记录操作按键", L"鼠标穿透模式下，在左下角显示当前使用的按键" },
+            { L"选框鼠标跟随", L"鼠标穿透模式下，光标靠近录制范围边缘时选区自动跟随光标，使操作始终处于录制画面内" },
+            // —— 「系统按键」页的条目说明 ——
+            { L"工具循环", L"在工具栏的绘图工具之间按顺序循环切换" },
+            { L"开始/暂停录制", L"临时全局键：开始/暂停屏幕录制" },
+            { L"鼠标穿透", L"临时全局键：启用后鼠标可以正常控制电脑" },
+            { L"隐藏/显示工具栏", L"临时全局键：可以隐藏/显示全屏画布工具栏" },
         };
         static const std::wstring empty;
         auto it = tips.find(label);
@@ -1000,6 +1011,7 @@ OptionRowRef optionRow(Ling::Node* parent,
 
     // 标题行：[标题][?]（问号说明）—— 与 desc 同处左 column
     auto* labRow = labelBox->makeChild<Ling::Node>();
+    r.labRow = labRow;
     labRow->setFlexDirection(Ling::FlexDirection::Row);
     labRow->setAlignItems(Ling::Align::Center);
     labRow->setWidthPercent(100.f);

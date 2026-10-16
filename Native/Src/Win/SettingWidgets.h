@@ -208,7 +208,9 @@ void adoptChild(Ling::Node* parent, Ling::Node* child);
 Ling::Node* sectionHeader(Ling::Node* parent,
     const std::wstring& title,
     const std::wstring& desc = L"",
-    const std::wstring& tip = L"");
+    const std::wstring& tip = L"",
+    // 非空时回写标题行（[标题][?] 那一行），供调用方在其右端追加页面级操作按钮
+    Ling::Node** outTitleRow = nullptr);
 
 // ─── Group Card：卡片分组容器（带可选 cardHeader / cardContent）──
 //   白底 + zinc-200 描边 + radiusLg(10px) + 16px pad
@@ -247,6 +249,7 @@ void trimTrailingGap(Ling::Node* content);
 struct OptionRowRef {
     Ling::Node* row;        // 整行
     Ling::Node* labelBox;   // 左 label 区（column）
+    Ling::Node* labRow;     // 标题行（row，含标题与「?」）；标题右侧的附加内容挂这里
     Ling::Node* ctrlBox;    // 右控件区（row, right align）
     Ling::Label* label;     // 主标题
     Ling::Label* desc;      // 副标题（可能为nullptr）

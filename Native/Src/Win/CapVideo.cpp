@@ -164,12 +164,59 @@ bool CapVideo::queryBarAnchor(float& x, float& y, float& w, float& h, float& btn
 	return true;
 }
 
+// 与 targetDesk 同适配器的显示器列表。采集侧的换屏只可能在**同一个 D3D 设备（= 同一适配器）**
+// 下的输出之间发生（Prepare 是从设备反查适配器的），所以这里按 DXGI 的适配器分组给出候选。
+// 不建 D3D 设备，只用工厂枚举，UI 线程上每次进录屏调用一次。
+std::vector<RECT> CapVideo::reachableMonitors(const RECT& targetDesk)
+{
+    std::vector<RECT> out;
+    CComPtr<IDXGIFactory1> factory;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&factory)) || !factory) return out;
+    for (UINT i = 0;; ++i) {
+        CComPtr<IDXGIAdapter1> ad;
+        if (FAILED(factory->EnumAdapters1(i, &ad)) || !ad) break;
+        std::vector<RECT> mine;
+        bool hasTarget = false;
+        for (UINT j = 0;; ++j) {
+            CComPtr<IDXGIOutput> output;
+            if (FAILED(ad->EnumOutputs(j, &output)) || !output) break;
+            DXGI_OUTPUT_DESC desc{};
+            if (FAILED(output->GetDesc(&desc))) continue;
+            const RECT& r = desc.DesktopCoordinates;
+            mine.push_back(r);
+            if (r.left == targetDesk.left && r.top == targetDesk.top
+                && r.right == targetDesk.right && r.bottom == targetDesk.bottom) hasTarget = true;
+        }
+        if (hasTarget) return mine;   // 同一块屏可能被多个适配器报告，取第一个命中的那组
+    }
+    return out;
+}
+
+bool CapVideo::canSwitchToMonitor(const RECT& mon) const
+{
+    if (gifParam || !mp4Param) return true;   // 动图走 GDI / 还没开录：不设限
+    // 采集线程已经试过、换不过去的那块屏（混合显卡上"适配器报告了这块屏、实际复制不起来"）
+    if (mp4Param->hasBlocked.load(std::memory_order_relaxed)) {
+        const long long p = mp4Param->switchBlocked.load(std::memory_order_relaxed);
+        if ((long)(int)(p >> 32) == mon.left && (long)(int)(p & 0xFFFFFFFFll) == mon.top) return false;
+    }
+    if (reachable_.empty()) return true;   // 拿不到显卡分组信息时不设限（照旧只靠采集侧的兜底）
+    for (const auto& r : reachable_) {
+        if (r.left == mon.left && r.top == mon.top && r.right == mon.right && r.bottom == mon.bottom) return true;
+    }
+    return false;
+}
+
 void CapVideo::startMp4(bool useSpeaker, bool useMic)
 {
     auto& cutMask = win->cutMask;
     auto* st = Setting::get();
     auto videoTempPath = st->getDataPath();
     mp4Param = std::make_unique<VideoMp4::DESKTOPCAPTUREPARAMS>();
+    // 录制中选区可整体拖动：记下开录时的原点，之后每帧按位移平移裁剪框（见 syncCaptureMove）
+    capBaseX = (int)std::lround((float)win->x + cutMask->maskRect.left);
+    capBaseY = (int)std::lround((float)win->y + cutMask->maskRect.top);
+    syncCaptureMove();   // 把跟随打开并报一次初始原点（采集线程据它算跟随基准）
     // 编码格式不在这里定，交给下面采集线程里那个"HEVC 不行就退 H.264"的循环
     // 录制区域先夹回桌面范围，再做对齐 —— 只会往里缩，不会越出桌面。
     // HEVC 编码器要求宽高是偶数，链路中间的 RGB32->NV12 转换还会按对齐后的 stride
@@ -187,6 +234,14 @@ void CapVideo::startMp4(bool useSpeaker, bool useMic)
     const long rcW = std::max(4l, (rcRight - rcLeft) & ~3l);
     const long rcH = std::max(2l, (rcBottom - rcTop) & ~1l);
     mp4Param->rx = { rcLeft, rcTop, rcLeft + rcW, rcTop + rcH };
+    // 「能跨过去的那几块屏」：与开录目标同显卡适配器的那些（选区跨屏时据此决定跟不跟）
+    {
+        RECT deskRect{ rcLeft, rcTop, rcLeft + rcW, rcTop + rcH };
+        MONITORINFO mi{ sizeof(MONITORINFO) };
+        HMONITOR hMon = MonitorFromRect(&deskRect, MONITOR_DEFAULTTONEAREST);
+        reachable_.clear();
+        if (hMon && GetMonitorInfoW(hMon, &mi)) reachable_ = reachableMonitors(mi.rcMonitor);
+    }
     mp4Param->f = videoTempPath.append(L"temp.mp4").wstring();
     mp4Param->EndMS = 0;
     // 「功能设置 → 录制」：分辨率 / 帧率 / 码率质量 / 硬件加速
@@ -269,6 +324,9 @@ void CapVideo::startGif()
     auto& cutMask = win->cutMask;
     auto videoTempPath = Setting::get()->getDataPath();
     gifParam = std::make_unique<VideoGif::GifParam>();
+    // 同 MP4：记下开录时的原点，录制中整体拖动时按位移平移抓取区域
+    capBaseX = (int)std::lround((float)win->x + cutMask->maskRect.left);
+    capBaseY = (int)std::lround((float)win->y + cutMask->maskRect.top);
     gifParam->x = (int)(win->x + cutMask->maskRect.left);
     gifParam->y = (int)(win->y + cutMask->maskRect.top);
     gifParam->w = (int)(cutMask->maskRect.right - cutMask->maskRect.left);
@@ -296,6 +354,31 @@ void CapVideo::startGif()
     captureThread = std::jthread([this](std::stop_token st) {
         VideoGif::createGif(gifParam.get());
     });
+}
+
+// 录制中选区被挪动：把「当前裁剪区左上角（虚拟桌面坐标）」交给采集线程。
+// 采集线程据此平移裁剪框，落到别的显示器上还会换采集目标（见 VideoMp4 里的换屏跟随）。
+// 只报原点、不报尺寸 —— 录制期间选区尺寸锁死，采集侧的输出分辨率在开录时也定死了。
+void CapVideo::syncCaptureMove()
+{
+    auto& cm = win->cutMask;   // unique_ptr，取引用
+    if (!cm) return;
+    const long rawX = (long)std::lround((float)win->x + cm->maskRect.left);
+    const long rawY = (long)std::lround((float)win->y + cm->maskRect.top);
+    if (mp4Param) {
+        // 与 startMp4 同一套取整口径（左上角往里取整），跟随开始那一下画面才不会整体跳几像素
+        const long x = (rawX + 3) & ~3l;
+        const long y = (rawY + 1) & ~1l;
+        // 打包成一个原子值（高 32 位 x / 低 32 位 y）：跨线程读，不能分两次取
+        const long long packed = ((long long)(int)x << 32) | (long long)(unsigned int)(int)y;
+        mp4Param->wantOrigin.store(packed, std::memory_order_relaxed);
+        mp4Param->followOn.store(true, std::memory_order_relaxed);
+    }
+    if (gifParam) {
+        // 动图这条是 GDI 抓屏，天然支持整块虚拟桌面：直接给相对开录原点的平移量即可
+        gifParam->followX.store((int)(rawX - capBaseX), std::memory_order_relaxed);
+        gifParam->followY.store((int)(rawY - capBaseY), std::memory_order_relaxed);
+    }
 }
 
 bool CapVideo::onSaveKey(bool toClipboard)

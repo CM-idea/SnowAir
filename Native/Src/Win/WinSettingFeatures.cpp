@@ -12,8 +12,41 @@
 #include "../Ocr/OcrPackVariant.h"
 #include "../Translate/TranslateTypes.h"
 #include <shobjidl.h>
+#include <commdlg.h>
 
 namespace {
+	// 某个子 Tab 是否仍是出厂值：0 基本功能 / 1 视频录制 / 2 文件输出 / 3 文本识别 / 4 翻译
+	//（与 build() 里给 segmentedPills 的标签顺序一致，也与 restoreBtn 的动作分派一致）
+	bool functionAtDefaults(int tab)
+	{
+		auto* s = Setting::get();
+		switch (tab) {
+		case 1:  return s->functionRecordAtDefaults();
+		case 2:  return s->functionOutputAtDefaults();
+		case 3:  return s->functionOcrAtDefaults();
+		case 4:  return s->functionTranslateAtDefaults();
+		default: return s->functionScreenshotAtDefaults();
+		}
+	}
+
+	// 色号文本（#RRGGBB）：高亮色块旁显示用
+	std::wstring colorCode(UINT32 rgba)
+	{
+		return std::format(L"#{:02X}{:02X}{:02X}",
+			(rgba >> 24) & 0xFFu, (rgba >> 16) & 0xFFu, (rgba >> 8) & 0xFFu);
+	}
+
+	// 解析键入的色号：接受 #RRGGBB / RRGGBB（忽略空白）；非法则返回 fallback
+	UINT32 parseColorCode(const std::wstring& text, UINT32 fallback)
+	{
+		std::wstring s;
+		for (wchar_t c : text) if (!iswspace(c)) s += c;
+		if (!s.empty() && s[0] == L'#') s.erase(0, 1);
+		if (s.size() != 6) return fallback;
+		for (wchar_t c : s) if (!iswxdigit(c)) return fallback;
+		return ((UINT32)wcstoul(s.c_str(), nullptr, 16) & 0xFFFFFFu) << 8 | 0xFFu;
+	}
+
 	// 文件夹选择
 	std::wstring pickFolder(HWND owner, const std::wstring& start)
 	{
@@ -301,11 +334,46 @@ WinSettingFeatures::WinSettingFeatures(Ling::WinBase* parent) : Ling::Node(paren
 {
 	setFlexDirection(Ling::FlexDirection::Column);
 	build();
+	// 悬停预览只在窗口级鼠标移动里更新（页面重建不影响订阅）
+	mouseMoveTok = win->onMouseMove.add([this](POINT pos) {
+		updateMouseHlPreview(pos);
+		// 各行的改动不触发本页重建，「恢复默认」的置灰借这个高频回调同步：
+		// 值没变时 setColor 会被 Text 内部的相等判断吃掉，不产生多余重绘
+		syncRestoreState();
+	});
 }
 
 WinSettingFeatures::~WinSettingFeatures()
 {
 	SettingUi::closePopup(win);
+	win->onMouseMove.remove(mouseMoveTok);
+	if (mouseHlPreview) {
+		if (win && win->body) win->body->removeChild(mouseHlPreview);
+		mouseHlPreview = nullptr;
+	}
+}
+
+// 「鼠标高亮提醒」的悬停预览：命中该行时把圆跟着光标走，离开就收起。
+// 尺寸与透明度取与实际绘制相同的值（见 WinCap::mouseHlRadius / kMouseHlAlpha）。
+void WinSettingFeatures::updateMouseHlPreview(const POINT& pos)
+{
+	if (!mouseHlPreview) return;
+	// 只在「视频录制」Tab 的卡片中部空白处触发：标题文本、色块/色号/开关都不算
+	//（其它 Tab 下该行是隐藏的，坐标判定不可靠，故一并排除）
+	const bool inArea = mouseHlArea && mouseHlArea->isPosIn(pos)
+		&& !(mouseHlLabel && mouseHlLabel->isPosIn(pos));
+	if (tabIndex != 1 || !inArea) {
+		mouseHlPreview->hide();
+		return;
+	}
+	constexpr float kD = 42.f;   // 直径 = 半径 21 逻辑像素 × 2
+	// 事件坐标是物理像素，而 setPosition 收的是逻辑像素（内部 ×dpi）；圆心同样取光标本体中心
+	const float k = (win && win->dpi > 0.f) ? win->dpi : 1.f;
+	float ox = 0.f, oy = 0.f;
+	Util::cursorBodyOffset(ox, oy);
+	mouseHlPreview->setPosition(Ling::Edge::Left, ((float)pos.x + ox) / k - kD * 0.5f);
+	mouseHlPreview->setPosition(Ling::Edge::Top, ((float)pos.y + oy) / k - kD * 0.5f);
+	mouseHlPreview->show();
 }
 
 void WinSettingFeatures::showTab(int index)
@@ -320,10 +388,17 @@ void WinSettingFeatures::showTab(int index)
 			else tabs[i]->hide();
 		}
 	}
-	if (restoreBtn) {
-		restoreBtn->setColor(index == 0 ? SettingTheme::textPrimary : SettingTheme::textMuted);
-		restoreBtn->setHoverColor(index == 0 ? SettingTheme::textPrimary : SettingTheme::textMuted);
-	}
+	syncRestoreState();
+}
+
+// 「恢复默认」的置灰：当前子页各项都还是出厂值 → 灰字（点击也不做事，见按钮回调）。
+// 与「外观设置 > 工具栏外观」的 tbRefreshRestore 同款口径。
+void WinSettingFeatures::syncRestoreState()
+{
+	if (!restoreBtn) return;
+	const bool grey = functionAtDefaults(tabIndex);
+	restoreBtn->setColor(grey ? SettingTheme::textMuted : SettingTheme::textPrimary);
+	restoreBtn->setHoverColor(grey ? SettingTheme::textMuted : SettingTheme::textPrimary);
 }
 
 void WinSettingFeatures::rebuildTab(int index)
@@ -366,11 +441,21 @@ void WinSettingFeatures::build()
 	auto* spacer = tabRow->makeChild<Ling::Node>();
 	spacer->setFlexGrow(1.f);
 	spacer->setFlexShrink(1.f);
-	// 「恢复默认」与外观页保持一致（Outline 变体：白底 + 边框），非 Ghost
+	// 「恢复默认」与外观页保持一致（Outline 变体：白底 + 边框），非 Ghost。
+	// 作用域 = **当前子 Tab**：把该子页的每一项写回出厂值，再整页重建以刷新控件；
+	// 该子页没改过时按钮置灰、点击不做事（见 syncRestoreState）。
 	restoreBtn = SettingUi::btnOutline(tabRow, Lang::get(L"setting.restoreDefault"), [this]() {
-		if (tabIndex != 0) return;
-		Setting::get()->restoreFunctionScreenshotDefaults();
-		rebuildTab(0);
+		if (functionAtDefaults(tabIndex)) return;
+		auto* s = Setting::get();
+		switch (tabIndex) {
+		case 0:  s->restoreFunctionScreenshotDefaults(); break;
+		case 1:  s->restoreFunctionRecordDefaults();     break;
+		case 2:  s->restoreFunctionOutputDefaults();     break;
+		case 3:  s->restoreFunctionOcrDefaults();        break;
+		default: s->restoreFunctionTranslateDefaults();  break;
+		}
+		rebuildTab(tabIndex);
+		syncRestoreState();
 	});
 	restoreBtn->setMarginLeft(SettingTheme::sp2);
 
@@ -528,6 +613,119 @@ void WinSettingFeatures::buildRecord(Ling::Node* p)
 		[](bool on) { Setting::get()->setHideToolbarInRecord(on); }, true);
 	SettingUi::toggleRow(g, Lang::get(L"setting.fnRecKeystrokes"), s->getShowKeystrokes(),
 		[](bool on) { Setting::get()->setShowKeystrokes(on); }, true);
+	// 行为见 WinCap::updateSelFollowCursor（录制中 + 穿透态）
+	SettingUi::toggleRow(g, Lang::get(L"setting.fnRecSelFollowMouse"), s->getSelFollowMouse(),
+		[](bool on) { Setting::get()->setSelFollowMouse(on); }, true);
+	// 行为见 WinCap::paintMouseHighlight；色块 + 色号点击弹系统调色板（与「托盘自定义颜色」同款）
+	{
+		auto r = SettingUi::optionRow(g, Lang::get(L"setting.fnRecMouseHighlight"), L"", true, SettingUi::kToggleH);
+		// 操作提示排在标题右侧的空白处，与标题同一行（不占标题下方、不动 label 区布局）：
+		// 挂到标题行上，吞掉剩余宽度并在其中居中。Label 内部是纵向容器，横向居中要用 alignItems
+		//（justifyContent 管的是纵向主轴，对单行文本无效果）。
+		{
+			auto* hint = r.labRow->makeChild<Ling::Label>();
+			hint->setText(Lang::get(L"setting.fnRecMouseHighlightHint"));
+			hint->setFontSize(SettingTheme::fontSm);
+			hint->setColor(SettingTheme::border);   // 与卡片描边同色：能看见即可，不抢主体
+			hint->setFlexGrow(1.f);
+			hint->setFlexShrink(1.f);
+			YGNodeStyleSetMinWidth(hint->node, 0.f);
+			hint->setAlignItems(Ling::Align::Center);
+		}
+		// 悬停预览圆：挂在 win->body 上（窗口坐标），跟着光标走；重建本页时先撤旧的
+		if (mouseHlPreview && win && win->body) {
+			win->body->removeChild(mouseHlPreview);
+			mouseHlPreview = nullptr;
+		}
+		auto* hl = win->body->makeChild<Ling::Node>();
+		hl->setPositionType(Ling::Position::Absolute);
+		hl->setSize(42.f, 42.f);
+		hl->setBorderRadius(21.f);
+		hl->setBg((s->getMouseHighlightColor() & 0xFFFFFF00u) | 0x59u);   // 与绘制同透明度
+		hl->hide();
+		mouseHlPreview = hl;
+		mouseHlArea = r.labelBox;   // 中部空白（标题右侧到控件之间）才算触发区
+		mouseHlLabel = r.label;     // 标题文本本身不算
+
+		// 色块（点击弹系统调色板）与色号输入框各自独立：色号可直接键入
+		auto* swatch = r.ctrlBox->makeChild<Ling::Button>();
+		swatch->setSize(20.f, 20.f);
+		swatch->setBorderRadius(4.f);
+		swatch->setBorder(1.f, SettingTheme::input);
+		swatch->setBg(s->getMouseHighlightColor());
+		swatch->setHoverBg(s->getMouseHighlightColor());   // 悬停不改底色（否则会盖掉颜色本身）
+		swatch->setText(L"");
+		swatch->setMarginRight(6.f);
+
+		auto* code = r.ctrlBox->makeChild<Ling::TextBox>();
+		code->setWidth(84.f);
+		code->setHeight(SettingTheme::ctrlH);
+		code->setBorderRadius(SettingTheme::radiusCtl);
+		code->setBg(SettingTheme::inputBg);
+		code->setPadding(SettingTheme::sp2, SettingTheme::sp1, SettingTheme::sp2, SettingTheme::sp1);
+		code->setFontSize(SettingTheme::fontSm);
+		code->setVerticalCenter(true);
+		code->setPlaceholder(L"#RRGGBB");
+		code->setPlaceholderColor(SettingTheme::placeholder);
+		code->setText(colorCode(s->getMouseHighlightColor()));
+		code->setMarginRight(SettingTheme::sp3);
+
+		// 常态不描边、文字走灰；悬停或编辑中才出现描边并把文字提亮
+		auto hovered = std::make_shared<bool>(false);
+		auto styleCodeBox = [code, hovered](bool focused) {
+			const bool framed = *hovered || focused;
+			code->setBorder(framed ? 1.f : 0.f, framed ? SettingTheme::input : 0u);
+			code->setColor(framed ? SettingTheme::textPrimary : SettingTheme::textMuted);
+		};
+		styleCodeBox(code->isFocused());
+		code->onEnter.add([code, styleCodeBox, hovered](Ling::TextBox*) {
+			*hovered = true; styleCodeBox(code->isFocused());
+		});
+		code->onLeave.add([code, styleCodeBox, hovered](Ling::TextBox*) {
+			*hovered = false; styleCodeBox(code->isFocused());
+		});
+
+		// 两处入口共用同一段落值逻辑：色块选色、色号键入（回车或失焦提交）
+		auto applyColor = [this, swatch, code](UINT32 v) {
+			Setting::get()->setMouseHighlightColor(v);
+			swatch->setBg(v);
+			code->setText(colorCode(v));
+			if (mouseHlPreview) mouseHlPreview->setBg((v & 0xFFFFFF00u) | 0x59u);
+		};
+		const HWND owner = win ? win->hwnd : nullptr;   // 调色板以设置窗为宿主，避免落到设置窗背后
+		swatch->onClick.add([applyColor, owner](Ling::Button*) {
+			const UINT32 cur = Setting::get()->getMouseHighlightColor();
+			static COLORREF cust[16]{};
+			CHOOSECOLORW cc{};
+			cc.lStructSize = sizeof(cc);
+			cc.hwndOwner = owner;
+			cc.lpCustColors = cust;
+			cc.rgbResult = RGB((cur >> 24) & 0xFFu, (cur >> 16) & 0xFFu, (cur >> 8) & 0xFFu);
+			cc.Flags = CC_FULLOPEN | CC_RGBINIT | CC_ANYCOLOR;
+			if (!ChooseColorW(&cc)) return;
+			applyColor(((UINT32)GetRValue(cc.rgbResult) << 24)
+				| ((UINT32)GetGValue(cc.rgbResult) << 16)
+				| ((UINT32)GetBValue(cc.rgbResult) << 8) | 0xFFu);
+		});
+		code->onEnter.add([applyColor, code](Ling::TextBox*) {
+			applyColor(parseColorCode(code->getText(), Setting::get()->getMouseHighlightColor()));
+		});
+		code->onFocusChanged.add([applyColor, styleCodeBox](Ling::TextBox* tb, bool focused) {
+			styleCodeBox(focused);
+			if (focused) return;
+			// 失焦：非法输入回落到当前值（applyColor 会把文本改回规范写法）
+			applyColor(parseColorCode(tb->getText(), Setting::get()->getMouseHighlightColor()));
+		});
+
+		auto* sw = r.ctrlBox->makeChild<Ling::Button>();
+		SettingUi::styleToggle(sw, s->getMouseHighlight());
+		bool on0 = s->getMouseHighlight();
+		sw->onClick.add([sw, on0](Ling::Button*) mutable {
+			on0 = !on0;
+			SettingUi::styleToggle(sw, on0);
+			Setting::get()->setMouseHighlight(on0);
+		});
+	}
 	SettingUi::grid2Cells(g);
 }
 

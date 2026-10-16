@@ -19,6 +19,9 @@ namespace VideoGif {
         int h;
         int x;
         int y;
+        // 录制中选区被整体拖动：相对开录时的平移量，抓帧时叠到 x/y 上（见 grabFrame / drawCursor）
+        std::atomic<int> followX{ 0 };
+        std::atomic<int> followY{ 0 };
         // 输出尺寸（「动图分辨率」上限）：0 = 按选区原生尺寸直出
         int outW{ 0 };
         int outH{ 0 };
@@ -33,8 +36,8 @@ namespace VideoGif {
         if (cursorInfo.flags == CURSOR_SHOWING) {
             ICONINFO iconInfo;
             GetIconInfo(cursorInfo.hCursor, &iconInfo);
-            int localX = cursorInfo.ptScreenPos.x - param->x - iconInfo.xHotspot;
-            int localY = cursorInfo.ptScreenPos.y - param->y - iconInfo.yHotspot;
+            int localX = cursorInfo.ptScreenPos.x - (param->x + param->followX.load()) - iconInfo.xHotspot;
+            int localY = cursorInfo.ptScreenPos.y - (param->y + param->followY.load()) - iconInfo.yHotspot;
             if (iconInfo.hbmMask) DeleteObject(iconInfo.hbmMask);
             if (iconInfo.hbmColor) DeleteObject(iconInfo.hbmColor);
             if (localX >= 0 && localX < param->w  && localY >= 0 && localY < param->h) {
@@ -90,7 +93,9 @@ namespace VideoGif {
     inline void grabFrame(HDC hScreenDC, HDC hMemDC, HBITMAP hBitmap, BITMAPINFO& bmi, GifParam* param,
         std::vector<unsigned char>& bgra_buffer, std::vector<unsigned char>& rgb_buffer, int ow, int oh)
     {
-        BitBlt(hMemDC, 0, 0, param->w, param->h, hScreenDC, param->x, param->y, SRCCOPY);
+        // 录制中拖动选区：抓取区域整体平移（同上，尺寸不变）
+        BitBlt(hMemDC, 0, 0, param->w, param->h, hScreenDC,
+            param->x + param->followX.load(), param->y + param->followY.load(), SRCCOPY);
         drawCursor(hMemDC, param);
         GetDIBits(hMemDC, hBitmap, 0, param->h, (void*)bgra_buffer.data(), &bmi, DIB_RGB_COLORS);
         bgraToRgbScaled(bgra_buffer.data(), param->w, param->h, rgb_buffer.data(), ow, oh);

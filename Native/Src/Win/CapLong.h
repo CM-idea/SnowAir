@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <include/Ling.h>
 
 class WinCap;
@@ -24,10 +24,18 @@ public:
 	bool hasImage() const { return !imgData.empty(); }
 	void layoutTool();
 	void setToolVisible(bool visible);
+	// 长图阶段的工具条（ToolLong）。与 CapVideo::toolBar() 同款：给「系统按键」的
+	// 绘图工具 / 工具循环用 —— 长图阶段的工具在这条工具条上，不在截图条上。
+	ToolLong* toolBar() const { return tool.get(); }
 	void raiseTool();
 	void toggleCapture();
 	void startCapture();
 	void setPaused(bool on);
+	// 暂停/继续（「系统按键」截图组的「暂停/继续滚动」，默认 Space）
+	void togglePaused();
+	// 是否处于滚动截图会话中（含暂停与编辑态，它们属同一次滚动）。
+	// 选区锁定判定用；⚠ 不可命名为 isCapturing（成员变量已占用该名字）
+	bool capturing() const { return isCapturing; }
 	void onPreviewPanChanged();
 	bool hitPreview(POINT clientPos) const;
 	bool hitSelViewport(POINT clientPos) const;

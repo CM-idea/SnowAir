@@ -1,6 +1,7 @@
 #pragma once
 #include <include/Ling.h>
 #include <vector>
+#include <functional>
 #include "../Tool/ToolbarTheme.h"
 
 // 光标落在哪一块。边/角用环带命中，远离选区为 None
@@ -17,6 +18,9 @@ class CutMask
 public:
 	CutMask(Ling::WinBase* win);
 	~CutMask();
+	// 选区被挪动（拖拽 / 鼠标跟随 / 方向键 / 滚轮）之后的回调，由宿主在创建后设置。
+	// 未设置时什么都不做 —— 录制侧靠它把采集裁剪框跟着平移。
+	std::function<void()> onRectMoved;
 	// 鼠标悬停时吸附到光标下的窗口矩形，选区真的变了才返回 true
 	bool highlight(POINT pos);
 	// 悬停是否停在有效目标上（区别于"自由拖框"：点一下即选中的窗口元素框）
@@ -43,8 +47,20 @@ public:
 	void clearRect();
 	// 改选区中右键：恢复按下前的矩形
 	void cancelAdjust();
-	// 平移选区并夹到窗口内；真的移动了返回 true
-	bool translateBy(float dx, float dy);
+	// 平移选区并夹到窗口内；真的移动了返回 true。
+	// hostPoint 非空时，录制期的"单块屏"约束以该点定屏（鼠标跟随传光标位置：鼠标一进另一块屏，
+	// 选区就整块贴过去）；为空则按选区中心定屏。
+	bool translateBy(float dx, float dy, const POINT* hostPoint = nullptr);
+	// —— 录制期的「单块屏」约束 ——
+	// 屏幕录制只能针对单块显示器采集（跨屏录不全，见 CapVideo::startMp4），故录制阶段要求
+	// 选区**完整落在某一块屏里**：框选、拖边、整体平移都会被夹进对应那块屏，不跨交界。
+	void setSingleMonitorMode(bool on);
+	// 把当前选区收进单块屏（进录屏阶段时调用：跨屏框好的框在这里被收小）；真的改了返回 true
+	bool snapToSingleMonitor();
+	// 录制期"这块屏能不能跨过去"（虚拟桌面坐标）：只有与当前采集目标挂在同一个显卡适配器上的屏
+	// 才换得过去（见 CapVideo::reachableMonitors）。由宿主注入，且**每次现取**：采集侧一旦在某块屏上
+	// 换失败（混合显卡常见），随后即可把该屏排除，避免选区先移过去再被回退。未注入时一律按可跨屏处理。
+	std::function<bool(const RECT&)> canSwitchToMonitor;
 	void paint(ID2D1DeviceContext* ctx);
 	// 信息栏控件
 	InfoHit hitInfoControl(POINT pos) const;
@@ -80,6 +96,14 @@ public:
 	void cancelHoverQuery();
 private:
 	void makeLayout();
+	// 把选区夹进"该归属的那块屏"（录制期用）：hostPoint 非空时以该点定屏（框选按起点、
+	// 鼠标跟随传光标、整体拖动传光标），为空则以选区中心定屏。真的改了 r 返回 true。
+	// keepIfNoFit 非空时：选区比目标屏还大就**原样退回**（不让它挪到装不下的屏上，录制侧同理）；
+	// 为空则收小到屏的尺寸（只用在"跨屏框好再进录屏"和框选过程中）。
+	bool clampToSingleMonitor(D2D1_RECT_F& r, const POINT* hostPoint = nullptr,
+		const D2D1_RECT_F* keepIfNoFit = nullptr) const;
+	bool monitorLocked_{ false };                 // 录制期的单块屏约束开关
+	std::vector<D2D1_RECT_F> monitorsDesk_;       // 显示器矩形列表（虚拟桌面坐标）
 	void applyAspectLock(D2D1_RECT_F& r) const;
 	void toggleAspectLock();
 	void toggleSelRadius();

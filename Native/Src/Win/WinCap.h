@@ -45,11 +45,24 @@ public:
 	void onGlobalKeyCombo(const std::wstring& text);
 	// 「显示光标」工具按钮：截图/导出时把会话开始那一刻的系统光标一起拍进去
 	void toggleShowCursor();
+	// 「系统按键」派发：按键 → 命令表 → 与工具栏点击**同一批**入口。true = 已处理
+	bool commandKey(UINT key);
+	// 执行一条命令（窗口内按键与全局钩子**共用**这一段）；查表在 commandKey
+	bool runCommand(const std::wstring& id);
+	// 当前界面掩码（截图 / 录屏 / 全屏画布）
+	unsigned currentSurface() const;
+	// 会话期间把「系统按键」里的临时全局键挂到钩子上；surface=0 表示撤掉。
+	// static：调用方 beginDemoCanvas() 本身就是静态的；钩子回调也靠 get() 现取会话实例，
+	// 不捕获 this（免得会话销毁后回调撞到悬空指针）。
+	static void syncGlobalCommandKeys(unsigned surface);
 	bool showCursorEnabled() const { return showCursor; }
 	void hollowWin();
 	void restoreWin();
 	// 长截图：禁止选区挖洞 / WS_EX_TRANSPARENT 鼠标穿透
 	void ensureNoMousePierce();
+	// 选区被挪动（拖拽 / 鼠标跟随 / 方向键 / 滚轮）后由 CutMask 回调：
+	// 录制中把平移同步给采集线程的裁剪框，否则画面里选区挪了、录出来还是原地
+	void onMaskRectChanged();
 	void startAnnotate(const std::wstring& toolId);
 	void startPin(const std::wstring& toolId = L"");
 	void startLong();
@@ -129,6 +142,8 @@ private:
 	void relayoutTool();
 	void enterLiveStage();
 	bool exportSelection(std::vector<BYTE>& pixels, int& cw, int& ch, bool includeAnnot = true);
+	// 记住本次选区（屏幕坐标），供全局热键「重复截图」重新抓同一块
+	void rememberLastRegion();
 	bool beginMaskResize(POINT pos);
 	void applyMaskHitCursor(MaskHit hit);
 	bool hasAnnotShapes() const;
@@ -142,6 +157,12 @@ private:
 	void updateInfoBarTip(POINT pos);
 	// 录屏工具条已出、尚未点「开始」：与 Adjust 一样可拖/缩放选区
 	bool videoCanAdjust() const;
+	// 选区画幅是否已锁定（不许拖边/拖角改大小）：
+	//   · 录屏已开录 —— 仍允许整体挪动（见 maskMoveLocked）
+	//   · 长图已开始滚动（含暂停 / 编辑态）
+	bool maskSizeLocked() const;
+	// 连整体挪动是否也锁定：仅长图滚动中。录屏开录后不在其中，故与上面分开判定
+	bool maskMoveLocked() const;
 	// 「显示光标」：会话开始抓一次系统光标位图；屏幕上/导出图里按开关叠加
 	void captureCursorSnapshot();
 	void paintCursor(ID2D1DeviceContext* ctx);
@@ -161,6 +182,8 @@ private:
 	Ling::Canvas* canvas{ nullptr };
 	POINT pixPos{}, pixFocus{};
 	bool isPress{ false }, isClosed{ false }, isMouseTransparent{ false };
+	// 「隐藏/显示工具栏」的当前状态（系统按键 F1，只有命令键能触发）。随会话重建，不落盘
+	bool toolHidden{ false };
 	// 托盘「屏幕录制」：本次会话框选完成后直接进录屏（不再弹截图工具栏）
 	bool pendingRecord{ false };
 	// 演示模式（全屏实时画布）：不画静帧、不画遮罩/选框，工具栏在顶部居中
@@ -184,6 +207,20 @@ private:
 	std::wstring keyOverlayText_;
 	ULONGLONG keyOverlayUntil_{ 0 };
 	static constexpr UINT keyOverlayTimerId{ 0x5301 };
+	// 视频录制期间的光标覆盖物。穿透后本窗口收不到鼠标移动事件，故统一用定时器轮询光标：
+	//   · 「选框鼠标跟随」：光标贴近选区边缘时自动平移选区
+	//   · 「鼠标高亮提醒」：光标下垫一个半透明圆形色块，便于在录屏里找到光标
+	static constexpr UINT recCursorTimerId{ 0x5302 };
+	static constexpr UINT recCursorTickMs{ 33 };
+	static constexpr float selFollowMargin{ 24.f };   // 判定"贴近边缘"的带宽（逻辑像素）
+	static constexpr float mouseHlRadius{ 21.f };     // 高亮圆半径（逻辑像素，直径 42）
+	static constexpr float kMouseHlAlpha{ 0.35f };    // 高亮圆的透明度（固定）
+	void updateSelFollowCursor();
+	void updateMouseHighlight();
+	void paintMouseHighlight(ID2D1DeviceContext* ctx);
+	POINT mouseHlPos_{ -1, -1 };   // 上次画高亮时的圆心（客户区，已含光标本体偏移）；没动就不重画
+	UINT32 mouseHlColor_{ 0 };     // 笔刷对应的色号（颜色改了要重建笔刷）
+	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> mouseHlBrush_;
 	ULONGLONG lastDownTime{ 0 };
 	POINT lastDownPos{ 0, 0 };
 	bool hideScreenImg{ false };

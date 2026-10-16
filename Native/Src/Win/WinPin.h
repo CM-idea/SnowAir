@@ -14,6 +14,8 @@ public:
 	static void initFromData(int x, int y, int w, int h, std::vector<BYTE>& data);
 	static bool hasWindow();
 	static void dispose();
+	// 全局热键「隐藏/显示贴图」：临时隐藏 / 放回全部贴图（不落盘，重启照常显示）
+	static void toggleAllHidden();
 	void layoutTools() override;
 	void forwardKey(UINT key) override;
 	void copyToClipboard();

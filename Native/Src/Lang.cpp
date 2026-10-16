@@ -56,9 +56,9 @@ Lang* Lang::get()
 
 std::wstring Lang::get(const std::wstring& keyPath)
 {
-	// 一路用带默认值的重载：第三方语言文件缺键是常态（程序加了新文案，人家的文件还是老的），
-	// 而带默认值的 GetNamedObject/GetNamedString 不抛异常。缺了先找内置的 en-US，
-	// 连那儿也没有就把键名本身显示出来 —— 界面上难看，但比崩掉好，也一眼能看出缺哪个键
+	// 全程使用带默认值的重载：第三方语言文件缺键属正常情况（程序新增文案后，其文件仍是旧版），
+	// 而带默认值的 GetNamedObject/GetNamedString 不会抛异常。缺失时先回退内置 en-US，
+	// 仍无则直接显示键名 —— 界面观感较差，但优于异常，且可直接看出缺哪个键
 	auto arr = Ling::Util::splitStr(keyPath, L'.');
 	if (arr.size() < 2) return keyPath;
 	auto& self = *lang;

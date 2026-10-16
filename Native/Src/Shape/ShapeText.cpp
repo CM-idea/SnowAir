@@ -332,12 +332,12 @@ void ShapeText::syncEditorGeometry()
 	const float visScale = (rect.right > rect.left) ? (tb->w / (rect.right - rect.left)) : win->scale;
 	tb->setPadding(attachTo ? 0.f : borderPadding * visScale / d);
 	// 附着文字：让输入框把文字**垂直居中**排在自己的框里 —— 这才是"插入符上下居中"的正解。
-	// Ling::TextBox 默认从框顶往下排，框比一行高时插入符就偏上/偏下；之前我用"整体上抬
-	// borderPadding"去硬凑，那只是把偏差挪了个方向，已经删掉
-	// 附着文字：输入框**自己的背景要透明**。编辑中你看到的那个"刚好贴着文字、没有两边间距"
-	// 的缝，其实是输入框的不透明底色把线擦掉的（不是我们挖的洞）—— 洞是 paintPunch 按
-	// rect（文字 + 两侧间距、以锚点居中）挖的，被它盖在上面挡住了。
-	// 同时让它按内容自适应：这样"以锚点为中心"才是真的把文字居中，插入符也才会落在洞里。
+	// Ling::TextBox 默认自框顶向下排布，框高大于一行时插入符会偏上 / 偏下；此前用"整体上抬
+	// borderPadding"补偿，只是把偏差换了个方向，该做法已移除。
+	// 附着文字：输入框**自身背景必须透明**。编辑时看到的"紧贴文字、两侧无间距"那道缝，
+	// 是输入框的不透明底色遮住了连线（不是选区挖洞的效果）—— 洞由 paintPunch 按 rect
+	//（文字 + 两侧间距、以锚点居中）挖出，随后被输入框底色覆盖。
+	// 同时按内容自适应尺寸：这样才能真正以锚点为中心居中文字，插入符也才会落在洞内。
 	if (attachTo) {
 		tb->setBg(0);
 		// 输入框是 autoSize 的（AnnotHost::getTextBox 建框时就开了）：框 = 文字大小，

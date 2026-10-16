@@ -82,6 +82,7 @@
     "getMoreLang": "獲取更多語言",
     "hotkeys": "熱鍵設定",
     "hotkeysDesc": "管理系統級快捷鍵",
+    "systemKeys": "系統按鍵",
     "hotkeysTip": "點擊右側開始錄製，最多三鍵組合；鬆開即保存。Backspace 或 Delete 清除，Esc 取消。",
     "quick": "快捷翻譯",
     "quickDesc": "輸入文字即可快速翻譯（微軟 / Google / 有道 / 百度 / 離線）",
@@ -296,10 +297,10 @@
     "sysTip": "系統提示"
   },
   "shortcut": {
-    "cap": "截圖",
     "pressKey": "按下快捷鍵…",
     "capture": "區域截圖",
     "capture_fullscreen": "截取全屏",
+    "capture_repeat": "重複截圖",
     "capture_focused_window": "截取焦點視窗",
     "fullscreen_canvas": "演示畫布",
     "record": "錄影",
@@ -309,7 +310,7 @@
     "show_main": "打開設定",
     "open_screenshot_dir": "打開截圖目錄",
     "open_history": "打開截圖歷史",
-    "toggle_pins": "開關全部貼圖"
+    "toggle_pins": "隱藏/顯示貼圖"
   },
   "long": {
     "start": "開始",

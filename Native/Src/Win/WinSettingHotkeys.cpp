@@ -86,6 +86,13 @@ namespace {
             });
     }
 
+    // 暂缓启用的全局热键：设置页保留这一行但**置灰不可点**，
+    // 免得出现"能录入、能保存、按下去却不生效"的迷惑行为。
+    bool isPendingHotkey(const std::wstring& id)
+    {
+        return id == L"quick_translate" || id == L"translate_selection";
+    }
+
     // 快捷键按钮文字与颜色：未绑定时显示「点击设置」占位（muted 色），已绑定显示组合键。
     void applyShortcutLabel(Ling::Button* btn, const std::wstring& id)
     {
@@ -126,8 +133,23 @@ namespace {
 
 WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
 {
+    Ling::Node* titleRow = nullptr;
     SettingUi::sectionHeader(this, Lang::get(L"setting.hotkeys"),
-        Lang::get(L"setting.hotkeysDesc"), Lang::get(L"setting.hotkeysTip"));
+        Lang::get(L"setting.hotkeysDesc"), Lang::get(L"setting.hotkeysTip"), &titleRow);
+    // 标题行右端：恢复默认（清掉用户设过的键位 → 逐条回落内置默认表，并整体重注册）
+    if (titleRow) {
+        auto* spacer = titleRow->makeChild<Ling::Node>();
+        spacer->setFlexGrow(1.f);
+        spacer->setFlexShrink(1.f);
+        restoreBtn = SettingUi::btnOutline(titleRow, Lang::get(L"setting.restoreDefault"), [this]() {
+            if (Setting::get()->shortcutKeyAtDefaults()) return;   // 本来就是出厂键位
+            this->endCapture();          // 正在录制键位时先收尾（清掉转圈、恢复全局热键）
+            Setting::get()->restoreShortcutKeyDefaults();
+            for (auto* b : this->btns) applyShortcutLabel(b, b->id);
+            this->syncRestoreState();
+        });
+        restoreBtn->setMarginLeft(SettingTheme::sp3);
+    }
 
     // 3 分组 12 项（AI 对话组已随 AI 功能一并移除）
     // 注：滚动已由外层 WinSetting 的内容 ScrollerBox 统一管理，本页不再自建滚动容器。
@@ -136,11 +158,11 @@ WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
         // 0 截图组 6 项
         {Lang::get(L"setting.hotkeyGrpCapture"),{
             { L"capture",               Lang::get(L"shortcut.capture") },
-            { L"capture_fullscreen",    Lang::get(L"shortcut.capture_fullscreen") },
-            { L"capture_focused_window",Lang::get(L"shortcut.capture_focused_window") },
-            { L"fullscreen_canvas",     Lang::get(L"shortcut.fullscreen_canvas") },
             { L"record",                Lang::get(L"shortcut.record") },
-            { L"show_cursor",           Lang::get(L"shortcut.show_cursor") },
+            { L"fullscreen_canvas",     Lang::get(L"shortcut.fullscreen_canvas") },
+            { L"capture_fullscreen",    Lang::get(L"shortcut.capture_fullscreen") },
+            { L"capture_repeat",        Lang::get(L"shortcut.capture_repeat") },
+            { L"capture_focused_window",Lang::get(L"shortcut.capture_focused_window") },
         }},
         // 1 翻译组 2 项
         {Lang::get(L"setting.hotkeyGrpTranslate"),{
@@ -191,6 +213,21 @@ WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
         if (this->curKey.empty()) return;
         this->endCapture();
         });
+    // 键位改动发生在各按钮自己的录制流程里、不触发本页重建：「恢复默认」的置灰借
+    // 鼠标移动这个现成的高频回调同步（值没变时 setColor 不产生多余重绘）
+    onMouseMoveToken = win->onMouseMove.add([this, weakThis](POINT) {
+        if (!weakThis.lock()) return;
+        this->syncRestoreState();
+        });
+    syncRestoreState();
+}
+
+void WinSettingHotkeys::syncRestoreState()
+{
+    if (!restoreBtn) return;
+    const bool grey = Setting::get()->shortcutKeyAtDefaults();
+    restoreBtn->setColor(grey ? SettingTheme::textMuted : SettingTheme::textPrimary);
+    restoreBtn->setHoverColor(grey ? SettingTheme::textMuted : SettingTheme::textPrimary);
 }
 
 void WinSettingHotkeys::buildGroup(const std::wstring& grpTitle,
@@ -211,13 +248,27 @@ void WinSettingHotkeys::buildGroup(const std::wstring& grpTitle,
 
         auto* btn = r.ctrlBox->makeChild<Ling::Button>();
         btn->setId(it.first);
-        applyShortcutLabel(btn, it.first);
         btn->setHeight(SettingTheme::ctrlH);
         btn->setWidth(160.f);
         btn->setBorderRadius(SettingTheme::radiusCtl);   // 与所在行的外框(10)同心
-        styleHotkeyBtn(btn, false);   // 常态配色（白底 + 描边 + 深字）
-        btn->onClick.add([this](Ling::Button* b) { this->onBtnClick(b); });
-        btns.push_back(btn);
+        if (isPendingHotkey(it.first)) {
+            // 暂缓实现的项：整行置灰，按钮显示「功能开发中」且不响应点击，也不参与录制
+            btn->setText(Lang::get(L"cap.comingSoon"));
+            btn->setBg(SettingTheme::inputBg);
+            btn->setHoverBg(SettingTheme::inputBg);      // 悬停取同值 → 无悬停效果
+            btn->setBorder(1.f, SettingTheme::input);
+            btn->setColor(SettingTheme::textMuted);
+            btn->setHoverColor(SettingTheme::textMuted);
+            if (r.label) r.label->setColor(SettingTheme::textMuted);
+        }
+        else {
+            // 顺序：先定底色与悬停色、再定文字色。styleHotkeyBtn 会把文字色写为 textPrimary，
+            // 若放在 applyShortcutLabel 之后，未绑定行的灰色占位会被冲掉
+            styleHotkeyBtn(btn, false);          // 常态配色（白底 + 描边 + 悬停底色）
+            applyShortcutLabel(btn, it.first);   // 文字色最后定：未绑定 = 灰
+            btn->onClick.add([this](Ling::Button* b) { this->onBtnClick(b); });
+            btns.push_back(btn);
+        }
     }
 }
 
@@ -226,6 +277,7 @@ WinSettingHotkeys::~WinSettingHotkeys()
     // 页面在录制中途被销毁（切走/关窗）时，热键仍是挂起状态，这里兜底恢复
     if (!curKey.empty()) Setting::get()->resumeShortcutKeys();
     win->killTimer(kSpinnerTimerId);
+    win->onMouseMove.remove(onMouseMoveToken);
     win->onMouseDown.remove(onMouseDownToken);
     win->onKeyDown.remove(onKeyDownToken);
     win->onKeyUp.remove(onKeyUpToken);

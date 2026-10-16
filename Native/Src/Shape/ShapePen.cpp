@@ -9,6 +9,23 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 	constexpr float kPi = 3.14159265358979323846f;
+
+	// 8 方向吸附门槛：|dy| <= |dx|*tan(22.5°) 视为水平，反之垂直，其余吸附到 45°
+	constexpr float kShiftTan22_5 = 0.41421356f;
+
+	// 把 (x,y) 相对锚点 (ax,ay) 约束到 水平 / 垂直 / 45° 这八个方向之一
+	void constrainEightWay(float ax, float ay, float x, float y, float& ox, float& oy)
+	{
+		const float dx = x - ax, dy = y - ay;
+		const float adx = std::fabs(dx), ady = std::fabs(dy);
+		if (ady <= adx * kShiftTan22_5) { ox = ax + dx; oy = ay; }
+		else if (adx <= ady * kShiftTan22_5) { ox = ax; oy = ay + dy; }
+		else {
+			const float span = std::max(adx, ady);
+			ox = ax + (dx >= 0 ? span : -span);
+			oy = ay + (dy >= 0 ? span : -span);
+		}
+	}
 }
 
 ShapePen::ShapePen(AnnotHost* win) : ShapeBase(win),
@@ -150,6 +167,50 @@ void ShapePen::appendSample(float x, float y, bool force)
 	rebuildPath();
 }
 
+void ShapePen::resetShiftStraight()
+{
+	shiftStraight = false;
+	shiftBaseCount = 0;
+	shiftAnchor = { 0.f, 0.f };
+}
+
+// 按住 Shift 画标准线：只约束"按下 Shift 之后"画出来的那一段，不碰已经手绘出来的轨迹。
+// 按下 Shift 那一刻记下"当时画到哪"（锚点）与"已经有多少个采样点"（基线），之后每帧把点截回
+// 基线、再补一个约束到 8 方向的端点 —— 提交出来就是"一段手绘 + 一段标准直线"。
+// 松手只清会话状态，点全都留着继续手绘（与 QT6 版 applyDrawConstraint 的分段语义一致）。
+void ShapePen::applyShiftStraight(float x, float y)
+{
+	const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+	if (!shift) {
+		resetShiftStraight();
+		appendSample(x, y, false);
+		return;
+	}
+	if (!shiftStraight) {
+		shiftStraight = true;
+		if (pts.empty()) {
+			// 起笔就按着 Shift：锚点补成第一个点
+			clock0 = nowMs();
+			pts.push_back({ x, y });
+			times.push_back(0);
+		}
+		shiftAnchor = pts.back();
+		shiftBaseCount = pts.size();
+	}
+	float ox = x, oy = y;
+	constrainEightWay(shiftAnchor.x, shiftAnchor.y, x, y, ox, oy);
+	// 截回基线，只保留一个约束端点（每帧重算，不会越描越偏）
+	if (pts.size() != shiftBaseCount) {
+		pts.resize(shiftBaseCount);
+		if (times.size() > shiftBaseCount) times.resize(shiftBaseCount);
+	}
+	pts.push_back({ ox, oy });
+	times.push_back(nowMs() - clock0);
+	smoothX = ox;   // 与后续自由手绘的 EMA 接上，松开 Shift 时不会跳
+	smoothY = oy;
+	rebuildPath();
+}
+
 void ShapePen::syncRectFromPts()
 {
 	if (pts.empty()) {
@@ -272,6 +333,7 @@ void ShapePen::paintDragger(ID2D1DeviceContext* ctx)
 void ShapePen::mouseDown(const float x, const float y)
 {
 	if (!settled) {
+		resetShiftStraight();
 		if (isFade) {
 			// 渐隐画笔：开一条新轨迹，并让宿主定时器开始按寿命刷新
 			laser = {};
@@ -317,7 +379,8 @@ void ShapePen::mouseDown(const float x, const float y)
 void ShapePen::mouseDrag(const float x, const float y)
 {
 	if (!settled) {
-		appendSample(x, y, false);
+		if (isFade) { appendSample(x, y, false); return; }  // 渐隐画笔不走 Shift 直线
+		applyShiftStraight(x, y);
 		return;
 	}
 	if (isFade) return; // 渐隐画笔落笔即弃控点，不做变换
@@ -374,8 +437,11 @@ void ShapePen::mouseUp(const float x, const float y)
 			win->requestFadeTick();
 			return;
 		}
-		appendSample(x, y, true);
+		// Shift 直线段收笔：再算一次约束端点（而不是把原始点直接补进去，免得末尾多一个折角）
+		if (shiftStraight) applyShiftStraight(x, y);
+		else appendSample(x, y, true);
 		settled = true;
+		resetShiftStraight();
 		syncRectFromPts();
 		updateDraggers();
 		rebuildPath();

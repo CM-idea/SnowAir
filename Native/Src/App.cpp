@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <dwmapi.h>
 #include "App.h"
 #include "Setting.h"
 #include "Tray.h"
@@ -128,6 +129,64 @@ void App::captureFullScreenSilent()
 	if (Setting::get()->getCopyAsFile() && saved) Util::addFileToClipboard(path);
 	else Util::saveToClipboard(sw, sh, pixels.data());
 	if (saved) Setting::get()->addHistoryItem(pixels, sw, sh, L"fullscreen");
+}
+
+// 全局热键「截取焦点窗口」：静默抓当前前台窗口，全程不建窗口。
+// 与 captureFullScreenSilent 的差别只在"抓哪块"和"文件名模板"（走焦点窗口那一套 + {{FOCUS_WINDOW_APP_NAME}}）。
+void App::captureFocusedWindowSilent()
+{
+	HWND fg = GetForegroundWindow();
+	if (!fg) return;
+	DWORD pid = 0;
+	GetWindowThreadProcessId(fg, &pid);
+	if (!pid || pid == GetCurrentProcessId()) return;   // 前台是我们自己的窗口：不做
+
+	// 扩展边框（DWM）比 GetWindowRect 更贴近用户看到的那一圈；取不到再退回 GetWindowRect
+	RECT rc{};
+	if (FAILED(DwmGetWindowAttribute(fg, DWMWA_EXTENDED_FRAME_BOUNDS, &rc, sizeof(rc)))) {
+		if (!GetWindowRect(fg, &rc)) return;
+	}
+	const int w = rc.right - rc.left;
+	const int h = rc.bottom - rc.top;
+	if (w <= 0 || h <= 0) return;
+
+	// 应用名要在覆盖/任何窗口出现前取（此刻前台仍是目标窗口）
+	const std::wstring appName = Util::foregroundAppName();
+	auto pixels = Util::captureScreen(rc.left, rc.top, w, h);
+	if (pixels.empty()) return;
+
+	const std::wstring ext = Util::extensionFromSaveFormat(Setting::get()->getSaveFormat());
+	const std::wstring path = Util::buildSavePath(
+		Setting::get()->getFocusedWindowFormat(), Setting::defaultFocusedWindowFormat(), ext, appName);
+	const bool saved = !path.empty() && Util::saveToFile(path, w, h, pixels.data());
+
+	if (Setting::get()->getCopyAsFile() && saved) Util::addFileToClipboard(path);
+	else Util::saveToClipboard(w, h, pixels.data());
+	if (saved) Setting::get()->addHistoryItem(pixels, w, h, L"focused");
+}
+
+// 全局热键「重复截图」：按上一次记住的选区（屏幕坐标）静默再抓一次，全程不建窗口。
+void App::captureLastRegionSilent()
+{
+	int rx = 0, ry = 0, rw = 0, rh = 0;
+	if (!Setting::get()->getLastCaptureRect(rx, ry, rw, rh)) return;
+
+	// 分辨率/显示器数量变了就把选区夹回当前虚拟桌面，别抓到桌面外
+	auto [sx, sy, sw, sh] = getScreenArea();
+	if (sw <= 0 || sh <= 0) return;
+	if (rx < sx) { rw -= (sx - rx); rx = sx; }
+	if (ry < sy) { rh -= (sy - ry); ry = sy; }
+	if (rx + rw > sx + sw) rw = sx + sw - rx;
+	if (ry + rh > sy + sh) rh = sy + sh - ry;
+	if (rw <= 0 || rh <= 0) return;
+
+	auto pixels = Util::captureScreen(rx, ry, rw, rh);
+	if (pixels.empty()) return;
+
+	// 与手动「区域截图」收工一致：进剪贴板 + 记历史；勾了「截图后自动保存」才静默落盘
+	Util::saveToClipboard(rw, rh, pixels.data());
+	Util::quietSaveCapture(pixels, rw, rh, false, L"");
+	Setting::get()->addHistoryItem(pixels, rw, rh, L"capture");
 }
 
 App::App()

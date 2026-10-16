@@ -119,7 +119,7 @@ SnowAir.exe --enter=video       # Screen recording
 SnowAir.exe --enter=tray        # Tray only, same as default behavior
 ```
 
-Capture entry points: click the tray icon, and choose capture / open settings / do nothing under "Feature Settings → Tray Single Click"; or use the global hotkey `Ctrl+Alt+A`; running the exe again opens the settings center.
+Capture entry points: click the tray icon, and choose capture / open settings / do nothing under "Feature Settings → Tray Single Click"; or use the global hotkey `F1`; running the exe again opens the settings center.
 
 </details>
 

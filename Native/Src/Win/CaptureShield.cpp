@@ -166,9 +166,9 @@ namespace CaptureShield
 	void drain(HWND target)
 	{
 		if (!g_shield) return;
-		// 托盘菜单项是在按下时就执行命令的（Ling::Button::onDown），所以覆盖窗 show() 出来时
-		// 用户那一下点击往往还按着。这时候撤盾牌，抬手就会落到覆盖窗上，变成一个"没有按下的
-		// 抬起"（旧代码会当成框选完成 → 录屏会话直接冲进录制）。等它抬起来再撤，顺手吃掉这一下。
+		// 托盘菜单项在按下时即执行命令（Ling::Button::onDown），故覆盖窗 show() 出来时
+		// 用户那一次点击通常仍按着。此时撤盾牌，抬起会落到覆盖窗上，成为"无对应按下的
+		// 抬起"（旧代码会视为框选完成 → 录屏会话随即进入录制）。待其抬起后再撤，并吞掉该次抬起。
 		if (!g_down && anyButtonHeld()) {
 			g_pendingTarget = target;
 			return;

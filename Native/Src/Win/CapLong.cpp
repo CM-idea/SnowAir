@@ -707,6 +707,11 @@ void CapLong::startCapture()
 	win->refresh();
 }
 
+void CapLong::togglePaused()
+{
+	setPaused(!isPaused);
+}
+
 void CapLong::setPaused(bool on)
 {
 	if (!isCapturing || isFinish || isPaused == on) return;

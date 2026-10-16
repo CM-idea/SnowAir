@@ -10,6 +10,7 @@
 
 // 子页面头文件（集中 include，避免 WinSetting.h 膨胀）
 #include "WinSettingHotkeys.h"
+#include "WinSettingSystemKeys.h"
 #include "WinSettingQuickTranslate.h"
 #include "WinSettingHistory.h"
 #include "WinSettingPlugins.h"
@@ -293,36 +294,38 @@ void WinSetting::onCreated()
 	show();
 }
 
-// 7 菜单：按键顺序 Hotkeys → Quick → History → Plugins → Appearance → Features → About
+// 8 菜单：按键顺序 Hotkeys → Quick → SystemKeys → Appearance → Features → History → Plugins → About
 void WinSetting::initMenuItems(Ling::Node* sideNav)
 {
-	const std::wstring keys[7] = {
+	const std::wstring keys[8] = {
 		L"setting.hotkeys",
 		L"setting.quick",
-		L"setting.history",
-		L"setting.plugins",
+		L"setting.systemKeys",
 		L"setting.appearance",
 		L"setting.function",
+		L"setting.history",
+		L"setting.plugins",
 		L"setting.about",
 	};
-	const wchar_t* icons[7] = {
-		Icon::Hotkey,      // 热键设置
+	const wchar_t* icons[8] = {
+		Icon::Hotkey,      // 全局热键
 		Icon::Quick,       // 快捷翻译
-		Icon::Folder,      // 历史
-		Icon::Plugin,      // 插件集成
+		Icon::SystemKeys,  // 系统按键
 		Icon::Appearance,  // 外观设置
 		Icon::Function,    // 功能设置
+		Icon::Folder,      // 截图历史
+		Icon::Plugin,      // 插件集成
 		Icon::Logo,        // 关于
 	};
 	menus.clear();
-	gMenuData.assign(7, MenuItemData{});
+	gMenuData.assign(8, MenuItemData{});
 
 	auto menuBox = sideNav->makeChild<Ling::Node>();
 	menuBox->setFlexGrow(1.0);
 	menuBox->setFlexDirection(Ling::FlexDirection::Column);
 	menuBox->setJustifyContent(Ling::Justify::Start);
 
-	for (int i = 0; i < 7; ++i) {
+	for (int i = 0; i < 8; ++i) {
 		auto menuItem = menuBox->makeChild<Ling::Button>();
 		menuItem->setWidthPercent(100.f);
 		menuItem->setText(L""); // 内部 Text 置空，由手动 Label 控制
@@ -401,6 +404,7 @@ void WinSetting::loadPage(int index)
 	// 清理旧子页：先手动置空指针（避免访问悬空），再清空 content 的所有子节点
 	pageHotkeys    = nullptr;
 	pageQuick      = nullptr;
+	pageSysKeys    = nullptr;
 	pageHistory    = nullptr;
 	pagePlugins    = nullptr;
 	pageAppearance = nullptr;
@@ -433,7 +437,7 @@ void WinSetting::loadPage(int index)
 		SettingUi::adoptChild(content, child);
 	};
 
-	// 菜单顺序：0=Hotkeys 1=Quick 2=History 3=Plugins 4=Appearance 5=Features 6=About
+	// 菜单顺序：0=Hotkeys 1=Quick 2=SystemKeys 3=Appearance 4=Features 5=History 6=Plugins 7=About
 	switch (index) {
 	case 0:
 		pageHotkeys = new WinSettingHotkeys(this);
@@ -461,6 +465,19 @@ void WinSetting::loadPage(int index)
 			SettingTheme::contentPadX, SettingTheme::contentPadY);
 		break;
 	case 2:
+		// 系统按键：命令表内容铺出来（见 CommandKeys / WinSettingSystemKeys）
+		pageSysKeys = new WinSettingSystemKeys(this);
+		adopt(pageSysKeys); makeFullFill(pageSysKeys);
+		break;
+	case 3:
+		pageAppearance = new WinSettingAppearance(this);
+		adopt(pageAppearance); makeFullFill(pageAppearance);
+		break;
+	case 4:
+		pageFeatures = new WinSettingFeatures(this);
+		adopt(pageFeatures); makeFullFill(pageFeatures);
+		break;
+	case 5:
 		// 截图历史页：底部一行（打开目录 / 清空历史 / 当前条目）需始终贴住视口底部 →
 		// 与快捷翻译页同策略，直接把该页塞进视口容器 cardNode（页面高度恒等于视口高度），
 		// 页内只让中部缩略图网格自建滚动，底行因此恒贴底、不随网格滚走。
@@ -472,19 +489,11 @@ void WinSetting::loadPage(int index)
 		pageHistory->setPadding(SettingTheme::contentPadX, SettingTheme::contentPadY,
 			SettingTheme::contentPadX, SettingTheme::contentPadY);
 		break;
-	case 3:
+	case 6:
 		pagePlugins = new WinSettingPlugins(this);
 		adopt(pagePlugins); makeFullFill(pagePlugins);
 		break;
-	case 4:
-		pageAppearance = new WinSettingAppearance(this);
-		adopt(pageAppearance); makeFullFill(pageAppearance);
-		break;
-	case 5:
-		pageFeatures = new WinSettingFeatures(this);
-		adopt(pageFeatures); makeFullFill(pageFeatures);
-		break;
-	case 6:
+	case 7:
 		pageAbout = new WinSettingAbout(this);
 		adopt(pageAbout); makeFullFill(pageAbout);
 		break;

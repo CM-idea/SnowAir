@@ -3,7 +3,7 @@
 /**
  * 热键设置页 —— 分组结构（AI 对话组已随 AI 功能移除）：
  *   截图组(6) / 翻译组(2) / 其他组(4) = 共 12 项
- * 旧版只有 1 项（shortcut.cap），现扩展为 3 分组。
+ * 旧版只有 1 项，现扩展为 3 分组。
  */
 class WinSettingHotkeys :public Ling::Node
 {
@@ -21,8 +21,12 @@ private:
 	// 构造一组：先加 groupLabel，再加若干行白底卡片录入按钮
 	void buildGroup(const std::wstring& grpTitle,
 		const std::vector<std::pair<std::wstring, std::wstring>>& items, Ling::Node* p);
+	// 「恢复默认」的置灰：键位都还是出厂值 → 灰字且点击不做事
+	void syncRestoreState();
 private:
 	std::vector<Ling::Button*> btns;
+	Ling::Button* restoreBtn{ nullptr };
+	winrt::event_token onMouseMoveToken{};
 	std::wstring curKey;
 	winrt::event_token onMouseDownToken, onKeyDownToken, onKeyUpToken, onTimerToken, onBlurToken;
 	std::vector<std::wstring> tempKeys;

@@ -1,5 +1,6 @@
 #pragma once
 #include <thread>
+#include <vector>
 #include <include/Ling.h>
 
 // 录制参数只在 CapVideo.cpp 里构造，头文件用前向声明就够 ——
@@ -28,6 +29,14 @@ public:
 	void setPaused(bool on);
 	void startMp4(bool useSpeaker, bool useMic);
 	void startGif();
+	// 录制中选区被挪动：把「相对开录时的平移量」交给采集线程，让录出来的画面跟着选区走
+	void syncCaptureMove();
+	// 录屏期间「选区能跨过去的那几块屏」（虚拟桌面坐标）：只有与 targetDesk 所在屏挂在**同一个
+	// DXGI 适配器**上的屏，采集侧才换得过去（见 VideoMp4 的换屏跟随）。
+	static std::vector<RECT> reachableMonitors(const RECT& targetDesk);
+	// 选区能不能被挪到这块屏上继续录：同适配器、且采集侧没在它上面换失败过。
+	// 动图那条走 GDI 抓屏，覆盖整块虚拟桌面，不受显卡分组限制。
+	bool canSwitchToMonitor(const RECT& mon) const;
 	// 停止录制并返回录好的临时文件路径；没在录制时返回空串
 	std::wstring stop();
 	// Ctrl+S / Ctrl+C 转给工具条上的"存文件" / "存剪切板"；没在录制时返回 false
@@ -44,6 +53,10 @@ private:
 	std::unique_ptr<ToolVideo> tool;
 	std::unique_ptr<VideoMp4::DESKTOPCAPTUREPARAMS> mp4Param;
 	std::unique_ptr<VideoGif::GifParam> gifParam;
+	// 开录那一刻选区的原点（虚拟桌面坐标）：录制中选区的位移都相对它算
+	int capBaseX{ 0 }, capBaseY{ 0 };
+	// 开录时算好的「能跨过去的那几块屏」（同显卡适配器）：选区跨屏时现取，避免每次移动都查 DXGI
+	std::vector<RECT> reachable_;
 	std::jthread captureThread;
 	bool paused{ false };
 };

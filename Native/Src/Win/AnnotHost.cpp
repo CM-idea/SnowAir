@@ -400,7 +400,7 @@ void AnnotHost::updateLinkHints(const POINT& imgPos, const std::wstring& tool)
 		float bestDist = 1e9f;
 		for (auto& s : history->shapes) {
 			if (!s || s->isUndo || s->isEphemeral()) continue;
-			s->syncLinks();                 // 位置按最新的形状几何算（形状没了会顺手脱钩）
+			s->syncLinks();                 // 位置按最新的形状几何计算（形状消失时自动解除关联）
 			if (!s->hasLink()) continue;
 			D2D1_POINT_2F pos{};
 			if (!s->linkButtonPos(pos)) continue;

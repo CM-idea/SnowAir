@@ -32,6 +32,10 @@ private:
 	void rebuildDashSpine();
 	void rebuildLaserPath(int64_t now);
 	void appendSample(float x, float y, bool force = false);
+	// 按住 Shift：从"按下 Shift 那一刻的落点"拉出一段 8 方向直线；松开即恢复手绘。
+	// 已经画好的手绘段不动 —— 表现是"一段手绘 + 一段标准直线"。
+	void applyShiftStraight(float x, float y);
+	void resetShiftStraight();
 	int64_t nowMs() const;
 	void syncRectFromPts();
 	void scalePtsToRect(const D2D1_RECT_F& oldR, const D2D1_RECT_F& newR);
@@ -59,6 +63,10 @@ private:
 	bool isSoft{ false };
 	bool isFade{ false };
 	bool fadeDone{ false };
+	// Shift 画直线：分段语义（只约束按下 Shift 之后画出的那一段）
+	bool shiftStraight{ false };
+	D2D1_POINT_2F shiftAnchor{ 0.f, 0.f };
+	size_t shiftBaseCount{ 0 };
 	bool pathFilled{ false }; // 实线走 FillGeometry
 	bool settled{ false }; // 落笔结束后才用矩形系控点
 	// 渐隐画笔：逐点带时间戳的轨迹 + 每帧按寿命重建的填充轮廓

@@ -181,6 +181,26 @@ void ToolLong::onAnnotClick(const std::wstring& id)
 	win->presentSelectedAnnotStyle();
 }
 
+// 「系统按键」用：绘图工具命令键（与点击按钮同一实现，但不做"再点一次取消"的切换）
+void ToolLong::cmdAnnotTool(const std::wstring& id)
+{
+	if (id.empty()) return;
+	applyAnnotSelect(id);
+	win->startLongAnnotate(id);
+	win->presentSelectedAnnotStyle();
+}
+
+// 「系统按键」用：工具循环（Tab）—— 在可见的绘图工具按钮之间循环切换一个
+void ToolLong::cycleAnnotTool()
+{
+	if (annotBtns.empty()) return;
+	size_t next = 0;
+	for (size_t i = 0; i < annotBtns.size(); i++) {
+		if (annotBtns[i] && annotBtns[i]->id == curAnnotId_) { next = (i + 1) % annotBtns.size(); break; }
+	}
+	if (annotBtns[next]) cmdAnnotTool(annotBtns[next]->id);
+}
+
 Ling::Button* ToolLong::makeIconBtn(const std::wstring& code, const std::wstring& id)
 {
 	auto btn = contentNode->makeChild<Ling::Button>();

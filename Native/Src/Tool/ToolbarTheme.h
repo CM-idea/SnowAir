@@ -67,7 +67,7 @@ namespace ToolbarTheme
 	// 圆角滑条宽 / 数值宽：与属性栏 PropSlider 同一套 ToolbarTheme::sliderWidth / sliderValueWidth
 	// 与选区间距：与主工具栏相同，见 CutMask（strokeWidth + 2×dpi）
 	inline constexpr float infoFontSize{ 14.f };
-	inline constexpr uint32_t infoBg{ 0x1E1E1E46u };
+	inline constexpr uint32_t infoBg{ 0x1E1E1EBFu };
 	inline constexpr uint32_t infoText{ 0xFFFFFFE6u };
 	inline constexpr uint32_t infoIconMuted{ 0xFFFFFFB3u }; // ~70% 白，深底上的默认图标
 

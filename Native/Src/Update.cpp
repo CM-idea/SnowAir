@@ -99,7 +99,7 @@ namespace {
 
 	// 起一段 PowerShell 收尾：等本进程退出（exe 开着的时候覆盖不掉自己）、把新 exe 覆盖过去、
 	// 用 --enter=tray 把新版本拉起来（只挂托盘，不弹截图窗口）、最后把中间文件和脚本自己删掉。
-	// 返回脚本有没有起成功 —— 没起成功就别退出进程了，不然用户以为在升级，其实什么也没发生
+	// 返回脚本是否启动成功 —— 失败则不退出进程，否则用户以为正在升级、实际未执行任何操作
 	bool startScript(const std::filesystem::path& exePath)
 	{
 		auto scriptPath = Setting::get()->getDataPath() / L"update.ps1";
@@ -204,7 +204,7 @@ namespace {
 			filter.CacheControl().WriteBehavior(HttpCacheWriteBehavior::NoCache);
 			HttpClient client{ filter };
 			auto op = client.GetStringAsync(Uri{ versionUrl });
-			// 10 秒还没回来就撤：这是后台顺手干的活，不值得一直挂着一个连接。
+			// 10 秒未返回则取消：属后台任务，不值得长期占用连接。
 			// Cancel 之后下面的 co_await 会抛，一路走到 catch 里
 			auto guard = ThreadPoolTimer::CreateTimer([op](const ThreadPoolTimer&) { op.Cancel(); },
 				std::chrono::seconds(10));
@@ -254,7 +254,7 @@ namespace {
 		}
 		catch (...) {
 			// 网络不通、超时、被取消、服务端返回了个错误码、磁盘写不进去：一律静默。
-			// 自动升级是顺手做的事，不该拿弹窗打扰用户，明天空闲时再来
+			// 自动升级属后台任务，不应以弹窗打扰用户，改为次日空闲时重试
 		}
 	}
 

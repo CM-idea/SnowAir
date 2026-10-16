@@ -15,6 +15,11 @@
 #include "../Tool/ToolOcr.h"
 #include "../Ocr/OcrService.h"
 #include "../Translate/TranslateService.h"
+#include "../Translate/BergamotEngine.h"
+#include "../CommandKeys.h"
+#include "../Tool/ToolVideo.h"
+#include "../Tool/ToolLong.h"
+#include "HotkeyHook.h"
 #include "../History.h"
 #include "../Shape/ShapeText.h"
 #include "../Tool/ToolbarTheme.h"
@@ -178,6 +183,7 @@ WinCap::WinCap() : AnnotHost()
 		if (cutMask) cutMask->onHoverDwellTimer(id);
 		if (cutMask) cutMask->onHoverAnimTick(id);
 		if (id == keyOverlayTimerId) onKeyOverlayTimer();
+		if (id == recCursorTimerId) { updateSelFollowCursor(); updateMouseHighlight(); }
 	});
     onMouseWheel.add([this](POINT pos, float space) { this->onWheel(pos, space); });
     onDestroy.add([this]() { this->onClosed(); });
@@ -241,6 +247,8 @@ void WinCap::initNow(StartMode mode, std::shared_ptr<std::vector<BYTE>> grab)
     auto ptr = new WinCap();
     winCap.reset(ptr);
     ptr->cutMask = std::make_unique<CutMask>(ptr);
+    // 选区挪动 → 通知录制侧把裁剪框一起平移（拖拽/鼠标跟随/方向键/滚轮全走 CutMask 这一处）
+    ptr->cutMask->onRectMoved = [p = ptr]() { p->onMaskRectChanged(); };
     ptr->pendingGrab_ = std::move(grab);
     if (mode == StartMode::Demo) {
         // 演示画布：不画静帧（实时桌面）、不压暗/不描边/不画控点
@@ -264,6 +272,8 @@ void WinCap::initNow(StartMode mode, std::shared_ptr<std::vector<BYTE>> grab)
     }
     else if (mode == StartMode::Record) {
         ptr->pendingRecord = true;
+        // 从托盘「屏幕录制」进来的：框选阶段起就按单块屏约束（框完直接开录，不能跨屏）
+        if (ptr->cutMask) ptr->cutMask->setSingleMonitorMode(true);
     }
 }
 
@@ -285,6 +295,8 @@ void WinCap::beginRecordPick()
 void WinCap::beginDemoCanvas()
 {
     init(StartMode::Demo);
+    // 画布起来后把「鼠标穿透」「隐藏/显示工具栏」挂到全局钩子上（穿透之后焦点就不在本软件了）
+    syncGlobalCommandKeys(CommandKeys::SurfaceFullscreen);
 }
 
 void WinCap::makeDemoToolCap()
@@ -443,6 +455,7 @@ void WinCap::layout()
         }
     }
     paintPix(ctx);
+    paintMouseHighlight(ctx);
     paintCursor(ctx);
     paintKeyOverlay(ctx);
     canvas->finishPaint();
@@ -495,9 +508,17 @@ bool WinCap::beginMaskResize(POINT pos)
 	if (demoMode) return false;
 	const auto hit = cutMask->hitTest(pos);
 	if (hit == MaskHit::None) return false;
-	// 边/角始终可调选区；区内「拖动/平移」仅在无标注时允许（有笔迹后锁平移）
+	// 画幅已锁定（录屏开录 / 长图滚动）时：一律不许拖边、拖角。
+	// 长图连整体挪动也禁止；录屏保留整体挪动，但要求未开鼠标穿透。
+	const bool sizeLocked = maskSizeLocked();
+	if (sizeLocked) {
+		if (maskMoveLocked()) return false;
+		if (hit != MaskHit::Inside || isMouseTransparent) return false;
+	}
 	if (hit == MaskHit::Inside) {
-		if (hasAnnotShapes() || !getCurToolId().empty()) return false;
+		// 区内平移：要求未选中标注工具；截图与长图还要求未绘制标注，录屏开录后不作要求
+		if (!getCurToolId().empty()) return false;
+		if (!sizeLocked && hasAnnotShapes()) return false;
 	}
 	maskDragging = true;
 	isPress = true;
@@ -587,14 +608,24 @@ BOOL WinCap::setCursor()
 		// 2) 截图选区边/角：悬停即 ↔ ↕（不必等到拖动）
 		// 长图编辑态选区已定死，不提供调边光标；演示画布没有可调选区
 		const bool longEdit = stage == CapStage::Long && capLong && capLong->isEditMode();
+		// 画幅锁定后不再给缩放光标（避免可拖动的误导）；区内可整体挪动时给四向光标。
+		// 这两项须与 beginMaskResize 的两道闸门一一对应，否则光标与实际可操作性不符。
+		const bool selResizable = !maskSizeLocked();
+		const bool selMovable = !maskMoveLocked() && getCurToolId().empty() && !isMouseTransparent
+			&& (maskSizeLocked() || !hasAnnotShapes());
 		if (!demoMode && cutMask && cutMask->hasRect() && !longEdit) {
 			if (cutMask->hitInfoControl(pos) != InfoHit::None) {
 				SetCursor(LoadCursor(nullptr, IDC_HAND));
 				return TRUE;
 			}
 			const auto hit = cutMask->hitTest(pos);
-			if (hit != MaskHit::None && hit != MaskHit::Inside) {
+			if (hit != MaskHit::None && hit != MaskHit::Inside && selResizable) {
 				applyMaskHitCursor(hit);
+				return TRUE;
+			}
+			if (hit == MaskHit::Inside && !selResizable && selMovable) {
+				// 开录后只剩"整体挪动"这一种选区操作，光标给足提示
+				SetCursor(LoadCursor(nullptr, IDC_SIZEALL));
 				return TRUE;
 			}
 		}
@@ -817,34 +848,166 @@ void WinCap::paintPix(ID2D1DeviceContext* ctx)
 	}
 }
 
+unsigned WinCap::currentSurface() const
+{
+	return demoMode ? CommandKeys::SurfaceFullscreen
+		: (stage == CapStage::Video ? CommandKeys::SurfaceRecord : CommandKeys::SurfaceCapture);
+}
+
+// 「系统按键」派发：按键 → 命令表 → 与工具栏点击同一批 WinCap 入口（不写第二套实现）。
+// 「常规」组整组（关闭 / 完成 / 复制 / 存为文件 / 工具循环）也在此接管，语义与原 onKey 的
+// 硬编码分支一致；该组在设置页为只读行 —— 不可改绑，但照旧派发。
+bool WinCap::commandKey(UINT key)
+{
+	// 正在编辑标注文字：键盘归输入框，任何命令键都不许抢
+	if (editingText) return false;
+	const std::wstring id = CommandKeys::actionForKey(key, currentSurface());
+	return id.empty() ? false : runCommand(id);
+}
+
+// 执行一条命令：窗口内按键（commandKey）与全局钩子（临时全局键）**共用这一段**
+bool WinCap::runCommand(const std::wstring& id)
+{
+	if (editingText) return false;
+	// 「删除标注」为只读行，scan 不会返回它，此处再兜一层
+	if (id == L"cmd_delete_sel") return false;
+
+	// —— 「常规」组中带阶段差别的四条 ——
+	// 语义与原 onKey 的硬编码分支逐条一致（原分支已删除）：演示画布的 Enter 不结束会话、
+	// Esc 先退穿透，以及长图与录屏阶段的存图路径都在此分流。
+	if (id == L"cmd_close") {
+		// 演示画布 + 穿透中：第一次先退出穿透，再按一次才关画布
+		if (demoMode && isMouseTransparent) { toggleDemoThrough(); return true; }
+		close();
+		return true;
+	}
+	if (id == L"cmd_done") {
+		// 画布：Enter 不做"完成复制"（只靠 ✕ / Esc 退出）；标注中 = 复制，否则按当前阶段收尾
+		if (annotLive) { if (!demoMode) copyToClipboard(); return true; }
+		copyCurrentStage();
+		return true;
+	}
+	if (id == L"cmd_copy") {
+		if (annotLive) { copyToClipboard(demoMode); return true; }
+		if (stage == CapStage::Long && capLong && capLong->hasImage()) {
+			longCopyToClipboard();
+			close();
+			return true;
+		}
+		if (stage == CapStage::Video && capVideo) { capVideo->onSaveKey(true); return true; }
+		return true;
+	}
+	if (id == L"cmd_save") {
+		if (annotLive) { saveToFile(demoMode); return true; }
+		if (stage == CapStage::Long && capLong && capLong->hasImage()) {
+			if (longSaveToFile()) close();   // 存失败就别关，让用户看到失败提示
+			return true;
+		}
+		if (stage == CapStage::Video && capVideo) { capVideo->onSaveKey(false); return true; }
+		return true;
+	}
+
+	// —— 工具栏动作：与"点那颗按钮"调同一批 WinCap 入口 ——
+	//（动作 id 口径即工具栏槽位 id，映射见 CommandKeys 的 kActionMap）
+	const std::wstring act = CommandKeys::toolbarActionForId(id);
+	if (!act.empty()) {
+		// 「鼠标穿透」两个工具栏上都有：录屏会话走录屏条那颗（它同时管按钮状态），
+		// 全屏画布走演示画布自己的穿透
+		if (act == L"mouse-through") {
+			ToolVideo* tv = (stage == CapStage::Video && capVideo) ? capVideo->toolBar() : nullptr;
+			if (tv) tv->cmdTogglePierce();
+			else toggleDemoThrough();
+			return true;
+		}
+		if (act == L"extra") { startVideo(); return true; }
+		if (act == L"pin") { startPin(); return true; }
+		if (act == L"ocr") { startOcr(); return true; }
+		if (act == L"translate") { startTranslate(); return true; }
+		if (act == L"long") { startLong(); return true; }
+		// 绘图工具：包浆/水印/高亮按子工具直选。
+		// 三个阶段各有自己的工具条与入口（录屏 = ToolVideo、长图 = ToolLong、其余 = 截图条），
+		// 走各自入口才能同时更新选中态与属性栏锚点。
+		const std::wstring sub = CommandKeys::subToolForId(id);
+		const std::wstring tool = sub.empty() ? act : sub;
+		if (stage == CapStage::Video && capVideo && capVideo->toolBar()) {
+			capVideo->toolBar()->cmdAnnotTool(tool);
+		}
+		else if (stage == CapStage::Long && capLong && capLong->toolBar()) {
+			capLong->toolBar()->cmdAnnotTool(tool);
+		}
+		else {
+			startAnnotate(tool);
+		}
+		return true;
+	}
+
+	// —— 录屏组的四条：动作在录屏工具条上（与点按钮同一段实现）——
+	// （它们同时是临时全局键，焦点不在本软件时由全局钩子那侧派发，见 HotkeyHook）
+	if (stage == CapStage::Video && capVideo) {
+		if (auto* tv = capVideo->toolBar()) {
+			if (id == L"cmd_record_toggle") { tv->cmdToggleRecord(); return true; }
+			if (id == L"cmd_toggle_gif") { tv->cmdToggleGif(); return true; }
+			if (id == L"cmd_toggle_system_audio") { tv->cmdToggleSystemAudio(); return true; }
+			if (id == L"cmd_toggle_mic") { tv->cmdToggleMic(); return true; }
+		}
+	}
+
+	// —— 常规动作（工具栏上没有对应按钮的那些）——
+	// 「工具循环」：在工具栏的绘图工具之间循环切换一个；同样按阶段作用在当前可见的工具条
+	if (id == L"cmd_quick_switch") {
+		if (stage == CapStage::Video && capVideo && capVideo->toolBar()) capVideo->toolBar()->cycleAnnotTool();
+		else if (stage == CapStage::Long && capLong && capLong->toolBar()) capLong->toolBar()->cycleAnnotTool();
+		else if (toolCap) toolCap->cycleTool();
+		return true;
+	}
+	if (id == L"cmd_undo") { if (annotLive && history) history->undo(); return true; }
+	if (id == L"cmd_redo") { if (annotLive && history) history->redo(); return true; }
+	// 下面两条工具栏上**没有对应按钮**，只有命令键能触发
+	if (id == L"cmd_clear") { if (history) history->clearAll(); return true; }
+	if (id == L"cmd_toggle_toolbar") {
+		toolHidden = !toolHidden;
+		if (toolCap) { if (toolHidden) toolCap->hide(); else toolCap->show(); }
+		return true;
+	}
+	if (id == L"cmd_show_cursor") { toggleShowCursor(); return true; }
+	if (id == L"cmd_scan_qrcode") { startQrcode(); return true; }
+	if (id == L"cmd_scroll_pause") { if (capLong) capLong->togglePaused(); return true; }
+	return false;
+}
+
 void WinCap::forwardKey(UINT key)
 {
 	onKey(key);
 }
 
+// 会话期间把「系统按键」里 Scope::Global 的那几条**临时**挂到全局钩子上；surface=0 即撤。
+// 为什么非挂不可：录屏时焦点在被录的程序上，而鼠标穿透 / 收起工具栏之后焦点也不在本软件上 ——
+// 窗口内根本收不到这些键。其余命令键一律**不挂**（免得在任何程序里吞掉用户的键）。
+void WinCap::syncGlobalCommandKeys(unsigned surface)
+{
+	std::vector<HotkeyHook::Binding> list;
+	if (surface != 0) {
+		for (const auto& gkey : CommandKeys::groupOrder()) {
+			for (const auto& id : CommandKeys::idsInGroup(gkey)) {
+				if (CommandKeys::scopeOf(id) != CommandKeys::Scope::Global) continue;
+				// ⚠ 只挡「未实装」：只读 ≠ 不生效（见 CommandKeys::scan 的说明）
+				if (!CommandKeys::implemented(id)) continue;
+				if ((CommandKeys::surfaceMaskForId(id) & surface) == 0) continue;
+				const std::wstring chord = CommandKeys::binding(id);
+				if (chord.empty()) continue;   // 用户清空过 → 不绑
+				list.push_back({ chord, [id]() {
+					// 现取当前会话实例：钩子回调可能在会话销毁后才到，捕获 this 就是悬空指针
+					if (auto* w = WinCap::get()) w->runCommand(id);
+				} });
+			}
+		}
+	}
+	HotkeyHook::setSessionBindings(std::move(list));
+}
+
 void WinCap::onKey(UINT key)
 {
-    if (key == VK_ESCAPE) {
-        // 演示画布 + 穿透中：第一次 Esc 先退出穿透，再按一次才关画布
-        if (demoMode && isMouseTransparent) {
-            toggleDemoThrough();
-            return;
-        }
-        // Esc 始终退出截图；分层退出只走右键
-        close();
-        return;
-    }
-    // 录屏：Tab 切换鼠标穿透（穿透后焦点常在别的窗，靠 CaptureEsc::claimTab 热键兜底）
-    if (key == VK_TAB && stage == CapStage::Video) {
-        // 热键与本窗/工具栏 WM_KEYDOWN 可能连着来两次，短时去重
-        static ULONGLONG lastTabMs{ 0 };
-        const auto now = GetTickCount64();
-        if (now - lastTabMs < 100) return;
-        lastTabMs = now;
-        setMouseTransparent(!isMouseTransparent);
-        if (isMouseTransparent && capVideo) capVideo->cancelAnnotSelect();
-        return;
-    }
+    // 方向键：挪选区 / 挪光标（没有对应的命令，所以不走命令表）
     if (key == VK_UP || key == VK_DOWN || key == VK_LEFT || key == VK_RIGHT) {
         const int step = (GetKeyState(VK_SHIFT) & 0x8000) ? 10 : 1;
         const int dx = (key == VK_LEFT) ? -step : (key == VK_RIGHT) ? step : 0;
@@ -858,27 +1021,9 @@ void WinCap::onKey(UINT key)
         SetCursorPos(pos.x, pos.y);
         return;
     }
-    if (annotLive) {
-        annotKey(key);
-        // 正在编辑标注文字（输入框有焦点）：键盘归输入框 —— Enter 是"换行"（线上文字靠用户
-        // 自己回车排成竖列），Ctrl+C/V 是文本框自己的复制粘贴，都不能被下面这些截图快捷键抢走。
-        // 这里 return 只是不再处理快捷键，事件派发照旧会走到输入框那个订阅者
-        if (editingText) return;
-        const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-        // 演示画布：Enter 不做"完成复制"、Ctrl+C/S 复制保存后也不关画布
-        //（全屏画布：Enter 不结束会话；画布只靠 ✕ / Esc 退出）
-        if (demoMode) {
-            if (ctrl && key == 'C') copyToClipboard(true);
-            else if (ctrl && key == 'S') saveToFile(true);
-            return;
-        }
-        if (ctrl && key == 'C') { copyToClipboard(); return; }
-        if (ctrl && key == 'S') { saveToFile(); return; }
-        if (key == VK_RETURN) { copyToClipboard(); return; }
-        return;
-    }
-    // 放大镜可见时 Ctrl+C 复制色值（框选拖动 / 调边角 / 查找元素悬停——后者未按下）
-    if (key == 'C' && (GetKeyState(VK_CONTROL) & 0x8000)
+    // 放大镜可见时 Ctrl+C 为「取色值」，优先于「复制」命令本身。
+    // !annotLive 不可省：标注中的 Ctrl+C 归「复制」（其语义已移至 runCommand），否则也会触发取色。
+    if (!annotLive && key == 'C' && (GetKeyState(VK_CONTROL) & 0x8000)
         && ((stage == CapStage::Select && isPress && selectDragging_)
             || (stage == CapStage::Select && !isPress && !demoMode
                 && Setting::get()->getFindWindowElements())
@@ -889,23 +1034,13 @@ void WinCap::onKey(UINT key)
             GetRValue(pixColor_), GetGValue(pixColor_), GetBValue(pixColor_)));
         pixCopiedUntil_ = GetTickCount64() + 1500;   // 提示行临时变绿
         refresh();
+        return;
     }
-    // 长图与录屏阶段：Ctrl+S 存文件，Ctrl+C 存剪切板
-    else if ((key == 'S' || key == 'C') && (GetKeyState(VK_CONTROL) & 0x8000)) {
-        const bool toClipboard{ key == 'C' };
-        if (stage == CapStage::Long && capLong && capLong->hasImage()) {
-            if (toClipboard) longCopyToClipboard();
-            else if (!longSaveToFile()) return;
-            close();
-        }
-        else if (stage == CapStage::Video && capVideo) {
-            capVideo->onSaveKey(toClipboard);
-        }
-    }
-    // Enter：长图 / 录屏阶段存剪切板
-    else if (key == VK_RETURN) {
-        copyCurrentStage();
-    }
+    // 「系统按键」：按当前界面查命令表，命中即执行并吃掉。关闭/完成/复制/存为文件/撤销/重做/
+    // 清除/绘图工具等均在此表内，键位可在设置页配置（阶段分流见 runCommand）
+    if (commandKey(key)) return;
+    // 表外的键（Ctrl+Z/Y 兜底、Delete/Backspace 删标注、Esc 取消选中）归标注层
+    if (annotLive) annotKey(key);
 }
 
 bool WinCap::nudgeSelectionByArrow(int dx, int dy)
@@ -914,6 +1049,8 @@ bool WinCap::nudgeSelectionByArrow(int dx, int dy)
 	if (!cutMask || !cutMask->hasRect()) return false;
 	// 演示画布没有可挪的选区（全屏画布方向键不微调选区）
 	if (demoMode) return false;
+	// 长图滚动中：方向键同样不挪选区（与鼠标拖动同一规则，见 maskMoveLocked）
+	if (maskMoveLocked()) return false;
 	if (stage != CapStage::Adjust && !annotLive && !videoCanAdjust()) return false;
 	if (maskDragging || isPress) return false;
 	// 已有标注时方向键不挪选区
@@ -1434,7 +1571,14 @@ void WinCap::onClosed()
     isClosed = true;
     deferExitAfterRightUp = false;
     CaptureEsc::release(hwnd);
+    killTimer(recCursorTimerId);
     annotLive = false;
+    // 截图会话结束：把离线翻译引擎（模型几百 MB）还回去。它平时按语言对常驻换速度，
+    // 但这一次截图已经收工，没有继续留着的理由 —— 下次要用再重新加载。
+    // release() 内部加锁：若还有后台翻译在跑会等它收尾，不会把正在用的引擎抽掉。
+    BergamotEngine::release();
+    // 会话结束：把那几条临时全局键从钩子上撤掉（幂等，本来没挂也安全）
+    syncGlobalCommandKeys(0);
     stopKeyOverlay();
     if (capVideo) capVideo->dispose();
     if (capLong) capLong->dispose();
@@ -1555,8 +1699,8 @@ void WinCap::layoutTool(Ling::WinBase* tool)
 
 void WinCap::enterLiveStage()
 {
-    // 底图是拖框那一刻的静态截图，从这里开始不能再画它 ——
-    // 否则录屏和滚动截图从屏幕上拿到的都是这张死图。只留遮罩，选区内是透明的洞。
+    // 底图是拖框那一刻的静态截图，自本阶段起不再绘制 ——
+    // 否则录屏与滚动截图取到的都是这张静态底图。只保留遮罩，选区内部为透明区域。
     hideScreenImg = true;
     // 尺寸标签放不下时会折回选区内部（全屏必然如此），那就会被录进去 / 滚进长图。
     // 选区这时已经定死了，标签也没什么可看的，直接不画 —— 这样选区内就真的什么都不画了，
@@ -1570,6 +1714,114 @@ void WinCap::enterLiveStage()
 bool WinCap::videoCanAdjust() const
 {
 	return stage == CapStage::Video && capVideo && !capVideo->isRecording() && !isMouseTransparent;
+}
+
+bool WinCap::maskSizeLocked() const
+{
+	// 录屏已开录：画幅定死（整体挪动仍放行，见 maskMoveLocked）
+	if (stage == CapStage::Video && !videoCanAdjust()) return true;
+	// 长图已开始滚动（含暂停 / 编辑态）：画幅同样定死
+	if (stage == CapStage::Long && capLong && capLong->capturing()) return true;
+	return false;
+}
+
+bool WinCap::maskMoveLocked() const
+{
+	// 长图由同一块选区逐帧拼接，滚动中挪动会使已拼部分与新帧错位，故连整体挪动也禁止
+	return stage == CapStage::Long && capLong && capLong->capturing();
+}
+
+// 「选框鼠标跟随」(视频录制)：录制中且处于穿透态时，光标贴近选区边缘就自动平移选区，
+// 使操作始终留在录制画面内。穿透后本窗口收不到鼠标移动事件，只能按固定间隔轮询光标位置。
+// 平移只改位置、不改画幅（与 maskSizeLocked 的"录制中不许改大小"一致）。
+void WinCap::updateSelFollowCursor()
+{
+	if (stage != CapStage::Video) { killTimer(recCursorTimerId); return; }
+	if (!cutMask || !cutMask->hasRect()) return;
+	if (!capVideo || !capVideo->isRecording()) return;
+	if (!isMouseTransparent) return;   // 只在穿透模式下跟随
+	if (!Setting::get() || !Setting::get()->getSelFollowMouse()) return;
+
+	POINT cur{};
+	if (!GetCursorPos(&cur)) return;
+	ScreenToClient(hwnd, &cur);        // 选区是客户区坐标（窗口铺满整个虚拟桌面）
+
+	const auto& r = cutMask->maskRect;
+	const float margin = selFollowMargin * dpi;
+	// 光标越出"边缘内侧 margin"这条线时，按越出的距离整体平移，把它带回线内
+	float dx = 0.f, dy = 0.f;
+	if (cur.x < r.left + margin)        dx = (float)cur.x - (r.left + margin);
+	else if (cur.x > r.right - margin)  dx = (float)cur.x - (r.right - margin);
+	if (cur.y < r.top + margin)         dy = (float)cur.y - (r.top + margin);
+	else if (cur.y > r.bottom - margin) dy = (float)cur.y - (r.bottom - margin);
+	if (dx == 0.f && dy == 0.f) return;
+	// 传光标作为"定屏依据"：鼠标一进另一块显示器，选区就整块贴过去（录制侧同步换采集目标），
+	// 否则光标只是越出选区、选区却卡在原屏边缘不动
+	if (!cutMask->translateBy(dx, dy, &cur)) return;   // 已贴到桌面边缘、挪不动了
+
+	if (annotLive) syncViewportFilters();
+	if (annotLive) layoutTools();
+	else if (capVideo) capVideo->layoutTool();
+	syncQrcodePanel();
+	syncOcrPanel();
+	refresh();
+}
+
+// 「鼠标高亮提醒」：录制中光标位置变化就重画一次（高亮圆由 paintMouseHighlight 画）
+void WinCap::updateMouseHighlight()
+{
+	if (stage != CapStage::Video) { killTimer(recCursorTimerId); return; }
+	if (!capVideo || !capVideo->isRecording()) return;
+	if (!Setting::get() || !Setting::get()->getMouseHighlight()) return;
+
+	POINT cur{};
+	if (!GetCursorPos(&cur)) return;
+	ScreenToClient(hwnd, &cur);
+	// 圆心取光标本体中心而非热点（热点在指针尖角上，见 Util::cursorBodyOffset）
+	float ox = 0.f, oy = 0.f;
+	Util::cursorBodyOffset(ox, oy);
+	const POINT c{ cur.x + (LONG)ox, cur.y + (LONG)oy };
+	if (c.x == mouseHlPos_.x && c.y == mouseHlPos_.y) return;   // 没动就不重画
+	mouseHlPos_ = c;
+	refresh();
+}
+
+// 「鼠标高亮提醒」：在光标下垫一个半透明圆形色块。调用点在 paintCursor 之前 ——
+// 视觉上位于系统光标之下，符合"色块叠在鼠标后面"。录制结束后残留的刷新不会画它（条件已不成立）。
+void WinCap::paintMouseHighlight(ID2D1DeviceContext* ctx)
+{
+	if (!ctx) return;
+	if (stage != CapStage::Video || !capVideo || !capVideo->isRecording()) return;
+	if (!Setting::get() || !Setting::get()->getMouseHighlight()) return;
+
+	POINT cur{};
+	if (!GetCursorPos(&cur)) return;
+	ScreenToClient(hwnd, &cur);
+	const UINT32 rgba = Setting::get()->getMouseHighlightColor();
+	// 颜色可改：变了就换笔刷（色号只存 RGB，A 固定 FF；这里按固定透明度画半透明色块）
+	if (!mouseHlBrush_ || mouseHlColor_ != rgba) {
+		mouseHlBrush_.Reset();
+		Ling::D2D::get()->deviceContext->CreateSolidColorBrush(
+			D2D1::ColorF(((rgba >> 24) & 0xFFu) / 255.f, ((rgba >> 16) & 0xFFu) / 255.f,
+				((rgba >> 8) & 0xFFu) / 255.f, kMouseHlAlpha),
+			mouseHlBrush_.GetAddressOf());
+		mouseHlColor_ = rgba;
+	}
+	if (!mouseHlBrush_) return;
+	// 圆心 = 热点 + 光标本体偏移（物理像素，与下面的半径同口径）
+	float ox = 0.f, oy = 0.f;
+	Util::cursorBodyOffset(ox, oy);
+	const float r = mouseHlRadius * dpi;
+	ctx->FillEllipse(D2D1::Ellipse(D2D1::Point2F((float)cur.x + ox, (float)cur.y + oy), r, r),
+		mouseHlBrush_.Get());
+}
+
+// 选区被挪动（拖拽 / 鼠标跟随 / 方向键 / 滚轮）后由 CutMask 回调。
+// 录制中把平移同步给采集线程，否则屏幕上选区已经挪走、录出来的画面还是原来那一块。
+void WinCap::onMaskRectChanged()
+{
+	if (stage != CapStage::Video || !capVideo || !capVideo->isRecording()) return;
+	capVideo->syncCaptureMove();
 }
 
 bool WinCap::annotRightClick()
@@ -1920,6 +2172,9 @@ void WinCap::beginVideoCapture()
 {
 	hideScreenImg = true;
 	if (cutMask) cutMask->hideLabel = true;
+	// 录制期间轮询光标（「选框鼠标跟随」/「鼠标高亮提醒」任一开启即需要）
+	if (Setting::get()->getSelFollowMouse() || Setting::get()->getMouseHighlight())
+		setTimer(recCursorTickMs, recCursorTimerId);
 	// 默认不穿透，便于边录边标；穿透按钮后续再开
 	refresh();
 }
@@ -1946,12 +2201,29 @@ void WinCap::startVideo()
     }
 
     stage = CapStage::Video;
+    // 录制只能针对**单块显示器**采集（采集链路按屏建复制纹理，跨屏录不全）：
+    // 先把现有选区收进单块屏（跨屏框取的选区在此被收小），之后拖边 / 整体平移同样受该约束
+    if (cutMask) {
+        cutMask->setSingleMonitorMode(true);
+        cutMask->snapToSingleMonitor();   // 跨屏框取的选区在这里收进单块屏
+    }
     // 与 startLong 同路径：收起截图栏 + live 遮罩；开录前不穿透，选区仍可调
     enterLiveStage();
     if (cutMask) cutMask->hideLabel = false;
     clearMainToolUserPlaced();
     capVideo = std::make_unique<CapVideo>(this);
     capVideo->makeTool();
+    // 选区能否移到某块屏，交由录制侧判定（不同显卡的屏切换不过去 → 选区停留在原屏边缘）；
+    // 采集侧切换失败后也会把该屏排除，见 CapVideo::canSwitchToMonitor。生命周期随本会话。
+    if (cutMask) {
+        cutMask->canSwitchToMonitor = [this](const RECT& m) {
+            return capVideo && capVideo->canSwitchToMonitor(m);
+        };
+    }
+    // 进入录屏阶段的这一刻即把「系统按键」中 Scope::Global 的命令镜像到键盘钩子，**不等到开录**：
+    // 录制时焦点通常在被录的程序上，而「开始/暂停录制」是同一条命令键 —— 若只挂"开录之后"，
+    // 用该键开始录制这一步永远无法命中（键位那时尚未上钩子）。会话结束时统一撤销（见 dtor）。
+    syncGlobalCommandKeys(CommandKeys::SurfaceRecord);
 }
 
 void WinCap::startMp4(bool useSpeaker, bool useMic)
@@ -2049,12 +2321,12 @@ void WinCap::setMouseTransparent(bool transparent)
         }
         isPress = false;
         SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
-        CaptureEsc::claimTab(hwnd);
+        // 穿透后焦点已不在本软件：`` ` ``（鼠标穿透）由会话期间镜像到低级键盘钩子的绑定收回
+        //（见 syncGlobalCommandKeys），此处不再额外注册热键。
     }
     else {
         exStyle &= ~WS_EX_TRANSPARENT;
         exStyle &= ~WS_EX_LAYERED;
-        CaptureEsc::releaseTab(hwnd);
     }
     SetWindowLongPtr(hwnd, GWL_EXSTYLE, exStyle);
     SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
@@ -2400,11 +2672,24 @@ void WinCap::startQrcode()
 	refresh();
 }
 
+// 记住本次选区（屏幕坐标）→ 全局热键「重复截图」据此再抓一块。
+// 只在真正的截图收工时调用（keepOpen 的预览 / 演示画布不算）。
+void WinCap::rememberLastRegion()
+{
+    if (!cutMask || !cutMask->hasRect()) return;
+    const int rx = x + (int)std::lround(cutMask->maskRect.left);
+    const int ry = y + (int)std::lround(cutMask->maskRect.top);
+    const int rw = (int)std::lround(cutMask->maskRect.right - cutMask->maskRect.left);
+    const int rh = (int)std::lround(cutMask->maskRect.bottom - cutMask->maskRect.top);
+    Setting::get()->setLastCaptureRect(rx, ry, rw, rh);
+}
+
 void WinCap::saveToFile(bool keepOpen)
 {
     std::vector<BYTE> pixels;
     int cw{ 0 }, ch{ 0 };
     if (!exportSelection(pixels, cw, ch)) return;
+    if (!keepOpen) rememberLastRegion();
     auto setToolTopmost = [this](bool topmost) {
         if (!toolCap || !toolCap->hwnd) return;
         SetWindowPos(toolCap->hwnd, topmost ? HWND_TOPMOST : HWND_NOTOPMOST,
@@ -2445,6 +2730,7 @@ void WinCap::copyToClipboard(bool keepOpen)
     std::vector<BYTE> pixels;
     int cw{ 0 }, ch{ 0 };
     if (!exportSelection(pixels, cw, ch)) return;
+    if (!keepOpen) rememberLastRegion();
     Util::saveToClipboard(cw, ch, pixels.data());
     // 「截图后自动保存」：收工时静默落盘（点选窗口按「焦点窗口文件名格式」命名）
     if (!keepOpen) Util::quietSaveCapture(pixels, cw, ch, selectionFromElement_, focusAppName_);

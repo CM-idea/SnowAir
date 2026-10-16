@@ -36,6 +36,7 @@
 #include <mmdeviceapi.h>
 #include <chrono>
 #include <audiosessiontypes.h>
+#include <atomic>
 
 
 namespace VideoMp4{
@@ -694,6 +695,33 @@ public:
     CComPtr<ID3D11Texture2D> lGDIImage;
     CComPtr<ID3D11Texture2D> lDestImage;
     DXGI_OUTDUPL_DESC lOutputDuplDesc = {};
+    // 当前采集目标那块屏在虚拟桌面里的矩形（Prepare 时记下）：换屏跟随要拿它判断"是否换屏"
+    RECT monRect{};
+
+    // 换屏跟随：在本设备所属适配器下找目标显示器的输出索引。
+    // 只有这个范围内可行 —— 挂在别的适配器上的屏，DuplicateOutput 用本设备的纹理接不住
+    static bool FindOutputOnDeviceAdapter(ID3D11Device* dev, const RECT& wantMon, UINT& outIndex)
+    {
+        if (!dev) return false;
+        CComPtr<IDXGIDevice> dxgiDev;
+        if (FAILED(dev->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgiDev)) || !dxgiDev) return false;
+        CComPtr<IDXGIAdapter> ad;
+        if (FAILED(dxgiDev->GetParent(__uuidof(IDXGIAdapter), (void**)&ad)) || !ad) return false;
+        for (UINT i = 0;; ++i)
+        {
+            CComPtr<IDXGIOutput> out;
+            if (FAILED(ad->EnumOutputs(i, &out)) || !out) break;
+            DXGI_OUTPUT_DESC d{};
+            if (FAILED(out->GetDesc(&d))) continue;
+            if (d.DesktopCoordinates.left == wantMon.left && d.DesktopCoordinates.top == wantMon.top
+                && d.DesktopCoordinates.right == wantMon.right && d.DesktopCoordinates.bottom == wantMon.bottom)
+            {
+                outIndex = i;
+                return true;
+            }
+        }
+        return false;
+    }
 
     static void GetAdapters(std::vector<CComPtr<IDXGIAdapter1>>& a)
     {
@@ -862,6 +890,7 @@ public:
 
         DXGI_OUTPUT_DESC lOutputDesc;
         hr = lDxgiOutput->GetDesc(&lOutputDesc);
+        monRect = lOutputDesc.DesktopCoordinates;   // 换屏跟随的判据
 
         // QI for Output 1
         CComPtr<IDXGIOutput1> lDxgiOutput1;
@@ -1029,6 +1058,16 @@ struct DESKTOPCAPTUREPARAMS
     // 是否允许 SinkWriter 使用硬件 MFT（编码器）。关掉即只走软件编码
     bool HwTransforms = true;
     RECT rx = { 0,0,0,0 };
+    // 录制中选区被挪动：UI 线程报告「期望的裁剪区左上角（桌面坐标）」，采集线程据此平移裁剪框；
+    // 落到别的显示器上就换采集目标（同适配器内无缝切，换不过去保持原屏）。
+    // 坐标打包进一个原子值（高 32 位 x / 低 32 位 y），免得读到半新半旧的一对坐标。
+    std::atomic<bool> followOn{ false };
+    std::atomic<long long> wantOrigin{ 0 };
+    // 换屏失败记录：采集线程判定某块屏换不过去时写入它的左上角（桌面坐标）。
+    // UI 侧据此把该屏从"可跨屏"中排除 —— 混合显卡下适配器报告了某块屏、实际复制不起来是常见情况，
+    // 排除后选区不会再移过去又被回退。
+    std::atomic<bool> hasBlocked{ false };
+    std::atomic<long long> switchBlocked{ 0 };
     HWND hWnd = 0;
     IDXGIAdapter1* ad = 0;
     UINT nOutput = 0;
@@ -1559,6 +1598,27 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
         {
             wi = dp.rx.right - dp.rx.left;
             he = dp.rx.bottom - dp.rx.top;
+        }
+    }
+
+    // —— 录制中「选区跨屏」跟随 ——
+    // UI 报的是期望的裁剪区左上角（桌面坐标）；这里记下它与本帧实际裁剪原点的差，之后每次跟随
+    // 都按同一口径平移（避免跟随开始那一下画面整体跳几像素）。尺寸一律沿用开录时定下的裁剪
+    // 尺寸 —— 编码器的帧尺寸不可变，所以跟随只平移、不缩放。
+    long followBiasX = 0, followBiasY = 0;
+    long followCropW = 0, followCropH = 0;
+    long lastWantX = LONG_MIN, lastWantY = 0;
+    if (dp.HasVideo)
+    {
+        followCropW = dp.rx.right - dp.rx.left;
+        followCropH = dp.rx.bottom - dp.rx.top;
+        if (dp.followOn.load(std::memory_order_relaxed))
+        {
+            const long long packed = dp.wantOrigin.load(std::memory_order_relaxed);
+            lastWantX = (long)(int)(packed >> 32);
+            lastWantY = (long)(int)(packed & 0xFFFFFFFFll);
+            followBiasX = (dp.rx.left + cap.monRect.left) - lastWantX;
+            followBiasY = (dp.rx.top + cap.monRect.top) - lastWantY;
         }
     }
 
@@ -2186,6 +2246,64 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
         HRESULT hrf = S_FALSE;
         if (dp.HasVideo)
         {
+            // 换屏跟随：选区移到别的显示器时切换采集目标继续录制（只平移，帧尺寸不变）。
+            // 位置必须在 AcquireNextFrame **之前** —— 换屏会释放并重建复制对象，此刻不能持有上一帧，
+            // 否则随后的 ReleaseFrame 会作用到新对象上，帧数据也可能取自另一块屏。
+            // 目标屏挂在别的适配器上时无法切换 → 保持当前屏，不做部分跟随。
+            if (dp.followOn.load(std::memory_order_relaxed))
+            {
+                const long long packed = dp.wantOrigin.load(std::memory_order_relaxed);
+                const long wx = (long)(int)(packed >> 32);
+                const long wy = (long)(int)(packed & 0xFFFFFFFFll);
+                if (wx != lastWantX || wy != lastWantY)
+                {
+                    lastWantX = wx;
+                    lastWantY = wy;
+                    const long dx = wx + followBiasX;   // 期望的裁剪原点（虚拟桌面坐标）
+                    const long dy = wy + followBiasY;
+                    POINT mid{ (LONG)(dx + followCropW / 2), (LONG)(dy + followCropH / 2) };
+                    HMONITOR hm = MonitorFromPoint(mid, MONITOR_DEFAULTTONEAREST);
+                    MONITORINFO mi{ sizeof(MONITORINFO) };
+                    if (hm && GetMonitorInfoW(hm, &mi))
+                    {
+                        // 采集帧尺寸不可变：目标屏装不下裁剪框就**不换**（换过去必然裁到屏外）。
+                        // 选区那侧同一条取舍（CutMask::clampToSingleMonitor）—— 两边行为一致。
+                        const bool fits = followCropW <= (mi.rcMonitor.right - mi.rcMonitor.left)
+                            && followCropH <= (mi.rcMonitor.bottom - mi.rcMonitor.top);
+                        if (fits && !EqualRect(&mi.rcMonitor, &cap.monRect))
+                        {
+                            UINT idx = 0;
+                            if (CAPTURE::FindOutputOnDeviceAdapter(cap.device, mi.rcMonitor, idx)
+                                && cap.Prepare(idx))
+                            {
+                                cap.monRect = mi.rcMonitor;
+                                dp.nOutput = idx;   // ACCESS_LOST 后的重建沿用该索引
+                            }
+                            else
+                            {
+                                // 切换失败：记录该显示器，UI 侧随后会禁止选区再移向这里
+                                dp.switchBlocked.store(
+                                    ((long long)(int)mi.rcMonitor.left << 32)
+                                    | (long long)(unsigned int)(int)mi.rcMonitor.top,
+                                    std::memory_order_relaxed);
+                                dp.hasBlocked.store(true, std::memory_order_relaxed);
+                            }
+                        }
+                        if (EqualRect(&mi.rcMonitor, &cap.monRect))
+                        {
+                            // 换算成当前屏的局部裁剪框并夹进复制纹理（尺寸仍是开录时定下的）
+                            long l = dx - cap.monRect.left;
+                            long t = dy - cap.monRect.top;
+                            const long maxL = (long)cap.lOutputDuplDesc.ModeDesc.Width - followCropW;
+                            const long maxT = (long)cap.lOutputDuplDesc.ModeDesc.Height - followCropH;
+                            if (l < 0) l = 0; else if (l > maxL) l = maxL > 0 ? maxL : 0;
+                            if (t < 0) t = 0; else if (t > maxT) t = maxT > 0 ? maxT : 0;
+                            dp.rx = { l, t, l + followCropW, t + followCropH };
+                        }
+                    }
+                }
+            }
+
             hr = cap.lDeskDupl->AcquireNextFrame(
                 0,
                 &lFrameInfo,

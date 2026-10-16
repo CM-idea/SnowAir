@@ -464,10 +464,18 @@ void WinSettingAppearance::buildAppTab(Ling::Node* host)
 
 void WinSettingAppearance::buildOtherTab(Ling::Node* host)
 {
-    SettingUi::toggleRow(host,
+    // 双栏：与「软件外观」等页的开关排布一致
+    auto* grid = SettingUi::grid2(host);
+    SettingUi::toggleRow(grid,
         Lang::get(L"setting.featureTips"),
         Setting::get()->getFeatureTips(),
         [](bool on) { Setting::get()->setFeatureTips(on); }, true);
+    // 「快捷键提示」：开关只影响之后弹出的停悬气泡（已显示的提示仍带旧文字，属预期）
+    SettingUi::toggleRow(grid,
+        Lang::get(L"setting.hotkeyTip"),
+        Setting::get()->getHotkeyTip(),
+        [](bool on) { Setting::get()->setHotkeyTip(on); }, true);
+    SettingUi::grid2Cells(grid);
 }
 
 // ---- 软件语言下拉：与其他下拉选项样式一致（标准 selectRow） ----
@@ -508,7 +516,7 @@ void WinSettingAppearance::initThemeCtrls(Ling::Node* p)
             Ling::App::get()->dq.TryEnqueue([this]() {
                 SettingTheme::apply(Setting::get()->getAppTheme());
                 if (win) win->close();
-                Ling::App::get()->dq.TryEnqueue([]() { WinSetting::init(4); });
+                Ling::App::get()->dq.TryEnqueue([]() { WinSetting::init(3); });
             });
         }, true);
 }

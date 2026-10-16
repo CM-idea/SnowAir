@@ -161,6 +161,23 @@ void History::syncViewportFilters(const std::wstring& toolId)
 	win->onHistoryChanged();
 }
 
+void History::clearAll()
+{
+	// 先快照一份指针再逐条删：removeShape 会改动 shapes，边遍历边删会使迭代器失效。
+	// 且必须走 removeShape —— 它同时收尾 hover / 选中 / 正在编辑的文本等关联状态，
+	// 直接 shapes.clear() 会让这些状态残留为悬空指针。
+	std::vector<ShapeBase*> victims;
+	victims.reserve(shapes.size());
+	for (auto& s : shapes) if (s) victims.push_back(s.get());
+	for (auto* v : victims) {
+		// 渐隐画笔这类临时笔迹不归清除管（它们自己会消失）
+		if (v->isEphemeral()) continue;
+		removeShape(v);
+	}
+	win->refresh();
+	win->onHistoryChanged();
+}
+
 void History::undo()
 {
     int i{ (int)(shapes.size() - 1) };

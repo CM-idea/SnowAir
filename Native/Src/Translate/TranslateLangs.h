@@ -91,7 +91,7 @@ namespace TranslateLangs {
 			auto d = detect(text);
 			if (!d.empty()) src = d;
 		}
-		// 还是 auto（认不出语种）：别乱换目标，交给在线引擎自动识别
+		// 仍为 auto（未能识别语种）：不切换目标，交由在线引擎自动识别
 		if (src.empty() || _wcsicmp(src.c_str(), L"auto") == 0) return;
 		// 源与目标撞车（默认 auto→en 遇到英文即 en→en）：只有当整段"确实基本就是目标语"时才换向，
 		// 否则保持用户设的目标不动 —— 中英混排里夹几个英文字母不该把 zh→en 翻成 en→zh。

@@ -12,6 +12,16 @@ public:
 	ToolVideo(WinCap* win);
 	~ToolVideo();
 	bool onSaveKey(bool toClipboard);
+	// —— 「系统按键」用：与点这颗按钮**同一段实现**（按钮的 onClick 也调这里，别写第二份）——
+	void cmdTogglePierce() { togglePierce(); }
+	void cmdToggleRecord() { togglePlayPause(); }
+	void cmdToggleGif() { onGifClick(); }
+	void cmdToggleSystemAudio();
+	void cmdToggleMic();
+	// —— 「系统按键」用：绘图工具命令键。录屏阶段的绘图工具在本条工具条上（非截图条），
+	//    故工具键与工具循环必须走这里。——
+	void cmdAnnotTool(const std::wstring& id);   // 选中某件绘图工具（等同点击该按钮）
+	void cycleAnnotTool();                       // 工具循环（Tab）
 	void updateUndoEnabled();
 	void cancelAnnotSelect();
 	void syncPierce(bool on);

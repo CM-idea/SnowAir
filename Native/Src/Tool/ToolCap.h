@@ -34,6 +34,9 @@ public:
 	float getBtnCenterX() const;
 	void cancelSelect();
 	void selectTool(const std::wstring& id);
+	// 「工具循环」(系统按键 Tab)：在当前工具栏可见的绘图工具槽位之间循环切换一个。
+	// 走 onClickCap（与点击按钮同一路径），不另写选中逻辑
+	void cycleTool();
 	// 框选同表面标注：选中工具并打开属性栏（不移交窗口）
 	void selectAnnotTool(const std::wstring& id);
 	void bindOwner(HWND ownerHwnd);
@@ -122,6 +125,9 @@ private:
 	static constexpr float spliterW{ 1.f };
 	static constexpr float spliterH{ 24.f };
 	void styleToolbarBtn(Ling::Button* btn);
+	// 停悬气泡：按「快捷键提示」开关决定是否追加当前键位（"矩形" → "矩形（1）"）。
+	// lookup 留空 = 用 btn->id 再经 resolveToolId 取到已选子工具
+	void bindTip(Ling::Button* btn, const std::wstring& text, const std::wstring& lookup = L"");
 	std::vector<std::wstring> btnIds = {
 		L"border",L"opacity",L"|",
 		L"show-cursor",

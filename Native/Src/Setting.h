@@ -20,6 +20,14 @@ public:
 	const JsonObject getConfigObj();
 	void setShortcutKey(const std::wstring& type, const std::vector<std::wstring>& keys);
 	std::wstring getShortcutKey(const std::wstring& type);
+	// 「全局热键」页的「恢复默认」：清掉用户设过的键位（清空后 getShortcutKey 逐条回落内置默认表），
+	// 并按新键位整体重注册
+	void restoreShortcutKeyDefaults();
+	// 全局热键是否仍是出厂键位（没有任何覆盖项）
+	bool shortcutKeyAtDefaults();
+	// 全局热键「重复截图」：记住的上一块选区（屏幕坐标）。无记录返回 false。
+	bool getLastCaptureRect(int& x, int& y, int& w, int& h);
+	void setLastCaptureRect(int x, int y, int w, int h);
 	void setAutoStart(bool autoStart);
 	bool getAutoStart();
 	// 启动时调用：开了「开机自启」就确保登记项指向当前这个 exe。换了安装目录 / 升级更换版本后，
@@ -30,17 +38,13 @@ public:
 	std::wstring getLang();
 	void setLang(const std::wstring& lang);
 	void initShortcutKeys();
-	// 全局截图热键：先走系统 RegisterHotKey；被别的程序占了就退到低级键盘钩子兜底
-	void applyCaptureHotkey(const std::wstring& chord);
 	// 录制热键期间挂起/恢复全局热键：挂起后系统热键与低级键盘钩子都不再拦截按键，
 	// 否则用户在设置页录入热键时按键会先被全局热键吞掉而录不进去。
 	void suspendShortcutKeys();
 	void resumeShortcutKeys();
-	// 注册失败时的低频重试（一旦 RegisterHotKey 成功就摘掉钩子），由消息泵上的定时器驱动
-	static void CALLBACK onCaptureHotkeyRetry(HWND, UINT, UINT_PTR id, DWORD);
-	void startCaptureHotkeyRetry();
-	void stopCaptureHotkeyRetry();
 	void purgeRemovedAiSettings();
+	// 启动时清理旧程序 ScreenCapture 留下的历史键位（`cap`，现用 id 为 capture）；见 Setting.cpp
+	void purgeLegacyShortcutKeys();
 	bool getToolFlag(const std::wstring& tool, const std::wstring& key, bool def);
 	void setToolFlag(const std::wstring& tool, const std::wstring& key, bool val);
 	float getToolNum(const std::wstring& tool, const std::wstring& key, float def);
@@ -74,6 +78,9 @@ public:
 	// 「功能提示」总开关：开则在设置项旁显示说明问号（默认开）
 	bool getFeatureTips();
 	void setFeatureTips(bool on);
+	// 「快捷键提示」：工具栏停悬文字后追加当前键位（"矩形" → "矩形（1）"）。默认关闭
+	bool getHotkeyTip();
+	void setHotkeyTip(bool on);
 
 	bool getFindWindowElements();
 	void setFindWindowElements(bool on);
@@ -102,6 +109,17 @@ public:
 	bool getCancelConfirmDialog();
 	void setCancelConfirmDialog(bool on);
 	void restoreFunctionScreenshotDefaults();
+	// 「功能设置」各子页的「恢复默认」：逐项写回该子页的出厂值（清掉用户覆盖项）
+	void restoreFunctionRecordDefaults();     // 视频录制
+	void restoreFunctionOutputDefaults();     // 文件输出
+	void restoreFunctionOcrDefaults();        // 文本识别
+	void restoreFunctionTranslateDefaults(); // 翻译
+	// 与上面 5 个 restore 成对：该子页是否仍是出厂值（供「恢复默认」按钮置灰）
+	bool functionScreenshotAtDefaults();
+	bool functionRecordAtDefaults();
+	bool functionOutputAtDefaults();
+	bool functionOcrAtDefaults();
+	bool functionTranslateAtDefaults();
 
 	int getVideoQuality();
 	void setVideoQuality(int v);
@@ -125,6 +143,15 @@ public:
 	void setHideToolbarInRecord(bool on);
 	bool getShowKeystrokes();
 	void setShowKeystrokes(bool on);
+	// 「选框鼠标跟随」（视频录制）：录制中处于穿透态时，光标贴近选区边缘就让选区自动平移跟随
+	bool getSelFollowMouse();
+	void setSelFollowMouse(bool on);
+	// 「鼠标高亮提醒」（视频录制）：录制中在光标下垫一个半透明圆形色块
+	bool getMouseHighlight();
+	void setMouseHighlight(bool on);
+	// 高亮圆的颜色（0xRRGGBBAA，取色存不透明值；绘制时按固定透明度做半透明色块）
+	UINT32 getMouseHighlightColor();
+	void setMouseHighlightColor(UINT32 rgba);
 
 	std::wstring getManualSaveFormat();
 	void setManualSaveFormat(const std::wstring& v);
@@ -201,6 +228,15 @@ public:
 	void clearAllHistory();
 private:
 	Setting();
+	// —— 全局热键 ——
+	// 注册/重注册全部全局热键：先走系统 RegisterHotKey；被别的程序占了就退到低级键盘钩子兜底
+	void applyHotkeys();
+	// 执行一条全局热键的动作（id 取自 Setting.cpp 的 kHotkeys）
+	void runHotkeyAction(const std::wstring& id);
+	// 注册失败时的低频重试（一旦 RegisterHotKey 成功就摘掉钩子），由消息泵上的定时器驱动
+	static void CALLBACK onHotkeyRetry(HWND, UINT, UINT_PTR id, DWORD);
+	void startHotkeyRetry();
+	void stopHotkeyRetry();
 	JsonObject featuresObj();
 	JsonObject getToolObj(const std::wstring& tool);
 	std::filesystem::path initDataPath();
@@ -218,7 +254,6 @@ private:
 	const std::filesystem::path dataPath;
 	const std::filesystem::path configPath;
 	JsonObject configObj;
-	std::wstring captureChord;            // 当前生效的截图热键组合
-	UINT_PTR captureRetryTimer{ 0 };
-	int captureRetryTick{ 0 };
+	UINT_PTR hotkeyRetryTimer{ 0 };
+	int hotkeyRetryTick{ 0 };
 };

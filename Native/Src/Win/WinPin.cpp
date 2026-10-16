@@ -22,6 +22,8 @@
 using namespace Microsoft::WRL;
 namespace {
 	std::vector<std::unique_ptr<WinPin>> winPins;
+	// 「隐藏/显示贴图」的临时态：只影响当前这些窗口，不落盘
+	bool pinsHidden{ false };
 
 	int clampPos(float val, float size, int min, int max)
 	{
@@ -160,6 +162,24 @@ void WinPin::dispose()
 	// 同 WinSetting::dispose：~WinBase 不销毁 HWND，退出前把还开着的贴图窗逐个真正关掉
 	for (auto& p : winPins) { if (p && p->hwnd) p->close(); }
 	winPins.clear();
+}
+
+// 全局热键「隐藏/显示贴图」：一次把所有贴图藏起来，再按一次全部放回来。
+// 纯临时操作 —— 不落盘、不改贴图自身状态；"放回来"时一并清除专注模式遗留的隐藏标记。
+void WinPin::toggleAllHidden()
+{
+	if (winPins.empty()) return;
+	pinsHidden = !pinsHidden;
+	for (auto& p : winPins) {
+		if (!p) continue;
+		if (pinsHidden) {
+			p->hide();
+		}
+		else {
+			p->hiddenByFocus = false;
+			p->show();
+		}
+	}
 }
 
 D2D1_SIZE_U WinPin::getImgSize() const

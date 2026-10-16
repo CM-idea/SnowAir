@@ -59,10 +59,14 @@ namespace ToolbarStore {
 				L"undo", L"split-1", L"reset-canvas", L"mouse-through", L"cancel" };
 		}
 		else {
-			// 贴图栏（kind=3）：椭圆不单列
+			// 贴图栏（kind=3）：椭圆不单列。
+			// 识别/翻译**不属于**贴图栏：运行时 isPinHidden() 会把 ocr/translate/long/extra/pin/
+			// show-cursor 整体隐藏（识别走贴图右键菜单），列进来只会是点不出东西的死槽位。
+			// save 反过来 —— 它在运行时槽位表里，这里必须也有名字，否则会被 kept 规则
+			// 强制插到最前、且用户在编辑器里既看不到也移不走。
 			st.active = { L"show-border", L"opacity", L"split-0", L"rect", L"arrow",
 				L"pen", L"text", L"serial-number", L"mosaic", L"eraser", L"split-1",
-				L"undo", L"split-2", L"ocr", L"translate", L"cancel", L"confirm" };
+				L"undo", L"split-2", L"save", L"cancel", L"confirm" };
 		}
 		return st;
 	}

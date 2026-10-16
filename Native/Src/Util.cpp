@@ -587,6 +587,93 @@ std::wstring Util::decodeQrCode(const int w, const int h, BYTE* data)
 	return result;
 }
 
+void Util::cursorBodyOffset(float& dx, float& dy)
+{
+	dx = 0.f;
+	dy = 0.f;
+
+	// 形状不变时复用上次结果：本函数由录制期的光标轮询驱动，逐次重画位图不划算
+	static HCURSOR s_cur = nullptr;
+	static bool s_valid = false;
+	static float s_dx = 0.f;
+	static float s_dy = 0.f;
+
+	CURSORINFO ci{};
+	ci.cbSize = sizeof(ci);
+	if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING) || !ci.hCursor) return;
+	if (ci.hCursor == s_cur) {
+		if (s_valid) { dx = s_dx; dy = s_dy; }
+		return;
+	}
+	s_cur = ci.hCursor;
+	s_valid = false;
+
+	ICONINFO ii{};
+	if (!GetIconInfo(ci.hCursor, &ii)) return;
+	// 单色光标只有 AND/XOR 掩码（总高度为图形高度的两倍），没有颜色位图
+	const bool mono = (ii.hbmColor == nullptr);
+	BITMAP bm{};
+	if (GetObjectW(mono ? ii.hbmMask : ii.hbmColor, sizeof(bm), &bm)
+		&& bm.bmWidth > 0 && bm.bmHeight > 0) {
+		const int w = bm.bmWidth;
+		const int h = mono ? bm.bmHeight / 2 : bm.bmHeight;
+		HDC screen = (h > 0) ? GetDC(nullptr) : nullptr;
+		HDC mem = screen ? CreateCompatibleDC(screen) : nullptr;
+		void* bits = nullptr;
+		HBITMAP dib = nullptr;
+		if (mem) {
+			// 32bpp、top-down：DrawIconEx 会把带 alpha 的光标原样画进来；屏幕坐标系 y 向下，与热点一致
+			BITMAPINFO bi{};
+			bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+			bi.bmiHeader.biWidth = w;
+			bi.bmiHeader.biHeight = -h;
+			bi.bmiHeader.biPlanes = 1;
+			bi.bmiHeader.biBitCount = 32;
+			bi.bmiHeader.biCompression = BI_RGB;
+			dib = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+		}
+
+		int minX = w, minY = h, maxX = -1, maxY = -1;
+		if (dib && bits) {
+			auto* px = static_cast<UINT32*>(bits);
+			// 单色光标没有 alpha 通道：先铺一层哨兵色，未被图形覆盖的像素保持哨兵值
+			constexpr UINT32 kSentinel = 0xFFFF00FFu;
+			if (mono) {
+				for (size_t i = 0, n = (size_t)w * h; i < n; i++) px[i] = kSentinel;
+			}
+			HGDIOBJ old = SelectObject(mem, dib);
+			DrawIconEx(mem, 0, 0, ci.hCursor, w, h, 0, nullptr, DI_NORMAL);
+			SelectObject(mem, old);
+			for (int y = 0; y < h; y++) {
+				for (int x = 0; x < w; x++) {
+					const UINT32 v = px[(size_t)y * w + x];
+					const bool opaque = mono ? (v != kSentinel) : ((v >> 24) != 0u);
+					if (!opaque) continue;
+					if (x < minX) minX = x;
+					if (x > maxX) maxX = x;
+					if (y < minY) minY = y;
+					if (y > maxY) maxY = y;
+				}
+			}
+		}
+
+		if (dib) DeleteObject(dib);
+		if (mem) DeleteDC(mem);
+		if (screen) ReleaseDC(nullptr, screen);
+
+		// 位图坐标与热点同以左上为原点、y 向下，包围盒中心减热点即得偏置
+		if (maxX >= minX && maxY >= minY) {
+			s_dx = (minX + maxX) * 0.5f - (float)ii.xHotspot;
+			s_dy = (minY + maxY) * 0.5f - (float)ii.yHotspot;
+			s_valid = true;
+			dx = s_dx;
+			dy = s_dy;
+		}
+	}
+	if (ii.hbmColor) DeleteObject(ii.hbmColor);
+	if (ii.hbmMask) DeleteObject(ii.hbmMask);
+}
+
 // ================= History 辅助：id → 条目 filePath 查找 =================
 static std::wstring findHistoryFilePath(const std::wstring& id)
 {
