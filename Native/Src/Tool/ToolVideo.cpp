@@ -286,7 +286,7 @@ std::vector<std::wstring> ToolVideo::resolveSlots() const
 void ToolVideo::makeSlot(const std::wstring& id)
 {
 	if (id == L"pierce") {
-		btnPierce = makeIconBtn(Icon::Pierce, L"pierce");
+		btnPierce = makeIconBtn(Icon::Cursor, L"pierce");   // 与截图栏「显示光标」同一图标
 		btnPierce->onClick.add([this](Ling::Button*) { togglePierce(); });
 		tip->bind(btnPierce, Lang::get(L"video.mouseThrough"));
 		applyToggleStyle(btnPierce, pierceOn);
