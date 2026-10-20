@@ -387,7 +387,7 @@ void AnnotHost::paintTextMidHint(ID2D1DeviceContext* ctx)
 
 // 连线的提示（只在箭头工具下出现）：
 //   · 悬停形状时：在"朝鼠标方向"的边缘点画一个和控点同款的小圆点 + 一句"拖动可连线"
-//     —— 这就是**起点**的提示（这个形状可以按住往外拖出连线）；
+//     —— 这就是**起点**提示：必须从这个圆点上起笔才会联动，从形状内部别处起笔是普通操作；
 //   · 拖动连线中：点**一直待在起点**上（起点贴着边缘随鼠标方向滑，点跟着滑）。
 //     拖进目标形状时终点会吸附，但点不会跟到目标上去 —— 用户要的：目标不需要点提示；
 //   · 线中点上的**叉**：点它直接删掉这条箭头/线段，只在没拖动时出现。
@@ -1163,16 +1163,20 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 	// 录屏工具启用时跳过点选，直接落笔，避免标注过程中拖到旧图形
 	// 文本工具落在线段中间时要例外：那儿就是要打字，不能被"命中已有箭头"抢走
 	const bool textOnShaft = (shaftHost != nullptr);
-	// 连线：箭头/线段工具按在矩形/椭圆里 —— **一律起笔画连线**（选没选中都一样，用户定的：
-	// 箭头工具下矩形不该被拖走，要移动它请换矩形工具/空工具）。
-	// 没拖就抬手（就是单击）见 annotUp：空线删掉、改成选中那个形状，
-	// 于是箭头工具下"点一下=选中、按住拖=连线"
+	// 连线：箭头/线段工具必须从形状**边缘的锚点圆点**起笔才联动（见 updateLinkHints）。
+	// 形状内部其它位置不再触发连线 —— 那些位置仍是普通的点选/移动，避免误连。
+	// 没拖就抬手（就是单击）见 annotUp：空线删掉、改成选中那个形状。
 	bool linkFromShape = false;
 	linkPressTarget = nullptr;
 	if (tool == L"arrow" && !annotSkipHitSelect() && !textOnShaft) {
 		if (ShapeBase* t = ShapeLink::pickTarget(this, (float)imgPos.x, (float)imgPos.y)) {
-			linkFromShape = true;
-			linkPressTarget = t;
+			D2D1_POINT_2F dot{};
+			// 锚点热区与画出来的小圆点同口径（略放大一点便于命中）
+			if (ShapeLink::edgePointToward(t, (float)imgPos.x, (float)imgPos.y, dot)
+				&& std::hypot((float)imgPos.x - dot.x, (float)imgPos.y - dot.y) <= 9.f * dpi) {
+				linkFromShape = true;
+				linkPressTarget = t;
+			}
 		}
 	}
 	if (!annotSkipHitSelect() && !textOnShaft && !linkFromShape) {

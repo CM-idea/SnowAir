@@ -56,7 +56,7 @@ SnowAir comes in two editions that share the same experience and feature layout:
 
 | E&#8288;d&#8288;i&#8288;t&#8288;i&#8288;o&#8288;n | Description | H&#8288;o&#8288;w&#8288; t&#8288;o&#8288; G&#8288;e&#8288;t |
 | --- | --- | --- |
-| **F&#8288;r&#8288;e&#8288;e** | A 3 MB-class ultra-small, single-file portable build covering everyday features like screenshots, annotation, scrolling capture, screen recording, OCR, and pinning. | [G&#8288;e&#8288;t&#8288; i&#8288;t][releases-link] |
+| **F&#8288;r&#8288;e&#8288;e** | A 4 MB-class ultra-small, single-file portable build covering everyday features like screenshots, annotation, scrolling capture, screen recording, OCR, and pinning. | [G&#8288;e&#8288;t&#8288; i&#8288;t][releases-link] |
 | **P&#8288;r&#8288;o&#8288;f&#8288;e&#8288;s&#8288;s&#8288;i&#8288;o&#8288;n&#8288;a&#8288;l** | Built on Qt6, it offers a more complete set of professional features on top of the free edition (AI large models, screen mirror, super action, quick translate, etc.) along with ongoing update support | [G&#8288;e&#8288;t&#8288; i&#8288;t][releases-link] |
 
 ## 📦 Installation
