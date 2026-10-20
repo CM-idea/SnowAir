@@ -74,20 +74,12 @@ Configuration, language and plugins live in `%AppData%\SnowAir\` by default; to 
 </details>
 
 <details>
-<summary><strong>Build from Source</strong></summary>
+<summary><strong>Open-Source Scope</strong></summary>
 <br/>
 
-Requires Windows 10 1803+ and Visual Studio 2026. The project uses the v145 toolset; make sure to select "Desktop development with C++" during installation.
+SnowAir itself is open source under the **Apache License 2.0**. It depends on a customized Ling branch with unpublished implementation, which is not distributed here, so **building from this repository alone is not supported**.
 
-Before the first build, fetch the GUI framework Ling (not included in this repository):
-
-```powershell
-git clone --depth 1 https://github.com/xland/Ling.git Native/deps/Ling
-```
-
-Open `Native/SnowAir.slnx` in Visual Studio and build with **Release | x64**.
-
-Output: `Native/x64/Release/SnowAir.exe`.
+To run SnowAir, download `SnowAir.exe` from [SnowAir Releases](https://github.com/CM-idea/SnowAir/releases).
 
 </details>
 
@@ -139,6 +131,8 @@ Thanks to [xland](https://github.com/xland) and [ScreenCapture](https://github.c
 ## 📄 License
 
 This project is open-sourced under the **Apache License 2.0**; see [`LICENSE`](LICENSE) for the full text, and [`NOTICE`](NOTICE) for third-party components and upstream attributions.
+
+The open-source scope of this repository covers SnowAir itself; the customized Ling it depends on is not part of it.
 
 [releases-link]: https://github.com/CM-idea/SnowAir/releases
 [issues-link]: https://github.com/CM-idea/SnowAir/issues

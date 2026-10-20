@@ -74,20 +74,12 @@ SnowAir 分为两个版本，共享同一套使用体验与功能布局：
 </details>
 
 <details>
-<summary><strong>从源码编译</strong></summary>
+<summary><strong>开源范围</strong></summary>
 <br/>
 
-需要 Windows 10 1803+ 与 Visual Studio 2026，工程使用 v145 工具集，安装时需勾选「使用 C++ 的桌面开发」。
+SnowAir 本体以 **Apache License 2.0** 开源；运行依赖定制版 Ling（含未公开实现），该分支不随仓库发布，因此**不提供从源码直接构建**。
 
-首次编译前拉取 GUI 框架 Ling（不在本仓库内）：
-
-```powershell
-git clone --depth 1 https://github.com/xland/Ling.git Native/deps/Ling
-```
-
-用 Visual Studio 打开 `Native/SnowAir.slnx`，选择 **Release | x64** 生成。
-
-输出：`Native/x64/Release/SnowAir.exe`。
+需要直接使用请从 [SnowAir Releases](https://github.com/CM-idea/SnowAir/releases) 下载 `SnowAir.exe`。
 
 </details>
 
@@ -140,6 +132,8 @@ SnowAir 是本地工具，默认不上传任何截图或文本；联网仅用于
 ## 📄 许可证
 
 本项目以 **Apache License 2.0** 协议开源，全文见 [`LICENSE`](LICENSE)；第三方组件与上游署名见 [`NOTICE`](NOTICE)。
+
+本仓库的开源范围是 SnowAir 本体；所依赖的定制版 Ling 不在开源范围内。
 
 [releases-link]: https://github.com/CM-idea/SnowAir/releases
 [issues-link]: https://github.com/CM-idea/SnowAir/issues

@@ -15,31 +15,21 @@
 | [`Src/`](Src/) | 主程序源码 |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | **架构速查**（Ling 框架 / SettingUi 浮层 / WinSetting 布局 / 待修 BUG），改代码前先读 |
 | [`Lang/`](Lang/) | 多语言 JSON |
-| [`deps/Ling/`](deps/Ling/) | [Ling](https://github.com/xland/Ling) GUI 框架（需自行拉取） |
+| `deps/Ling/` | 定制版 Ling GUI 框架（未随仓库发布） |
 
-## 环境要求
+## 开发环境
+
+如需阅读或修改源码，建议安装：
 
 - Windows 10 1803+
-- Visual Studio 2022（含「使用 C++ 的桌面开发」）
+- Visual Studio 2026（v145 工具集，含「使用 C++ 的桌面开发」）
 - Windows 10 SDK
 
-## 构建
+## 构建说明
 
-**开发**：双击仓库根目录 **`启动轻雪-开发.bat`**，或在本目录执行 `dev.bat`（Debug 编译并启动，便于调试，exe 约 5 MB）。
+SnowAir 本体以 **Apache License 2.0** 开源；运行依赖定制版 Ling（含未公开实现），该分支不随仓库发布，因此不提供从源码直接构建。
 
-**发布**：
-
-```powershell
-# 1. 拉取 Ling（若 deps/Ling 不存在）
-git clone --depth 1 https://github.com/xland/Ling.git deps/Ling
-
-# 2. Release | x64
-.\build.bat
-```
-
-或双击 **`build.bat`** / 用 VS 2022 打开 `SnowAir.slnx` 生成。
-
-输出：`x64/Release/SnowAir.exe`
+需要运行请使用 [Releases](https://github.com/CM-idea/SnowAir/releases) 中的 `SnowAir.exe`。
 
 ## 命令行
 
