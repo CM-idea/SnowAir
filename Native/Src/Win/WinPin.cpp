@@ -223,7 +223,13 @@ void WinPin::applyScale(float newScale, POINT anchor)
 	setTimer(800, 101);
 	if (editing) layoutTools();
 	refresh();
-	refreshOcrPanel();
+	// 识别结果是"持续显示"的：缩放期间只暂时收起（不销毁、不丢识别结果），
+	// 停手 200ms 后再按新尺寸重建并显示回来（见 onTimerCB 的 102）
+	if (toolOcr && toolOcr->hwnd) {
+		ocrHiddenByZoom = true;
+		toolOcr->hide();
+		setTimer(200, 102);
+	}
 }
 
 void WinPin::paintScaleTip(ID2D1DeviceContext* ctx)
@@ -845,6 +851,18 @@ void WinPin::onTimerCB(UINT id)
 		refresh();
 		return;
 	}
+	if (id == 102) {
+		// 缩放停手：按新尺寸把识别结果重新对齐一次再显示回来。
+		// 顺序不能反：必须先 sync（改尺寸 + 重建叠加层），再 repaint 让它真的画出来，最后 show。
+		killTimer(102);
+		if (!toolOcr || !toolOcr->hwnd) { ocrHiddenByZoom = false; return; }
+		ocrHiddenByZoom = false;
+		if (thumbnail) return;   // 缩略图态不显示识别结果（菜单项也置灰）
+		refreshOcrPanel();
+		toolOcr->repaint();
+		toolOcr->show();
+		return;
+	}
 	annotTimer(id);
 }
 
@@ -1017,7 +1035,11 @@ void WinPin::enterThumbnail(POINT cursorClientPos)
 	setSize((float)thumb / dpi, (float)thumb / dpi);
 	setPosition(nx, ny);
 	refresh();
-	refreshOcrPanel();
+	// 缩略图态不显示识别结果（50px 的窗口里叠加层没有意义，菜单里那一项也会置灰）。
+	// 只隐藏、不销毁：退出缩略图后如果还勾着，原样恢复出来。
+	killTimer(102);
+	ocrHiddenByZoom = false;
+	if (toolOcr && toolOcr->hwnd) toolOcr->hide();
 }
 
 void WinPin::exitThumbnail()
@@ -1028,7 +1050,12 @@ void WinPin::exitThumbnail()
 	setPosition(preThumbX, preThumbY);
 	scale = preThumbScale;
 	refresh();
-	refreshOcrPanel();
+	// 退出缩略图：还勾着"显示识别结果"就原样恢复（缩略图期间只是藏起来了）
+	if (toolOcr && toolOcr->hwnd) {
+		refreshOcrPanel();
+		toolOcr->repaint();
+		toolOcr->show();
+	}
 }
 
 void WinPin::applyTopMost(bool on)
@@ -1131,6 +1158,10 @@ void WinPin::applyImageTransform(int quarterTurns, bool flipH)
 
 void WinPin::refreshOcrPanel()
 {
+	// 缩放中 / 缩略图态：先不动叠加层。缩放是逐帧的，每帧重建一遍叠加层既慢，
+	// 重建又会撞上"窗口改尺寸（SWP_NOREDRAW）还没重绘"的空档，看起来就是"一缩放结果就没了"。
+	// 这两种情况下统一等停手（定时器 102）或退出缩略图后再重建一次。
+	if (ocrHiddenByZoom || thumbnail) return;
 	if (toolOcr && toolOcr->hwnd) {
 		const D2D1_RECT_F r = D2D1::RectF(0, 0, w, h);
 		toolOcr->syncToMask(r, x, y, dpi);
@@ -1139,6 +1170,8 @@ void WinPin::refreshOcrPanel()
 
 void WinPin::toggleOcrPanel(bool copyText)
 {
+	killTimer(102);
+	ocrHiddenByZoom = false;
 	if (toolOcr) { toolOcr.reset(); refresh(); return; }
 	std::vector<BYTE> px;
 	D2D1_SIZE_U sz{};
@@ -1201,6 +1234,8 @@ void WinPin::showContextMenu(POINT screenPt)
 	});
 	add(Lang::get(L"pin.menuSaveAs"), [this]() { saveToFile(); });
 	add(Lang::get(L"pin.menuOcr"), [this]() { toggleOcrPanel(); }, true, toolOcr != nullptr);
+	// 缩略图态不提供识别结果（窗口只有 50px，叠加层没有意义）：整项置灰、不可点
+	items.back().enabled = !thumbnail;
 	sep();
 	add(Lang::get(L"pin.menuEdit"), [this]() { if (thumbnail) exitThumbnail(); setEditing(true); });
 	addSub(Lang::get(L"pin.menuTransform"), {

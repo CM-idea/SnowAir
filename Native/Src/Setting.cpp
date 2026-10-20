@@ -162,13 +162,13 @@ std::wstring Setting::getShortcutKey(const std::wstring& type)
     // 一路用带默认值的重载：启动时 ensureDefaults 已经补齐过，这里只是别让运行期
     // 意外（配置被外部改动、问了个没配过的 type）变成一次崩溃
     auto obj = configObj.GetNamedObject(L"shortcutKey", nullptr);
-    std::wstring val;
-    if (obj) {
-        val = std::wstring{ obj.GetNamedString(type, L"") };
+    // 配置里"有这一行"就以它为准 —— 包括用户按 Backspace/Delete 清空后写进去的空串，
+    // 空串 = 不绑定。只有从来没写过的行才回落到内置默认键位，
+    // 否则"清空 capture"会被误当成"没配过"，又变回 F1，清空就永远清不掉。
+    if (obj && obj.HasKey(type)) {
+        return std::wstring{ obj.GetNamedString(type, L"") };
     }
-    // 配置里没有（从没设过）→ 用内置默认键位
-    if (val.empty()) val = defaultShortcutOf(type);
-    return val;
+    return defaultShortcutOf(type);
 }
 
 // 「全局热键」页的恢复默认：清空整个 shortcutKey 对象。
@@ -181,7 +181,8 @@ void Setting::restoreShortcutKeyDefaults()
     applyHotkeys();
 }
 
-// 没有任何键位覆盖项 = 仍是出厂键位。设置页没有"清空某一行"的入口，所以存过的值必是用户改过的。
+// 没有任何键位覆盖项 = 仍是出厂键位。单行清空（Backspace/Delete）也会写进配置对象，
+// 所以只要对象非空就说明用户改过，此时「恢复默认」才可点。
 bool Setting::shortcutKeyAtDefaults()
 {
     auto obj = configObj.GetNamedObject(L"shortcutKey", nullptr);
@@ -561,8 +562,10 @@ void Setting::setFeatArray(const wchar_t* key, const JsonArray& arr)
 	save();
 }
 
-int Setting::getOcrEngine() { return featInt(L"ocrEngine", 4); }
+int Setting::getOcrEngine() { return featInt(L"ocrEngine", 0); }
 void Setting::setOcrEngine(int v) { setFeatInt(L"ocrEngine", v); }
+int Setting::getOcrResultMode() { return featInt(L"ocrResultMode", 0); }
+void Setting::setOcrResultMode(int v) { setFeatInt(L"ocrResultMode", std::clamp(v, 0, 1)); }
 std::wstring Setting::getOcrCloudConfigId() { return featStr(L"ocrCloudConfigId", L""); }
 void Setting::setOcrCloudConfigId(const std::wstring& id) { setFeatStr(L"ocrCloudConfigId", id); }
 
@@ -679,6 +682,14 @@ int Setting::getDemoDefaultTool() { return featInt(L"demoDefaultTool", 0); }
 void Setting::setDemoDefaultTool(int v) { setFeatInt(L"demoDefaultTool", v); }
 int Setting::getDemoEdgeBehavior() { return featInt(L"demoEdgeBehavior", 0); }
 void Setting::setDemoEdgeBehavior(int v) { setFeatInt(L"demoEdgeBehavior", v); }
+int Setting::getToolDefaultWidth()
+{
+	return std::clamp(featInt(L"toolDefaultWidth", 4), 1, 10);
+}
+void Setting::setToolDefaultWidth(int v)
+{
+	setFeatInt(L"toolDefaultWidth", std::clamp(v, 1, 10));
+}
 bool Setting::getAutoSaveAfterCapture() { return featBool(L"autoSaveAfterCapture", false); }
 void Setting::setAutoSaveAfterCapture(bool on) { setFeatBool(L"autoSaveAfterCapture", on); }
 std::wstring Setting::getSaveFormat() { return featStr(L"saveFormat", L"PNG (*.png)"); }
@@ -725,6 +736,8 @@ void Setting::restoreFunctionRecordDefaults()
 	setHideToolbarInRecord(true);
 	setShowKeystrokes(false);
 	setSelFollowMouse(false);
+	setRecordToolbarPeek(false);
+	setRecordDefaultPierce(false);
 	setMouseHighlight(false);
 	featuresObj().Remove(L"mouseHighlightColor");
 	save();
@@ -741,10 +754,11 @@ void Setting::restoreFunctionOutputDefaults()
 	setRecordDir(L"");
 }
 
-// 文本识别：回到内置的「系统 OCR」；云端配置（含 Key）属于用户数据，不在此列，由各自的删除按钮处理
+// 文本识别：回到默认的离线 PP-OCRv6（未安装时运行时会自动回落系统 OCR）；
+// 云端配置（含 Key）属于用户数据，不在此列，由各自的删除按钮处理
 void Setting::restoreFunctionOcrDefaults()
 {
-	setOcrEngine(4);
+	setOcrEngine(0);
 	setOcrCloudConfigId(L"");
 }
 
@@ -775,6 +789,7 @@ bool Setting::functionRecordAtDefaults()
 		&& getGifFps() == 1 && getGifFormat() == 0 && getRecordMic() == 0
 		&& getVideoEncoder() == 0 && getEncodeSpeed() == 1 && getHwAccel()
 		&& getHideToolbarInRecord() && !getShowKeystrokes() && !getSelFollowMouse()
+		&& !getRecordToolbarPeek() && !getRecordDefaultPierce()
 		&& !getMouseHighlight() && getMouseHighlightColor() == 0x0FDC78FF;
 }
 
@@ -787,7 +802,7 @@ bool Setting::functionOutputAtDefaults()
 
 bool Setting::functionOcrAtDefaults()
 {
-	return getOcrEngine() == 4 && getOcrCloudConfigId().empty();
+	return getOcrEngine() == 0 && getOcrCloudConfigId().empty();
 }
 
 bool Setting::functionTranslateAtDefaults()
@@ -819,6 +834,10 @@ bool Setting::getShowKeystrokes() { return featBool(L"showKeystrokes", false); }
 void Setting::setShowKeystrokes(bool on) { setFeatBool(L"showKeystrokes", on); }
 bool Setting::getSelFollowMouse() { return featBool(L"selFollowMouse", false); }
 void Setting::setSelFollowMouse(bool on) { setFeatBool(L"selFollowMouse", on); }
+bool Setting::getRecordToolbarPeek() { return featBool(L"recordToolbarPeek", false); }
+void Setting::setRecordToolbarPeek(bool on) { setFeatBool(L"recordToolbarPeek", on); }
+bool Setting::getRecordDefaultPierce() { return featBool(L"recordDefaultPierce", false); }
+void Setting::setRecordDefaultPierce(bool on) { setFeatBool(L"recordDefaultPierce", on); }
 bool Setting::getMouseHighlight() { return featBool(L"mouseHighlight", false); }
 void Setting::setMouseHighlight(bool on) { setFeatBool(L"mouseHighlight", on); }
 UINT32 Setting::getMouseHighlightColor()

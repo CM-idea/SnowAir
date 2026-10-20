@@ -7,6 +7,7 @@
 #include "../App.h"
 #include "../Setting.h"
 #include "../Lang.h"
+#include "../Util.h"
 // VideoMp4.hpp / VideoGif.hpp 里用的是裸 ComPtr，本项目的 pch 没有这条 using，
 // 在包含它们之前补上，头文件本身保持原样。
 using namespace Microsoft::WRL;
@@ -16,6 +17,26 @@ using namespace Microsoft::WRL;
 #include <vector>
 
 namespace {
+    // 录制临时文件名直接用「视频文件名格式」的末段。
+    // 录完点 ✓ 是把**这个临时文件**放进剪贴板，QQ/微信会原样带上文件名 ——
+    // 以前固定叫 temp.mp4 / temp.gif，粘贴出去就是 "temp"；现在和设置里看到的名字一致。
+    std::wstring recordTempPath(const std::wstring& ext)
+    {
+        auto* st = Setting::get();
+        std::wstring name = Util::previewFileName(
+            st->getVideoRecordFormat(), Setting::defaultVideoRecordFormat(), L"");
+        if (auto slash = name.find_last_of(L'/'); slash != std::wstring::npos)
+            name = name.substr(slash + 1);
+        // 格式模板是用户可编辑的：把文件名里不允许的字符换成下划线
+        for (auto& c : name) {
+            if (c == L'\\' || c == L':' || c == L'*' || c == L'?' || c == L'"'
+                || c == L'<' || c == L'>' || c == L'|' || c < 0x20) c = L'_';
+        }
+        while (!name.empty() && (name.back() == L' ' || name.back() == L'.')) name.pop_back();
+        if (name.empty()) name = L"SnowAir";
+        return (st->getDataPath() / (name + L"." + ext)).wstring();
+    }
+
     // MP4 录制失败以前是静默 return，用户那边就是"录完什么都没有"，连缓存文件都不生成。
     // 失败原因基本都在对方机器上（混合显卡笔记本把进程放在独显上跑，桌面复制就不成立），
     // 实测让用户在系统图形设置里给本程序选"节能"（把进程放回核显）能解决，
@@ -211,7 +232,6 @@ void CapVideo::startMp4(bool useSpeaker, bool useMic)
 {
     auto& cutMask = win->cutMask;
     auto* st = Setting::get();
-    auto videoTempPath = st->getDataPath();
     mp4Param = std::make_unique<VideoMp4::DESKTOPCAPTUREPARAMS>();
     // 录制中选区可整体拖动：记下开录时的原点，之后每帧按位移平移裁剪框（见 syncCaptureMove）
     capBaseX = (int)std::lround((float)win->x + cutMask->maskRect.left);
@@ -242,19 +262,23 @@ void CapVideo::startMp4(bool useSpeaker, bool useMic)
         reachable_.clear();
         if (hMon && GetMonitorInfoW(hMon, &mi)) reachable_ = reachableMonitors(mi.rcMonitor);
     }
-    mp4Param->f = videoTempPath.append(L"temp.mp4").wstring();
+    mp4Param->f = recordTempPath(L"mp4");
     mp4Param->EndMS = 0;
     // 「功能设置 → 录制」：分辨率 / 帧率 / 码率质量 / 硬件加速
     static const int kMaxOutH[]{ 480, 720, 1080, 1440, 2160 };
     mp4Param->MaxOutHeight = kMaxOutH[std::clamp(st->getVideoQuality(), 0, 4)];
-    static const int kFps[]{ 24, 30, 60 };
-    mp4Param->fps = kFps[std::clamp(st->getVideoFps(), 0, 2)];
-    // 码率档（kbps）+ 质量档（0~100）：vbrm=2 时编码器按 vbrq 定画质，BR 作为平均码率目标
-    static const int kBitrate[]{ 2500, 6000, 12000 };
+    // 「视频帧率」：0/1/2 保持原来的 24/30/60，后面追加低帧率（体积更小）
+    static const int kFps[]{ 24, 30, 60, 15, 10, 5 };
+    mp4Param->fps = kFps[std::clamp(st->getVideoFps(), 0, 5)];
+    // 质量档（0~100）：录屏走 Quality 模式 —— 静止画面只花很少码率，动态画面优先保画质。
+    // ★ 必须显式设 vbrm=2，否则 VideoMp4 里"按 vbrq 定质量"的分支不会执行，
+    //   编码器会走驱动默认码控（经常是 CBR），体积既大又不听这个选项的。
+    static const int kBitrate[]{ 2500, 6000, 12000 };   // 平均码率目标（部分 MFT 需要）
     static const int kQuality[]{ 40, 50, 60 };
     const int speed = std::clamp(st->getEncodeSpeed(), 0, 2);
     mp4Param->BR = kBitrate[speed];
     mp4Param->vbrq = kQuality[speed];
+    mp4Param->vbrm = 2;                                  // 质量优先
     mp4Param->Qu = 50;
     mp4Param->HwTransforms = st->getHwAccel();
     mp4Param->MustEnd = false;
@@ -322,7 +346,6 @@ void CapVideo::startMp4(bool useSpeaker, bool useMic)
 void CapVideo::startGif()
 {
     auto& cutMask = win->cutMask;
-    auto videoTempPath = Setting::get()->getDataPath();
     gifParam = std::make_unique<VideoGif::GifParam>();
     // 同 MP4：记下开录时的原点，录制中整体拖动时按位移平移抓取区域
     capBaseX = (int)std::lround((float)win->x + cutMask->maskRect.left);
@@ -335,9 +358,9 @@ void CapVideo::startGif()
     // WebP 依赖系统的 WIC WebP 编码器，缺失时退回 GIF —— 否则会写出与扩展名不符的内容
     int gifFmt = std::clamp(Setting::get()->getGifFormat(), 0, 2);
     if (gifFmt == 1 && !VideoGif::webpEncoderAvailable()) gifFmt = 0;
-    static const wchar_t* kGifTemp[]{ L"temp.gif", L"temp.webp", L"temp.png" };
+    static const wchar_t* kGifExt[]{ L"gif", L"webp", L"png" };
     gifParam->format = gifFmt;
-    gifParam->path = videoTempPath.append(kGifTemp[gifFmt]).wstring();
+    gifParam->path = recordTempPath(kGifExt[gifFmt]);
     // 「功能设置 → 录制 → 动图帧率」：10 / 15 / 24
     static const int kGifFps[]{ 10, 15, 24 };
     gifParam->fps = (UINT)kGifFps[std::clamp(Setting::get()->getGifFps(), 0, 2)];
@@ -386,11 +409,11 @@ bool CapVideo::onSaveKey(bool toClipboard)
     return tool ? tool->onSaveKey(toClipboard) : false;
 }
 
-std::wstring CapVideo::stop()
+std::wstring CapVideo::stop(bool hideHost)
 {
     if (!mp4Param && !gifParam) return L"";
-    // 遮罩也别留在屏幕上，录完这一帧就该收工了
-    win->hide();
+    // 遮罩也别留在屏幕上，录完这一帧就该收工了（演示画布内录屏时不能隐藏宿主）
+    if (hideHost) win->hide();
     std::wstring filePath;
     if (mp4Param) {
         mp4Param->MustEnd = true;

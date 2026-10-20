@@ -119,6 +119,8 @@ private:
 	ZoomMode zoomMode{ ZoomMode::Direct };
 	float cropScale{ 1.f };
 	float cropCenterX{ -1.f }, cropCenterY{ -1.f };
+	// 缩放中识别结果被暂时收起（只隐藏不销毁），停手后由定时器恢复（见 onTimerCB 的 102）
+	bool ocrHiddenByZoom{ false };
 	// —— 外观/状态 ——
 	int opacityPercent{ 100 };
 	bool topMost{ true };

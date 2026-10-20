@@ -9,6 +9,7 @@
 #include "./Win/WinCap.h"
 #include "./Win/WinPin.h"
 #include "./Win/WinSetting.h"
+#include "./Win/ScreenCapture.h"
 
 std::unique_ptr<App> app;
 
@@ -84,8 +85,8 @@ void App::createBitmapFromBGRA(int w, int h, const std::vector<BYTE>& data, ID2D
 void App::takeScreenShot(int x, int y, int w, int h, ID2D1Bitmap1** img)
 {
     // GDI 抓屏（BitBlt+GetDIBits）与建位图分开：前者可放工作线程（见 WinCap::init），
-    // 这里保留同步实现供兜底路径使用。
-    auto data = Util::captureScreen(x, y, w, h);
+    // 这里保留同步实现供兜底路径使用。截图走 ScreenCapture（HDR 屏优先生效），失败回退 GDI。
+    auto data = ScreenCapture::captureOrGdi(x, y, w, h);
     createBitmapFromBGRA(w, h, data, img);
 }
 
@@ -125,7 +126,7 @@ void App::captureFullScreenSilent()
 {
 	auto [sx, sy, sw, sh] = getScreenArea();
 	if (sw <= 0 || sh <= 0) return;
-	auto pixels = Util::captureScreen(sx, sy, sw, sh);
+	auto pixels = ScreenCapture::captureOrGdi(sx, sy, sw, sh);
 	if (pixels.empty()) return;
 
 	// 文件名与「功能设置 → 文件输出 → 手动保存文件名格式」同一套模板（默认 SnowAir_{{YYYY-MM-DD_HH-mm-ss}}），
@@ -161,7 +162,7 @@ void App::captureFocusedWindowSilent()
 
 	// 应用名要在覆盖/任何窗口出现前取（此刻前台仍是目标窗口）
 	const std::wstring appName = Util::foregroundAppName();
-	auto pixels = Util::captureScreen(rc.left, rc.top, w, h);
+	auto pixels = ScreenCapture::captureOrGdi(rc.left, rc.top, w, h);
 	if (pixels.empty()) return;
 
 	const std::wstring ext = Util::extensionFromSaveFormat(Setting::get()->getSaveFormat());
@@ -189,7 +190,7 @@ void App::captureLastRegionSilent()
 	if (ry + rh > sy + sh) rh = sy + sh - ry;
 	if (rw <= 0 || rh <= 0) return;
 
-	auto pixels = Util::captureScreen(rx, ry, rw, rh);
+	auto pixels = ScreenCapture::captureOrGdi(rx, ry, rw, rh);
 	if (pixels.empty()) return;
 
 	// 与手动「区域截图」收工一致：进剪贴板 + 记历史；勾了「截图后自动保存」才静默落盘

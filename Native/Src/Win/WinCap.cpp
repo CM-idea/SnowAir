@@ -27,6 +27,7 @@
 #include "../Tool/ToolbarChrome.h"
 #include "CaptureEsc.h"
 #include "CaptureShield.h"
+#include "ScreenCapture.h"
 #include "../Tip.h"
 #include "../Setting.h"
 #include "../App.h"
@@ -34,8 +35,85 @@
 #include "../Translate/TranslateTypes.h"
 #include <sstream>
 #include <algorithm>
+#include <filesystem>
 #include <thread>
+#include <wincodec.h>
+#include <shobjidl.h>
+#include <shellapi.h>
+#include <commdlg.h>
+#include <oleauto.h>
+#include <cstdarg>
+#pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "oleaut32.lib")
 using namespace Microsoft::WRL;
+
+// 选区矩形 → 截图像素矩形：左/上向下取整，右/下向上取整。
+// 选区在 DPI 换算或补间后可能带小数，按宽度截断会丢掉右/下边那一列像素；
+// 向外对齐才能保证截图边界和屏幕上看到的选框一致。
+static D2D1_RECT_U pixelAlignedRect(const D2D1_RECT_F& r)
+{
+	return D2D1::RectU((UINT32)std::floor(r.left), (UINT32)std::floor(r.top),
+		(UINT32)std::ceil(r.right), (UINT32)std::ceil(r.bottom));
+}
+
+// ===================== 录制期选框层（排除捕获） =====================
+// 录制画面来自桌面复制，屏幕上的选框描边/控点也会被一起录进去（描边以选区边界为中心线，
+// 一半落在录制区域内）。WDA_EXCLUDEFROMCAPTURE 只能整窗排除，而主窗口还要录标注、鼠标高亮，
+// 不能排除 —— 于是把选框 chrome 单独放到这个透明、鼠标穿透的置顶窗里，只排除它。
+class SelectionChrome : public Ling::WinBase
+{
+public:
+	explicit SelectionChrome(WinCap* owner) : owner_(owner)
+	{
+		dpi = (owner && owner->dpi > 0.f) ? owner->dpi : 1.f;
+		// 和演示画布的穿透同一套：WS_EX_LAYERED + WS_EX_TRANSPARENT + 分层 alpha 255，
+		// 系统才会在命中测试里整窗跳过它（只加 WS_EX_TRANSPARENT 对 Composition 窗口不生效，
+		// 会把整屏点击吃掉 —— 工具栏点不动、鼠标穿透也到不了桌面）。
+		createNativeWindow(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
+			| WS_EX_LAYERED | WS_EX_TRANSPARENT, WS_POPUP);
+		SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+	}
+	~SelectionChrome()
+	{
+		if (hwnd) { close(); hwnd = nullptr; }
+	}
+	// 与主窗口同位置同尺寸（物理像素）：cutMask 的客户坐标在这里可以直接复用
+	void place(int px, int py, int pw, int ph)
+	{
+		setPosition(px, py);
+		setSize((float)pw / dpi, (float)ph / dpi);
+		show();
+		refresh();
+	}
+protected:
+	// 只显示、不接收鼠标：WS_EX_TRANSPARENT 对非分层（Composition）窗口不保证穿透，
+	// 必须让 WM_NCHITTEST 返回 HTTRANSPARENT —— 系统会把这一下继续交给同线程的下层窗口
+	// （工具栏在上面时优先给工具栏，否则给 WinCap 主窗口）。否则开始录制后整块屏幕（含工具栏）
+	// 的点击都会被这层吃掉，表现为"工具栏点不动"。
+	LRESULT onHitTest(const POINT) override { return HTTRANSPARENT; }
+	void onCreated() override
+	{
+		body->setBg(0);
+		canvas_ = body->makeChild<Ling::Canvas>();
+		// 不建 swap chain：这层每秒只重画几次（选框移动时），单缓冲足够；
+		// 全屏 swap chain 会多吃一整套全屏缓冲（4K 下约 30MB+），对录制内存不划算。
+		canvas_->setSizePercent(100.f, 100.f);
+	}
+	void layout() override
+	{
+		Ling::WinBase::layout();
+		if (!canvas_ || !owner_ || !owner_->cutMask) return;
+		auto ctx = canvas_->startPaint();
+		if (!ctx) return;
+		ctx->Clear(0);
+		owner_->cutMask->paintChrome(ctx);
+		canvas_->finishPaint();
+	}
+private:
+	WinCap* owner_{ nullptr };
+	Ling::Canvas* canvas_{ nullptr };
+};
 
 namespace
 {
@@ -101,20 +179,20 @@ namespace
 
 	std::wstring keyComboText(DWORD vk)
 	{
-		// 纯修饰键不单独显示（否则按住 Ctrl 时会先冒一个"Ctrl +"）
-		switch (vk) {
-		case VK_LCONTROL: case VK_RCONTROL: case VK_CONTROL:
-		case VK_LSHIFT:   case VK_RSHIFT:   case VK_SHIFT:
-		case VK_LMENU:    case VK_RMENU:    case VK_MENU:
-		case VK_LWIN:     case VK_RWIN:
-			return L"";
-		default: break;
-		}
+		// 修饰键按下就先显示到 "+" 为止（例如 "Ctrl + "），等主键按下再续成 "Ctrl + C"。
+		const bool isCtrl = (vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_CONTROL);
+		const bool isShift = (vk == VK_LSHIFT || vk == VK_RSHIFT || vk == VK_SHIFT);
+		const bool isAlt = (vk == VK_LMENU || vk == VK_RMENU || vk == VK_MENU);
+		const bool isWin = (vk == VK_LWIN || vk == VK_RWIN);
+
 		std::wstring s;
-		if (GetAsyncKeyState(VK_CONTROL) & 0x8000) s += L"Ctrl + ";
-		if (GetAsyncKeyState(VK_SHIFT) & 0x8000) s += L"Shift + ";
-		if (GetAsyncKeyState(VK_MENU) & 0x8000) s += L"Alt + ";
-		if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN)) & 0x8000) s += L"Win + ";
+		if (isCtrl || (GetAsyncKeyState(VK_CONTROL) & 0x8000)) s += L"Ctrl + ";
+		if (isShift || (GetAsyncKeyState(VK_SHIFT) & 0x8000)) s += L"Shift + ";
+		if (isAlt || (GetAsyncKeyState(VK_MENU) & 0x8000)) s += L"Alt + ";
+		if (isWin || ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN)) & 0x8000)) s += L"Win + ";
+		// 纯修饰键：只显示组合前缀，不当作主键处理
+		if (isCtrl || isShift || isAlt || isWin) return s;
+
 		UINT sc = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
 		LONG lp = (LONG)(sc << 16);
 		wchar_t nameW[64]{};
@@ -179,12 +257,39 @@ WinCap::WinCap() : AnnotHost()
     onMouseUp.add([this](POINT pos, bool isRight) { this->onUp(pos, isRight); });
     onKeyDown.add([this](UINT key) { this->onKey(key); });
     onTimer.add([this](UINT id) {
+		// 未框选时 Ctrl+C 只取色：提示显示完后退出截图（期间用户开始框选/按下则取消）
+		if (id == colorCopyCloseTimerId) {
+			killTimer(colorCopyCloseTimerId);
+			if (stage == CapStage::Select && !isPress) close();
+			return;
+		}
 		annotTimer(id);
 		if (capLong) capLong->onTimerCB(id);
 		if (cutMask) cutMask->onHoverDwellTimer(id);
 		if (cutMask) cutMask->onHoverAnimTick(id);
 		if (id == keyOverlayTimerId) onKeyOverlayTimer();
 		if (id == recCursorTimerId) { updateSelFollowCursor(); updateMouseHighlight(); }
+		if (id == boardPierceTimerId) demoBoardApplyPierce();
+		if (id == demoRecTickTimerId) {
+			if (demoRecRunning_ && !demoRecPaused_) {
+				++demoRecElapsed_;
+				// 动图仍有 10 分钟上限（与录屏工具栏一致）：到点自动收工并弹保存框
+				if (demoRecGif_ && demoRecElapsed_ >= 10 * 60) { demoRecSaveAs(); return; }
+				if (toolSub) toolSub->refreshDemoRecState();
+			}
+		}
+		if (id == pptRaiseTimerId) {
+			// PPT 放映窗是后出现的 TOPMOST：把它压回下面，画布和工具栏重新置顶
+			killTimer(pptRaiseTimerId);
+			if (hwnd) SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+				SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+			if (toolCap && toolCap->hwnd) SetWindowPos(toolCap->hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+				SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+			// COM 没给出 HWND 时，放映窗这时已经建出来了
+			if (demoBoard_.mode == DemoBoard::Mode::Ppt && (!demoBoard_.pptWnd || !IsWindow(demoBoard_.pptWnd)))
+				demoBoard_.pptWnd = demoBoardPptWindow();
+			refresh();
+		}
 	});
     onMouseWheel.add([this](POINT pos, float space) { this->onWheel(pos, space); });
     onDestroy.add([this]() { this->onClosed(); });
@@ -234,7 +339,8 @@ void WinCap::init(StartMode mode)
     auto grab = std::make_shared<std::vector<BYTE>>();
     std::thread([grab, sx, sy, sw, sh, app, mode]() {
         // 演示画布不用底图（实时桌面），省掉这次抓屏
-        if (mode != StartMode::Demo) *grab = Util::captureScreen(sx, sy, sw, sh);
+        // 截图统一走 ScreenCapture：HDR 屏用 DXGI 桌面复制（系统做 HDR→SDR），失败再回退 GDI
+        if (mode != StartMode::Demo) *grab = ScreenCapture::captureOrGdi(sx, sy, sw, sh);
         app->dq.TryEnqueue([grab, mode]() {
             CaptureShield::arm();   // 抓屏完成后再铺盾牌：不遮挡目标窗口的悬停态
             WinCap::initNow(mode, grab);
@@ -333,17 +439,949 @@ void WinCap::toggleDemoThrough()
     refresh();
 }
 
+// ---------------- 演示画布：屏幕录制 ----------------
+// 演示里的录制不切 CapStage::Video：画布（标注/白板）继续留在屏幕上被录进去，
+// CapVideo 只负责采集与编码；属性栏仍挂在演示工具栏下方。
+void WinCap::toggleDemoRecorder()
+{
+	if (!demoMode) return;
+	ensureHistory();
+	const bool barShown = toolSub && toolSub->demoRecToolsBuilt();
+	// 再点一次 = 收起属性栏；录制中收起栏不影响录制，按钮仍保持选中态
+	if (barShown) { closeDemoRecBar(); return; }
+	demoRecBarOpen_ = true;
+	if (toolCap) toolCap->setDemoRecordState(true);
+	if (toolSub) {
+		toolSub->bindOwner(hwnd);
+		// 属性栏不能出现在录制画面里；录制停止时恢复（见 stopDemoRecording）
+		App::excludeFromCapture(toolSub->hwnd);
+		toolSub->showDemoRecTools();
+	}
+	layoutTools();
+	refresh();
+}
+
+void WinCap::closeDemoRecBar()
+{
+	demoRecBarOpen_ = false;
+	// 录制中收栏不解锁选中态：按钮同时表示"正在录制"
+	if (toolCap) toolCap->setDemoRecordState(demoRecRunning_);
+	if (toolSub) toolSub->hideTools();
+	refresh();
+}
+
+void WinCap::startDemoRecording()
+{
+	if (!demoMode || demoRecRunning_ || !cutMask) return;
+	if (!capVideo) capVideo = std::make_unique<CapVideo>(this);
+	// 工具栏/属性栏是独立顶层窗：不排除的话会被录进画面
+	if (toolCap) App::excludeFromCapture(toolCap->hwnd);
+	if (toolSub) App::excludeFromCapture(toolSub->hwnd);
+	cutMask->hideLabel = true;
+	if (demoRecGif_) capVideo->startGif();
+	else capVideo->startMp4(demoRecAudio_, demoRecMic_);
+	if (Setting::get()->getShowKeystrokes()) startKeyOverlay();
+	demoRecRunning_ = true;
+	demoRecPaused_ = false;
+	demoRecElapsed_ = 0;
+	setTimer(1000, demoRecTickTimerId);
+	if (toolCap) toolCap->setDemoRecordState(true);
+	if (toolSub) toolSub->refreshDemoRecState();
+	refresh();
+}
+
+std::wstring WinCap::stopDemoRecording(bool deleteFile)
+{
+	if (!demoRecRunning_) return L"";
+	killTimer(demoRecTickTimerId);
+	stopKeyOverlay();
+	// hideHost=false：停止采集后画布必须留在屏幕上（演示模式不能跟着一起隐藏）
+	std::wstring path = capVideo ? capVideo->stop(false) : L"";
+	demoRecRunning_ = false;
+	demoRecPaused_ = false;
+	demoRecElapsed_ = 0;
+	App::clearCaptureExclusion(toolCap ? toolCap->hwnd : nullptr);
+	App::clearCaptureExclusion(toolSub ? toolSub->hwnd : nullptr);
+	// 录制中若被别的工具顶掉属性栏，停止后按钮不该再显示选中态
+	demoRecBarOpen_ = toolSub && toolSub->demoRecToolsBuilt();
+	if (toolCap) toolCap->setDemoRecordState(demoRecBarOpen_);
+	if (toolSub) toolSub->refreshDemoRecState();
+	refresh();
+	if (deleteFile) {
+		if (!path.empty()) DeleteFileW(path.c_str());
+		path.clear();
+	}
+	return path;
+}
+
+void WinCap::demoRecToggle()
+{
+	if (!demoMode) return;
+	if (!demoRecRunning_) {
+		// 快捷键直接开录时把属性栏一并摆出来，让计时与暂停/完成可见
+		// （工具栏整体被隐藏时不单独冒出来）
+		if (!toolHidden && (!toolSub || !toolSub->chromeVisible() || !toolSub->demoRecToolsBuilt()))
+			toggleDemoRecorder();
+		startDemoRecording();
+		return;
+	}
+	demoRecPaused_ = !demoRecPaused_;
+	if (capVideo) capVideo->setPaused(demoRecPaused_);
+	if (toolSub) toolSub->refreshDemoRecState();
+	refresh();
+}
+
+void WinCap::demoRecToggleAudio()
+{
+	if (demoRecRunning_ || demoRecGif_) return;
+	demoRecAudio_ = !demoRecAudio_;
+	if (toolSub) toolSub->refreshDemoRecState();
+}
+
+void WinCap::demoRecToggleMic()
+{
+	if (demoRecRunning_ || demoRecGif_) return;
+	demoRecMic_ = !demoRecMic_;
+	if (toolSub) toolSub->refreshDemoRecState();
+}
+
+void WinCap::demoRecToggleGif()
+{
+	if (demoRecRunning_) return;
+	demoRecGif_ = !demoRecGif_;
+	if (toolSub) toolSub->refreshDemoRecState();
+}
+
+void WinCap::demoRecSaveAs()
+{
+	if (!demoRecRunning_) return;
+	auto srcPath = stopDemoRecording(false);
+	if (srcPath.empty()) return;
+	// 与 ToolVideo::saveFile 同一套命名/目录规则；录完留在演示画布
+	auto* st = Setting::get();
+	std::wstring ext = std::filesystem::path(srcPath).extension().wstring();
+	if (!ext.empty() && ext[0] == L'.') ext.erase(0, 1);
+	if (ext.empty()) ext = demoRecGif_ ? L"gif" : L"mp4";
+	std::wstring defName = Util::previewFileName(
+		st->getVideoRecordFormat(), Setting::defaultVideoRecordFormat(), L"");
+	if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos) defName = defName.substr(slash + 1);
+	// 画布是置顶全屏窗：用 hwnd 做 owner，保存框才会压在画布之上且模态
+	auto tarPath = Util::getSaveFilePath(hwnd, ext, defName, st->getRecordDir());
+	if (!tarPath.empty() && CopyFileW(srcPath.c_str(), tarPath.c_str(), FALSE)) {
+		// 历史封面用收工这一刻的选区画面（HDR 屏走 ScreenCapture，避免 GDI 抓黑）
+		int vw = 0, vh = 0;
+		std::vector<BYTE> cover;
+		if (cutMask) {
+			const auto& sel = cutMask->maskRect;
+			const int cx = x + (int)sel.left;
+			const int cy = y + (int)sel.top;
+			const int cw2 = (int)(sel.right - sel.left);
+			const int ch2 = (int)(sel.bottom - sel.top);
+			if (cw2 > 0 && ch2 > 0) {
+				cover = ScreenCapture::captureOrGdi(cx, cy, cw2, ch2);
+				if (cover.size() == (size_t)cw2 * (size_t)ch2 * 4) { vw = cw2; vh = ch2; }
+				else cover.clear();
+			}
+		}
+		st->addHistoryMedia(tarPath, vw, vh, L"record", cover);
+	}
+	DeleteFileW(srcPath.c_str());
+	refresh();
+}
+
+void WinCap::demoRecCancel()
+{
+	if (!demoRecRunning_) return;
+	stopDemoRecording(true);
+	// 取消 = 不保存 + 留在演示，同时收起属性栏并恢复按钮常态
+	closeDemoRecBar();
+}
+
+void WinCap::demoRecFinish()
+{
+	if (!demoRecRunning_) return;
+	auto path = stopDemoRecording(false);
+	if (!path.empty()) Util::addFileToClipboard(path);
+	exitDemoCanvas();
+}
+
+// ---------------- 演示画布：白板背景 ----------------
+namespace {
+    constexpr float kBoardMin{ 80.f };      // 背景最小宽/高（逻辑）
+    constexpr float kBoardGrab{ 10.f };     // 边缘命中带宽（逻辑）
+
+    bool IsPptPath(const std::wstring& path)
+    {
+        const size_t dot = path.find_last_of(L'.');
+        if (dot == std::wstring::npos) return false;
+        std::wstring ext = path.substr(dot);
+        for (auto& ch : ext) ch = (wchar_t)towlower(ch);
+        return ext == L".ppt" || ext == L".pptx" || ext == L".pptm"
+            || ext == L".pps" || ext == L".ppsx"
+            || ext == L".dps" || ext == L".dpt";   // WPS 演示自己的格式
+    }
+
+    bool LoadBoardBitmap(IWICImagingFactory* wic, ID2D1DeviceContext* d2d, const std::wstring& path,
+        ComPtr<ID2D1Bitmap>& out, UINT32& outW, UINT32& outH)
+    {
+        if (!wic || !d2d) return false;
+        ComPtr<IWICBitmapDecoder> dec;
+        if (FAILED(wic->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+            WICDecodeMetadataCacheOnDemand, dec.GetAddressOf())) || !dec) return false;
+        ComPtr<IWICBitmapFrameDecode> frame;
+        if (FAILED(dec->GetFrame(0, frame.GetAddressOf())) || !frame) return false;
+        ComPtr<IWICFormatConverter> conv;
+        if (FAILED(wic->CreateFormatConverter(conv.GetAddressOf())) || !conv) return false;
+        if (FAILED(conv->Initialize(frame.Get(), GUID_WICPixelFormat32bppPBGRA,
+            WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))) return false;
+        UINT bw = 0, bh = 0;
+        if (FAILED(conv->GetSize(&bw, &bh)) || bw == 0 || bh == 0) return false;
+        const UINT stride = bw * 4;
+        std::vector<BYTE> px((size_t)stride * bh);
+        if (FAILED(conv->CopyPixels(nullptr, stride, (UINT)px.size(), px.data()))) return false;
+        D2D1_BITMAP_PROPERTIES props{};
+        props.pixelFormat = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+            D2D1_ALPHA_MODE_PREMULTIPLIED);
+        props.dpiX = 96.f;
+        props.dpiY = 96.f;
+        if (FAILED(d2d->CreateBitmap(D2D1::SizeU(bw, bh), px.data(), stride, &props,
+            out.GetAddressOf())) || !out) return false;
+        outW = bw;
+        outH = bh;
+        return true;
+    }
+
+    // ---------- PPT 放映：IDispatch 晚绑定 ----------
+    // 不引用类型库，按成员名调用；Microsoft PowerPoint 与 WPS 演示（KWPP.Application）共用一套。
+
+    // WPS 的自动化服务经常处于"忙"状态（启动、云同步、模态提示），会直接拒绝调用。
+    // 这类 HRESULT 是"稍后重试"的意思，不是真的失败，必须重试，否则表现为"打开没反应"。
+    bool PptRetryable(HRESULT hr)
+    {
+        return hr == RPC_E_CALL_REJECTED || hr == RPC_E_SERVERCALL_RETRYLATER;
+    }
+
+    // 排障用：把每一步的 HRESULT 落到 %TEMP%\SnowAir-ppt.log（追加，不影响功能）
+    void PptLog(const wchar_t* fmt, ...)
+    {
+        wchar_t body[1024]{};
+        va_list ap;
+        va_start(ap, fmt);
+        vswprintf_s(body, fmt, ap);
+        va_end(ap);
+        wchar_t tmp[MAX_PATH]{};
+        if (!GetTempPathW(MAX_PATH, tmp)) return;
+        const std::wstring file = std::wstring(tmp) + L"SnowAir-ppt.log";
+        HANDLE h = CreateFileW(file.c_str(), FILE_APPEND_DATA,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return;
+        SYSTEMTIME st{};
+        GetLocalTime(&st);
+        wchar_t line[1200]{};
+        const int n = swprintf_s(line, L"[%02d:%02d:%02d.%03d] %s\r\n",
+            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, body);
+        DWORD written = 0;
+        if (n > 0) WriteFile(h, line, (DWORD)n * sizeof(wchar_t), &written, nullptr);
+        CloseHandle(h);
+    }
+
+    bool PptId(IDispatch* obj, const wchar_t* name, DISPID& id)
+    {
+        if (!obj) return false;
+        LPOLESTR n = const_cast<LPOLESTR>(name);
+        id = 0;
+        HRESULT hr = E_FAIL;
+        for (int i = 0; i < 40; ++i) {
+            hr = obj->GetIDsOfNames(IID_NULL, &n, 1, LOCALE_USER_DEFAULT, &id);
+            if (!PptRetryable(hr)) break;
+            Sleep(50);
+        }
+        return SUCCEEDED(hr);
+    }
+
+    // args 按书写顺序传入；DISPPARAMS 要逆序，这里翻转，并在调用后统一释放。
+    bool PptInvoke(IDispatch* obj, const wchar_t* name, WORD flags,
+        std::vector<VARIANT> args, VARIANT* out)
+    {
+        DISPID id = 0;
+        if (!PptId(obj, name, id)) {
+            for (auto& a : args) VariantClear(&a);
+            return false;
+        }
+        std::reverse(args.begin(), args.end());
+        DISPPARAMS dp{};
+        dp.cArgs = (UINT)args.size();
+        dp.rgvarg = args.empty() ? nullptr : args.data();
+        VARIANT local;
+        VariantInit(&local);
+        if (out) VariantInit(out);
+        HRESULT hr = E_FAIL;
+        for (int i = 0; i < 40; ++i) {
+            hr = obj->Invoke(id, IID_NULL, LOCALE_USER_DEFAULT, flags, &dp,
+                out ? out : &local, nullptr, nullptr);
+            if (!PptRetryable(hr)) break;
+            Sleep(50);
+        }
+        for (auto& a : args) VariantClear(&a);
+        if (!out) VariantClear(&local);
+        return SUCCEEDED(hr);
+    }
+
+    bool PptGet(IDispatch* obj, const wchar_t* name, VARIANT* out)
+    {
+        return PptInvoke(obj, name, DISPATCH_PROPERTYGET, {}, out);
+    }
+
+    bool PptPut(IDispatch* obj, const wchar_t* name, VARIANT value)
+    {
+        DISPID id = 0;
+        if (!PptId(obj, name, id)) { VariantClear(&value); return false; }
+        DISPID putId = DISPID_PROPERTYPUT;
+        DISPPARAMS dp{};
+        dp.rgvarg = &value;
+        dp.cArgs = 1;
+        dp.rgdispidNamedArgs = &putId;
+        dp.cNamedArgs = 1;
+        HRESULT hr = E_FAIL;
+        for (int i = 0; i < 40; ++i) {
+            hr = obj->Invoke(id, IID_NULL, LOCALE_USER_DEFAULT,
+                DISPATCH_PROPERTYPUT, &dp, nullptr, nullptr, nullptr);
+            if (!PptRetryable(hr)) break;
+            Sleep(50);
+        }
+        VariantClear(&value);
+        return SUCCEEDED(hr);
+    }
+
+    // 取子对象（属性或返回对象的调用都能覆盖），失败返回空
+    ComPtr<IDispatch> PptChild(IDispatch* obj, const wchar_t* name)
+    {
+        VARIANT v;
+        VariantInit(&v);
+        ComPtr<IDispatch> child;
+        if (PptGet(obj, name, &v) && v.vt == VT_DISPATCH && v.pdispVal)
+            child = v.pdispVal;                      // ComPtr 赋值会自动 AddRef
+        VariantClear(&v);
+        return child;
+    }
+
+    // 放映窗 HWND 属性是 Long；个别实现不提供，调用方再回退到枚举 screenClass
+    HWND PptWindowOf(IDispatch* show)
+    {
+        VARIANT v;
+        VariantInit(&v);
+        HWND h = nullptr;
+        if (PptGet(show, L"HWND", &v)) {
+            if (v.vt == VT_I4) h = (HWND)(INT_PTR)v.lVal;
+            else if (v.vt == VT_I8) h = (HWND)(INT_PTR)v.llVal;
+            else if (v.vt == VT_UI4) h = (HWND)(INT_PTR)v.ulVal;
+        }
+        VariantClear(&v);
+        return h;
+    }
+
+    ComPtr<IDispatch> PptCreateApp()
+    {
+        static const wchar_t* kProgIds[] = { L"PowerPoint.Application", L"KWPP.Application" };
+        for (auto prog : kProgIds) {
+            CLSID clsid{};
+            HRESULT hr = CLSIDFromProgID(prog, &clsid);
+            PptLog(L"CLSIDFromProgID(%s) hr=0x%08X", prog, hr);
+            if (FAILED(hr)) continue;
+            ComPtr<IDispatch> app;
+            for (int i = 0; i < 40; ++i) {
+                hr = CoCreateInstance(clsid, nullptr, CLSCTX_LOCAL_SERVER,
+                    IID_PPV_ARGS(app.GetAddressOf()));
+                if (!PptRetryable(hr)) break;
+                Sleep(50);
+            }
+            PptLog(L"CoCreateInstance(%s) hr=0x%08X app=%p", prog, hr, app.Get());
+            if (SUCCEEDED(hr) && app) return app;
+        }
+        return nullptr;
+    }
+}
+
+void WinCap::toggleDemoBoard()
+{
+    if (!demoMode) return;
+    if (!demoBoardActive()) {
+        demoBoard_.mode = DemoBoard::Mode::Color;
+        demoBoard_.color = 0xFFFFFFFF;             // 默认白色
+        demoBoard_.opacity = 100;
+        demoBoard_.rect = D2D1::RectF(0.f, 0.f, (float)w, (float)h);
+        demoBoard_.adjust = false;
+        demoBoard_.pages.clear();
+        demoBoard_.page = 0;
+        demoBoard_.chips.clear();
+        if (toolCap) toolCap->setDemoBoardState(true);
+        ensureHistory();
+        if (toolSub) toolSub->showBoardTools();
+        demoBoardBarOpen_ = true;
+        // 打开白板属性栏时临时取消渐隐画笔：用户此时多半是要编辑背景，
+        // 留着它会在点背景边缘时落下渐隐笔迹；收起属性栏时再还原。
+        if (toolCap && toolCap->curId == L"laser") {
+            toolCap->cancelSelect();
+            restoreLaserOnBoardBarClose_ = true;
+        }
+        layoutTools();                              // 属性栏首次显示要靠这里定位/现身
+        setMouseTransparent(isMouseTransparent);   // 穿透改为"按点让开"
+        refresh();
+        return;
+    }
+    // 已开启：只收/展属性栏，背景保留
+    if (!toolSub) return;
+    if (toolSub->boardToolsVisible()) {
+        toolSub->hideTools();
+        demoBoardBarOpen_ = false;
+        restoreTemporaryLaser();
+    }
+    else {
+        toolSub->showBoardTools();
+        demoBoardBarOpen_ = true;
+        if (toolCap && toolCap->curId == L"laser") {
+            toolCap->cancelSelect();
+            restoreLaserOnBoardBarClose_ = true;
+        }
+    }
+    layoutTools();
+    refresh();
+}
+
+void WinCap::restoreDemoBoardBar()
+{
+    // 只有"编辑背景"状态下，选标注工具才算背景标注阶段：工具属性栏是临时替换，
+    // 取消工具后要把白板属性栏还回来。平时选标注工具就是直接收起白板属性栏。
+    if (!demoMode || !demoBoardActive() || !demoBoard_.adjust || !demoBoardBarOpen_ || !toolSub) return;
+    toolSub->showBoardTools();
+    layoutTools();
+}
+
+void WinCap::restoreTemporaryLaser()
+{
+    if (!restoreLaserOnBoardBarClose_) return;
+    restoreLaserOnBoardBarClose_ = false;
+    if (toolCap) toolCap->restoreToolSelection(L"laser");
+    refresh();
+}
+
+void WinCap::demoBoardClear()
+{
+    if (!demoBoardActive()) {
+        if (toolSub) toolSub->hideTools();
+        return;
+    }
+    demoBoardStopPpt();
+    demoBoard_.mode = DemoBoard::Mode::None;
+    demoBoardBarOpen_ = false;
+    demoBoard_.opacity = 100;
+    demoBoard_.adjust = false;
+    demoBoard_.dragging = false;
+    demoBoard_.pages.clear();
+    demoBoard_.page = 0;
+    demoBoard_.chips.clear();
+    if (toolCap) toolCap->setDemoBoardState(false);
+    if (toolSub) toolSub->hideTools();
+    restoreTemporaryLaser();
+    layoutTools();
+    setMouseTransparent(isMouseTransparent);
+    refresh();
+}
+
+void WinCap::demoBoardSetColor(UINT32 color)
+{
+    if (!demoMode) return;
+    if (demoBoard_.mode == DemoBoard::Mode::Ppt) demoBoardStopPpt();
+    if (demoBoard_.mode != DemoBoard::Mode::Color) {
+        demoBoard_.pages.clear();
+        demoBoard_.page = 0;
+        demoBoard_.chips.clear();
+        demoBoard_.rect = D2D1::RectF(0.f, 0.f, (float)w, (float)h);
+        demoBoard_.adjust = false;
+    }
+    demoBoard_.mode = DemoBoard::Mode::Color;
+    demoBoard_.color = color;
+    if (toolCap) toolCap->setDemoBoardState(true);
+    if (toolSub && toolSub->boardToolsVisible()) toolSub->refreshBoardState();
+    refresh();
+}
+
+void WinCap::demoBoardSetOpacity(int percent)
+{
+    if (!demoMode || !demoBoardActive()) return;
+    // 只有纯色背景支持透明度；图片 / PPT 时滑条禁用
+    if (demoBoard_.mode != DemoBoard::Mode::Color) return;
+    demoBoard_.opacity = std::clamp(percent, 10, 100);
+    refresh();
+}
+
+void WinCap::demoBoardPickColor()
+{
+    Ling::Color cur{ demoBoard_.color };
+    COLORREF rgb = RGB(cur.r, cur.g, cur.b);
+    static COLORREF cust[16]{};
+    CHOOSECOLOR cc{};
+    cc.lStructSize = sizeof(cc);
+    cc.hwndOwner = hwnd;
+    cc.lpCustColors = cust;
+    cc.rgbResult = rgb;
+    cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+    if (!ChooseColorW(&cc)) return;
+    const UINT32 c = ((UINT32)GetRValue(cc.rgbResult) << 24)
+        | ((UINT32)GetGValue(cc.rgbResult) << 16)
+        | ((UINT32)GetBValue(cc.rgbResult) << 8) | 0xFFu;
+    demoBoardSetColor(c);
+}
+
+void WinCap::demoBoardPickBackground()
+{
+    ComPtr<IFileOpenDialog> dlg;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(dlg.GetAddressOf()))) || !dlg) return;
+    DWORD opts = 0;
+    dlg->GetOptions(&opts);
+    dlg->SetOptions(opts | FOS_ALLOWMULTISELECT | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST);
+    const COMDLG_FILTERSPEC filters[] = {
+        { L"图片", L"*.png;*.jpg;*.jpeg;*.bmp;*.webp;*.gif" },
+        { L"演示文稿", L"*.ppt;*.pptx;*.pptm;*.pps;*.ppsx;*.dps;*.dpt" },
+    };
+    dlg->SetFileTypes(_countof(filters), filters);
+    dlg->SetTitle(L"选择背景");
+    if (FAILED(dlg->Show(hwnd))) return;
+    ComPtr<IShellItemArray> items;
+    if (FAILED(dlg->GetResults(items.GetAddressOf())) || !items) return;
+    DWORD count = 0;
+    items->GetCount(&count);
+    std::vector<std::wstring> paths;
+    paths.reserve(count);
+    for (DWORD i = 0; i < count; ++i) {
+        ComPtr<IShellItem> item;
+        if (FAILED(items->GetItemAt(i, item.GetAddressOf())) || !item) continue;
+        PWSTR file = nullptr;
+        if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &file)) || !file) continue;
+        paths.emplace_back(file);
+        CoTaskMemFree(file);
+    }
+    if (paths.empty()) return;
+    // 只要选了 PPT 就按 PPT 处理（忽略同批图片）
+    for (const auto& p : paths) {
+        if (IsPptPath(p)) { demoBoardStartPpt(p); return; }
+    }
+    demoBoardLoadImages(paths);
+}
+
+void WinCap::demoBoardToggleAdjust()
+{
+    if (!demoMode || !demoBoardActive()) return;
+    if (demoBoard_.mode == DemoBoard::Mode::Ppt) return;   // PPT 暂不支持调整
+    demoBoard_.adjust = !demoBoard_.adjust;
+    demoBoard_.dragging = false;
+    // 退出编辑背景时，背景层标注不能再保持选中（平时它不可单独点选）
+    if (!demoBoard_.adjust && shapeHover && shapeHover->backgroundLayer)
+        clearAnnotSelection();
+    if (toolSub && toolSub->boardToolsVisible()) toolSub->refreshBoardState();
+    refresh();
+}
+
+void WinCap::demoBoardStepPage(int delta)
+{
+    if (!demoMode || !demoBoardActive() || delta == 0) return;
+    if (demoBoard_.mode == DemoBoard::Mode::Ppt) {
+        demoBoardForwardKey(delta > 0 ? VK_NEXT : VK_PRIOR);
+        return;
+    }
+    if (demoBoard_.mode != DemoBoard::Mode::Images || demoBoard_.pages.size() < 2) return;
+    const int n = (int)demoBoard_.pages.size();
+    demoBoard_.page = ((demoBoard_.page + delta) % n + n) % n;
+    refresh();
+}
+
+D2D1_RECT_F WinCap::demoBoardCurrentRect() const
+{
+    if (demoBoard_.mode == DemoBoard::Mode::Color) return demoBoard_.rect;
+    if (demoBoard_.mode == DemoBoard::Mode::Images && !demoBoard_.pages.empty()) {
+        const int i = std::clamp(demoBoard_.page, 0, (int)demoBoard_.pages.size() - 1);
+        return demoBoard_.pages[i]->rect;
+    }
+    return D2D1::RectF(0.f, 0.f, (float)w, (float)h);
+}
+
+int WinCap::demoBoardPageIndex() const
+{
+    return demoBoard_.mode == DemoBoard::Mode::Images ? demoBoard_.page : -1;
+}
+
+void WinCap::demoBoardRestoreRect(int page, const D2D1_RECT_F& r)
+{
+    if (page < 0) {
+        demoBoard_.rect = r;
+    }
+    else if (page < (int)demoBoard_.pages.size() && demoBoard_.pages[page]) {
+        demoBoard_.pages[page]->rect = r;
+    }
+}
+
+bool WinCap::demoBoardContains(POINT client) const
+{
+    if (!demoBoardActive()) return false;
+    // PPT 模式画布不画任何东西（透明），整屏都算"未覆盖"，穿透时鼠标要能点到放映窗
+    if (demoBoard_.mode == DemoBoard::Mode::Ppt) return false;
+    const auto r = demoBoardCurrentRect();
+    return client.x >= r.left && client.x < r.right && client.y >= r.top && client.y < r.bottom;
+}
+
+int WinCap::demoBoardEdgeAt(POINT client) const
+{
+    if (!demoBoard_.adjust || demoBoard_.mode == DemoBoard::Mode::Ppt) return 0;
+    const auto r = demoBoardCurrentRect();
+    const float grab = kBoardGrab * dpi;
+    if (client.x < r.left - grab || client.x > r.right + grab
+        || client.y < r.top - grab || client.y > r.bottom + grab) return 0;
+    int edge = 0;
+    if (std::fabs(client.x - r.left) <= grab) edge |= 1;
+    if (std::fabs(client.y - r.top) <= grab) edge |= 2;
+    if (std::fabs(client.x - r.right) <= grab) edge |= 4;
+    if (std::fabs(client.y - r.bottom) <= grab) edge |= 8;
+    return edge;
+}
+
+void WinCap::demoBoardUpdateResize(POINT client)
+{
+    if (!demoBoard_.dragging || !demoBoard_.dragEdge) return;
+    D2D1_RECT_F r = demoBoard_.dragRect;
+    const float minSize = kBoardMin * dpi;
+    if (demoBoard_.dragEdge & 1) r.left = (std::min)((float)client.x, r.right - minSize);
+    if (demoBoard_.dragEdge & 4) r.right = (std::max)((float)client.x, r.left + minSize);
+    if (demoBoard_.dragEdge & 2) r.top = (std::min)((float)client.y, r.bottom - minSize);
+    if (demoBoard_.dragEdge & 8) r.bottom = (std::max)((float)client.y, r.top + minSize);
+    r.left = std::clamp(r.left, 0.f, (float)w);
+    r.right = std::clamp(r.right, 0.f, (float)w);
+    r.top = std::clamp(r.top, 0.f, (float)h);
+    r.bottom = std::clamp(r.bottom, 0.f, (float)h);
+    if (demoBoard_.mode == DemoBoard::Mode::Color) {
+        demoBoard_.rect = r;
+    }
+    else if (demoBoard_.mode == DemoBoard::Mode::Images && !demoBoard_.pages.empty()) {
+        const int i = std::clamp(demoBoard_.page, 0, (int)demoBoard_.pages.size() - 1);
+        demoBoard_.pages[i]->rect = r;
+    }
+    refresh();
+}
+
+void WinCap::demoBoardLoadImages(const std::vector<std::wstring>& paths)
+{
+    demoBoardStopPpt();
+    ComPtr<IWICImagingFactory> wic;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(wic.GetAddressOf())))) return;
+    auto d2d = Ling::D2D::get();
+    std::vector<std::shared_ptr<DemoBoardPage>> pages;
+    pages.reserve(paths.size());
+    for (const auto& p : paths) {
+        auto page = std::make_shared<DemoBoardPage>();
+        page->path = p;
+        if (!LoadBoardBitmap(wic.Get(), d2d->deviceContext.Get(), p, page->bmp, page->srcW, page->srcH))
+            continue;
+        const float bw = (float)page->srcW, bh = (float)page->srcH;
+        page->rect = D2D1::RectF(((float)w - bw) * 0.5f, ((float)h - bh) * 0.5f,
+            ((float)w + bw) * 0.5f, ((float)h + bh) * 0.5f);
+        pages.push_back(page);
+    }
+    if (pages.empty()) return;
+    demoBoard_.pages = std::move(pages);
+    demoBoard_.page = 0;
+    demoBoard_.mode = DemoBoard::Mode::Images;
+    demoBoard_.adjust = false;
+    demoBoard_.chips.clear();
+    if (toolCap) toolCap->setDemoBoardState(true);
+    if (toolSub && toolSub->boardToolsVisible()) toolSub->refreshBoardState();
+    refresh();
+}
+
+void WinCap::demoBoardStartPpt(const std::wstring& path)
+{
+    demoBoardStopPpt();
+    demoBoard_.pages.clear();
+    demoBoard_.page = 0;
+    demoBoard_.chips.clear();
+    demoBoard_.mode = DemoBoard::Mode::Ppt;
+    demoBoard_.adjust = false;
+    demoBoard_.pptWnd = nullptr;
+    // 先把画布刷成透明（PPT 模式不画背景），再去做可能耗时的 COM 调用，
+    // 否则这段时间屏幕上还是上一次的纯色/图片，看起来像"点了没反应"。
+    refresh();
+
+    // 用 COM 打开并直接放映：ShellExecute 的 /S 只对老版本/pps 有效，新版 PowerPoint
+    // 会老老实实打开编辑窗口，于是没有放映、按键也没有可转发的目标。
+    PptLog(L"start path=%s", path.c_str());
+    bool launched = false;
+    auto app = PptCreateApp();
+    if (app) {
+        VARIANT vis;
+        VariantInit(&vis);
+        vis.vt = VT_I4;
+        vis.lVal = -1;                             // msoTrue
+        PptLog(L"Visible hr=0x%08X", PptPut(app.Get(), L"Visible", vis) ? 0 : E_FAIL);
+
+        auto presentations = PptChild(app.Get(), L"Presentations");
+        PptLog(L"Presentations=%p", presentations.Get());
+        if (presentations) {
+            VARIANT file;
+            VariantInit(&file);
+            file.vt = VT_BSTR;
+            file.bstrVal = SysAllocString(path.c_str());
+            VARIANT readOnly;
+            VariantInit(&readOnly);
+            readOnly.vt = VT_I4;
+            readOnly.lVal = -1;                    // 只读，避免改到用户文件
+            VARIANT untitled;
+            VariantInit(&untitled);
+            untitled.vt = VT_I4;
+            untitled.lVal = 0;                     // 保留原文件名
+            VARIANT withWin;
+            VariantInit(&withWin);
+            withWin.vt = VT_I4;
+            withWin.lVal = -1;                     // 带窗口打开，退放映后就是普通窗口
+
+            VARIANT opened;
+            VariantInit(&opened);
+            ComPtr<IDispatch> pres;
+            const bool openOk = PptInvoke(presentations.Get(), L"Open", DISPATCH_METHOD,
+                { file, readOnly, untitled, withWin }, &opened);
+            PptLog(L"Open ok=%d vt=%d", openOk ? 1 : 0, opened.vt);
+            if (openOk && opened.vt == VT_DISPATCH && opened.pdispVal) pres = opened.pdispVal;
+            VariantClear(&opened);
+
+            if (pres) {
+                auto settings = PptChild(pres.Get(), L"SlideShowSettings");
+                PptLog(L"SlideShowSettings=%p", settings.Get());
+                if (settings) {
+                    // ShowType=1（ppShowTypeSpeaker）：强制整屏放映，不跟随文件里保存的"窗口播放"
+                    VariantInit(&vis);
+                    vis.vt = VT_I4;
+                    vis.lVal = 1;
+                    PptLog(L"ShowType hr=0x%08X", PptPut(settings.Get(), L"ShowType", vis) ? 0 : E_FAIL);
+
+                    VARIANT running;
+                    VariantInit(&running);
+                    const bool runOk = PptInvoke(settings.Get(), L"Run", DISPATCH_METHOD, {}, &running);
+                    PptLog(L"Run ok=%d vt=%d", runOk ? 1 : 0, running.vt);
+                    if (runOk && running.vt == VT_DISPATCH && running.pdispVal)
+                        demoBoard_.pptShow = running.pdispVal;
+                    VariantClear(&running);
+                    launched = runOk;
+                }
+            }
+        }
+        if (launched) {
+            demoBoard_.pptApp = app;
+            // Run 的返回值不是所有实现都给，取不到就从放映窗集合补
+            if (!demoBoard_.pptShow) {
+                auto shows = PptChild(app.Get(), L"SlideShowWindows");
+                if (shows) {
+                    VARIANT idx;
+                    VariantInit(&idx);
+                    idx.vt = VT_I4;
+                    idx.lVal = 1;
+                    VARIANT item;
+                    VariantInit(&item);
+                    if (PptInvoke(shows.Get(), L"Item", DISPATCH_METHOD, { idx }, &item)
+                        && item.vt == VT_DISPATCH && item.pdispVal)
+                        demoBoard_.pptShow = item.pdispVal;
+                    VariantClear(&item);
+                }
+            }
+            if (demoBoard_.pptShow) demoBoard_.pptWnd = PptWindowOf(demoBoard_.pptShow.Get());
+            PptLog(L"launched show=%p hwnd=%p", demoBoard_.pptShow.Get(), demoBoard_.pptWnd);
+        }
+        else {
+            // 打开/放映失败：不要留下一个空的 PowerPoint 进程窗口，直接放掉
+            demoBoard_.pptShow.Reset();
+        }
+    }
+    if (!launched) {
+        // COM 不可用：至少用系统关联把文件打开（不要再写死 POWERPNT.EXE，WPS 机器上没有这个 exe）
+        PptLog(L"fallback shell open");
+        ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    // 放映窗口是后创建的 TOPMOST，会把我们盖住：等它出来后再把画布和工具栏抬回最上层
+    if (hwnd) setTimer(1200, pptRaiseTimerId);
+    if (toolSub && toolSub->boardToolsVisible()) toolSub->refreshBoardState();
+    refresh();
+}
+
+HWND WinCap::demoBoardPptWindow()
+{
+    if (demoBoard_.pptWnd && IsWindow(demoBoard_.pptWnd)) return demoBoard_.pptWnd;
+    struct Ctx { HWND wnd; } ctx{ nullptr };
+    EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+        auto* c = reinterpret_cast<Ctx*>(lp);
+        wchar_t cls[64]{};
+        if (GetClassNameW(h, cls, 64) <= 0) return TRUE;
+        if (!IsWindowVisible(h)) return TRUE;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(h, &pid);
+        HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!proc) return TRUE;
+        wchar_t exe[MAX_PATH]{};
+        DWORD n = MAX_PATH;
+        const bool ok = QueryFullProcessImageNameW(proc, 0, exe, &n) != 0;
+        CloseHandle(proc);
+        if (!ok) return TRUE;
+        std::wstring name = exe;
+        const size_t slash = name.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) name = name.substr(slash + 1);
+        for (auto& ch : name) ch = (wchar_t)towlower(ch);
+        if (name != L"powerpnt.exe" && name != L"wpp.exe" && name != L"wps.exe") return TRUE;
+
+        bool accept = _wcsicmp(cls, L"screenClass") == 0;   // PowerPoint 的放映窗
+        if (!accept) {
+            // WPS 11 的放映窗是 Qt 的 QWidget：没有专用类名，用"无标题 + 铺满整个显示器"识别。
+            // 编辑窗有标题、最大化时也只铺满工作区（任务栏还在），两者能区分开。
+            if (GetWindowTextLengthW(h) > 0) return TRUE;
+            RECT r{};
+            if (GetWindowRect(h, &r)) {
+                HMONITOR mon = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
+                MONITORINFO mi{ sizeof(MONITORINFO) };
+                if (GetMonitorInfoW(mon, &mi)) {
+                    const RECT& m = mi.rcMonitor;
+                    accept = r.left <= m.left + 2 && r.top <= m.top + 2
+                        && r.right >= m.right - 2 && r.bottom >= m.bottom - 2;
+                }
+            }
+        }
+        if (!accept) return TRUE;
+        c->wnd = h;
+        return FALSE;
+    }, reinterpret_cast<LPARAM>(&ctx));
+    demoBoard_.pptWnd = ctx.wnd;
+    return ctx.wnd;
+}
+
+void WinCap::demoBoardStopPpt()
+{
+    // 只结束放映，文件保持打开（普通编辑窗口）。释放最后一个自动化引用时
+    // WPS 可能把文档一起关掉，所以这里刻意不 Reset pptApp / pptShow。
+    bool exited = false;
+    if (demoBoard_.pptShow) {
+        auto view = PptChild(demoBoard_.pptShow.Get(), L"View");
+        if (view) exited = PptInvoke(view.Get(), L"Exit", DISPATCH_METHOD, {}, nullptr);
+    }
+    PptLog(L"stop ppt exit=%d", exited ? 1 : 0);
+    // 只有 COM 没成功退出时才发 Esc 兜底；只发给放映窗，不碰编辑窗口
+    if (!exited) {
+        HWND h = demoBoard_.pptWnd;
+        if (!h || !IsWindow(h)) h = demoBoardPptWindow();
+        if (h && IsWindow(h)) {
+            PostMessageW(h, WM_KEYDOWN, VK_ESCAPE, 0);
+            PostMessageW(h, WM_KEYUP, VK_ESCAPE, 1);
+        }
+    }
+    demoBoard_.pptWnd = nullptr;
+}
+
+void WinCap::demoBoardForwardKey(UINT key)
+{
+    // 放映窗有焦点时本来就能收到 PgUp/PgDn；焦点在画布上时由这里代翻页
+    if (demoBoard_.pptShow) {
+        auto view = PptChild(demoBoard_.pptShow.Get(), L"View");
+        if (view && PptInvoke(view.Get(), key == VK_NEXT ? L"Next" : L"Previous",
+            DISPATCH_METHOD, {}, nullptr)) return;
+    }
+    HWND h = demoBoardPptWindow();
+    if (!h || !IsWindow(h)) return;
+    PostMessageW(h, WM_KEYDOWN, key, 0);
+    PostMessageW(h, WM_KEYUP, key, 1);
+}
+
+void WinCap::paintDemoBoard(ID2D1DeviceContext* ctx)
+{
+    if (!ctx || !demoBoardActive()) return;
+    auto d2d = Ling::D2D::get();
+    if (!brushBoard_) {
+        d2d->deviceContext->CreateSolidColorBrush(D2D1::ColorF(0.f, 0.f, 0.f, 1.f),
+            brushBoard_.GetAddressOf());
+    }
+    if (!brushBoard_) return;
+
+    if (demoBoard_.mode == DemoBoard::Mode::Color) {
+        auto c = Ling::Color(demoBoard_.color).getD2DColor();
+        c.a *= std::clamp(demoBoard_.opacity, 10, 100) / 100.f;
+        brushBoard_->SetColor(c);
+        ctx->FillRectangle(demoBoard_.rect, brushBoard_.Get());
+    }
+    else if (demoBoard_.mode == DemoBoard::Mode::Images && !demoBoard_.pages.empty()) {
+        const int i = std::clamp(demoBoard_.page, 0, (int)demoBoard_.pages.size() - 1);
+        auto& pg = demoBoard_.pages[i];
+        if (pg && pg->bmp)
+            ctx->DrawBitmap(pg->bmp.Get(), pg->rect, 1.f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    }
+    // PPT：画布保持透明，露出下面 PowerPoint 的放映窗口
+
+    // 底部页码（仅多图）
+    demoBoard_.chips.clear();
+    if (demoBoard_.mode == DemoBoard::Mode::Images && demoBoard_.pages.size() > 1) {
+        const int n = (int)demoBoard_.pages.size();
+        const float gap = 4.f * dpi;
+        float cw = 26.f * dpi;
+        const float chh = 20.f * dpi;
+        const float maxW = (float)w * 0.8f;
+        if (n * (cw + gap) > maxW)
+            cw = (std::max)(14.f * dpi, (maxW - gap * (n - 1)) / n);
+        const float total = n * cw + (n - 1) * gap;
+        float x = ((float)w - total) * 0.5f;
+        const float y = (float)h - 34.f * dpi;
+        for (int i = 0; i < n; ++i) {
+            const D2D1_RECT_F r{ x, y, x + cw, y + chh };
+            demoBoard_.chips.push_back(r);
+            const bool active = (i == demoBoard_.page);
+            brushBoard_->SetColor(active ? D2D1::ColorF(0x34C759, 1.f)
+                : D2D1::ColorF(0.f, 0.f, 0.f, 0.55f));
+            ctx->FillRoundedRectangle(D2D1::RoundedRect(r, chh * 0.5f, chh * 0.5f),
+                brushBoard_.Get());
+            auto layout = d2d->makeTextLayout(std::to_wstring(i + 1), 11.f * dpi, cw, chh);
+            if (layout) {
+                layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                ctx->DrawTextLayout(D2D1::Point2F(r.left, r.top), layout.Get(),
+                    active ? brushBg.Get() : brushText.Get());
+            }
+            x += cw + gap;
+        }
+    }
+
+    // 编辑背景：只描一圈 2px 的边提示（贴内侧），不再画八个控点
+    if (demoBoard_.adjust && demoBoard_.mode != DemoBoard::Mode::Ppt) {
+        const auto r = demoBoardCurrentRect();
+        const float bw = 2.f * dpi;               // 描边宽度（逻辑 2px）
+        brushBoard_->SetColor(D2D1::ColorF(0x34C759, 1.f));
+        // 描边以路径为中线，向内缩半个线宽，保证整条线都落在背景内侧
+        ctx->DrawRectangle(D2D1::RectF(r.left + bw * 0.5f, r.top + bw * 0.5f,
+            r.right - bw * 0.5f, r.bottom - bw * 0.5f), brushBoard_.Get(), bw);
+    }
+}
+
+
 void WinCap::resetDemoCanvas()
 {
     // 走 clearAllShapes：先断开 shapeHover/editingText 再释放，否则下一个工具栏点击
     // （onClick 里要读 hasSelectedAnnot）就会在已释放对象上做虚调用 → 闪退
-    clearAllShapes();
+    // 编辑背景关闭时保留背景层标注；打开时连背景层一起清
+    clearAllShapes(!demoBoard_.adjust);
     newShape = nullptr;
     refresh();
 }
 
 void WinCap::exitDemoCanvas()
 {
+    // 还在录制就按「取消」收工：临时文件丢掉，退出演示
+    if (demoRecRunning_) stopDemoRecording(true);
+    demoRecBarOpen_ = false;
+    // 退出演示：PPT 还在放映就先结束放映（文件保持打开，不关 PowerPoint）
+    demoBoardStopPpt();
+    // 关闭白板/演示前，把开栏时临时取消的渐隐画笔还原
+    restoreTemporaryLaser();
+    demoBoard_.mode = DemoBoard::Mode::None;
     // 穿透状态下退出：先把命中样式恢复回来，再按安全顺序清标注并关窗
     setMouseTransparent(false);
     clearAllShapes();
@@ -400,6 +1438,29 @@ void WinCap::onCreated()
     ScreenToClient(hwnd, &pos);
     setPixPos(pos);
     show();
+    // 覆盖窗必须真的拿到键盘焦点：热键唤起截图时前台还是别的程序，不主动抢焦点的话
+    // Ctrl+C（取色）/ 方向键 / Enter 这些窗口内按键全都送不到这里。
+    // SetForegroundWindow 可能被前台锁挡下，用「临时置顶再取消」兜底（与设置窗同招）。
+    if (hwnd) {
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd)) {
+            // 前台锁：借"临时取消置顶再置顶"把窗口顶到前台
+            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            SetForegroundWindow(hwnd);
+            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        }
+        if (GetForegroundWindow() != hwnd) {
+            // 仍被挡：临时共享前台线程的输入队列，抢到焦点后再脱离
+            HWND fg = GetForegroundWindow();
+            const DWORD fgThread = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
+            const DWORD myThread = GetCurrentThreadId();
+            const bool attached = fgThread && fgThread != myThread
+                && AttachThreadInput(fgThread, myThread, TRUE);
+            SetForegroundWindow(hwnd);
+            if (attached) AttachThreadInput(fgThread, myThread, FALSE);
+        }
+        SetFocus(hwnd);
+    }
     CaptureEsc::claim(hwnd);
     // 窗口已经能收鼠标了：把空窗期被盾牌吃掉的那一下按下补进来（还按着就接着拖）
     CaptureShield::drain(hwnd);
@@ -416,6 +1477,8 @@ void WinCap::layout()
     if (!hideScreenImg) {
         ctx->DrawBitmap(screenImg.Get(), destRect);
     }
+    // 演示画布：白板背景先于标注绘制（PPT 模式不画，露出下面放映窗口）
+    if (demoMode) paintDemoBoard(ctx);
     // 标注在底图上、暗色遮罩下：选区外被压暗，洞内正常显示（与「全屏纸+导出裁切」一致）
     // 长图选区大图由 CapLong 后画，标注需叠在其上
     if (annotLive || (stage == CapStage::Video && hasAnnotShapes())) {
@@ -425,7 +1488,7 @@ void WinCap::layout()
 		paintSizePreview(ctx);
     // 查找元素悬停：仅描边；已框选/标注中：截图选区控点一直显示
     // 演示模式不画遮罩的任何部件（不压暗、不描边、不控点、不标签）—— 整屏就是画布
-    if (cutMask && !demoMode) {
+    if (cutMask && !demoMode && !chrome_) {
         const bool findHover = (stage == CapStage::Select && !isPress);
         // 录屏相关阶段不压暗：框选录制区域时要能看清整屏（不然选到屏幕上的什么都看不准），
         // 录起来之后选区外也保持原样。pendingRecord = 托盘「屏幕录制」进来、还没框完这一段。
@@ -462,6 +1525,8 @@ void WinCap::layout()
     canvas->finishPaint();
     // 识别浮层里的"标注镜像"跟着本窗口一起重画（标注一变就同步，避免两个窗口错帧）
     if (toolOcr) toolOcr->repaintOverlay();
+    // 录制期：选框 chrome 在独立窗口里，跟着本帧一起重画（同坐标，直接复用 cutMask 几何）
+    if (chrome_) chrome_->refresh();
 }
 
 void WinCap::applyMaskHitCursor(MaskHit hit)
@@ -563,6 +1628,22 @@ BOOL WinCap::setCursor()
 	POINT pos{};
 	GetCursorPos(&pos);
 	ScreenToClient(hwnd, &pos);
+
+	// 演示画布调整背景：缩放光标优先于当前绘图工具的光标（画笔/橡皮等会把它盖掉）
+	if (demoMode && demoBoardActive() && demoBoard_.adjust) {
+		const int e = demoBoard_.dragging ? demoBoard_.dragEdge : demoBoardEdgeAt(pos);
+		if (e) {
+			const bool h = (e & 1) || (e & 4);
+			const bool v = (e & 2) || (e & 8);
+			if (h && v) {
+				const bool nwse = ((e & 1) && (e & 2)) || ((e & 4) && (e & 8));
+				SetCursor(LoadCursor(nullptr, nwse ? IDC_SIZENWSE : IDC_SIZENESW));
+			}
+			else if (h) SetCursor(LoadCursor(nullptr, IDC_SIZEWE));
+			else SetCursor(LoadCursor(nullptr, IDC_SIZENS));
+			return TRUE;
+		}
+	}
 
 	if (annotLive) {
 		if (stage == CapStage::Long && capLong
@@ -761,18 +1842,26 @@ void WinCap::samplePixColor()
 	pixSampleY_ = py;
 }
 
-void WinCap::paintPix(ID2D1DeviceContext* ctx)
+bool WinCap::magnifierVisible() const
 {
-	// 放大镜显示时机：框选真正拖动 / 调四边四角 / **查找元素悬停**（Select 阶段未按下）
-	if (!screenImg || !cutMask) return;
+	// 与 paintPix 完全同一套判据：
+	//   框选真正拖动 / 调四边四角 / 查找元素悬停（未按下、未进演示画布）
+	if (!screenImg || !cutMask) return false;
 	const bool framing = (stage == CapStage::Select && isPress && selectDragging_);
 	const bool resizing = cutMask->isResizingEdge()
 		&& (maskDragging || ((stage == CapStage::Adjust || videoCanAdjust()) && isPress));
-	// 查找元素阶段（未按下时悬停画布）：跟手显示放大镜
 	const bool elementHover = stage == CapStage::Select && !isPress && !demoMode
 		&& Setting::get()->getFindWindowElements();
-	if (!framing && !resizing && !elementHover) return;
+	// 还没开始框选（Select 且没有按住鼠标）时按 Ctrl+C 取色：
+	// 让放大镜临时露出来显示「复制成功」，随后自动退出
+	const bool colorFlash = stage == CapStage::Select && !isPress
+		&& GetTickCount64() < pixCopiedUntil_;
+	return framing || resizing || elementHover || colorFlash;
+}
 
+void WinCap::paintPix(ID2D1DeviceContext* ctx)
+{
+	if (!magnifierVisible()) return;
 	const float pad = kPad * dpi;
 	const float canvas = kCanvas * dpi;
 	const float shellW = kShellW * dpi;
@@ -944,6 +2033,13 @@ bool WinCap::runCommand(const std::wstring& id)
 
 	// —— 录屏组的四条：动作在录屏工具条上（与点按钮同一段实现）——
 	// （它们同时是临时全局键，焦点不在本软件时由全局钩子那侧派发，见 HotkeyHook）
+	// 演示画布内也能录屏：同一组命令在演示会话里改走 demoRec* 入口
+	if (demoMode) {
+		if (id == L"cmd_record_toggle") { demoRecToggle(); return true; }
+		if (id == L"cmd_toggle_gif") { demoRecToggleGif(); return true; }
+		if (id == L"cmd_toggle_system_audio") { demoRecToggleAudio(); return true; }
+		if (id == L"cmd_toggle_mic") { demoRecToggleMic(); return true; }
+	}
 	if (stage == CapStage::Video && capVideo) {
 		if (auto* tv = capVideo->toolBar()) {
 			if (id == L"cmd_record_toggle") { tv->cmdToggleRecord(); return true; }
@@ -968,6 +2064,11 @@ bool WinCap::runCommand(const std::wstring& id)
 	if (id == L"cmd_toggle_toolbar") {
 		toolHidden = !toolHidden;
 		if (toolCap) { if (toolHidden) toolCap->hide(); else toolCap->show(); }
+		// 属性栏是独立顶层窗，必须跟着一起收/展；用 suspend 保留内容，展开时交给 layoutTools 复位
+		if (toolSub) {
+			if (toolHidden) toolSub->suspendChrome();
+			else layoutTools();
+		}
 		return true;
 	}
 	if (id == L"cmd_show_cursor") { toggleShowCursor(); return true; }
@@ -1008,6 +2109,11 @@ void WinCap::syncGlobalCommandKeys(unsigned surface)
 
 void WinCap::onKey(UINT key)
 {
+    // 演示画布 + 白板：PgUp/PgDn 翻页（多图）或转发给 PPT 放映
+    if (demoMode && demoBoardActive() && (key == VK_PRIOR || key == VK_NEXT)) {
+        demoBoardStepPage(key == VK_NEXT ? 1 : -1);
+        return;
+    }
     // 方向键：挪选区 / 挪光标（没有对应的命令，所以不走命令表）
     if (key == VK_UP || key == VK_DOWN || key == VK_LEFT || key == VK_RIGHT) {
         const int step = (GetKeyState(VK_SHIFT) & 0x8000) ? 10 : 1;
@@ -1023,18 +2129,28 @@ void WinCap::onKey(UINT key)
         return;
     }
     // 放大镜可见时 Ctrl+C 为「取色值」，优先于「复制」命令本身。
-    // !annotLive 不可省：标注中的 Ctrl+C 归「复制」（其语义已移至 runCommand），否则也会触发取色。
-    if (!annotLive && key == 'C' && (GetKeyState(VK_CONTROL) & 0x8000)
-        && ((stage == CapStage::Select && isPress && selectDragging_)
-            || (stage == CapStage::Select && !isPress && !demoMode
-                && Setting::get()->getFindWindowElements())
-            || (cutMask && cutMask->isResizingEdge()
-                && (maskDragging || ((stage == CapStage::Adjust || videoCanAdjust()) && isPress))))) {
+    // 判据直接复用放大镜的可见性（含"选中工具后拖调选区边角"的情况）：
+    // 只要屏幕上显示着「按 Ctrl+C 复制色值」，Ctrl+C 就必须复制色值，而不是整张图。
+    // 另外：还没开始框选时也允许直接 Ctrl+C 取光标下的颜色 —— 用户可能只是想取色，
+    // 这时不需要先出放大镜，复制成功后显示提示并自动退出截图。
+    // 注意不能用 hasRect 判断：开启「查找元素」时，悬停就会先把 maskRect 铺好；
+    // 真正"已经开始/完成框选"的标志是按下鼠标（isPress）或进入 Adjust 阶段。
+    const bool preSelectPick = !demoMode && cutMask && stage == CapStage::Select && !isPress;
+    if (key == 'C' && (GetKeyState(VK_CONTROL) & 0x8000)
+        && (magnifierVisible() || preSelectPick)) {
+        if (preSelectPick) {
+            POINT cur{};
+            GetCursorPos(&cur);
+            ScreenToClient(hwnd, &cur);
+            setPixPos(cur);   // 让放大镜壳体出现在光标旁，显示"复制成功"
+        }
         samplePixColor();
         Ling::Util::setTextToClipboard(std::format(L"#{:02X}{:02X}{:02X}",
             GetRValue(pixColor_), GetGValue(pixColor_), GetBValue(pixColor_)));
-        pixCopiedUntil_ = GetTickCount64() + 1500;   // 提示行临时变绿
+        pixCopiedUntil_ = GetTickCount64() + (preSelectPick ? 100ull : 1500ull);
         refresh();
+        // 只取色：几乎同时就退出，只留够看清「复制成功」的一瞬
+        if (preSelectPick) setTimer(100, colorCopyCloseTimerId);
         return;
     }
     // 「系统按键」：按当前界面查命令表，命中即执行并吃掉。关闭/完成/复制/存为文件/撤销/重做/
@@ -1218,9 +2334,10 @@ void WinCap::copyCurrentStage()
 ComPtr<ID2D1Bitmap1> WinCap::getCutImg()
 {
     ComPtr<ID2D1Bitmap1> cutImg;
-    auto& maskRect = cutMask->maskRect;
-    const UINT32 cw = (UINT32)(maskRect.right - maskRect.left);
-    const UINT32 ch = (UINT32)(maskRect.bottom - maskRect.top);
+    // 选区可能带小数：统一向外对齐到整像素，避免右下边被截掉一列
+    const D2D1_RECT_U rect = pixelAlignedRect(cutMask->maskRect);
+    const UINT32 cw = rect.right - rect.left;
+    const UINT32 ch = rect.bottom - rect.top;
     if (cw == 0 || ch == 0) return cutImg;
     D2D1_BITMAP_PROPERTIES1 prop{};
     prop.pixelFormat = screenImg->GetPixelFormat();
@@ -1228,7 +2345,6 @@ ComPtr<ID2D1Bitmap1> WinCap::getCutImg()
     screenImg->GetDpi(&prop.dpiX, &prop.dpiY);
     Ling::D2D::get()->deviceContext->CreateBitmap(D2D1::SizeU(cw, ch), nullptr, 0, &prop, cutImg.GetAddressOf());
     auto start = D2D1::Point2U(0, 0);
-    auto rect = D2D1::RectU((UINT32)maskRect.left, (UINT32)maskRect.top, (UINT32)maskRect.right, (UINT32)maskRect.bottom);
     cutImg->CopyFromBitmap(&start, screenImg.Get(), &rect);
     return cutImg;
 }
@@ -1236,8 +2352,11 @@ ComPtr<ID2D1Bitmap1> WinCap::getCutImg()
 LRESULT WinCap::onHitTest(const POINT pos)
 {
     // 仅「正在录制」时整窗穿透；开录前还要拖选区
-    if (isMouseTransparent) return HTTRANSPARENT;
-    return HTCLIENT;
+    if (!isMouseTransparent) return HTCLIENT;
+    // 白板的按点穿透由 demoBoardApplyPierce 直接切 WS_EX_TRANSPARENT：
+    // 走到这里说明窗口这一帧是可交互的，正常接收点击。
+    if (demoMode && demoBoardActive()) return HTCLIENT;
+    return HTTRANSPARENT;
 }
 
 void WinCap::onDown(POINT pos, bool isRight)
@@ -1293,6 +2412,32 @@ void WinCap::onDown(POINT pos, bool isRight)
             && !hasAnnotShapes() && stage == CapStage::Adjust) {
             copyToClipboard();
             return;
+        }
+    }
+    // 演示画布：白板交互（调整背景拖边 / 底部页码）优先于标注
+    if (demoMode && demoBoardActive() && !isRight) {
+        if (demoBoard_.adjust) {
+            const int edge = demoBoardEdgeAt(pos);
+            if (edge) {
+                demoBoard_.dragging = true;
+                demoBoard_.dragEdge = edge;
+                demoBoard_.dragStart = pos;
+                demoBoard_.dragRect = demoBoardCurrentRect();
+                isPress = true;
+                SetCapture(hwnd);
+                return;
+            }
+        }
+        else if (demoBoard_.mode == DemoBoard::Mode::Images && !demoBoard_.chips.empty()) {
+            for (size_t i = 0; i < demoBoard_.chips.size(); ++i) {
+                const auto& r = demoBoard_.chips[i];
+                if ((float)pos.x >= r.left && (float)pos.x < r.right
+                    && (float)pos.y >= r.top && (float)pos.y < r.bottom) {
+                    demoBoard_.page = (int)i;
+                    refresh();
+                    return;
+                }
+            }
         }
     }
     if (annotLive) {
@@ -1372,6 +2517,11 @@ void WinCap::updateInfoBarTip(POINT pos)
 
 void WinCap::onMove(POINT pos)
 {
+    // 光标离开窗口时 Ling 会投递一个 INT_MAX 的哨兵位置（其它浮层也是这么判的）。
+    // 不能拿它当真实坐标：setPixPos 会把它夹到窗口右下角，放大镜就闪到右下角去了。
+    if (pos.x == INT_MAX || pos.y == INT_MAX) return;
+    // 白板：正在拖背景边/角
+    if (demoMode && demoBoard_.dragging) { demoBoardUpdateResize(pos); return; }
     if (cutMask && cutMask->infoInteracting()) {
         cutMask->onInfoMove(pos);
         return;
@@ -1466,6 +2616,25 @@ void WinCap::onMove(POINT pos)
 
 void WinCap::onUp(POINT pos, bool isRight)
 {
+    // 白板：结束背景拖拽
+    if (demoMode && demoBoard_.dragging) {
+        demoBoardUpdateResize(pos);                 // 补最后一次移动，保证落点精确
+        const int page = demoBoardPageIndex();
+        const D2D1_RECT_F before = demoBoard_.dragRect;
+        const D2D1_RECT_F after = demoBoardCurrentRect();
+        demoBoard_.dragging = false;
+        demoBoard_.dragEdge = 0;
+        isPress = false;
+        if (GetCapture() == hwnd) ReleaseCapture();
+        const bool changed = std::fabs(after.left - before.left) > 0.5f
+            || std::fabs(after.top - before.top) > 0.5f
+            || std::fabs(after.right - before.right) > 0.5f
+            || std::fabs(after.bottom - before.bottom) > 0.5f;
+        // 调整背景算一步撤销：记在 History 里，Ctrl+Z / 撤销按钮可以回滚尺寸
+        if (changed && history) history->addBoardResize(page, before, after);
+        refresh();
+        return;
+    }
     if (isRight) {
         if (deferExitAfterRightUp) {
             deferExitAfterRightUp = false;
@@ -1520,6 +2689,19 @@ void WinCap::onUp(POINT pos, bool isRight)
         // 托盘「屏幕录制」更是一路冲进录制 —— 表现就是"没有查找元素和框选，点了就没了"。
         // 所以这里必须要求"这一次确实按下过"。
         if (!isPress) return;
+        // 按下时框已经定格；抬起时光标若已不在这个框里（贴边点击、或节流期间又挪了 1~2px），
+        // 这次不当成确认，按当前位置立即重查一次 —— 否则会把 1~2px 外的旧元素当成选中结果。
+        if (!selectDragging_ && cutMask->hoverPicked()) {
+            const auto& mr = cutMask->maskRect;
+            if (pos.x < (int)std::floor(mr.left) || pos.x >= (int)std::ceil(mr.right)
+                || pos.y < (int)std::floor(mr.top) || pos.y >= (int)std::ceil(mr.bottom)) {
+                isPress = false;
+                selectDragging_ = false;
+                cutMask->highlight(pos, true);
+                refresh();
+                return;
+            }
+        }
         // 没有拖拽、悬停停在窗口元素上 → 这次是"点选窗口"，按焦点窗口处理（文件名/历史来源）
         selectionFromElement_ = !selectDragging_ && cutMask->hoverPicked();
         isPress = false;
@@ -1573,7 +2755,12 @@ void WinCap::onClosed()
     deferExitAfterRightUp = false;
     CaptureEsc::release(hwnd);
     killTimer(recCursorTimerId);
+    killTimer(demoRecTickTimerId);
+    demoRecRunning_ = false;
+    demoRecPaused_ = false;
     annotLive = false;
+    // 选框层先收：它每帧都要读 cutMask，必须赶在 cutMask 释放/停绘之前销毁
+    chrome_.reset();
     // 截图会话结束：把离线翻译引擎（模型几百 MB）还回去。它平时按语言对常驻换速度，
     // 但这一次截图已经收工，没有继续留着的理由 —— 下次要用再重新加载。
     // release() 内部加锁：若还有后台翻译在跑会等它收尾，不会把正在用的引擎抽掉。
@@ -1698,9 +2885,15 @@ void WinCap::layoutTool(Ling::WinBase* tool)
         toolY = maskTopScr - gap - toolH + pad;
     }
     else {
-        const int overlapPad = (int)(3.f * tool->dpi + 0.5f);
-        toolX = maskLeftScr - pad + overlapPad;
-        toolY = maskBottomScr - toolH + pad - overlapPad;
+        // 选区外上下都放不下（典型：全屏录制）→ 放进选区内部时用"下中"：
+        // 水平居中到选区中线，纵向离选区底 15 逻辑像素（不贴着屏幕/选区底边）。
+        // 选区铺到屏幕底（全屏）时再按工作区夹一次，免得压在任务栏上。
+        const int inset = (int)(15.f * tool->dpi + 0.5f);
+        toolX = maskLeftScr + (maskRightScr - maskLeftScr - visualW) / 2 - pad;
+        toolY = maskBottomScr - inset - visualH - pad;
+        const int maxY = mi.rcWork.bottom - inset - visualH - pad;
+        if (toolY > maxY) toolY = maxY;
+        if (toolY < mi.rcWork.top) toolY = mi.rcWork.top;
     }
 
     if (toolX < mi.rcWork.left) toolX = mi.rcWork.left;
@@ -1759,14 +2952,28 @@ void WinCap::updateSelFollowCursor()
 	ScreenToClient(hwnd, &cur);        // 选区是客户区坐标（窗口铺满整个虚拟桌面）
 
 	const auto& r = cutMask->maskRect;
-	const float margin = selFollowMargin * dpi;
-	// 光标越出"边缘内侧 margin"这条线时，按越出的距离整体平移，把它带回线内
+	// 触发带：默认 24 逻辑像素；选区较大时取边长的 1/5 —— 鼠标移到"边框 1/5 处"就开始跟随，
+	// 不用贴到最边上才动。
+	const float bw = r.right - r.left;
+	const float bh = r.bottom - r.top;
+	const float mx = std::max(selFollowMargin * dpi, bw * 0.2f);
+	const float my = std::max(selFollowMargin * dpi, bh * 0.2f);
 	float dx = 0.f, dy = 0.f;
-	if (cur.x < r.left + margin)        dx = (float)cur.x - (r.left + margin);
-	else if (cur.x > r.right - margin)  dx = (float)cur.x - (r.right - margin);
-	if (cur.y < r.top + margin)         dy = (float)cur.y - (r.top + margin);
-	else if (cur.y > r.bottom - margin) dy = (float)cur.y - (r.bottom - margin);
+	if (cur.x < r.left + mx)        dx = (float)cur.x - (r.left + mx);
+	else if (cur.x > r.right - mx)  dx = (float)cur.x - (r.right - mx);
+	if (cur.y < r.top + my)         dy = (float)cur.y - (r.top + my);
+	else if (cur.y > r.bottom - my) dy = (float)cur.y - (r.bottom - my);
 	if (dx == 0.f && dy == 0.f) return;
+	// 平滑：每帧只走剩余越界距离的一部分（指数缓动）并限制单帧最大位移。
+	// 原来一帧就挪到"光标刚好回到线内"，看起来是整块瞬移，现在变成连续跟手。
+	const float maxStep = selFollowMaxStep * dpi;
+	dx = std::clamp(dx * selFollowEase, -maxStep, maxStep);
+	dy = std::clamp(dy * selFollowEase, -maxStep, maxStep);
+	// 浮点步长可能小于 1px 被取整吃掉 → 按方向给最小 1px，避免越靠近边界越"爬不动"
+	if (dx > 0.f && dx < 1.f) dx = 1.f;
+	else if (dx < 0.f && dx > -1.f) dx = -1.f;
+	if (dy > 0.f && dy < 1.f) dy = 1.f;
+	else if (dy < 0.f && dy > -1.f) dy = -1.f;
 	// 传光标作为"定屏依据"：鼠标一进另一块显示器，选区就整块贴过去（录制侧同步换采集目标），
 	// 否则光标只是越出选区、选区却卡在原屏边缘不动
 	if (!cutMask->translateBy(dx, dy, &cur)) return;   // 已贴到桌面边缘、挪不动了
@@ -1848,6 +3055,9 @@ bool WinCap::annotSkipHitSelect() const
 	// 录屏/长图编辑且已选标注工具（含橡皮）：不点选已有标注
 	if (stage == CapStage::Video && !getCurToolId().empty()) return true;
 	if (stage == CapStage::Long && capLong && capLong->isEditMode() && !getCurToolId().empty()) return true;
+	// 演示画布：选了工具就只画新图形。弯曲的画笔以前会把包围盒内部都当成"可拖动"，
+	// 于是图形内部/交叉处没法再画；想二次编辑旧标注，先再点一次当前工具取消选中。
+	if (demoMode && !getCurToolId().empty()) return true;
 	return false;
 }
 
@@ -1969,8 +3179,24 @@ bool WinCap::handleLayerCancel(bool fromToolbar)
 	}
 	// 4) 有标注工具 → 取消工具
 	if (toolCap && !toolCap->curId.empty()) {
-		toolCap->cancelSelect();
+		toolCap->cancelSelect();   // 白板属性栏会保留，等后面的层级再收
 		refresh();
+		return false;
+	}
+	// 5) 白板：取消「编辑背景」
+	if (demoMode && demoBoardActive() && demoBoard_.adjust) {
+		demoBoard_.adjust = false;
+		demoBoard_.dragging = false;
+		if (shapeHover && shapeHover->backgroundLayer) clearAnnotSelection();
+		if (toolSub && toolSub->boardToolsVisible()) toolSub->refreshBoardState();
+		refresh();
+		return false;
+	}
+	// 6) 白板：收起属性栏
+	if (demoMode && demoBoardActive() && toolSub && toolSub->boardToolsVisible()) {
+		toolSub->hideTools();
+		demoBoardBarOpen_ = false;
+		restoreTemporaryLaser();
 		return false;
 	}
 	// 工具栏上右键：最多退到未选工具，不重框选、不退出
@@ -2018,6 +3244,17 @@ void WinCap::startAnnotate(const std::wstring& toolId)
 {
 	if (!cutMask->hasRect()) return;
 	ensureHistory();
+	// 选绘图工具会顶掉录屏属性栏：没在录时把「屏幕录制」按钮恢复常态；
+	// 录制中则保持选中（按钮同时表示"正在录制"）
+	if (demoMode && demoRecBarOpen_ && !demoRecRunning_) {
+		demoRecBarOpen_ = false;
+		if (toolCap) toolCap->setDemoRecordState(false);
+	}
+	// 没开"编辑背景"时，选标注工具就是收起白板属性栏（工具属性栏接管）；
+	// 开了编辑背景才把它当成临时替换，取消工具后恢复（见 restoreDemoBoardBar）。
+	if (demoMode && demoBoardActive() && !demoBoard_.adjust) demoBoardBarOpen_ = false;
+	// 用户主动选了别的工具：不再在收起白板属性栏时还原渐隐画笔
+	restoreLaserOnBoardBarClose_ = false;
 	if (toolSub) toolSub->bindOwner(hwnd);
 	annotLive = true;
 	// 标注阶段仍显示选区尺寸信息栏；长图/录屏才在 enterLiveStage 里隐藏
@@ -2035,8 +3272,9 @@ void WinCap::startPin(const std::wstring& /*toolId*/)
 	std::vector<BYTE> pixels;
 	int cw = 0, ch = 0;
 	if (!exportSelection(pixels, cw, ch)) return;
-	const int px = x + (int)cutMask->maskRect.left;
-	const int py = y + (int)cutMask->maskRect.top;
+	const D2D1_RECT_U pr = pixelAlignedRect(cutMask->maskRect);
+	const int px = x + (int)pr.left;
+	const int py = y + (int)pr.top;
 	annotLive = false;
 	WinPin::initFromData(px, py, cw, ch, pixels);
 	close();
@@ -2053,8 +3291,15 @@ void WinCap::layoutTools()
 	else if (toolCap) {
 		layoutTool(toolCap.get());
 	}
-	if (!toolSub || !annotLive || !toolSub->hasContent() || getCurToolId().empty()) {
-		if (toolSub && getCurToolId().empty()) toolSub->hideTools();
+	if (!toolSub) return;
+	// 工具栏整体隐藏时，属性栏也一起收着；期间任何重排版都不能把它又摆出来
+	if (toolHidden) { toolSub->suspendChrome(); return; }
+	// 白板属性栏不依赖当前绘图工具：即使用户已经取消选中工具（curId 为空），
+	// 点白板也要能把属性栏摆出来。演示录屏属性栏同理。
+	const bool boardBar = toolSub->boardToolsBuilt();
+	const bool recBar = toolSub->demoRecToolsBuilt();
+	if (!boardBar && !recBar && (!annotLive || !toolSub->hasContent() || getCurToolId().empty())) {
+		if (getCurToolId().empty()) toolSub->hideTools();
 		return;
 	}
 	RECT winRect{ x, y, x + (int)w, y + (int)h };
@@ -2098,6 +3343,8 @@ void WinCap::startVideoAnnotate(const std::wstring& toolId)
 	setMouseTransparent(false);
 	ensureHistory();
 	if (toolSub) toolSub->bindOwner(hwnd);
+	// 属性栏是独立顶层窗：录制中才创建/显示时也要排除，否则会出现在录制画面里
+	if (toolSub && toolSub->hwnd) App::excludeFromCapture(toolSub->hwnd);
 	annotLive = true;
 	// 保留已选标注：点所属工具应出属性栏，不应取消选中
 	setForcedToolId(toolId);
@@ -2183,10 +3430,29 @@ void WinCap::setRecordPaused(bool on)
 void WinCap::beginVideoCapture()
 {
 	hideScreenImg = true;
+	// 录制期不再绘制开场那一帧整屏静帧：把 D2D 位图释放掉，省一份全屏显存/工作集。
+	// （录制中的 OCR/导出都走采集侧 / 选区像素，不再读 screenImg；放大镜也只在框选/调边时用）
+	if (screenImg) screenImg.Reset();
 	if (cutMask) cutMask->hideLabel = true;
+	// 开录：把选框 chrome 挪到独立的"排除捕获"层（屏幕上还在，视频里没有）。
+	// 主窗口从此不再画描边/控点（见 layout），只保留标注、鼠标高亮、按键浮层。
+	if (!chrome_ && cutMask) {
+		chrome_ = std::make_unique<SelectionChrome>(this);
+		chrome_->place(x, y, (int)w, (int)h);
+		App::excludeFromCapture(chrome_->hwnd);
+		// 压在主窗口正上方；工具栏/属性栏再依次抬到它上面（它们本身也已排除捕获）
+		SetWindowPos(chrome_->hwnd, hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+		if (capVideo && capVideo->toolHwnd())
+			SetWindowPos(capVideo->toolHwnd(), chrome_->hwnd, 0, 0, 0, 0,
+				SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+	}
+	// 属性栏是独立顶层窗：不排除的话，它出现在选区里就会被录进去
+	if (toolSub && toolSub->hwnd) App::excludeFromCapture(toolSub->hwnd);
 	// 录制期间轮询光标（「选框鼠标跟随」/「鼠标高亮提醒」任一开启即需要）
 	if (Setting::get()->getSelFollowMouse() || Setting::get()->getMouseHighlight())
 		setTimer(recCursorTickMs, recCursorTimerId);
+	// 「录屏默认开启鼠标穿透」：开录即穿；录制中可用 ` 或工具条按钮临时开关
+	if (Setting::get()->getRecordDefaultPierce()) setMouseTransparent(true);
 	// 默认不穿透，便于边录边标；穿透按钮后续再开
 	refresh();
 }
@@ -2324,6 +3590,21 @@ void WinCap::setMouseTransparent(bool transparent)
 {
     isMouseTransparent = transparent;
     if (!hwnd) return;
+    // 白板：按点穿透。WS_EX_TRANSPARENT 一旦加上，本窗口就收不到鼠标消息了，
+    // 所以不能靠 onHitTest 实时判断（HTTRANSPARENT 也过不到别的进程），
+    // 改成定时器轮询光标位置，只在"未覆盖处"临时给窗口加穿透样式。
+    if (demoMode && demoBoardActive()) {
+        killTimer(boardPierceTimerId);
+        if (transparent) {
+            if (GetCapture() == hwnd) ReleaseCapture();
+            isPress = false;
+            setTimer(boardPierceTickMs, boardPierceTimerId);
+        }
+        demoBoardApplyPierce();
+        refresh();
+        return;
+    }
+    killTimer(boardPierceTimerId);
     LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
     if (transparent) {
         exStyle |= WS_EX_LAYERED;
@@ -2343,6 +3624,32 @@ void WinCap::setMouseTransparent(bool transparent)
     SetWindowLongPtr(hwnd, GWL_EXSTYLE, exStyle);
     SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     if (capVideo) capVideo->syncPierceBtn(transparent);
+}
+
+// 白板按点穿透：光标当前没落在背景上时才让窗口整窗穿透。
+// 只在状态切换时改 ex-style，避免每帧 SetWindowPos 造成闪烁。
+void WinCap::demoBoardApplyPierce()
+{
+    if (!hwnd) return;
+    POINT p{};
+    GetCursorPos(&p);
+    ScreenToClient(hwnd, &p);
+    const bool passThrough = demoMode && demoBoardActive() && isMouseTransparent
+        && !demoBoardContains(p);
+    LONG_PTR ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+    const bool now = (ex & WS_EX_TRANSPARENT) != 0;
+    if (passThrough == now) return;
+    if (passThrough) {
+        ex |= WS_EX_LAYERED | WS_EX_TRANSPARENT;
+        SetWindowLongPtr(hwnd, GWL_EXSTYLE, ex);
+        SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+    }
+    else {
+        ex &= ~(WS_EX_LAYERED | WS_EX_TRANSPARENT);
+        SetWindowLongPtr(hwnd, GWL_EXSTYLE, ex);
+    }
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 }
 
 // 文字识别：进程内 OcrService + 选区浮层
@@ -2408,10 +3715,19 @@ namespace {
 			const float d = (r.y + r.h * 0.5f) - (ln.y0 + lh * 0.5f);
 			return d <= 0.5f * m && -d <= 0.5f * m;
 		};
+		// 横向还必须"挨着"：OCR 把一行切成几块时，块与块之间只有字间距；而两栏/左右对齐的
+		// 不同元素能隔出几十上百像素（左栏"外观设置"与右栏"屏幕录制"、行末的"F1"）。
+		// 只按纵向重叠合并会把整屏同高度的文字并成一行 —— 文字顺序、合并后的框宽高全都乱掉，
+		// 下游按框高定字号就会把一整行放大成"大标题"（实测把图标、标题、按钮并成一行）。
+		auto sideBySide = [](const Line& ln, const OcrRegion& r) {
+			const float lh = ln.y1 - ln.y0;
+			const float gap = std::max(0.f, std::max(ln.x0 - (r.x + r.w), r.x - ln.x1));
+			return gap <= std::max(6.f, std::min(lh, r.h) * 1.5f);
+		};
 		for (size_t i = 0; i < in.regions.size(); i++) {
 			const auto& r = in.regions[i];
 			Line* hit = nullptr;
-			for (auto& ln : lines) if (overlaps(ln, r)) { hit = &ln; break; }
+			for (auto& ln : lines) if (overlaps(ln, r) && sideBySide(ln, r)) { hit = &ln; break; }
 			if (!hit) {
 				lines.push_back({ r.x, r.y, r.x + r.w, r.y + r.h, { i } });
 			}
@@ -2455,8 +3771,9 @@ void WinCap::startOcrInternal(bool translateMode)
 
 	std::vector<BYTE> pixels;
 	int cw{ 0 }, ch{ 0 };
-	// 识别/翻译只看**原始截图内容**，不带上用户画的标注 —— 标注会盖住原文字、干扰识别。
-	if (!exportSelection(pixels, cw, ch, false)) return;
+	// 识别/翻译只看**原始截图内容**：不带上用户画的标注（会盖住原文字、干扰识别），
+	// 也不要导出效果（阴影加边会让图比选区大，叠加层会整缩一圈、对不上原文）
+	if (!exportSelection(pixels, cw, ch, false, false)) return;
 
 	// 建面板（含建窗、标注镜像、对齐选区）；翻译模式会先建一次空壳，识别完再填内容
 	auto makePanel = [&](OcrResult res, std::vector<BYTE> px) {
@@ -2464,6 +3781,21 @@ void WinCap::startOcrInternal(bool translateMode)
 		toolOcr = std::make_unique<ToolOcr>(this, std::move(res), translateMode, std::move(px), cw, ch);
 		toolOcr->createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP);
 		SetWindowLongPtr(toolOcr->hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(hwnd));
+		// 双击译文/识别文字 = 「完成」；拖选后 Ctrl+C = 只复制选中片段并退出。
+		// 浮层是独立置顶窗口，这两下本来只会被它吃成选区，截图窗永远收不到 —— 表现为"双击后没法粘贴"。
+		// 回调只投递到 UI 队列（收工会销毁本会话），返回后不再碰 this。
+		{
+			HWND h = hwnd;
+			toolOcr->setOnConfirm([h](const std::wstring& text) {
+				Ling::App::get()->dq.TryEnqueue([h, text]() {
+					auto* cap = WinCap::get();
+					if (!cap || cap->hwnd != h || !IsWindow(h)) return;
+					if (text.empty()) { cap->copyToClipboard(); return; }   // 双击：走「完成」原逻辑
+					Ling::Util::setTextToClipboard(text);                    // 拖选 Ctrl+C：只复制选中片段
+					cap->close();
+				});
+			});
+		}
 		// 标注要盖在识别结果上：浮层是独立置顶窗口，标注画在本窗口里，两个窗口没法互相穿插 ——
 		// 把本窗口的标注"镜像"到浮层顶层，视觉上就等于"后画的标注盖在识别结果上面"。
 		// 之后再叠一次选框（边框/控点/尺寸标签）：选框必须始终压在最上层，否则会被标注或识别结果盖住。
@@ -2755,9 +4087,12 @@ void WinCap::copyToClipboard(bool keepOpen)
     if (!keepOpen) close();
 }
 
-bool WinCap::exportSelection(std::vector<BYTE>& pixels, int& cw, int& ch, bool includeAnnot)
+bool WinCap::exportSelection(std::vector<BYTE>& pixels, int& cw, int& ch, bool includeAnnot,
+    bool applyEffects)
 {
     if (!cutMask->hasRect() || !screenImg) return false;
+    // 选框与导出共用同一份像素矩形，光标合成也按它的原点算，避免亚像素误差
+    const D2D1_RECT_U cropRect = pixelAlignedRect(cutMask->maskRect);
     D2D1_SIZE_U size{};
     if (includeAnnot && annotLive && history && !history->shapes.empty()) {
         if (!getAnnotPixels(pixels, size, &cutMask->maskRect)) return false;
@@ -2765,9 +4100,10 @@ bool WinCap::exportSelection(std::vector<BYTE>& pixels, int& cw, int& ch, bool i
         for (size_t i = 3; i < pixels.size(); i += 4) pixels[i] = 255;
     }
     else {
-        auto& maskRect = cutMask->maskRect;
-        const UINT32 cutW = (UINT32)(maskRect.right - maskRect.left);
-        const UINT32 cutH = (UINT32)(maskRect.bottom - maskRect.top);
+        // 与屏幕上的选框同一口径：向外对齐到整像素再裁
+        const D2D1_RECT_U rect = cropRect;
+        const UINT32 cutW = rect.right - rect.left;
+        const UINT32 cutH = rect.bottom - rect.top;
         if (cutW == 0 || cutH == 0) return false;
         D2D1_BITMAP_PROPERTIES1 prop{
             .pixelFormat{ screenImg->GetPixelFormat() },
@@ -2778,7 +4114,6 @@ bool WinCap::exportSelection(std::vector<BYTE>& pixels, int& cw, int& ch, bool i
         auto hr = Ling::D2D::get()->deviceContext->CreateBitmap(D2D1::SizeU(cutW, cutH), nullptr, 0, &prop, cpuBmp.GetAddressOf());
         if (FAILED(hr)) return false;
         auto start = D2D1::Point2U(0, 0);
-        auto rect = D2D1::RectU((UINT32)maskRect.left, (UINT32)maskRect.top, (UINT32)maskRect.left + cutW, (UINT32)maskRect.top + cutH);
         if (FAILED(cpuBmp->CopyFromBitmap(&start, screenImg.Get(), &rect))) return false;
         D2D1_MAPPED_RECT mapped{};
         if (FAILED(cpuBmp->Map(D2D1_MAP_OPTIONS_READ, &mapped))) return false;
@@ -2795,7 +4130,11 @@ bool WinCap::exportSelection(std::vector<BYTE>& pixels, int& cw, int& ch, bool i
     cw = (int)size.width;
     ch = (int)size.height;
     if (showCursor && cursorValid && cursorW > 0 && cursorH > 0 && cw > 0 && ch > 0)
-        compositeCursor(pixels, cw, ch, (int)cutMask->maskRect.left, (int)cutMask->maskRect.top);
+        compositeCursor(pixels, cw, ch, (int)cropRect.left, (int)cropRect.top);
+    // 导出效果（圆角/阴影）只属于「存盘 / 复制」：阴影会在图四周加边、圆角把四角涂透明，
+    // 图尺寸就和选区不相等了。OCR 的叠加层按「面板尺寸（=选区尺寸）/ 图尺寸」换算坐标，
+    // 一旦不等，整层文字会按比例缩小并贴左上角 —— 表现为字盖不住原文、看着像乱码。
+    if (!applyEffects) return true;
     return cutMask->applyExportEffects(pixels, cw, ch);
 }
 
@@ -2979,7 +4318,7 @@ void WinCap::stopKeyOverlay()
 		UnhookWindowsHookEx(g_mouseHook);
 		g_mouseHook = nullptr;
 	}
-	keyOverlayText_.clear();
+	keyOverlayLines_.clear();
 	keyOverlayUntil_ = 0;
 	killTimer(keyOverlayTimerId);
 }
@@ -2987,7 +4326,21 @@ void WinCap::stopKeyOverlay()
 void WinCap::onGlobalKeyCombo(const std::wstring& text)
 {
 	if (text.empty()) return;
-	keyOverlayText_ = text;
+	if (!keyOverlayLines_.empty()) {
+		const std::wstring& prev = keyOverlayLines_.back();
+		// 同一个组合在补全（"Ctrl + " → "Ctrl + C"）：替换最后一条，不新增历史。
+		// 也顺便挡住了按住不放产生的重复按键（prev == text 同样走替换）。
+		if (prev.size() <= text.size() && text.compare(0, prev.size(), prev) == 0) {
+			keyOverlayLines_.back() = text;
+		}
+		else {
+			keyOverlayLines_.push_back(text);
+			if (keyOverlayLines_.size() > 3) keyOverlayLines_.erase(keyOverlayLines_.begin());
+		}
+	}
+	else {
+		keyOverlayLines_.push_back(text);
+	}
 	keyOverlayUntil_ = GetTickCount64() + 1500;
 	setTimer(1500, keyOverlayTimerId);   // 每来一个键就续期，停手 1.5s 后消失
 	refresh();
@@ -2997,14 +4350,20 @@ void WinCap::onKeyOverlayTimer()
 {
 	killTimer(keyOverlayTimerId);
 	keyOverlayUntil_ = 0;
-	keyOverlayText_.clear();
+	keyOverlayLines_.clear();
 	refresh();
 }
 
 void WinCap::paintKeyOverlay(ID2D1DeviceContext* ctx)
 {
-	if (!ctx || keyOverlayText_.empty() || GetTickCount64() > keyOverlayUntil_) return;
-	auto layout = Ling::D2D::makeTextLayout(keyOverlayText_, 18.f * dpi);
+	if (!ctx || keyOverlayLines_.empty() || GetTickCount64() > keyOverlayUntil_) return;
+	// 最多三条按时间顺序纵向堆叠（最早在上、最新在下）
+	std::wstring text;
+	for (const auto& line : keyOverlayLines_) {
+		if (!text.empty()) text += L'\n';
+		text += line;
+	}
+	auto layout = Ling::D2D::makeTextLayout(text, 18.f * dpi);
 	if (!layout) return;
 	DWRITE_TEXT_METRICS tm{};
 	if (FAILED(layout->GetMetrics(&tm))) return;

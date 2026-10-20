@@ -825,13 +825,14 @@ public:
         auto sz = lOutputDuplDesc.ModeDesc.Width
             * lOutputDuplDesc.ModeDesc.Height * multi;
         auto sz2 = sz;
-        buf.resize(sz);
         if (rcx)
         {
             sz2 = (rcx->right - rcx->left) * (rcx->bottom - rcx->top) * multi;
-            buf.resize(sz2);
             sz = sz2;
         }
+        // ★ 先算好目标尺寸再 resize 一次：以前先按整屏 resize、再缩到选区尺寸，
+        //   vector 的 capacity 会一直停在整屏大小 —— 录一小块区域也要占一整屏内存。
+        if (buf.size() != (size_t)sz2) buf.resize(sz2);
 
         UINT lBmpRowPitch = lOutputDuplDesc.ModeDesc.Width * multi;
         if (rcx)

@@ -838,6 +838,8 @@ namespace {
     // 设置窗口在 onCreated 里注册进来的悬停气泡（工具栏停悬气泡那套外壳：圆角矩形 + 小三角）。
     // 未注册时 helpTipButton 返回 nullptr —— 构建期不产生问号。
     HoverTip* s_helpTip{ nullptr };
+    // 已创建的问号按钮：总开关切换时直接 show/hide，不必重建整页
+    std::vector<Ling::Button*> s_helpButtons;
 
     // 选项说明文案表：键 = 中文选项原文；
     // 英文界面下语言包给的是英文，查不到 → 不出问号）。
@@ -860,19 +862,21 @@ namespace {
             { L"默认工具", L"进入全屏画布时默认选中的工具" },
             { L"工具栏贴边", L"贴边时吸附上/下边缘，或收起到顶部，鼠标移到边缘临时显示" },
             { L"编码模式", L"自动优先硬件编码，失败回落 H.264；也可指定 H.264 / H.265" },
-            { L"编码速率", L"速率越快越省性能，但文件体积越大" },
-            { L"启用硬件加速", L"编码模式不适配会导致录制失败；花屏或异常时关闭，改用软件编码" },
+            { L"编码质量", L"质量越高画面越清晰，文件体积也越大" },
+            { L"硬件加速", L"编码模式不适配会导致录制失败；花屏或异常时建议关闭" },
             { L"视频清晰度", L"输出高度上限：区域更高时等比缩小，不放大" },
             { L"动图清晰度", L"动图的输出高度上限，同样只缩不放" },
-            { L"动图格式", L"GIF 兼容最好 / WebP 体积最小 / APNG 无损，扩展名仍为 .png" },
+            { L"动图格式", L"GIF 兼容最好 / WebP 体积最小 / APNG 无损" },
             { L"麦克风", L"选择录制使用的麦克风，无设备时使用系统默认" },
             { L"截图文件路径", L"截图与「以文件形式复制」的保存位置，留空用默认目录" },
             { L"录屏文件路径", L"录屏与动图的保存位置，留空用默认目录" },
             { L"字典模式", L"点击译文中的英文单词，即可查看详细释义" },
             { L"快捷键提示", L"显示当前工具快捷键" },
-            { L"排除系统工具栏", L"避免录屏工具栏被录入画面" },
+            { L"排除工具栏", L"避免录屏工具栏被录入画面" },
             { L"记录操作按键", L"鼠标穿透模式下，在左下角显示当前使用的按键" },
             { L"选框鼠标跟随", L"鼠标穿透模式下，光标靠近录制范围边缘时选区自动跟随光标，使操作始终处于录制画面内" },
+            { L"鼠标高亮提醒", L"录制时在光标下显示半透明色块，便于在画面中定位光标；点击色块或输入色号可自定义颜色" },
+            { L"标注默认值", L"设置线迹标注类工具默认宽度，默认是4" },
             // —— 「系统按键」页的条目说明 ——
             { L"工具循环", L"在工具栏的绘图工具之间按顺序循环切换" },
             { L"开始/暂停录制", L"临时全局键：开始/暂停屏幕录制" },
@@ -885,7 +889,16 @@ namespace {
     }
 }
 
-void attachHelpTip(HoverTip* tip) { s_helpTip = tip; }
+void attachHelpTip(HoverTip* tip) { s_helpTip = tip; s_helpButtons.clear(); }
+
+void applyFeatureTipsVisibility()
+{
+    const bool on = Setting::get() && Setting::get()->getFeatureTips();
+    for (auto* b : s_helpButtons) {
+        if (!b) continue;
+        if (on) b->show(); else b->hide();
+    }
+}
 
 HoverTip* helpTip() { return s_helpTip; }
 
@@ -911,6 +924,7 @@ Ling::Button* helpTipButton(Ling::Node* parent, const std::wstring& text)
     btn->setJustifyContent(Ling::Justify::Center);
     btn->setAlignItems(Ling::Align::Center);
     s_helpTip->bind(btn, text);
+    s_helpButtons.push_back(btn);
     return btn;
 }
 
@@ -970,7 +984,8 @@ OptionRowRef optionRow(Ling::Node* parent,
                        const std::wstring& label,
                        const std::wstring& desc,
                        bool chrome,
-                       float ctrlH)
+                       float ctrlH,
+                       const std::wstring& helpText)
 {
     OptionRowRef r{};
     auto* row = parent->makeChild<Ling::Node>();
@@ -1025,7 +1040,7 @@ OptionRowRef optionRow(Ling::Node* parent,
     lab->setFlexShrink(1.f);
     YGNodeStyleSetMinWidth(lab->node, 0.f);
 
-    helpTipButton(labRow, optionTipFor(label));
+    helpTipButton(labRow, helpText.empty() ? optionTipFor(label) : helpText);
 
     if (!desc.empty()) {
         auto* d = labelBox->makeChild<Ling::Label>();
@@ -1137,9 +1152,10 @@ Ling::Button* toggleRow(Ling::Node* parent,
                         const std::wstring& desc,
                         bool on,
                         std::function<void(bool)> onChange,
-                        bool chrome)
+                        bool chrome,
+                        const std::wstring& helpText)
 {
-    auto r = optionRow(parent, label, desc, chrome, kToggleH);   // 右内边距按开关高度算，与上下留白一致
+    auto r = optionRow(parent, label, desc, chrome, kToggleH, helpText);   // 右内边距按开关高度算，与上下留白一致
     auto* btn = r.ctrlBox->makeChild<Ling::Button>();
     styleToggle(btn, on);
     btn->onClick.add([btn, on, onChange](Ling::Button*) mutable {

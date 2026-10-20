@@ -9,13 +9,14 @@ class ToolSub;
 class ToolNestedPanel : public Ling::WinBase
 {
 public:
-	enum class Kind { None, Corner, WmAngle, PatinaWm, Emoji };
+	enum class Kind { None, Corner, WmAngle, PatinaWm, Emoji, BoardOpacity };
 	explicit ToolNestedPanel(ToolSub* owner);
 	~ToolNestedPanel();
 	void openCorner(const RECT& workArea, Ling::Button* anchor);
 	void openWmAngle(const RECT& workArea, Ling::Button* anchor);
 	void openPatinaWm(const RECT& workArea, Ling::Button* anchor);
 	void openEmoji(const RECT& workArea, Ling::Button* anchor);
+	void openBoardOpacity(const RECT& workArea, Ling::Button* anchor, float value);
 	void closePanel();
 	bool isOpen() const { return open_; }
 	Kind kind() const { return kind_; }

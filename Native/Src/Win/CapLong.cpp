@@ -8,6 +8,7 @@
 #include "../Tool/ToolbarTheme.h"
 #include "../App.h"
 #include "../Util.h"
+#include "ScreenCapture.h"
 #include "../Lang.h"
 #include "../Setting.h"
 using namespace Microsoft::WRL;
@@ -829,7 +830,10 @@ void CapLong::firstStep()
 	capStartPos.x = (int)maskRect.left;
 	capStartPos.y = (int)maskRect.top;
 	ClientToScreen(win->hwnd, &capStartPos);
-	imgData = Util::captureScreen(capStartPos.x, capStartPos.y, imgW, imgH);
+	// 首帧先试 DXGI（HDR 屏由系统做 HDR→SDR）；成功则后续帧沿用，失败整段回退 GDI
+	imgData = ScreenCapture::capture(capStartPos.x, capStartPos.y, imgW, imgH);
+	useDxgiCapture = !imgData.empty();
+	if (!useDxgiCapture) imgData = Util::captureScreen(capStartPos.x, capStartPos.y, imgW, imgH);
 	img1 = imgData;
 	previewFollowBottom = true;
 	makeImgPreview();
@@ -886,7 +890,14 @@ void CapLong::capStep()
 
 bool CapLong::tryAppendFrame()
 {
-	auto data = Util::captureScreen(capStartPos.x, capStartPos.y, imgW, imgH);
+	auto data = useDxgiCapture
+		? ScreenCapture::capture(capStartPos.x, capStartPos.y, imgW, imgH)
+		: Util::captureScreen(capStartPos.x, capStartPos.y, imgW, imgH);
+	if (data.empty()) {
+		// 中途 DXGI 失败（例如被别的采集程序抢占）：这一帧退回 GDI，别让滚动拼接断掉
+		data = Util::captureScreen(capStartPos.x, capStartPos.y, imgW, imgH);
+		useDxgiCapture = false;
+	}
 	if (firstCheck) {
 		changeStartY = -1;
 		for (int y = 0; y < imgH; y++) {

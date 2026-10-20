@@ -17,6 +17,37 @@
 #include "Shape/ShapeWatermark.h"
 #include "Shape/ShapeHighlight.h"
 
+namespace {
+// 白板"调整背景"的一步操作：本身不画任何东西，只负责在撤销/重做时把尺寸换回去。
+// 放进 shapes 里是为了和标注共用同一套撤销顺序（先撤销最后做的操作）。
+class ShapeBoardResize : public ShapeBase
+{
+public:
+	ShapeBoardResize(AnnotHost* win, int page, const D2D1_RECT_F& before, const D2D1_RECT_F& after)
+		: ShapeBase(win), page_(page), before_(before), after_(after)
+	{
+	}
+	void paint(ID2D1DeviceContext*) override {}
+	void onUndoChanged(bool undone) override
+	{
+		if (auto* cap = dynamic_cast<WinCap*>(win)) {
+			cap->demoBoardRestoreRect(page_, undone ? before_ : after_);
+			cap->refresh();
+		}
+	}
+private:
+	int page_;
+	D2D1_RECT_F before_, after_;
+};
+
+void SetShapeUndo(ShapeBase* shape, bool undone)
+{
+	if (!shape) return;
+	shape->isUndo = undone;
+	shape->onUndoChanged(undone);
+}
+}
+
 History::History(AnnotHost* win):win{win}
 {
 
@@ -83,6 +114,8 @@ ShapeBase* History::createShape(const std::wstring& state, const int& x, const i
     // watermark / patina：视口滤镜，由 syncViewportFilters 创建，不在此落笔
     // eraser 不建 shape，由 eraseAt 直接擦除
     if (!result) return nullptr;
+    // 白板「编辑背景」时画的标注归入背景层：关掉编辑背景后不参与点选/擦除
+    result->backgroundLayer = win->boardBackgroundEditing();
     result->mouseDown((float)x, (float)y);
     win->onHistoryChanged();
     return result;
@@ -115,7 +148,7 @@ void History::syncViewportFilters(const std::wstring& toolId)
 		if (!isWm && !isPa && !isHl) continue;
 		std::wstring kind = isWm ? L"watermark" : (isPa ? L"patina" : L"highlight");
 		if (keep.empty() || kind != keep) {
-			s->isUndo = true;
+			SetShapeUndo(s.get(), true);
 			if (win->shapeHover == s.get()) win->shapeHover = nullptr;
 		}
 	}
@@ -186,7 +219,7 @@ void History::undo()
         auto cur = shapes[i].get();
         // 渐隐画笔等临时笔迹不进撤销栈（laser 不提交成 op）
         if (!cur->isUndo && !cur->isEphemeral()) {
-            cur->isUndo = true;
+            SetShapeUndo(cur, true);
             if (cur == win->shapeHover) {
                 win->shapeHover = nullptr;
             }
@@ -203,7 +236,7 @@ void History::redo()
     {
         auto cur = shapes[i].get();
         if (cur->isUndo) {
-            cur->isUndo = false;
+            SetShapeUndo(cur, false);
             win->refresh();
             win->onHistoryChanged();
             break;
@@ -279,14 +312,16 @@ void History::eraseAt(const float x, const float y)
 {
     bool erased{ false };
     for (int i = (int)shapes.size() - 1; i >= 0; --i) {
-        auto cur = shapes[i].get();
-        if (cur->isUndo || cur->isEphemeral()) continue;
-        if (!cur->hitErase(x, y)) continue;
+		auto cur = shapes[i].get();
+		if (cur->isUndo || cur->isEphemeral()) continue;
+		// 背景层标注只在「编辑背景」打开时可擦除
+		if (cur->backgroundLayer && !win->boardBackgroundEditing()) continue;
+		if (!cur->hitErase(x, y)) continue;
         // 编辑中的文字先收尾，再 undo；空文本 finishEdit 会异步硬删，这里再标 isUndo 也无妨
         if (auto txt = dynamic_cast<ShapeText*>(cur)) {
             if (txt->isEditing) txt->finishEdit();
         }
-        cur->isUndo = true;
+        SetShapeUndo(cur, true);
         if (win->shapeHover == cur) {
             win->shapeHover = nullptr;
         }
@@ -296,6 +331,14 @@ void History::eraseAt(const float x, const float y)
 		win->refresh();
 		win->onHistoryChanged();
 	}
+}
+
+void History::addBoardResize(int page, const D2D1_RECT_F& before, const D2D1_RECT_F& after)
+{
+	// 新操作会丢弃已撤销的重做栈（与 createShape 一致）
+	removeUndoShape();
+	shapes.push_back(std::make_unique<ShapeBoardResize>(win, page, before, after));
+	win->onHistoryChanged();
 }
 
 void History::removeUndoShape()

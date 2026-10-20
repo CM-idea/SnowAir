@@ -56,7 +56,7 @@
     },
     "video": {
         "outputMp4": "Экспорт в MP4",
-        "outputGif": "Экспорт в GIF",
+        "outputGif": "Запись анимации",
         "recordSystem": "Запись системного звука",
         "recordMic": "Запись микрофона",
         "startRecord": "Начать запись",

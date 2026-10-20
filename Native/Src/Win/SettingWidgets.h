@@ -228,6 +228,8 @@ Ling::Label* groupLabel(Ling::Node* parent, const std::wstring& text, const std:
 //   设置项旁的「?」：悬停出工具栏那套停悬气泡（HoverTip）。由设置窗口在 onCreated 里
 //   把它的 HoverTip 实例注册进来（HoverTip 需要宿主 hwnd，只能在窗口创建后构造）。
 void attachHelpTip(HoverTip* tip);
+//   按「功能提示」总开关立即显示/隐藏已创建的所有「?」（不需要重建页面）
+void applyFeatureTipsVisibility();
 //   造一个「?」按钮：parent 通常是选项标题所在的行容器。文本为空 / 总开关关着时返回 nullptr。
 Ling::Button* helpTipButton(Ling::Node* parent, const std::wstring& text);
 //   取当前注册的说明气泡（未注册返回 nullptr）；供子页做自定义悬停提示（如文件输出预览）。
@@ -261,7 +263,9 @@ OptionRowRef optionRow(Ling::Node* parent,
     const std::wstring& label = L"",
     const std::wstring& desc  = L"",
     bool chrome = false,
-    float ctrlH = SettingTheme::ctrlH);   // 行内控件实际高度：决定右侧内边距（与控件上下留白取齐）
+    float ctrlH = SettingTheme::ctrlH,   // 行内控件实际高度：决定右侧内边距（与控件上下留白取齐）
+    // 非空时覆盖该标签在 optionTipFor 里的通用「?」说明（同名标签在不同页面含义不同时用）
+    const std::wstring& helpText = L"");
 // 简易版：只返回 row Node*，不关心 label/desc。适用于「row 内部自由布局」场景（子页自行 makeChild）。
 inline Ling::Node* optionRowSimple(Ling::Node* parent, bool chrome = false)
 {
@@ -287,7 +291,9 @@ Ling::Button* toggleRow(Ling::Node* parent,
     const std::wstring& desc,
     bool on,
     std::function<void(bool)> onChange,
-    bool chrome = false);
+    bool chrome = false,
+    // 非空时覆盖「?」说明（同名标签在不同页面含义不同时用）
+    const std::wstring& helpText = L"");
 //   重载 2（简明，无 desc）: toggleRow(parent, label, on, onChange)
 inline Ling::Button* toggleRow(Ling::Node* parent,
     const std::wstring& label,

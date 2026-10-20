@@ -10,6 +10,7 @@
 #include "../Ocr/PluginPaths.h"
 #include "../Translate/TranslateModelManager.h"
 #include "../Lang.h"
+#include "../Setting.h"
 #include "../Tool/IconCodes.h"
 
 namespace {
@@ -400,6 +401,12 @@ void WinSettingPlugins::startOcrDownload()
 					[this, weak](bool ok2, std::wstring err2) {
 						onUi([this, weak, ok2, err2]() {
 							if (!weak.lock()) return;
+							// 第一次装好离线文字识别：默认识别模型切到 PP-OCRv6。
+							// 以后若组件被删掉，运行时会自动回落到系统 OCR，不需要再改配置。
+							if (ok2) {
+								Setting::get()->setOcrEngine(0);
+								Setting::get()->setOcrCloudConfigId(L"");
+							}
 							finishDownload(CardOcr, ok2 ? std::wstring{} : err2);
 						});
 					});

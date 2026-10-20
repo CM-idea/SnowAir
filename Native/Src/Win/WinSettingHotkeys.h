@@ -15,7 +15,6 @@ private:
 	void beginCapture(Ling::Button* btn);
 	void endCapture();
 	void onKeyDown(UINT key);
-	void onKeyUp(UINT key);
 	void onSpinnerTick(UINT id);
 	std::wstring keyToStr(UINT vkCode);
 	// 构造一组：先加 groupLabel，再加若干行白底卡片录入按钮
@@ -28,8 +27,7 @@ private:
 	Ling::Button* restoreBtn{ nullptr };
 	winrt::event_token onMouseMoveToken{};
 	std::wstring curKey;
-	winrt::event_token onMouseDownToken, onKeyDownToken, onKeyUpToken, onTimerToken, onBlurToken;
-	std::vector<std::wstring> tempKeys;
+	winrt::event_token onMouseDownToken, onKeyDownToken, onTimerToken, onBlurToken;
 	// 等待按键时按钮内的"转圈圈"（加载感）：用定时器轮换四分之一圆字形
 	Ling::Label* curSpinner{ nullptr };
 	Ling::Label* curLabel{ nullptr };

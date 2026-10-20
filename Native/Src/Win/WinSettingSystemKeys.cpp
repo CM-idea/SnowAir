@@ -36,22 +36,6 @@ namespace {
 		return out;
 	}
 
-	// 修饰键排在前、主键在后（与「全局热键」页同款，落盘串前后一致）
-	void normalizeKeys(std::vector<std::wstring>& keys)
-	{
-		auto rank = [](const std::wstring& k) {
-			if (k == L"Ctrl")  return 0;
-			if (k == L"Alt")   return 1;
-			if (k == L"Shift") return 2;
-			if (k == L"Win")   return 3;
-			if (k == L"LWin")  return 4;
-			if (k == L"RWin")  return 5;
-			return 100;
-		};
-		std::stable_sort(keys.begin(), keys.end(),
-			[&](const std::wstring& a, const std::wstring& b) { return rank(a) < rank(b); });
-	}
-
 	// 录到的这组键能否作为「系统按键」：允许不带修饰键的单键（默认值里就有 1..0 / W / Q / F /
 	// ` / Space / Esc / Enter / Tab / Backspace）—— 这些命令只在会话窗口有焦点时派发，
 	// 不占用其他程序的按键。要求恰好一个主键，且主键能被 strToKey 识别（否则落盘后无法命中）。
@@ -184,11 +168,6 @@ WinSettingSystemKeys::WinSettingSystemKeys(Ling::WinBase* parent) : Ling::Node(p
 		if (this->curId.empty()) return;
 		this->onKeyDown(key);
 		});
-	onKeyUpToken = win->onKeyUp.add([this, weakThis](UINT key) {
-		if (!weakThis.lock()) return;
-		if (this->curId.empty()) return;
-		this->onKeyUp(key);
-		});
 	onMouseDownToken = win->onMouseDown.add([this, weakThis](POINT pos, bool) {
 		if (!weakThis.lock()) return;
 		if (this->curId.empty()) return;
@@ -229,7 +208,6 @@ WinSettingSystemKeys::~WinSettingSystemKeys()
 	win->onMouseMove.remove(onMouseMoveToken);
 	win->onMouseDown.remove(onMouseDownToken);
 	win->onKeyDown.remove(onKeyDownToken);
-	win->onKeyUp.remove(onKeyUpToken);
 	win->onTimer.remove(onTimerToken);
 	win->onBlur.remove(onBlurToken);
 }
@@ -259,7 +237,6 @@ void WinSettingSystemKeys::beginCapture(Ling::Button* btn)
 {
 	curBtn = btn;
 	curId = btn->id;
-	tempKeys.clear();
 	// 清空按钮内置文本，改用自定义「转圈 + 文案」两个子节点（转圈落于文案左侧）
 	btn->setText(L"");
 	styleKeyBtn(btn, true);
@@ -298,7 +275,6 @@ void WinSettingSystemKeys::endCapture()
 	}
 	curBtn = nullptr;
 	curId.clear();
-	tempKeys.clear();
 	// 录制结束：按挂起前的键位恢复全局热键
 	Setting::get()->resumeShortcutKeys();
 }
@@ -313,32 +289,31 @@ void WinSettingSystemKeys::onSpinnerTick(UINT id)
 
 void WinSettingSystemKeys::onKeyDown(UINT key)
 {
+	// 主键按下即完成录制：不再等抬起。否则组合还没按全时先松任意一个修饰键
+	//（或改主意换修饰键）就会被当成"松手保存"，三键组合经常录不进去。
 	auto keyStr = keyToStr(key);
 	if (keyStr.empty()) return;
-	if (!isModifierKey(keyStr)) {
-		// 主键按下时把当前按住的修饰键补进来（只按修饰键再松手不算一次录制）
-		auto ensure = [&](int vk, const std::wstring& name) {
-			if ((GetAsyncKeyState(vk) & 0x8000) &&
-				std::find(tempKeys.begin(), tempKeys.end(), name) == tempKeys.end()) {
-				tempKeys.push_back(name);
-			}
-			};
-		ensure(VK_CONTROL, L"Ctrl");
-		ensure(VK_MENU,    L"Alt");
-		ensure(VK_SHIFT,   L"Shift");
-		ensure(VK_LWIN,    L"LWin");
-		ensure(VK_RWIN,    L"RWin");
-	}
-	if (std::find(tempKeys.begin(), tempKeys.end(), keyStr) != tempKeys.end()) return;
-	tempKeys.push_back(keyStr);
-}
+	// 只按修饰键：继续等主键，不结束录制
+	if (isModifierKey(keyStr)) return;
 
-void WinSettingSystemKeys::onKeyUp(UINT key)
-{
-	if (curId.empty()) return;
-	normalizeKeys(tempKeys);
-	const std::wstring chord = joinKeys(tempKeys);
-	const bool ok = isValidKeys(tempKeys);
+	const bool ctrl  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+	const bool alt   = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+	const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+	const bool lwin  = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0;
+	const bool rwin  = (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+
+	// 组合取"主键按下这一刻"按住的修饰键：与按下/松开的先后顺序无关
+	std::vector<std::wstring> keys;
+	if (ctrl) keys.push_back(L"Ctrl");
+	if (alt) keys.push_back(L"Alt");
+	if (shift) keys.push_back(L"Shift");
+	if (lwin) keys.push_back(L"LWin");
+	else if (rwin) keys.push_back(L"RWin");
+	keys.push_back(keyStr);
+
+	const std::wstring chord = joinKeys(keys);
+	// 最多三键（两个修饰键 + 一个主键）；不合法就丢弃，保持原键位
+	const bool ok = keys.size() <= 3 && isValidKeys(keys);
 	// ⚠ 先收尾再落值：按钮在判定完成前必须回到原值（冲突被取消 = 什么都不变）
 	const std::wstring id = curId;
 	endCapture();

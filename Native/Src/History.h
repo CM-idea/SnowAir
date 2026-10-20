@@ -22,6 +22,8 @@ public:
 	// 同组的另一个一起删（用户要的：选中整条线按 Delete，文字不能剩下）
 	void removeShapeGroup(ShapeBase* target);
 	void eraseAt(const float x, const float y);
+	// 白板：调整背景尺寸也进撤销栈（page<0 = 纯色背景，否则为图片页码）
+	void addBoardResize(int page, const D2D1_RECT_F& before, const D2D1_RECT_F& after);
 	// 确认编辑：丢掉已撤销的 shape，释放内存并锁定本轮结果
 	void purgeUndone();
 	std::vector<std::unique_ptr<ShapeBase>> shapes;

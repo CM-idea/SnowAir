@@ -45,6 +45,8 @@ public:
 		float dpi{ 1.f };
 	};
 	virtual bool queryMainBarAnchor(MainBarAnchor& out) const;
+	// 指定属性栏跟随的按钮（白板等没有"当前工具"的栏）；空串表示跟随当前工具
+	void setMainBarAnchorId(const std::wstring& id);
 	// 录屏等场景：不走 ToolCap 时强制当前工具 id
 	void setForcedToolId(const std::wstring& id) { forcedToolId = id; }
 	void clearForcedToolId() { forcedToolId.clear(); }
@@ -59,6 +61,8 @@ public:
 	// 按当前工具/选中态设置光标（WinCap/WinPin::setCursor 调用）
 	void applyAnnotCursor();
 	void applyToolDrawCursor();
+	// 白板「编辑背景」是否开启：决定新标注是否归入背景层、背景层能否被点选
+	virtual bool boardBackgroundEditing() const { return false; }
 	// 离屏合成底图+标注；crop 非空则只输出该矩形（全屏坐标）
 	bool getAnnotPixels(std::vector<BYTE>& pixels, D2D1_SIZE_U& size, const D2D1_RECT_F* crop = nullptr);
 	// 长图：在已有 BGRA 底图上叠标注（形状已是长图像素坐标）
@@ -110,7 +114,8 @@ protected:
 	void clearAnnotSelection();
 	// 清空全部标注：**必须先断开 shapeHover / newShape / editingText 这些裸指针再释放**
 	// （否则它们悬垂，下一次 hasSelectedAnnot()/paint 就会在已释放对象上做虚调用 → 闪退）
-	void clearAllShapes();
+	// keepBackground：保留「背景层」标注（白板未开启编辑背景时的重置画布）
+	void clearAllShapes(bool keepBackground = false);
 	bool shouldPaintAnnotHandles() const;
 	void lockAnnotDragFromHover();
 	void applyLockedAnnotDrag();

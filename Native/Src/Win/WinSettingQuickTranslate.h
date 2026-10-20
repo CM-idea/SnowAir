@@ -28,8 +28,8 @@ private:
 	void showLangBox(Ling::Button* btn, bool target);
 	void showProviderBox(Ling::Button* btn);
 	void doTranslate(const std::wstring& text);
-	void appendBubble(const std::wstring& role, const std::wstring& text);
-	void updatePendingBubble(const std::wstring& text);
+	Ling::Node* appendBubble(const std::wstring& role, const std::wstring& text);
+	void updateBubble(Ling::Node* bubble, const std::wstring& text);   // 回填某一条译文气泡
 	// —— 字典模式（单击译文英文单词，于该条下方展开释义）——
 	bool dictModeOn() const;
 	void buildResultContent(Ling::Node* bubble, Ling::Node* block, const std::wstring& text);   // 词元流 + 隐藏释义卡
@@ -40,7 +40,7 @@ private:
 	void resetDictState();                // 消息列表重建时清掉选中态
 	void scrollToBottom();
 	void updateWelcome();                 // 无记录时显示居中提示语
-	void updateSendBtn();                 // 发送按钮：按有无输入切换配色（灰底黑图标 / 绿底白图标）
+	void updateSendBtn();                 // 发送按钮：无输入或当前服务正在翻译时置灰，否则绿底白图标
 	// —— 历史侧栏 ——
 	void toggleHistory();
 	void animateHistory();                // onTimer 单帧步进侧栏宽度
@@ -81,6 +81,7 @@ private:
 	Ling::ScrollerBox* histScroll{ nullptr };
 	Ling::Node* histList{ nullptr };
 	winrt::event_token timerTok;          // onTimer 订阅（仅注册一次）
+	winrt::event_token mouseDownTok;      // 窗口内点击：点侧栏外空白处收起历史侧栏
 	bool histAnimRunning{ false };
 	float histAnimW{ 0.f };
 	bool histOpen{ false };
@@ -88,6 +89,7 @@ private:
 	struct Msg {
 		std::wstring role;      // "user" 原文 / "assistant" 译文
 		std::wstring content;
+		int reqId{ 0 };         // 翻译请求号（仅本轮内存有效；结果回填时按它找消息）
 	};
 	struct Session {
 		std::wstring id;
@@ -97,9 +99,17 @@ private:
 	};
 	std::vector<Session> sessions;
 	std::wstring curId;
-	bool busy{ false };
-	Ling::Node* pendingBubble{ nullptr };   // 正在翻译的译文气泡
-	Ling::Label* pendingText{ nullptr };
+	// 正在翻译的请求：按**服务**区分 —— 同一服务同时只允许一条（发送按钮对它置灰），
+	// 换到别的服务可以并行再发一条，互不影响（旧请求继续跑，结果回填到自己的气泡）。
+	struct PendingReq {
+		int id{ 0 };
+		std::wstring provider;
+		Ling::Node* bubble{ nullptr };
+	};
+	std::vector<PendingReq> pending;
+	int nextReqId{ 1 };
+	bool providerBusy(const std::wstring& provider) const;
+	bool anyBusy() const { return !pending.empty(); }
 	// —— 字典模式 ——
 	Ling::Node* dictCard{ nullptr };        // 当前显示的释义卡（同一时刻只显示一张）
 	Ling::Button* dictActiveBtn{ nullptr }; // 当前选中的词按钮

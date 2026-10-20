@@ -3,6 +3,9 @@
 #include "ToolbarTheme.h"
 
 class ToolSub;
+// 「自定义颜色」色块：七彩渐变块。颜色面板与白板属性栏共用同一份绘制，
+// 避免两处各画一套导致外观漂移。
+void PaintCustomColorSwatch(Ling::Canvas* canvas, float dpi);
 // 颜色二级属性栏：主属性栏只留当前色块，点开后出现本窗。
 class ToolColorPanel : public Ling::WinBase
 {

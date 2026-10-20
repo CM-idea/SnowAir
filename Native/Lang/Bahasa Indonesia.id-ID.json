@@ -56,7 +56,7 @@
     },
     "video": {
         "outputMp4": "Simpan sebagai file MP4",
-        "outputGif": "Simpan sebagai file GIF",
+        "outputGif": "Rekam animasi",
         "recordSystem": "Rekam Suara Sistem",
         "recordMic": "Rekam Suara Mikrofon",
         "startRecord": "Mulai Rekam",

@@ -7,7 +7,7 @@
 // 「系统按键」页 —— 软件内**命令**的可配置按键（见 CommandKeys.h）。
 // 分组 / 行序 / 默认键位 / 只读标记全部来自命令表，本页不另抄一份清单。
 //
-// 录制交互与「全局热键」页同款（点键位框 → 等按键 → 松开即落盘）：
+// 录制交互与「全局热键」页同款（点键位框 → 等按键 → 主键按下即落盘）：
 //   · 只读行（「常规」组整组 + 层级退出 + 删除标注）：行名称保持正常色，仅键位框置灰且不可点；
 //   · 录到固定键（只读行占用的键，跨界面一律算占用）→ 直接拒绝；
 //   · 录到与同一界面上其他可改命令重复的键 → 弹「是否覆盖」，确认后才解绑旧主并落值。
@@ -21,7 +21,6 @@ private:
 	void beginCapture(Ling::Button* btn);
 	void endCapture();
 	void onKeyDown(UINT key);
-	void onKeyUp(UINT key);
 	void onSpinnerTick(UINT id);
 	std::wstring keyToStr(UINT vkCode);
 	// 把某条命令的当前键位刷到它的键位框上（空 = 「点击设置」占位、muted 色）
@@ -35,8 +34,7 @@ private:
 	winrt::event_token onMouseMoveToken{};
 	Ling::Button* curBtn{ nullptr };   // 正在录制的那个框
 	std::wstring curId;                // 正在录制的命令 id
-	std::vector<std::wstring> tempKeys;
-	winrt::event_token onMouseDownToken, onKeyDownToken, onKeyUpToken, onTimerToken, onBlurToken;
+	winrt::event_token onMouseDownToken, onKeyDownToken, onTimerToken, onBlurToken;
 	Ling::Label* curSpinner{ nullptr };
 	Ling::Label* curLabel{ nullptr };
 	int spinIdx{ 0 };

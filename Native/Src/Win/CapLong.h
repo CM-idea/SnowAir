@@ -93,6 +93,8 @@ private:
 	bool isPaused{ false };
 	bool isFinish{ false };
 	bool firstCheck{ true };
+	// 首帧如果走了 DXGI（HDR 屏友好），后续拼接帧也走它，避免同一张长图混两种色彩管线
+	bool useDxgiCapture{ false };
 	bool excludedFromCapture{ false };
 	int dismissTime{ 0 };
 	int settleRecheckCount{ 0 };

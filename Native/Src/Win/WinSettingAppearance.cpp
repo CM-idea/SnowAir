@@ -469,12 +469,26 @@ void WinSettingAppearance::buildOtherTab(Ling::Node* host)
     SettingUi::toggleRow(grid,
         Lang::get(L"setting.featureTips"),
         Setting::get()->getFeatureTips(),
-        [](bool on) { Setting::get()->setFeatureTips(on); }, true);
+        [](bool on) {
+            Setting::get()->setFeatureTips(on);
+            // 立刻把已经创建出来的「?」一起显示/隐藏，不用退出设置页才生效
+            SettingUi::applyFeatureTipsVisibility();
+        }, true);
     // 「快捷键提示」：开关只影响之后弹出的停悬气泡（已显示的提示仍带旧文字，属预期）
     SettingUi::toggleRow(grid,
         Lang::get(L"setting.hotkeyTip"),
         Setting::get()->getHotkeyTip(),
         [](bool on) { Setting::get()->setHotkeyTip(on); }, true);
+    // 线迹标注类工具的默认宽度（1–10，默认 4）
+    {
+        std::vector<std::wstring> widths;
+        for (int i = 1; i <= 10; ++i) widths.push_back(std::to_wstring(i));
+        SettingUi::selectRow(grid,
+            Lang::get(L"setting.toolDefaultWidth"),
+            widths,
+            std::clamp(Setting::get()->getToolDefaultWidth(), 1, 10) - 1,
+            [](int i, const std::wstring&) { Setting::get()->setToolDefaultWidth(i + 1); }, true);
+    }
     SettingUi::grid2Cells(grid);
 }
 
@@ -1262,6 +1276,7 @@ std::wstring WinSettingAppearance::tbTipText(const std::wstring& id) const
         { L"laser-pointer", L"tool.fadePen" },
         { L"reset-canvas", L"tool.resetCanvas" },
         { L"mouse-through", L"tool.mouseThrough" },
+        { L"whiteboard", L"tool.whiteboard" },
         { L"show-border", L"pin.showBorder" },
         { L"opacity", L"pin.opacityTool" },
     };

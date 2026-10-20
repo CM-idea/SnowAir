@@ -1,8 +1,10 @@
 #include "pch.h"
 #include "../Win/WinCap.h"
 #include "../Lang.h"
+#include "../Setting.h"
 #include "../Tip.h"
 #include "ToolOcr.h"
+#include "ToolOcrCompare.h"
 #include "IconCodes.h"
 #include "ToolbarTheme.h"
 
@@ -324,6 +326,36 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 	// 自身的鼠标选区，避免"点到的位置"和"眼睛看到的文字"各算各的。
 	onMouseDown.add([this](POINT pos, bool isRight) {
 		if (isRight) return;
+		// 点在上方悬浮按钮上：交给按钮自己处理，不参与"双击复制结果"，
+		// 否则双击「对比」会直接复制并退出截图，而不是切换原图浮窗。
+		// 必须放在最前面：文本重排分支里也有双击判定，会把它盖掉。
+		if (buttonsShown_ && ((copyBtn && copyBtn->isPosIn(pos)) || (compareBtn && compareBtn->isPosIn(pos))))
+			return;
+		// 文本重排：单击/拖选交给普通 TextBox；双击仍然是「完成」。
+		if (reflow_) {
+			if (!pinOverlay_ && onConfirm_) {
+				const auto now = GetTickCount64();
+				const bool dbl = (now - lastDownTick_ <= GetDoubleClickTime())
+					&& std::abs(pos.x - lastDownPt_.x) <= GetSystemMetrics(SM_CXDOUBLECLK)
+					&& std::abs(pos.y - lastDownPt_.y) <= GetSystemMetrics(SM_CYDOUBLECLK);
+				lastDownTick_ = now;
+				lastDownPt_ = pos;
+				if (dbl) { onConfirm_(L""); return; }
+			}
+			return;
+		}
+		// 截图宿主：双击译文/识别文字 = 「完成」（复制整段并退出）。
+		// 必须抢在选区逻辑之前返回 —— 否则第二下会被当成又一次落点，
+		// 双击就变成了"选中一个字符/整块"，而不是完成。
+		if (!pinOverlay_ && onConfirm_) {
+			const auto now = GetTickCount64();
+			const bool dbl = (now - lastDownTick_ <= GetDoubleClickTime())
+				&& std::abs(pos.x - lastDownPt_.x) <= GetSystemMetrics(SM_CXDOUBLECLK)
+				&& std::abs(pos.y - lastDownPt_.y) <= GetSystemMetrics(SM_CYDOUBLECLK);
+			lastDownTick_ = now;
+			lastDownPt_ = pos;
+			if (dbl) { onConfirm_(L""); return; }
+		}
 		const SelPoint sp = hitSelPoint(pos);
 		if (sp.line < 0) return;
 		selActive_ = true;
@@ -348,6 +380,11 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 		applySelection();
 	});
 	onKeyDown.add([this](UINT key) {
+		// 文本重排且文本框已聚焦：编辑键、Ctrl+A/C/V 全归 TextBox；只把 Esc 透给宿主
+		if (reflow_ && !editors.empty() && editors[0] && editors[0]->isFocused()) {
+			if (key == VK_ESCAPE && this->host) this->host->onKeyDown(key);
+			return;
+		}
 		const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 		if (ctrl && key == 'A') {   // 全选（跨行）
 			if (!editors.empty()) {
@@ -359,7 +396,14 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 			}
 			return;
 		}
-		if (ctrl && key == 'C') { copyAll(); return; }
+		if (ctrl && key == 'C') {
+			// 截图宿主：拖选后 Ctrl+C = 复制选中片段并退出截图（等同「完成」，但只复制这段）。
+			// 没有选区时保持原行为：复制整段、留在原地面板里。
+			const std::wstring sel = (!pinOverlay_ && onConfirm_) ? selectedText() : std::wstring{};
+			if (!sel.empty()) { onConfirm_(sel); return; }
+			copyAll();
+			return;
+		}
 		if (ctrl && key == 'X') return;   // 只读展示，剪切忽略
 		if (this->host) this->host->onKeyDown(key);
 	});
@@ -367,12 +411,17 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 	onCursor.add([this](bool* handled) {
 		if (selActive_) { SetCursor(LoadCursor(nullptr, IDC_IBEAM)); *handled = true; }
 	});
+	// 右上角按钮的显示/隐藏靠轮询：面板除文字块外全穿透，空白处的悬停事件收不到
+	onTimer.add([this](UINT id) {
+		if (id == kHoverTimerId) updateButtonsHover();
+	});
 }
 
 ToolOcr::~ToolOcr()
 {
 	// WinBase 的析构不销毁 HWND：不先 close 就 reset，窗口会变成"幽灵窗"，
 	// 其 WndProc 仍指向已释放的对象 —— 鼠标划过即重入已释放内存，反复开关几次就闪退。
+	if (hwnd) killTimer(kHoverTimerId);
 	if (hwnd) { close(); hwnd = nullptr; }
 }
 
@@ -382,26 +431,55 @@ void ToolOcr::onCreated()
 	body->setBorderRadius(0.f);
 
 	if (!pinOverlay_) {
+		// 与工具栏主题联动：底色 / 悬停底 / 描边 / 图标色都取 ToolbarTheme
+		ToolbarTheme::refresh();
+		// 透明度对齐贴图右上角悬浮按钮：常态 45%、悬停 60%（色相仍跟主题走）
+		const uint32_t btnBg = (ToolbarTheme::background & 0xFFFFFF00u) | 0x73u;
+		const uint32_t btnHoverBg = (ToolbarTheme::hoverBg & 0xFFFFFF00u) | 0x99u;
+		auto styleTopBtn = [btnBg, btnHoverBg](Ling::Button* b) {
+			b->setSize(34.f, 34.f);
+			b->setPositionType(Ling::Position::Absolute);
+			b->setPosition(Ling::Edge::Top, 10.f);
+			b->setBg(btnBg);
+			b->setHoverBg(btnHoverBg);
+			b->setBorder(ToolbarTheme::borderWidth, ToolbarTheme::border);
+			b->setBorderRadius(ToolbarTheme::hoverRadius);
+			b->setAlignItems(Ling::Align::Center);
+			b->setJustifyContent(Ling::Justify::Center);
+			b->setFontFamily(Icon::Family);
+			b->setFontSize(18.f);
+			b->setColor(ToolbarTheme::iconNormal);
+			b->setHoverColor(ToolbarTheme::iconNormal);
+			};
+
 		copyBtn = body->makeChild<Ling::Button>();
 		copyBtn->setText(Icon::Copy);
-		copyBtn->setSize(34.f, 34.f);
-		copyBtn->setPositionType(Ling::Position::Absolute);
-		copyBtn->setPosition(Ling::Edge::Right, 4.f);
-		copyBtn->setPosition(Ling::Edge::Top, 4.f);
-		copyBtn->setBg(0xFFFFFFB0);          // 半透明浅底：底图深浅不定，按钮自身要有一点底色才看得见
-		copyBtn->setHoverBg(0xFFFFFFF2);
-		copyBtn->setBorderRadius(ToolbarTheme::hoverRadius);
-		copyBtn->setAlignItems(Ling::Align::Center);
-		copyBtn->setJustifyContent(Ling::Justify::Center);
-		copyBtn->setFontFamily(Icon::Family);
-		copyBtn->setFontSize(Icon::Size);
-		copyBtn->setColor(0x262626FF);
-		copyBtn->setHoverColor(0x262626FF);
-		copyBtn->onClick.add([this](Ling::Button*) { copyAll(); });
+		copyBtn->setPosition(Ling::Edge::Right, 10.f);
+		styleTopBtn(copyBtn);
+		copyBtn->onClick.add([this](Ling::Button*) {
+			// 截图宿主：右上角复制 = 「完成」（复制整段文字结果并退出截图）；
+			// 贴图宿主没有 onConfirm，维持原来的"只复制、不关窗"。
+			if (!pinOverlay_ && onConfirm_) { onConfirm_(L""); return; }
+			copyAll();
+		});
+
+		// 「对比」：与复制同款，排在它左边
+		compareBtn = body->makeChild<Ling::Button>();
+		compareBtn->setText(Icon::Compare);
+		compareBtn->setPosition(Ling::Edge::Right, 52.f);
+		styleTopBtn(compareBtn);
+		compareBtn->onClick.add([this](Ling::Button*) { toggleCompare(); });
+
+		// 两个按钮平时隐藏：鼠标悬停到选区范围内才出现
+		copyBtn->hide();
+		compareBtn->hide();
 
 		// 悬停提示（与其他工具条按钮一致：停悬 1 秒后弹出）
 		tip = std::make_unique<Tip>(this);
 		tip->bind(copyBtn, Lang::get(L"ocr.copy"));
+		tip->bind(compareBtn, Lang::get(L"ocr.compare"));
+
+		setTimer(kHoverPollMs, kHoverTimerId);
 	}
 
 	bannerNode = body->makeChild<Ling::Node>();
@@ -422,7 +500,52 @@ void ToolOcr::onCreated()
 	// 提示条（"翻译失败：…"之类）必须压在最上面：它建得比识别结果早，不显式提到最前
 	// 就会被后建的背景块/文字块盖住。
 	if (bannerNode) body->bringToFront(bannerNode);
+	// 右上角按钮压在文字块与标注镜像层之上（先建的后移，所以放在最后提）
+	if (compareBtn) body->bringToFront(compareBtn);
+	if (copyBtn) body->bringToFront(copyBtn);
 	show();
+}
+
+void ToolOcr::updateButtonsHover()
+{
+	if (pinOverlay_ || !hwnd || !copyBtn) return;
+	POINT pt{};
+	GetCursorPos(&pt);
+	// 面板窗口 == 选区矩形：光标落在窗口内就算"悬停在框选范围内"
+	const bool in = pt.x >= x && pt.x < x + (int)w && pt.y >= y && pt.y < y + (int)h;
+	if (in == buttonsShown_) return;
+	buttonsShown_ = in;
+	if (in) {
+		copyBtn->show();
+		if (compareBtn) compareBtn->show();
+	}
+	else {
+		if (tip) tip->hide();
+		copyBtn->hide();
+		if (compareBtn) compareBtn->hide();
+	}
+}
+
+void ToolOcr::toggleCompare()
+{
+	if (compare_) { compare_.reset(); refreshCompareBtnState(); return; }
+	if (!hwnd || srcImage_.empty()) return;
+	compare_ = std::make_unique<ToolOcrCompare>(srcImage_, imgW, imgH, dpi);
+	compare_->createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, WS_POPUP);
+	if (compare_->hwnd)
+		SetWindowLongPtr(compare_->hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(hwnd));
+	compare_->placeNear(RECT{ x, y, x + (int)w, y + (int)h });
+	compare_->show();
+	refreshCompareBtnState();
+}
+
+void ToolOcr::refreshCompareBtnState()
+{
+	if (!compareBtn) return;
+	// 选中态与工具栏开关按钮一致：图标用主题强调色
+	const uint32_t color = compare_ ? ToolbarTheme::selection : ToolbarTheme::iconNormal;
+	compareBtn->setColor(color);
+	compareBtn->setHoverColor(color);
 }
 
 void ToolOcr::rebuildEditors()
@@ -441,8 +564,13 @@ void ToolOcr::rebuildEditors()
 		showBanner(!busyMsg_.empty() ? busyMsg_
 			: (result_.error.empty() ? Lang::get(L"ocr.fail") : result_.error), busyMsg_.empty());
 		if (bannerNode) body->bringToFront(bannerNode);
+		if (compareBtn) body->bringToFront(compareBtn);
+		if (copyBtn) body->bringToFront(copyBtn);
 		return;
 	}
+
+	// 文本重排只作用于 OCR 结果；翻译仍要保留"译文对齐原文位置"的语义。
+	reflow_ = !translateMode_ && Setting::get()->getOcrResultMode() == 1;
 
 	const float scaleX = (imgW > 0) ? (w / (float)imgW) : 1.f;
 	const float scaleY = (imgH > 0) ? (h / (float)imgH) : 1.f;
@@ -545,7 +673,9 @@ void ToolOcr::rebuildEditors()
 		}
 	}
 
-	for (size_t i = 0; i < result_.regions.size(); ++i) {
+	// 文本重排：跳过逐框覆盖，走下面「整段文本框」分支
+	const size_t regionCount = reflow_ ? 0 : result_.regions.size();
+	for (size_t i = 0; i < regionCount; ++i) {
 		auto& reg = result_.regions[i];
 		const float rx = reg.x * scaleX / dpi;
 		const float ry = reg.y * scaleY / dpi;
@@ -597,12 +727,35 @@ void ToolOcr::rebuildEditors()
 		box->setPosition(Ling::Edge::Top, ry);
 		box->setFontSize(fLogical);
 		box->setColor(fg);
+		// 拖选文字的背景色统一 #1890FF（原位覆盖 / 文本重排一致）
+		box->setSelectionBgColor(0x1890FFFF);
 		box->setAutoSize(true);
 		box->setText(text);
 		box->setMouseSelectionEnabled(false);   // 选区由 ToolOcr 统一接管
 		editors.push_back(box);
 	}
-	if (editors.empty() && !result_.text.empty()) {
+	// 文本重排（或没有逐框结果时）落成一个整段文本框：可编辑、Enter 换行，
+	// 和普通多行输入框一致。文本优先用整段识别结果，缺失时按识别框顺序拼。
+	std::wstring fullText = result_.text;
+	if (reflow_ && fullText.empty()) {
+		for (const auto& reg : result_.regions) {
+			const std::wstring& t = reg.displayText.empty() ? reg.text : reg.displayText;
+			if (t.empty()) continue;
+			if (!fullText.empty()) fullText += L'\n';
+			fullText += t;
+		}
+	}
+	if ((reflow_ || editors.empty()) && !fullText.empty()) {
+		if (reflow_) {
+			// 整块铺满选区：完全不露出原画面（文字框四周也不透出来）
+			auto* bgNode = body->makeChild<Ling::Node>();
+			bgNode->setPositionType(Ling::Position::Absolute);
+			bgNode->setPosition(Ling::Edge::Left, 0.f);
+			bgNode->setPosition(Ling::Edge::Top, 0.f);
+			bgNode->setSize(w / dpi, h / dpi);
+			bgNode->setBg(palBg_);
+			bgs_.push_back(bgNode);
+		}
 		auto* box = body->makeChild<Ling::TextBox>();
 		box->setPositionType(Ling::Position::Absolute);
 		box->setPosition(Ling::Edge::Left, 8.f);
@@ -610,7 +763,8 @@ void ToolOcr::rebuildEditors()
 		box->setSize(std::max(80.f, w / dpi - 16.f), std::max(40.f, h / dpi - 48.f));
 		box->setBg(palBg_);
 		box->setColor(palFg_);
-		box->setText(result_.text);
+		box->setSelectionBgColor(0x1890FFFF);   // 拖选文字背景色统一 #1890FF
+		box->setText(fullText);
 		editors.push_back(box);
 	}
 	// 选区状态跟着重建作废；镜像层保持在最上层
@@ -624,6 +778,9 @@ void ToolOcr::rebuildEditors()
 	if (!busyMsg_.empty()) showBanner(busyMsg_, false);
 	else if (!result_.regions.empty()) clearBanner();
 	else if (!banner_.empty()) showBanner(banner_, bannerError_);
+	// 右上角按钮始终在识别结果、标注镜像层与提示条之上（重建文字块会重新排到前面）
+	if (compareBtn) body->bringToFront(compareBtn);
+	if (copyBtn) body->bringToFront(copyBtn);
 	// 不自动选中/聚焦：结果只是"叠在原图上供阅读"，一进来就整段高亮并不合适；点哪块再编辑哪块。
 }
 
@@ -851,7 +1008,11 @@ LRESULT ToolOcr::onHitTest(const POINT screenPos)
 	for (auto* e : editors) {
 		if (e && e->isPosIn(client)) return HTCLIENT;
 	}
-	if (copyBtn && copyBtn->isPosIn(client)) return HTCLIENT;
+	// 右上角按钮平时隐藏，只有悬停在选区内才吃鼠标（隐藏时点击继续落到宿主画布上）
+	if (buttonsShown_) {
+		if (copyBtn && copyBtn->isPosIn(client)) return HTCLIENT;
+		if (compareBtn && compareBtn->isPosIn(client)) return HTCLIENT;
+	}
 	return HTTRANSPARENT;
 }
 

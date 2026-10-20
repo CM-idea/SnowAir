@@ -23,6 +23,19 @@ public:
 	void showHighlightTools();
 	void showEraserTools();
 	void showOpacityTools();   // 贴图「透明度」：仅滑条，无图标/色板
+	// 演示画布「白板」属性栏：无色 / 调整背景 / 选择背景 + 颜色预设
+	void showBoardTools();
+	bool boardToolsVisible() const { return isVisible && hasTools && curToolId == L"board"; }
+	// 演示画布内的屏幕录制属性栏
+	void showDemoRecTools();
+	void refreshDemoRecState();
+	bool demoRecToolsBuilt() const { return hasTools && curToolId == L"demo-rec"; }
+	bool demoRecGifMode() const { return demoRecGif_; }
+	// 白板背景透明度（二级面板滑条调用）
+	void setBoardOpacity(int percent);
+	// 白板栏已构建但可能还没 show（isVisible=false）时也要允许布局放行
+	bool boardToolsBuilt() const { return hasTools && curToolId == L"board"; }
+	void refreshBoardState();
 
 	void hideTools();
 	// 拖选区时临时藏起（不拆内容）；抬手 resume 再跟新位置
@@ -167,6 +180,27 @@ private:
 	Ling::Button* angleBtn{ nullptr };
 	Ling::Button* patinaWmBtn{ nullptr };
 	Ling::Button* emojiTrigger{ nullptr };
+	// 白板属性栏
+	Ling::Button* boardAdjustBtn{ nullptr };
+	Ling::Button* boardPickBtn{ nullptr };
+	Ling::Button* boardNoColorBtn{ nullptr };
+	std::vector<Ling::Button*> boardSwatches;   // 7 个常驻色块（含自定义）
+	std::vector<Ling::Node*> boardRings;        // 选中态画在环上
+	Ling::Canvas* boardCustomCanvas{ nullptr }; // 自定义色块的七彩渐变（与颜色面板共用绘制）
+	Ling::Button* boardOpacityBtn{ nullptr };   // 「透明度」二级属性触发按钮（纯色背景可用）
+	// —— 演示画布录屏属性栏 ——
+	Ling::Button* recPlayBtn{ nullptr };
+	Ling::Button* recAudioBtn{ nullptr };
+	Ling::Button* recMicBtn{ nullptr };
+	Ling::Button* recGifBtn{ nullptr };
+	Ling::Button* recSaveBtn{ nullptr };
+	Ling::Button* recCancelBtn{ nullptr };
+	Ling::Button* recDoneBtn{ nullptr };
+	Ling::Label* recTimerLabel{ nullptr };
+	// 属性栏里选择的录制模式/音频开关（开录前可改，开录后锁定）
+	bool demoRecGif_{ false };
+	bool demoRecAudio_{ true };
+	bool demoRecMic_{ false };
 	// 复合图标按钮（马赛克模糊）：底字形 + 半透明叠字形
 	Ling::Button* overlayBtn{ nullptr };
 	Ling::Label* overlayBaseLabel{ nullptr };

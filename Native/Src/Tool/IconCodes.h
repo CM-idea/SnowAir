@@ -129,4 +129,23 @@ namespace Icon
 	inline constexpr const wchar_t* Baidu = L"\ue659";          // 百度
 	inline constexpr const wchar_t* Download = L"\ue65a";       // 下载
 	inline constexpr const wchar_t* Remove = L"\ue65b";         // 删除
+
+	// —— 白板 / 背景 / 新功能（字库 5228143，e664-e677）——
+	inline constexpr const wchar_t* Board = L"\ue671";              // 白板
+	inline constexpr const wchar_t* Forbid = L"\ue672";             // 禁止
+	inline constexpr const wchar_t* NoColor = L"\ue673";            // 无色（取消背景）
+	inline constexpr const wchar_t* AdjustBackground = L"\ue674";   // 调整背景
+	inline constexpr const wchar_t* ImageBackground = L"\ue675";    // 图片背景
+	inline constexpr const wchar_t* FunArrow = L"\ue676";           // 趣味箭头
+	inline constexpr const wchar_t* Compare = L"\ue677";            // 对比
+	inline constexpr const wchar_t* Audio2 = L"\ue670";             // 音频2
+	inline constexpr const wchar_t* Mirror = L"\ue66c";             // 镜像模式
+	inline constexpr const wchar_t* Filter = L"\ue66d";             // 筛选
+	inline constexpr const wchar_t* Crop = L"\ue66e";               // 裁剪
+	inline constexpr const wchar_t* RotateNW = L"\ue667";           // 左上旋转
+	inline constexpr const wchar_t* RotateNE = L"\ue668";           // 右上旋转
+	inline constexpr const wchar_t* RotateSE = L"\ue669";           // 右下旋转
+	inline constexpr const wchar_t* RotateSW = L"\ue66a";           // 左下旋转
+	inline constexpr const wchar_t* UserActive = L"\ue665";         // 用户已激活
+	inline constexpr const wchar_t* User = L"\ue666";               // 用户
 }

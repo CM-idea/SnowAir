@@ -3,6 +3,7 @@
 #include "../Tip.h"
 #include "ToolNestedPanel.h"
 #include "ToolSub.h"
+#include "../Win/WinCap.h"
 #include "IconCodes.h"
 #include "ToolbarChrome.h"
 #include "ToolbarTheme.h"
@@ -207,6 +208,19 @@ void ToolNestedPanel::openWmAngle(const RECT& workArea, Ling::Button* anchor)
 	finishOpen(workArea, anchor,
 		ToolbarTheme::propPad * 2.f + PropSlider::rowLogicW() + ToolbarTheme::shadowPad * 2.f);
 	owner->refreshNestedTrigger();
+}
+
+void ToolNestedPanel::openBoardOpacity(const RECT& workArea, Ling::Button* anchor, float value)
+{
+	closePanel();
+	kind_ = Kind::BoardOpacity;
+	clearContent();
+	prepareContentRow();
+	addSlider(10.f, 100.f, value, [this](float nv) {
+		owner->setBoardOpacity((int)std::lround(nv));
+	});
+	finishOpen(workArea, anchor,
+		ToolbarTheme::propPad * 2.f + PropSlider::rowLogicW() + ToolbarTheme::shadowPad * 2.f);
 }
 
 void ToolNestedPanel::rebuildPatinaWmRow()

@@ -5,6 +5,7 @@
 #include "../Lang.h"
 #include "../Tip.h"
 #include "ToolVideo.h"
+#include <climits>
 #include "ToolSub.h"
 #include "IconCodes.h"
 #include "ToolbarChrome.h"
@@ -243,7 +244,7 @@ void ToolVideo::buildBar()
 	dragHandle->setFlexShrink(0.f);
 	dragHandle->setAlignItems(Ling::Align::Center);
 	dragHandle->setJustifyContent(Ling::Justify::Center);
-	tip->bind(dragHandle, L"拖动");
+	// 拖拽手柄不给悬停提示：它只是移动工具条
 
 	for (const auto& id : resolveSlots()) {
 		if (id == L"|") makeSpliter();
@@ -344,7 +345,8 @@ void ToolVideo::makeSlot(const std::wstring& id)
 			if (isRecording) finishRecord(false);
 			else win->close();
 		});
-		tip->bind(btnCancel, Lang::get(isRecording ? L"video.stopExit" : L"video.exit"));
+		// 各工具栏的 × / ✓ 文案统一：× = 关闭，✓ = 完成（与截图栏、长截图一致）
+		tip->bind(btnCancel, Lang::get(L"tool.close"));
 	}
 	else if (id == L"done") {
 		auto* btnDone = makeIconBtn(Icon::Done, L"done");
@@ -353,7 +355,8 @@ void ToolVideo::makeSlot(const std::wstring& id)
 		btnDone->onClick.add([this](Ling::Button*) {
 			if (isRecording) finishRecord(true);
 		});
-		tip->bind(btnDone, Lang::get(L"video.stopClipboard"));
+		// 各工具栏的 × / ✓ 文案统一：✓ = 完成（这里会复制到剪贴板并结束录制）
+		tip->bind(btnDone, Lang::get(L"tool.clipboard"));
 	}
 	else {
 		// 标注类：矩形 / 箭头 / 画笔 / 文字 / 序号 / 马赛克 / 橡皮擦
@@ -381,7 +384,9 @@ void ToolVideo::onDragDown(POINT pos, bool isRight)
 {
 	if (isRight) return;
 	if (!dragHandle || !dragHandle->isPosIn(pos)) return;
+	killTimer(peekTimerId);
 	draggingBar = true;
+	dragMoved_ = false;
 	POINT scr{};
 	GetCursorPos(&scr);
 	dragMouseScreen = scr;
@@ -390,12 +395,25 @@ void ToolVideo::onDragDown(POINT pos, bool isRight)
 	SetCapture(hwnd);
 }
 
-void ToolVideo::onDragMove(POINT)
+void ToolVideo::onDragMove(POINT pos)
 {
+	// 贴边隐藏的进出：离开已滑出的工具栏 → 延时缩回；移到缩进后露出的边上 → 滑出
+	if (peekEdge_ != PeekEdge::None && !draggingBar) {
+		if (pos.x == INT_MAX && pos.y == INT_MAX) {
+			if (!peekHidden_) schedulePeekCollapse();
+		}
+		else {
+			killTimer(peekTimerId);   // 又回到工具栏上了：取消待缩回
+			if (peekHidden_) peekReveal();
+		}
+	}
 	if (!draggingBar) return;
 	POINT scr{};
 	GetCursorPos(&scr);
-	setPosition(dragWinX + scr.x - dragMouseScreen.x, dragWinY + scr.y - dragMouseScreen.y);
+	const int nx = dragWinX + scr.x - dragMouseScreen.x;
+	const int ny = dragWinY + scr.y - dragMouseScreen.y;
+	if (nx != x || ny != y) dragMoved_ = true;
+	setPosition(nx, ny);
 }
 
 void ToolVideo::onDragUp(POINT, bool)
@@ -404,6 +422,71 @@ void ToolVideo::onDragUp(POINT, bool)
 	draggingBar = false;
 	ReleaseCapture();
 	win->markMainToolUserPlaced();
+	peekEdge_ = PeekEdge::None;
+	peekHidden_ = false;
+	// 「贴边隐藏」只认**手动拖动**：松手时工具栏边缘贴住屏幕的上/下沿（8px 内）才缩进。
+	// 判定用整块屏幕 rcMonitor —— 工作区会被任务栏挤出一条缝，容易"看着贴边其实差几十像素"。
+	// 只要拖离边缘，就清掉贴边状态，本次录制内不再自动隐藏（拖回边缘可重新触发）。
+	if (Setting::get()->getRecordToolbarPeek() && dragMoved_) {
+		MONITORINFO mi{ sizeof(MONITORINFO) };
+		if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+			const int th = (int)(8.f * dpi + 0.5f);
+			if (y <= mi.rcMonitor.top + th) peekEdge_ = PeekEdge::Top;
+			else if (y + (int)h >= mi.rcMonitor.bottom - th) peekEdge_ = PeekEdge::Bottom;
+		}
+	}
+	killTimer(peekTimerId);
+	dragMoved_ = false;
+	if (peekEdge_ != PeekEdge::None) peekCollapse();
+}
+
+// 缩进边缘：藏到屏幕之外，只露出 peekStripPx 高的一条，鼠标移到这条上再滑出
+void ToolVideo::peekCollapse()
+{
+	if (peekEdge_ == PeekEdge::None || !hwnd) return;
+	MONITORINFO mi{ sizeof(MONITORINFO) };
+	if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) return;
+	// ★ 用 rcMonitor（整块屏幕）而不是 rcWork（工作区）：底部要藏到屏幕下沿之外，
+	//   只留一条压在任务栏上沿；用 rcWork 会在"工作区底"和"屏幕底"之间留出任务栏那段空档，
+	//   光标正好落在空档里 → 露头/缩回反复弹。
+	const RECT area = mi.rcMonitor;
+	const int strip = (int)(peekStripPx * dpi + 0.5f);
+	int nx = x;
+	const int maxX = area.right - (int)w;
+	if (nx < area.left) nx = area.left;
+	if (nx > maxX) nx = maxX;
+	const int ny = (peekEdge_ == PeekEdge::Top)
+		? area.top - ((int)h - strip)
+		: area.bottom - strip;
+	peekHidden_ = true;
+	if (x != nx || y != ny) setPosition(nx, ny);
+}
+
+// 滑出：贴着屏幕边缘（rcMonitor），光标从露出的一条进来后仍落在工具栏内，不会来回弹
+void ToolVideo::peekReveal()
+{
+	if (peekEdge_ == PeekEdge::None || !hwnd) return;
+	killTimer(peekTimerId);
+	MONITORINFO mi{ sizeof(MONITORINFO) };
+	if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) return;
+	const RECT area = mi.rcMonitor;
+	int nx = x;
+	const int maxX = area.right - (int)w;
+	if (nx < area.left) nx = area.left;
+	if (nx > maxX) nx = maxX;
+	const int ny = (peekEdge_ == PeekEdge::Top)
+		? area.top
+		: area.bottom - (int)h;
+	peekHidden_ = false;
+	if (x != nx || y != ny) setPosition(nx, ny);
+}
+
+void ToolVideo::schedulePeekCollapse()
+{
+	if (peekEdge_ == PeekEdge::None || peekHidden_ || draggingBar) return;
+	// 设置里中途关掉「贴边隐藏」：不再自动缩回（下次手动拖动时才清掉 peekEdge_）
+	if (!Setting::get()->getRecordToolbarPeek()) return;
+	setTimer(peekHideDelayMs, peekTimerId);
 }
 
 void ToolVideo::onGifClick()
@@ -474,6 +557,7 @@ void ToolVideo::startRecord()
 	isRecording = true;
 	isPaused = false;
 	totalSeconds = 0;
+	trimmedAfterStart_ = false;
 	if (btnPlay) {
 		btnPlay->setText(Icon::Pause);
 		tip->bind(btnPlay, Lang::get(L"video.pauseRecord"));
@@ -570,9 +654,8 @@ void ToolVideo::updateTimerText()
 {
 	if (!timerLabel) return;
 	if (!isRecording) {
-		// 未开录：只显示最大时长（如 120.00 / 6.00），缩短栏宽
-		const int maxMinutes = (selectIndex == 1) ? 6 : 120;
-		timerLabel->setText(std::format(L"{}.00", maxMinutes));
+		// 未开录：动图显示 10 分钟上限；视频不限时，从 00.00 起（不再显示上限数字）。
+		timerLabel->setText(selectIndex == 1 ? L"10.00" : L"00.00");
 		return;
 	}
 	timerLabel->setText(std::format(L"{:02d}.{:02d}", totalSeconds / 60, totalSeconds % 60));
@@ -580,12 +663,23 @@ void ToolVideo::updateTimerText()
 
 void ToolVideo::onTimerCB(UINT id)
 {
+	if (id == peekTimerId) {
+		killTimer(peekTimerId);
+		if (peekEdge_ != PeekEdge::None && !peekHidden_ && !draggingBar) peekCollapse();
+		return;
+	}
 	if (id != tickTimerId) return;
 	if (isPaused) return;
 	totalSeconds += 1;
 	updateTimerText();
-	const int maxSeconds = ((selectIndex == 1) ? 6 : 120) * 60;
-	if (totalSeconds >= maxSeconds) saveFile();
+	// 开录 1 秒后修剪一次工作集：此时采集/编码缓冲已分配、开场整屏截图已释放，
+	// 把堆里已经空闲的页还给系统（否则那几十 MB 会一直挂在任务管理器里）。
+	if (!trimmedAfterStart_ && totalSeconds >= 1) {
+		trimmedAfterStart_ = true;
+		SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+	}
+	// 视频录制不限时；动图（GIF/WebP/APNG）仍有 10 分钟上限，避免文件无限膨胀
+	if (selectIndex == 1 && totalSeconds >= 10 * 60) saveFile();
 }
 
 void ToolVideo::saveFile()

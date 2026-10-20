@@ -67,25 +67,6 @@ namespace {
         return !isReservedShortcut(joinShortcutKeys(keys));
     }
 
-    int modifierRank(const std::wstring& key)
-    {
-        if (key == L"Ctrl")  return 0;
-        if (key == L"Alt")   return 1;
-        if (key == L"Shift") return 2;
-        if (key == L"Win")   return 3;
-        if (key == L"LWin")  return 4;
-        if (key == L"RWin")  return 5;
-        return 100;
-    }
-
-    void normalizeShortcutKeys(std::vector<std::wstring>& keys)
-    {
-        std::stable_sort(keys.begin(), keys.end(),
-            [](const std::wstring& a, const std::wstring& b) {
-                return modifierRank(a) < modifierRank(b);
-            });
-    }
-
     // 暂缓启用的全局热键：设置页保留这一行但**置灰不可点**，
     // 免得出现"能录入、能保存、按下去却不生效"的迷惑行为。
     bool isPendingHotkey(const std::wstring& id)
@@ -191,11 +172,6 @@ WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
         if (this->curKey.empty()) return;
         this->onKeyDown(key);
         });
-    onKeyUpToken = win->onKeyUp.add([this, weakThis](UINT key) {
-        if (!weakThis.lock()) return;
-        if (this->curKey.empty()) return;
-        this->onKeyUp(key);
-        });
     onMouseDownToken = win->onMouseDown.add([this, weakThis](POINT pos, bool) {
         if (!weakThis.lock()) return;
         if (this->curKey.empty()) return;
@@ -276,7 +252,6 @@ WinSettingHotkeys::~WinSettingHotkeys()
     win->onMouseMove.remove(onMouseMoveToken);
     win->onMouseDown.remove(onMouseDownToken);
     win->onKeyDown.remove(onKeyDownToken);
-    win->onKeyUp.remove(onKeyUpToken);
     win->onTimer.remove(onTimerToken);
     win->onBlur.remove(onBlurToken);
 }
@@ -291,7 +266,6 @@ void WinSettingHotkeys::onBtnClick(Ling::Button* btn)
 void WinSettingHotkeys::beginCapture(Ling::Button* btn)
 {
     curKey = btn->id;
-    tempKeys.clear();
     // 清空按钮内置文本，改用自定义"转圈 + 文案"两个子节点。
     // 原因：Button 内置 Text 是 flex 首个子节点、无法用 makeChild 插到转圈左侧，
     // 故先置空内置文本，再用 (spinner + label) 作为一组居中摆放，转圈自然落于文案左侧。
@@ -335,7 +309,6 @@ void WinSettingHotkeys::endCapture()
         }
     }
     curKey.clear();
-    tempKeys.clear();
     // 录制结束（保存或取消）：按挂起前的组合键恢复全局热键
     Setting::get()->resumeShortcutKeys();
 }
@@ -350,32 +323,38 @@ void WinSettingHotkeys::onSpinnerTick(UINT id)
 
 void WinSettingHotkeys::onKeyDown(UINT key)
 {
+    // 主键按下即完成录制：不再等抬起。否则用户在组合还没按全时先松任意一个修饰键
+    //（或改主意换修饰键）就会被当成"松手保存"，三键组合经常录不进去。
     auto keyStr = keyToStr(key);
     if (keyStr.empty()) return;
-    if (!isShortcutModifierKey(keyStr)) {
-        auto ensure = [&](int vk, const std::wstring& name) {
-            if ((GetAsyncKeyState(vk) & 0x8000) &&
-                std::find(tempKeys.begin(), tempKeys.end(), name) == tempKeys.end()) {
-                tempKeys.push_back(name);
-            }
-            };
-        ensure(VK_CONTROL, L"Ctrl");
-        ensure(VK_MENU,    L"Alt");
-        ensure(VK_SHIFT,   L"Shift");
-        ensure(VK_LWIN,    L"LWin");
-        ensure(VK_RWIN,    L"RWin");
-    }
-    bool isContains = std::find(tempKeys.begin(), tempKeys.end(), keyStr) != tempKeys.end();
-    if (isContains) return;
-    tempKeys.push_back(keyStr);
-}
+    // 只按修饰键：继续等主键，不结束录制
+    if (isShortcutModifierKey(keyStr)) return;
 
-void WinSettingHotkeys::onKeyUp(UINT key)
-{
-    if (curKey.empty()) return;
-    normalizeShortcutKeys(tempKeys);
-    if (isValidShortcutKeys(tempKeys)) {
-        Setting::get()->setShortcutKey(curKey, tempKeys);
+    const bool ctrl  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool alt   = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    const bool lwin  = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0;
+    const bool rwin  = (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+
+    // 裸 Backspace / Delete = 清空这一行（带修饰键时仍按普通组合录制）
+    if ((key == VK_BACK || key == VK_DELETE) && !ctrl && !alt && !shift && !lwin && !rwin) {
+        Setting::get()->setShortcutKey(curKey, {});
+        endCapture();
+        return;
+    }
+
+    // 组合取"主键按下这一刻"按住的修饰键：与按下/松开的先后顺序无关
+    std::vector<std::wstring> keys;
+    if (ctrl) keys.push_back(L"Ctrl");
+    if (alt) keys.push_back(L"Alt");
+    if (shift) keys.push_back(L"Shift");
+    if (lwin) keys.push_back(L"LWin");
+    else if (rwin) keys.push_back(L"RWin");
+    keys.push_back(keyStr);
+
+    // 最多三键（两个修饰键 + 一个主键）；不合法就丢弃，保持原键位
+    if (keys.size() <= 3 && isValidShortcutKeys(keys)) {
+        Setting::get()->setShortcutKey(curKey, keys);
     }
     endCapture();
 }

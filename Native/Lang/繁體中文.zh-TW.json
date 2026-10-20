@@ -62,7 +62,7 @@
   },
   "video": {
     "outputMp4": "輸出MP4格式檔案",
-    "outputGif": "輸出GIF格式檔案",
+    "outputGif": "錄製動態圖",
     "recordSystem": "錄製系統聲音",
     "recordMic": "錄製麥克風聲音",
     "startRecord": "開始錄製",

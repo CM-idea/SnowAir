@@ -4,6 +4,7 @@
 #include "../Win/WinCap.h"
 #include "../Win/CutMask.h"
 #include "../Lang.h"
+#include "../Setting.h"
 #include "../Tip.h"
 #include "ToolSub.h"
 #include "ToolCap.h"
@@ -23,15 +24,15 @@ namespace {
 		float min, max, def;
 	};
 	const std::pair<const wchar_t*, SliderCfg> sliderCfgs[]{
-		{ L"rect",      { L"width",     1.f, 26.f,  4.f } },
-		{ L"arrow",     { L"width",     1.f, 16.f,  4.f } },
-		{ L"pen",       { L"width",     1.f, 40.f,  4.f } },
-		{ L"number",    { L"radius",    6.f, 86.f, 24.f } },
+		{ L"rect",      { L"width",     1.f, 64.f,  4.f } },
+		{ L"arrow",     { L"width",     1.f, 64.f,  4.f } },
+		{ L"pen",       { L"width",     1.f, 64.f,  4.f } },
+		{ L"number",    { L"radius",    6.f, 200.f, 24.f } },
 		{ L"text",      { L"fontSize", 8.f, 200.f, 24.f } },
 		{ L"mosaic",    { L"width",     0.f, 100.f, 30.f } },
 		{ L"patina",    { L"width",     0.f, 100.f, 15.f } },
-		{ L"watermark", { L"fontSize", 12.f, 120.f, 25.f } },
-		{ L"highlight", { L"width",     1.f, 40.f,  4.f } },
+		{ L"watermark", { L"fontSize", 12.f, 200.f, 25.f } },
+		{ L"highlight", { L"width",     1.f, 64.f,  4.f } },
 		{ L"opacity",   { L"percent",  10.f, 100.f, 100.f } },
 	};
 	const SliderCfg* findSliderCfg(const std::wstring& tool)
@@ -40,6 +41,15 @@ namespace {
 			if (tool == id) return &cfg;
 		}
 		return nullptr;
+	}
+
+	// 线迹标注类工具的默认宽度由「其他外观 → 标注默认值」决定（默认 4）
+	float strokeDefaultWidth(const std::wstring& tool, float fallback)
+	{
+		if (tool != L"rect" && tool != L"arrow" && tool != L"pen" && tool != L"highlight")
+			return fallback;
+		auto* s = Setting::get();
+		return s ? (float)s->getToolDefaultWidth() : fallback;
 	}
 }
 
@@ -114,6 +124,7 @@ void ToolSub::beginTool(const std::wstring& id)
 	closeColorPanel();
 	closeNestedPanel();
 	tip->hide();
+	win->setMainBarAnchorId(L"");   // 默认跟随当前工具（白板栏会再单独指定）
 	contentNode->removeAllChildren();
 	colorTrigger = nullptr;
 	colorTriggerRing = nullptr;
@@ -129,6 +140,21 @@ void ToolSub::beginTool(const std::wstring& id)
 	angleBtn = nullptr;
 	patinaWmBtn = nullptr;
 	emojiTrigger = nullptr;
+	boardSwatches.clear();
+	boardRings.clear();
+	boardAdjustBtn = nullptr;
+	boardPickBtn = nullptr;
+	boardNoColorBtn = nullptr;
+	boardCustomCanvas = nullptr;
+	boardOpacityBtn = nullptr;
+	recPlayBtn = nullptr;
+	recAudioBtn = nullptr;
+	recMicBtn = nullptr;
+	recGifBtn = nullptr;
+	recSaveBtn = nullptr;
+	recCancelBtn = nullptr;
+	recDoneBtn = nullptr;
+	recTimerLabel = nullptr;
 	overlayBtn = nullptr;
 	overlayBaseLabel = nullptr;
 	overlayTopLabel = nullptr;
@@ -143,7 +169,7 @@ void ToolSub::beginTool(const std::wstring& id)
 	sliderMin = cfg->min;
 	sliderMax = cfg->max;
 	// 会话内记忆；新截图会话 ToolSub 重建后回到默认
-	sliderVal = rememberedSlider(id, cfg->def, cfg->min, cfg->max);
+	sliderVal = rememberedSlider(id, strokeDefaultWidth(id, cfg->def), cfg->min, cfg->max);
 	auto cit = colorIndexMem.find(id);
 	selectColorIndex = (cit != colorIndexMem.end() && cit->second < colors.size()) ? cit->second : 0;
 	colors[customColorIndex] = sessionCustomColor;
@@ -453,6 +479,281 @@ void ToolSub::showOpacityTools()
 	initSlider();
 }
 
+// 演示画布「白板」属性栏：无色 / 调整背景 / 选择背景 + 6 个预设 + 自定义
+void ToolSub::showBoardTools()
+{
+	if (curToolId == L"board" && hasTools) { refreshBoardState(); return; }
+	beginTool(L"board");
+	// 4 个动作 + 7 个常驻色块；没有滑条，宽度把 initSize 预留给滑条的那段扣掉
+	initSize(4 + 7, false, false, -PropSlider::rowLogicW());
+	auto* cap = dynamic_cast<WinCap*>(win);
+
+	auto makeIcon = [&](const wchar_t* code, const std::wstring& text,
+		std::function<void()> act) {
+		auto* b = contentNode->makeChild<Ling::Button>();
+		b->setText(code);
+		b->setFontFamily(Icon::Family);
+		b->setFontSize(Icon::Size);
+		styleToolbarBtn(b);
+		applyToggleStyle(b, false);
+		tip->bind(b, text);
+		b->onClick.add([act](Ling::Button*) { act(); });
+		return b;
+	};
+	boardNoColorBtn = makeIcon(Icon::NoColor, Lang::get(L"board.noColor"), [cap]() {
+		if (cap) cap->demoBoardClear();
+	});
+	boardAdjustBtn = makeIcon(Icon::AdjustBackground, Lang::get(L"board.adjust"), [this, cap]() {
+		if (cap) { cap->demoBoardToggleAdjust(); refreshBoardState(); }
+	});
+	boardPickBtn = makeIcon(Icon::ImageBackground, Lang::get(L"board.pick"), [cap]() {
+		if (cap) cap->demoBoardPickBackground();
+	});
+	// 透明度：点开二级属性（滑条）；放在图片背景后面，紧挨着色块。图片/PPT 背景时不可用
+	boardOpacityBtn = makeIcon(Icon::Opacity, Lang::get(L"board.opacity"), [this, cap]() {
+		if (!cap) return;
+		if (cap->demoBoardImages() || cap->demoBoardPpt()) return;   // 仅纯色背景可调
+		if (nestedPanel && nestedPanel->isOpen()
+			&& nestedPanel->kind() == ToolNestedPanel::Kind::BoardOpacity) {
+			nestedPanel->closePanel();
+			refreshBoardState();
+			return;
+		}
+		closeColorPanel();
+		if (nestedPanel) nestedPanel->openBoardOpacity(workAreaRect(), boardOpacityBtn,
+			(float)cap->demoBoardOpacity());
+		refreshBoardState();
+	});
+
+	// 7 个常驻色块：白 / 黑 / 274C43 / EC221F / 34C759 / 1677FF / 自定义
+	// 结构与二级色板一致：按钮内一层环，选中时环描边，内侧才是色块
+	boardSwatches.clear();
+	boardRings.clear();
+	auto makeSwatch = [&](UINT32 color, const std::wstring& tipText, bool custom) {
+		auto* b = contentNode->makeChild<Ling::Button>();
+		const float slot = Icon::Size + ToolbarTheme::propGap;
+		b->setSize(iconInner, iconInner);
+		b->setMargin((slot - iconInner) * 0.5f, (btnSize - iconInner) * 0.5f,
+			(slot - iconInner) * 0.5f, (btnSize - iconInner) * 0.5f);
+		b->setFlexGrow(0.f);
+		b->setFlexShrink(0.f);
+		b->setBorderRadius(ToolbarTheme::hoverRadius);
+		b->setHoverBg(ToolbarTheme::hoverBg);
+		b->setAlignItems(Ling::Align::Center);
+		b->setJustifyContent(Ling::Justify::Center);
+		tip->bind(b, tipText);
+		b->onClick.add([this, cap, color, custom](Ling::Button*) {
+			if (!cap) return;
+			if (custom) cap->demoBoardPickColor();
+			else cap->demoBoardSetColor(color);
+			refreshBoardState();
+		});
+		auto* ring = b->makeChild<Ling::Node>();
+		ring->setSize(ToolbarTheme::swatchRing, ToolbarTheme::swatchRing);
+		ring->setBorderRadius(ToolbarTheme::swatchRadius + 1.f);
+		ring->setAlignItems(Ling::Align::Center);
+		ring->setJustifyContent(Ling::Justify::Center);
+		if (custom) {
+			// 自定义沿用颜色面板那颗七彩渐变块（同一份绘制）
+			auto* wheel = ring->makeChild<Ling::Canvas>();
+			wheel->setSize(ToolbarTheme::swatchSize, ToolbarTheme::swatchSize);
+			wheel->setBorderRadius(ToolbarTheme::swatchRadius);
+			boardCustomCanvas = wheel;
+		}
+		else {
+			auto* dot = ring->makeChild<Ling::Label>();
+			dot->setSize(ToolbarTheme::swatchSize, ToolbarTheme::swatchSize);
+			dot->setBorderRadius(ToolbarTheme::swatchRadius);
+			dot->setBg(color);
+			if (color == 0xFFFFFFFF) dot->setBorder(1.f, 0xA8A8A8FF);
+		}
+		boardSwatches.push_back(b);
+		boardRings.push_back(ring);
+		return b;
+	};
+	makeSwatch(0xFFFFFFFFu, Lang::get(L"color.white"), false);
+	makeSwatch(0x000000FFu, Lang::get(L"color.black"), false);
+	makeSwatch(0x274C43FFu, Lang::get(L"color.darkGreen"), false);
+	makeSwatch(0xEC221FFFu, Lang::get(L"color.red"), false);
+	makeSwatch(0x34C759FFu, Lang::get(L"color.green"), false);
+	makeSwatch(0x1677FFFFu, Lang::get(L"color.blue"), false);
+	makeSwatch(0u, Lang::get(L"color.custom"), true);
+	// 属性栏居中在白板按钮下方（白板不是"当前工具"，不能用画笔的位置）
+	win->setMainBarAnchorId(L"whiteboard");
+	refreshBoardState();
+}
+
+// 演示画布「屏幕录制」属性栏：开始/暂停 · 时间 · 系统声音 · 麦克风 · 动图 · 另存为 · 取消 · 完成
+void ToolSub::showDemoRecTools()
+{
+	if (curToolId == L"demo-rec" && hasTools) { refreshDemoRecState(); return; }
+	beginTool(L"demo-rec");
+	const float timerW = 62.f;
+	// 7 个图标按钮 + 一个定宽时间标签（把 initSize 预留的滑条宽度扣掉再补标签宽）
+	initSize(7, false, false, timerW - PropSlider::rowLogicW());
+	win->setMainBarAnchorId(L"extra");
+	auto* cap = dynamic_cast<WinCap*>(win);
+
+	auto makeIcon = [&](const wchar_t* code, const std::wstring& text,
+		std::function<void()> act) {
+		auto* b = contentNode->makeChild<Ling::Button>();
+		b->setText(code);
+		b->setFontFamily(Icon::Family);
+		b->setFontSize(Icon::Size);
+		styleToolbarBtn(b);
+		applyToggleStyle(b, false);
+		tip->bind(b, text);
+		b->onClick.add([act](Ling::Button*) { act(); });
+		return b;
+	};
+
+	recPlayBtn = makeIcon(Icon::Play, Lang::get(L"video.recordToggle"),
+		[cap]() { if (cap) cap->demoRecToggle(); });
+	// 时间轴：只读显示，1 秒一跳（由 WinCap 的计时器驱动刷新）
+	{
+		auto* slot = contentNode->makeChild<Ling::Node>();
+		slot->setSize(timerW, btnSize);
+		slot->setFlexGrow(0.f);
+		slot->setFlexShrink(0.f);
+		slot->setAlignItems(Ling::Align::Center);
+		slot->setJustifyContent(Ling::Justify::Center);
+		recTimerLabel = slot->makeChild<Ling::Label>();
+		recTimerLabel->setFontSize(14.f);
+		recTimerLabel->setColor(Icon::ColorNormal);
+		recTimerLabel->setText(L"00:00");
+	}
+	recAudioBtn = makeIcon(Icon::Audio, Lang::get(L"video.recordSystem"),
+		[cap]() { if (cap) cap->demoRecToggleAudio(); });
+	recMicBtn = makeIcon(Icon::MicOn, Lang::get(L"video.recordMic"),
+		[cap]() { if (cap) cap->demoRecToggleMic(); });
+	recGifBtn = makeIcon(Icon::Gif, Lang::get(L"video.outputGif"),
+		[cap]() { if (cap) cap->demoRecToggleGif(); });
+	recSaveBtn = makeIcon(Icon::Save, Lang::get(L"video.saveAs"),
+		[cap]() { if (cap) cap->demoRecSaveAs(); });
+	recCancelBtn = makeIcon(Icon::Cancel, Lang::get(L"video.cancelRecord"),
+		[cap]() { if (cap) cap->demoRecCancel(); });
+	recDoneBtn = makeIcon(Icon::Done, Lang::get(L"video.doneRecord"),
+		[cap]() { if (cap) cap->demoRecFinish(); });
+	if (recCancelBtn) {
+		recCancelBtn->setColor(Icon::ColorCancel);
+		recCancelBtn->setHoverColor(Icon::ColorCancel);
+	}
+	if (recDoneBtn) {
+		recDoneBtn->setColor(Icon::ColorDone);
+		recDoneBtn->setHoverColor(Icon::ColorDone);
+	}
+	refreshDemoRecState();
+}
+
+void ToolSub::refreshDemoRecState()
+{
+	if (curToolId != L"demo-rec" || !hasTools) return;
+	auto* cap = dynamic_cast<WinCap*>(win);
+	if (!cap) return;
+	const bool running = cap->demoRecRunning();
+	const bool paused = cap->demoRecPaused();
+	const bool gif = cap->demoRecGifMode();
+
+	auto setDisabled = [](Ling::Button* b, bool disabled) {
+		if (!b) return;
+		if (disabled) {
+			b->setBg(0);
+			b->setHoverBg(0);
+			b->setColor(Icon::ColorDisabled);
+			b->setHoverColor(Icon::ColorDisabled);
+		}
+	};
+
+	// 播放/暂停：录到一半显示暂停图标 + 选中态
+	if (recPlayBtn) {
+		recPlayBtn->setText((running && !paused) ? Icon::Pause : Icon::Play);
+		applyToggleStyle(recPlayBtn, running && !paused);
+	}
+	if (recTimerLabel) {
+		const int sec = running ? cap->demoRecElapsed() : 0;
+		recTimerLabel->setText(std::format(L"{:02d}:{:02d}", sec / 60, sec % 60));
+	}
+	// 音频 / 麦克风：动图模式与录制中都不可改（GIF 无音轨）
+	if (recAudioBtn) {
+		applyToggleStyle(recAudioBtn, cap->demoRecAudioOn());
+		setDisabled(recAudioBtn, running || gif);
+	}
+	if (recMicBtn) {
+		applyToggleStyle(recMicBtn, cap->demoRecMicOn());
+		setDisabled(recMicBtn, running || gif);
+	}
+	// 动图：开录后锁定
+	if (recGifBtn) {
+		applyToggleStyle(recGifBtn, gif);
+		setDisabled(recGifBtn, running);
+	}
+	// 未录制时另存为/取消/完成没有意义，置灰（点击仍由 WinCap 拦下）
+	const bool idle = !running;
+	setDisabled(recSaveBtn, idle);
+	setDisabled(recCancelBtn, idle);
+	setDisabled(recDoneBtn, idle);
+	if (!idle) {
+		if (recSaveBtn) {
+			recSaveBtn->setColor(Icon::ColorNormal);
+			recSaveBtn->setHoverColor(Icon::ColorNormal);
+		}
+		if (recCancelBtn) {
+			recCancelBtn->setColor(Icon::ColorCancel);
+			recCancelBtn->setHoverColor(Icon::ColorCancel);
+		}
+		if (recDoneBtn) {
+			recDoneBtn->setColor(Icon::ColorDone);
+			recDoneBtn->setHoverColor(Icon::ColorDone);
+		}
+	}
+}
+
+void ToolSub::setBoardOpacity(int percent)
+{
+	if (auto* cap = dynamic_cast<WinCap*>(win)) cap->demoBoardSetOpacity(percent);
+	refreshBoardState();
+}
+
+void ToolSub::refreshBoardState()
+{
+	auto* cap = dynamic_cast<WinCap*>(win);
+	if (!cap) return;
+	const bool ppt = cap->demoBoardPpt();
+	// 当前背景是图片/PPT 时：「选择背景」按钮保持选中，7 个色块全部取消选中
+	const bool media = ppt || cap->demoBoardImages();
+	if (boardPickBtn) applyToggleStyle(boardPickBtn, media);
+	// 透明度：100 时取消选中，小于 100 显示选中态；图片/PPT 时置灰不可用
+	if (boardOpacityBtn) {
+		const bool opacityOn = !media && cap->demoBoardOpacity() < 100;
+		applyToggleStyle(boardOpacityBtn, opacityOn);
+		if (media) boardOpacityBtn->setColor(Icon::ColorDisabled);
+	}
+	if (media && nestedPanel && nestedPanel->isOpen()
+		&& nestedPanel->kind() == ToolNestedPanel::Kind::BoardOpacity)
+		nestedPanel->closePanel();
+	if (boardAdjustBtn) {
+		applyToggleStyle(boardAdjustBtn, !ppt && cap->demoBoardAdjusting());
+		// PPT 放映时调背景不可用：置灰（点击仍会被 WinCap 拦下）
+		if (ppt) boardAdjustBtn->setColor(Icon::ColorDisabled);
+	}
+	static constexpr UINT32 kPresets[6] = {
+		0xFFFFFFFFu, 0x000000FFu, 0x274C43FFu, 0xEC221FFFu, 0x34C759FFu, 0x1677FFFFu
+	};
+	int sel = -1;
+	if (!media) {
+		const UINT32 cur = cap->demoBoardColor();
+		for (int i = 0; i < 6; ++i) {
+			if (kPresets[i] == cur) { sel = i; break; }
+		}
+		if (sel < 0) sel = 6;   // 非预设色算作自定义（色块本身是七彩渐变，不跟色变化）
+	}
+	for (size_t i = 0; i < boardRings.size(); ++i) {
+		if (!boardRings[i]) continue;
+		const bool active = ((int)i == sel);
+		boardRings[i]->setBorder(active ? 1.f : 0.f, active ? Icon::ColorActive : 0);
+	}
+}
+
 float ToolSub::setShapeSliderVal(const std::wstring& tool, float px)
 {
 	if (tool == L"number" && numberStyle == NumberEmoji) {
@@ -494,6 +795,8 @@ void ToolSub::layout()
 	ctx->Clear(0);
 	paintBorder(ctx);
 	canvas->finishPaint();
+	// 自定义色块的七彩渐变：与颜色面板共用同一份绘制，尺寸按当前布局重画
+	PaintCustomColorSwatch(boardCustomCanvas, dpi);
 }
 
 void ToolSub::onMinMaxInfo(MINMAXINFO* mmi)
@@ -928,7 +1231,7 @@ void ToolSub::loadStrokeSlider(const std::wstring& toolId)
 	curSliderKey = cfg->key;
 	sliderMin = cfg->min;
 	sliderMax = cfg->max;
-	sliderVal = rememberedSlider(toolId, cfg->def, cfg->min, cfg->max);
+	sliderVal = rememberedSlider(toolId, strokeDefaultWidth(toolId, cfg->def), cfg->min, cfg->max);
 }
 
 void ToolSub::initSlider()
@@ -1088,6 +1391,16 @@ void ToolSub::hideTools()
 	overlayBaseLabel = nullptr;
 	overlayTopLabel = nullptr;
 	overlayFlag = nullptr;
+	boardCustomCanvas = nullptr;
+	boardOpacityBtn = nullptr;
+	recPlayBtn = nullptr;
+	recAudioBtn = nullptr;
+	recMicBtn = nullptr;
+	recGifBtn = nullptr;
+	recSaveBtn = nullptr;
+	recCancelBtn = nullptr;
+	recDoneBtn = nullptr;
+	recTimerLabel = nullptr;
 	tip->hide();
 	if (!isVisible) return;
 	hide();
@@ -1145,6 +1458,13 @@ void ToolSub::updatePosition(const RECT& workArea)
 	if (!hasTools) return;
 	AnnotHost::MainBarAnchor bar{};
 	if (!win->queryMainBarAnchor(bar)) return;
+	// 工作区按「主工具栏所在显示器」取：多屏时调用方传进来的往往是截图窗口 /
+	// 贴图窗口的矩形，主栏被拖到副屏后就属于另一块屏，照那个工作区夹紧 x
+	// 会把属性栏甩到主屏上（用户看到的就是"属性栏跑到另一个屏幕"）。
+	RECT barRect{ static_cast<LONG>(bar.x), static_cast<LONG>(bar.y),
+		static_cast<LONG>(bar.x + bar.w), static_cast<LONG>(bar.y + bar.h) };
+	const RECT wa = (bar.w > 0.f && bar.h > 0.f)
+		? ToolbarChrome::workAreaNear(barRect) : workArea;
 	auto btnCenterX = bar.btnCenterX;
 	auto mainX = bar.x;
 	const float mainW = bar.w;
@@ -1162,10 +1482,41 @@ void ToolSub::updatePosition(const RECT& workArea)
 	const float refTop = bar.y + mainPad;
 	const float refBottom = bar.y + bar.h - mainPad;
 	const float arrowAnchor = mainX + btnCenterX;
-	const auto place = ToolbarChrome::placeBubble(
-		workArea, refTop, refBottom, w, h, mainGap,
+	auto place = ToolbarChrome::placeBubble(
+		wa, refTop, refBottom, w, h, mainGap,
 		// 属性栏优先在主栏下方；下方不够再上弹
 		px, arrowAnchor, true, tipDown_, arrowX, x, y);
+
+	// 属性栏不能压在框选上：主栏在选区上方时，属性栏默认落在主栏下方正好会盖住选区。
+	// 这里再算一次"翻到主栏上方"的落点，两个落点里挑与选区重叠面积更小的那个。
+	RECT avoid{};
+	bool hasAvoid = false;
+	if (auto* cap = dynamic_cast<WinCap*>(win)) {
+		if (cap->hwnd && cap->cutMask && cap->cutMask->hasRect()) {
+			POINT tl{ (LONG)cap->cutMask->maskRect.left, (LONG)cap->cutMask->maskRect.top };
+			POINT br{ (LONG)cap->cutMask->maskRect.right, (LONG)cap->cutMask->maskRect.bottom };
+			ClientToScreen(cap->hwnd, &tl);
+			ClientToScreen(cap->hwnd, &br);
+			avoid = RECT{ (LONG)std::min(tl.x, br.x), (LONG)std::min(tl.y, br.y),
+				(LONG)std::max(tl.x, br.x), (LONG)std::max(tl.y, br.y) };
+			hasAvoid = avoid.right > avoid.left && avoid.bottom > avoid.top;
+		}
+	}
+	if (hasAvoid) {
+		auto overlapArea = [&](const ToolbarChrome::BubblePlacement& p) -> LONGLONG {
+			const LONG l = (std::max)((LONG)p.x, avoid.left);
+			const LONG t = (std::max)((LONG)p.y, avoid.top);
+			const LONG r = (std::min)((LONG)p.x + (LONG)w, avoid.right);
+			const LONG b = (std::min)((LONG)p.y + (LONG)h, avoid.bottom);
+			return (r > l && b > t) ? (LONGLONG)(r - l) * (LONGLONG)(b - t) : 0;
+		};
+		if (overlapArea(place) > 0) {
+			const auto flipped = ToolbarChrome::placeBubble(
+				wa, refTop, refBottom, w, h, mainGap, px, arrowAnchor,
+				false, tipDown_, arrowX, x, y);
+			if (overlapArea(flipped) < overlapArea(place)) place = flipped;
+		}
+	}
 	if (place.tipFlipped) applyTipDirection(place.tipDown);
 	arrowX = place.arrowX;
 	if (place.moved) setPosition(place.x, place.y);
@@ -1177,9 +1528,9 @@ void ToolSub::updatePosition(const RECT& workArea)
 		refresh();
 	}
 	if (colorPanel && colorPanel->isOpen()) {
-		colorPanel->updatePosition(workArea);
+		colorPanel->updatePosition(wa);
 	}
 	if (nestedPanel && nestedPanel->isOpen()) {
-		nestedPanel->updatePosition(workArea);
+		nestedPanel->updatePosition(wa);
 	}
 }

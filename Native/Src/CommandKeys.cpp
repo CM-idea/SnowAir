@@ -98,10 +98,11 @@ namespace
 		// 必须在录屏会话期间由全局热键代注册、会话一结束就撤。
 		// GIF / 系统音量 / 麦克风**不是**，默认也不配键位 —— 它们只在工具栏有焦点时用得到，
 		// 设成全局键或给默认值，只会白白占掉用户自己的 `G` `]` `\`。
-		{ L"cmd_record_toggle",       kGrpRecord, L"cmdkey.recordToggle",       Scope::Global,  Scene::Record, kRecord, true, false, L"F1" },
-		{ L"cmd_toggle_gif",          kGrpRecord, L"cmdkey.toggleGif",          Scope::Session, Scene::Record, kRecord, true, false, L"" },
-		{ L"cmd_toggle_system_audio", kGrpRecord, L"cmdkey.toggleSystemAudio",  Scope::Session, Scene::Record, kRecord, true, false, L"" },
-		{ L"cmd_toggle_mic",          kGrpRecord, L"cmdkey.toggleMic",          Scope::Session, Scene::Record, kRecord, true, false, L"" },
+		// 演示画布内也能录屏 → 掩码同时含 Fullscreen，参与和演示组之间的冲突判定。
+		{ L"cmd_record_toggle",       kGrpRecord, L"cmdkey.recordToggle",       Scope::Global,  Scene::Record, kRecord | kFullscreen, true, false, L"F2" },
+		{ L"cmd_toggle_gif",          kGrpRecord, L"cmdkey.toggleGif",          Scope::Session, Scene::Record, kRecord | kFullscreen, true, false, L"" },
+		{ L"cmd_toggle_system_audio", kGrpRecord, L"cmdkey.toggleSystemAudio",  Scope::Session, Scene::Record, kRecord | kFullscreen, true, false, L"" },
+		{ L"cmd_toggle_mic",          kGrpRecord, L"cmdkey.toggleMic",          Scope::Session, Scene::Record, kRecord | kFullscreen, true, false, L"" },
 
 		// ——— 全屏画布（窗口内）———
 		// 鼠标穿透同样是**临时全局键**：它本身就是把焦点交给别的窗，没有全局键切不回来。

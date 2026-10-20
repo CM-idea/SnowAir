@@ -30,9 +30,15 @@ public:
 	void applyStoredLayout(int kind);
 	// 演示模式：穿透开关按钮的选中态
 	void setDemoThroughState(bool on);
+	void setDemoBoardState(bool on);
+	void setDemoRecordState(bool on);
 	bool isDemoLayout() const { return demoLayout; }
 	float getBtnCenterX() const;
+	// 属性栏跟随的按钮（默认跟随 curId）；白板这类"不是工具"的栏需要单独指定
+	void setAnchorId(const std::wstring& id) { anchorId = id; }
 	void cancelSelect();
+	// 只恢复工具选中态（不弹属性栏）：白板属性栏收起时还原被临时取消的渐隐画笔
+	void restoreToolSelection(const std::wstring& id);
 	void selectTool(const std::wstring& id);
 	// 「工具循环」(系统按键 Tab)：在当前工具栏可见的绘图工具槽位之间循环切换一个。
 	// 走 onClickCap（与点击按钮同一路径），不另写选中逻辑
@@ -46,6 +52,7 @@ public:
 	// 当前槽位 id。演示模式下 laser / pen 是同级排他槽位，laser 经 resolveToolId
 	// 映射到底层画笔工具（见 applyDemoLayout 的 pickedSub），所以标注引擎拿到的仍是 pen。
 	std::wstring curId;
+	std::wstring anchorId;   // 非空时属性栏按这个按钮居中（白板栏）
 private:
 	class AnnotHost* annotHost() const;
 	void onCreated() override;
@@ -101,12 +108,16 @@ private:
 	bool dpiChanged{ false };
 	bool draggingBar{ false };
 	POINT dragGrabOffset{};
-	// 演示模式「工具栏贴边」（demoEdgeBehavior）：0 吸附边缘 / 1 自动隐藏（贴边收起、鼠标到边缘弹出）
+	// 演示模式「工具栏贴边」（demoEdgeBehavior）：0 吸附边缘 / 1 自动隐藏（贴边收起、鼠标到边缘弹出）/ 2 无
 	bool demoAutoHide{ false };
 	bool demoCollapsed{ false };
 	int demoEdge{ -1 };              // 0 上 / 1 下
 	int demoExpandX{ 0 }, demoExpandY{ 0 };
 	static constexpr UINT demoEdgeTimerId{ 211 };
+	// 与录屏工具栏「贴边自动隐藏」同一套：缩进后只露 4px 的条，鼠标移出 150ms 后缩回
+	static constexpr int demoPeekStripPx{ 4 };
+	static constexpr UINT demoPeekHideDelayMs{ 150 };
+	void scheduleDemoCollapse();
 	std::unique_ptr<Tip> tip;
 	std::unique_ptr<ToolPicker> picker;
 	std::map<std::wstring, std::wstring> pickedSub;

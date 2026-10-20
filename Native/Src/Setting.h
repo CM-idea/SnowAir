@@ -60,6 +60,9 @@ public:
 
 	int getOcrEngine();
 	void setOcrEngine(int v);
+	// OCR 结果版式：0 = 原位覆盖（默认），1 = 文本重排（整段可编辑文本框）
+	int getOcrResultMode();
+	void setOcrResultMode(int v);
 	std::wstring getOcrCloudConfigId();
 	void setOcrCloudConfigId(const std::wstring& id);
 	std::vector<OcrCloudConfig> getOcrCloudConfigs();
@@ -100,6 +103,9 @@ public:
 	void setDemoDefaultTool(int v);
 	int getDemoEdgeBehavior();
 	void setDemoEdgeBehavior(int v);
+	// 线迹标注类工具（矩形/箭头/画笔/高亮）的默认宽度，1–10
+	int getToolDefaultWidth();
+	void setToolDefaultWidth(int v);
 	bool getAutoSaveAfterCapture();
 	void setAutoSaveAfterCapture(bool on);
 	std::wstring getSaveFormat();
@@ -146,6 +152,12 @@ public:
 	// 「选框鼠标跟随」（视频录制）：录制中处于穿透态时，光标贴近选区边缘就让选区自动平移跟随
 	bool getSelFollowMouse();
 	void setSelFollowMouse(bool on);
+	// 录屏工具栏「贴边隐藏」：手动拖到屏幕上/下边缘后自动缩进边缘（见 ToolVideo）
+	bool getRecordToolbarPeek();
+	void setRecordToolbarPeek(bool on);
+	// 录屏默认开启鼠标穿透：开录即穿透，录制中可用快捷键/工具条按钮临时开关
+	bool getRecordDefaultPierce();
+	void setRecordDefaultPierce(bool on);
 	// 「鼠标高亮提醒」（视频录制）：录制中在光标下垫一个半透明圆形色块
 	bool getMouseHighlight();
 	void setMouseHighlight(bool on);

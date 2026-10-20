@@ -37,8 +37,9 @@ public:
 	// 选区能不能被挪到这块屏上继续录：同适配器、且采集侧没在它上面换失败过。
 	// 动图那条走 GDI 抓屏，覆盖整块虚拟桌面，不受显卡分组限制。
 	bool canSwitchToMonitor(const RECT& mon) const;
-	// 停止录制并返回录好的临时文件路径；没在录制时返回空串
-	std::wstring stop();
+	// 停止录制并返回录好的临时文件路径；没在录制时返回空串。
+	// hideHost=false：演示画布内录屏用 —— 停止后不能把画布窗口一起隐藏
+	std::wstring stop(bool hideHost = true);
 	// Ctrl+S / Ctrl+C 转给工具条上的"存文件" / "存剪切板"；没在录制时返回 false
 	bool onSaveKey(bool toClipboard);
 	void setToolVisible(bool visible);

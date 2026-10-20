@@ -53,10 +53,11 @@ namespace ToolbarStore {
 				L"video-gif", L"save", L"cancel", L"confirm" };
 		}
 		else if (kind == 2) {
-			// 演示画布（kind=2）：椭圆同样并入矩形，不单列
-			st.active = { L"rect", L"arrow", L"pen", L"text",
+			// 演示画布（kind=2）：椭圆同样并入矩形，不单列；
+			// 穿透独立放在最左边，后面跟一个分隔符，与演示工具栏一致
+			st.active = { L"mouse-through", L"whiteboard", L"split-4", L"rect", L"arrow", L"pen", L"text",
 				L"serial-number", L"mosaic", L"eraser", L"laser-pointer", L"split-0",
-				L"undo", L"split-1", L"reset-canvas", L"mouse-through", L"cancel" };
+				L"undo", L"split-1", L"extra", L"reset-canvas", L"cancel" };
 		}
 		else {
 			// 贴图栏（kind=3）：椭圆不单列。
@@ -91,6 +92,29 @@ namespace ToolbarStore {
 		dropMerged(st.active);
 		dropMerged(st.inactive);
 		if (st.active.empty()) return def;
+		// 兼容旧配置：白板槽位是后加的，旧布局里没有。补在「穿透」右边，
+		// 设置页的工具栏编辑器里才看得到它。
+		if (kind == 2) {
+			auto hasBoard = [&]() {
+				return std::find(st.active.begin(), st.active.end(), L"whiteboard") != st.active.end()
+					|| std::find(st.inactive.begin(), st.inactive.end(), L"whiteboard") != st.inactive.end();
+			};
+			if (!hasBoard()) {
+				auto it = std::find(st.active.begin(), st.active.end(), L"mouse-through");
+				const size_t pos = (it == st.active.end()) ? 0 : (size_t)(it - st.active.begin()) + 1;
+				st.active.insert(st.active.begin() + pos, L"whiteboard");
+				dropped = true;
+			}
+			// 屏幕录制槽位也是后加的：旧布局里没有就补在「重置画布」前面
+			const bool hasRec = std::find(st.active.begin(), st.active.end(), L"extra") != st.active.end()
+				|| std::find(st.inactive.begin(), st.inactive.end(), L"extra") != st.inactive.end();
+			if (!hasRec) {
+				auto it = std::find(st.active.begin(), st.active.end(), L"reset-canvas");
+				const size_t pos = (it == st.active.end()) ? st.active.size() : (size_t)(it - st.active.begin());
+				st.active.insert(st.active.begin() + pos, L"extra");
+				dropped = true;
+			}
+		}
 		if (dropped) saveLayout(kind, st);
 		return st;
 	}
@@ -259,7 +283,8 @@ namespace ToolbarStore {
 		if (id == L"video-gif") return Icon::Gif;
 		if (id == L"laser-pointer") return Icon::FadePen;
 		if (id == L"reset-canvas") return Icon::Redo;
-		if (id == L"mouse-through") return Icon::Pierce;
+		if (id == L"mouse-through") return Icon::Cursor;   // 与截图栏「显示光标」同一图标
+		if (id == L"whiteboard") return Icon::Board;
 		if (id == L"show-border") return Icon::DashRect;
 		if (id == L"opacity") return Icon::Opacity;
 		return L"";

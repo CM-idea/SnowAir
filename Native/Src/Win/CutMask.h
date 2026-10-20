@@ -21,8 +21,9 @@ public:
 	// 选区被挪动（拖拽 / 鼠标跟随 / 方向键 / 滚轮）之后的回调，由宿主在创建后设置。
 	// 未设置时什么都不做 —— 录制侧靠它把采集裁剪框跟着平移。
 	std::function<void()> onRectMoved;
-	// 鼠标悬停时吸附到光标下的窗口矩形，选区真的变了才返回 true
-	bool highlight(POINT pos);
+	// 鼠标悬停时吸附到光标下的窗口矩形，选区真的变了才返回 true。
+	// force=true 跳过投递节流（确认点击落空后按当前位置立即重查一次用）
+	bool highlight(POINT pos, bool force = false);
 	// 悬停是否停在有效目标上（区别于"自由拖框"：点一下即选中的窗口元素框）
 	bool hoverPicked() const { return hoverTarget_.right > hoverTarget_.left && hoverTarget_.bottom > hoverTarget_.top; }
 	void startMakeRect(POINT pos);
@@ -62,6 +63,8 @@ public:
 	// 换失败（混合显卡常见），随后即可把该屏排除，避免选区先移过去再被回退。未注入时一律按可跨屏处理。
 	std::function<bool(const RECT&)> canSwitchToMonitor;
 	void paint(ID2D1DeviceContext* ctx);
+	// 录制期用：只画选框描边/控点/尺寸标签（不画压暗），由"排除捕获"的选框层窗口调用
+	void paintChrome(ID2D1DeviceContext* ctx);
 	// 信息栏控件
 	InfoHit hitInfoControl(POINT pos) const;
 	bool onInfoDown(POINT pos);
@@ -112,6 +115,10 @@ private:
 	void pickShadowColor();
 	void rebuildRadiusValueLayout();
 	void paintSelShadow(ID2D1DeviceContext* ctx) const;
+	// 描边 / 控点 / 尺寸标签：主窗口与录制期选框层共用
+	void paintBorder(ID2D1DeviceContext* ctx);
+	void paintHandles(ID2D1DeviceContext* ctx);
+	void paintLabel(ID2D1DeviceContext* ctx);
 	void paintDim(ID2D1DeviceContext* ctx) const;
 	void paintInfoIcons(ID2D1DeviceContext* ctx);
 	Microsoft::WRL::ComPtr<IDWriteTextLayout> makeIconLayout(const wchar_t* code, float slot);
@@ -124,7 +131,6 @@ private:
 	void scheduleHoverRefine();
 	void stopHoverRefine();
 	static bool rectEq(const D2D1_RECT_F& a, const D2D1_RECT_F& b, float eps = 0.5f);
-	static bool rectAlmost(const D2D1_RECT_F& a, const D2D1_RECT_F& b);
 	static bool rectContains(const D2D1_RECT_F& r, POINT pos);
 private:
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushBg;
@@ -175,19 +181,23 @@ private:
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushHandleFill;
 	// 查找元素：逻辑目标 + 指数追赶（避免 Out 缓动反复重开导致发冲）
 	D2D1_RECT_F hoverTarget_{};
+	// 最近一次命中链（客户区坐标，[0]=最细节点，末尾=窗口）；高亮用 [0]，其余供后续层级细化
+	std::vector<D2D1_RECT_F> hoverPath_;
 	bool hoverAnimating_{ false };
 	ULONGLONG lastHoverQueryMs_{ 0 };
 	POINT lastHoverQueryPos_{};
 	uint64_t hoverSeq_{ 0 };   // 最近一次投递到查询线程的序号（更旧的结果丢弃）
 	// 查询结果是否仍是"整块级粗框"（无障碍树尚未建好 / 页面没加载完）→ 武装驻留细化重查
 	bool hoverCoarse_{ false };
+	// 是否处于"查找元素"悬停阶段（按下/进调整后就结束）。信息栏据此决定要不要让开高亮元素
+	bool hoverPicking_{ false };
 	int hoverRefineTries_{ 0 };      // 驻留细化预算：最多 5 次，鼠标移动重置
 	bool hoverRefineTimerOn_{ false };
 	bool queryGuard_{ false };       // 查询期间临时拿到的鼠标捕获（按下/结果回来/看门狗到期撤）
 	static constexpr UINT hoverAnimTimerId{ 0x5201 };
 	static constexpr UINT hoverRefineTimerId{ 0x5202 };
 	static constexpr UINT hoverGuardTimerId{ 0x5203 };
-	static constexpr UINT kHoverRefineMs{ 120 };        // 驻留多久算"停稳了"
+	static constexpr UINT kHoverRefineMs{ 80 };         // 驻留多久算"停稳了"
 	static constexpr UINT kQueryGuardWatchdogMs{ 150 }; // 捕获兜底放手
 	static constexpr float hoverChaseRate{ 75.f }; // 约 40ms 贴合
 	static constexpr UINT hoverTickMs{ 16 };

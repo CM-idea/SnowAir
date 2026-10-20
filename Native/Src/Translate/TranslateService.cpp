@@ -29,17 +29,27 @@ std::wstring TranslateService::resolveProvider(const std::wstring& preferred)
 	return p;
 }
 
-// 服务链：用户选的服务优先；失败再依次退到其它在线服务，最后退离线（装了才有意义）
+// 服务链：用户选的服务优先；失败后按「微软 > 有道 > 百度」依次回退，
+// 最后才用离线引擎兜底（装了离线包才有意义）。
+// Google **不参与自动兜底**：国内直连几乎必然超时，一次就要等满 20s，
+// 会把整条链（以及截图翻译的每一行）拖死；想用 Google 就在设置里明确选它。
 std::vector<std::wstring> TranslateService::providerChain(const std::wstring& preferred)
 {
 	std::vector<std::wstring> chain;
+	const std::wstring first = resolveProvider(preferred);
+	// 用户明确选了离线：只走离线，不再用在线服务兜底。
+	// 在线接口不可达时单次就要等满 20s 超时，链上三个都走一遍、再乘上截图里的每一行，
+	// 点一次翻译能卡上几十秒；而且用户选离线本就是为了不走网络（隐私/断网）。
+	if (_wcsicmp(first.c_str(), TranslateProvider::Offline) == 0)
+		return { first };
 	auto push = [&chain](const std::wstring& p) {
 		for (auto& c : chain) if (_wcsicmp(c.c_str(), p.c_str()) == 0) return;
 		chain.push_back(p);
 	};
-	push(resolveProvider(preferred));        // 用户设置的翻译服务
-	push(TranslateProvider::Microsoft);      // 在线主力（内部走 Google 接口）
-	push(TranslateProvider::Youdao);         // 另一个在线源
+	push(first);        // 用户设置的翻译服务（选 Google 时只在这一步进链）
+	push(TranslateProvider::Microsoft);
+	push(TranslateProvider::Youdao);
+	push(TranslateProvider::Baidu);
 	if (BergamotEngine::isAvailable()) push(TranslateProvider::Offline);   // 离线兜底
 	return chain;
 }
@@ -135,20 +145,37 @@ void TranslateService::translateSegments(const std::vector<std::wstring>& segmen
 				one.text = segments[i];
 				// ② 逐段定源语：用户设的是 auto 时按这一段的脚本判（混排时各行方向可以不同）；
 				//    用户显式指定了源语就尊重用户，不覆盖。
+				std::wstring detected;
+				const bool hasHan = TranslateLangs::countScripts(segments[i]).han > 0;
 				if (srcAuto) {
-					auto d = TranslateLangs::detect(segments[i]);
-					if (!d.empty()) one.sourceLang = d;
+					detected = TranslateLangs::detect(segments[i]);
+					if (!detected.empty()) one.sourceLang = detected;
 				}
-				auto tr = runChain(one, chain);
-				if (tr.ok) {
-					r.providerUsed = tr.providerUsed;
-					line = tr.text;
+				// ③ 这一行本来就是目标语（英文截图配目标 en 最常见）：原样保留。
+				//    isSameLang 只敢判中日韩，en 这类拉丁目标判不出来，会把英文行送进 en→en ——
+				//    离线没有该方向，以前接着走完整条在线链，一行就可能卡几十秒。含汉字的
+				//    混排行（"翻译 Translate"）不算"已是英文"，仍要翻。
+				if (srcAuto && !detected.empty() && !hasHan
+					&& _wcsicmp(detected.c_str(), req.targetLang.c_str()) == 0) {
+					line = segments[i];
 					okCount++;
 				}
 				else {
-					// 这一行失败：保留原文，不拖垮其它已经翻好的行
-					line = segments[i];
-					if (lastErr.empty()) lastErr = tr.error.empty() ? L"未知错误" : tr.error;
+					// 拉丁字母占多、又夹汉字的行会被 detect 判成 en，目标也是 en 时同样是
+					// en→en 空转；这种行按中文处理，让中文部分真的被翻出来。
+					if (srcAuto && hasHan && _wcsicmp(one.sourceLang.c_str(), req.targetLang.c_str()) == 0)
+						one.sourceLang = L"zh-CN";
+					auto tr = runChain(one, chain);
+					if (tr.ok) {
+						r.providerUsed = tr.providerUsed;
+						line = tr.text;
+						okCount++;
+					}
+					else {
+						// 这一行失败：保留原文，不拖垮其它已经翻好的行
+						line = segments[i];
+						if (lastErr.empty()) lastErr = tr.error.empty() ? L"未知错误" : tr.error;
+					}
 				}
 			}
 			if (i) r.text += L'\n';

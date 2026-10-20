@@ -20,6 +20,8 @@ public:
 	// 渐隐画笔等：不可点选，淡出后自动移除
 	virtual bool isEphemeral() { return false; };
 	virtual bool hitErase(const float x, const float y) { return false; };
+	// 撤销/重做切换后回调（默认无动作）。白板背景尺寸这类"非绘制操作"靠它回滚。
+	virtual void onUndoChanged(bool undone) {}
 	// —— 连线：能被吸附的一侧（矩形/椭圆） ——
 	// 能不能当连线目标
 	virtual bool isLinkTarget() const { return false; }
@@ -52,6 +54,9 @@ public:
 public:
 	AnnotHost* win;
 	bool isUndo;
+	// 白板「编辑背景」时画的标注属于背景层：关掉编辑背景后不参与点选/擦除，
+	// 「重置画布」也不会清掉它（编辑背景打开时才一起清）
+	bool backgroundLayer{ false };
 	int hoverDraggerIndex{ -1 };
 protected:
 	// 四角优先、四边次之（不必精确点到控点）；返回 0–7，未命中 -1

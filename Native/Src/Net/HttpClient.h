@@ -12,6 +12,8 @@ namespace SnowHttp {
 		int status{ 0 };
 		std::string body;
 		std::wstring error;
+		// 跟随重定向后的最终地址（自动重定向时用来判断真正访问的是哪个站点）
+		std::wstring finalUrl;
 	};
 
 	Response get(const std::wstring& url,

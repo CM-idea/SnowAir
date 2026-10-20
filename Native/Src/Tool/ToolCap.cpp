@@ -267,32 +267,79 @@ void ToolCap::applyStoredLayout(int kind)
 
 // 演示模式（全屏画布）工具条：槽位与图标严格照默认全屏布局
 // （ToolbarLayoutStore kind=2 默认布局）：
-//   矩形 / 箭头 / 画笔 / 文字 / 序号 / 马赛克 / 橡皮擦 / 渐隐画笔 ┊ 撤销 ┊ 重置画布 / 穿透 / 取消
-// 与普通截图栏的差别：没有椭圆、没有贴图/OCR/翻译/长截图/保存/完成，多了渐隐画笔、重置画布、穿透。
+//   穿透 白板 ┊ 矩形 / 箭头 / 画笔 / 文字 / 序号 / 马赛克 / 橡皮擦 / 渐隐画笔 ┊ 撤销 ┊ 重置画布 / 关闭
+// 与普通截图栏的差别：没有椭圆、没有贴图/OCR/翻译/长截图/保存/完成，多了渐隐画笔、重置画布、穿透、白板。
 // 注意：要在 createNativeWindow（onCreated 建按钮）之前调用。
 void ToolCap::applyDemoLayout()
 {
 	demoLayout = true;
 	// 演示栏里 laser 与 pen 是同一层级的两个槽位（pickedSub 映射见 onCreated）
 	btnIds = {
+		L"mouse-through", L"whiteboard", L"|",
 		L"rect", L"arrow", L"pen", L"text", L"number", L"mosaic", L"eraser", L"laser", L"|",
 		L"undo", L"|",
-		L"reset-canvas", L"mouse-through", L"close"
+		L"extra", L"reset-canvas", L"close"
 	};
 	btnCodes = {
+		Icon::Cursor, Icon::Board, L"",
 		Icon::Rect, Icon::Arrow, Icon::Pen, Icon::Text, Icon::Number, Icon::Mosaic, Icon::Eraser, Icon::FadePen, L"|",
 		Icon::Undo, L"|",
-		Icon::Redo, Icon::Pierce, Icon::Cancel
+		Icon::Video, Icon::Redo, Icon::Cancel
 	};
 	btnTips = {
+		L"tool.mouseThrough", L"tool.whiteboard", L"",
 		L"tool.rect", L"tool.arrow", L"tool.pen", L"tool.text", L"tool.number", L"tool.mosaic", L"tool.eraser", L"tool.fadePen", L"",
 		L"tool.undo", L"",
-		L"tool.resetCanvas", L"tool.mouseThrough", L"tool.cancel"
+		L"cap.video", L"tool.resetCanvas", L"tool.close"
 	};
 	// 槽位换了必须重算窗口宽度：构造函数里那次 refreshSize 用的是默认（截图栏）槽位表，
 	// 不重算的话演示栏会带着截图栏的宽度留一大截空白（"工具栏宽度没自适应"）。
 	applyStoredLayout(2);   // 设置页若自定义过「全屏画布」布局，覆盖上面的内置默认
+	// 老的自定义布局里没有白板槽位：补在穿透右边，保证升级后也能看到入口
+	{
+		bool hasBoard = false;
+		for (const auto& id : btnIds) if (id == L"whiteboard") { hasBoard = true; break; }
+		if (!hasBoard) {
+			auto it = std::find(btnIds.begin(), btnIds.end(), L"mouse-through");
+			const size_t pos = (it == btnIds.end()) ? 0 : (size_t)(it - btnIds.begin()) + 1;
+			btnIds.insert(btnIds.begin() + pos, L"whiteboard");
+			btnCodes.insert(btnCodes.begin() + pos, Icon::Board);
+			btnTips.insert(btnTips.begin() + pos, L"tool.whiteboard");
+		}
+	}
+	// 同样兼容旧布局：没有屏幕录制槽位就补在「重置画布」前面
+	{
+		bool hasRec = false;
+		for (const auto& id : btnIds) if (id == L"extra") { hasRec = true; break; }
+		if (!hasRec) {
+			auto it = std::find(btnIds.begin(), btnIds.end(), L"reset-canvas");
+			const size_t pos = (it == btnIds.end()) ? btnIds.size() : (size_t)(it - btnIds.begin());
+			btnIds.insert(btnIds.begin() + pos, L"extra");
+			btnCodes.insert(btnCodes.begin() + pos, Icon::Video);
+			btnTips.insert(btnTips.begin() + pos, L"cap.video");
+		}
+	}
 	refreshSize();
+}
+
+void ToolCap::setDemoBoardState(bool on)
+{
+	for (auto* b : btns) {
+		if (!b || b->id != L"whiteboard") continue;
+		if (on) applySelectedStyle(b);
+		else applyNormalStyle(b);
+		break;
+	}
+}
+
+void ToolCap::setDemoRecordState(bool on)
+{
+	for (auto* b : btns) {
+		if (!b || b->id != L"extra") continue;
+		if (on) applySelectedStyle(b);
+		else applyNormalStyle(b);
+		break;
+	}
 }
 
 void ToolCap::setDemoThroughState(bool on)
@@ -612,6 +659,7 @@ float ToolCap::getBtnCenterX() const
 {
 	// 按设计格（btnSize / splitterSlotW）算中心，不能累加 btn->w：后者不含 margin，越往后越偏
 	float result{ (ToolbarTheme::shadowPad + contentLeadWidth()) * dpi };
+	const std::wstring& anchor = anchorId.empty() ? curId : anchorId;
 	const auto vis = visibleSlots();
 	for (size_t i = 0; i < btnIds.size(); i++)
 	{
@@ -620,7 +668,7 @@ float ToolCap::getBtnCenterX() const
 			result += splitterSlotW() * dpi;
 			continue;
 		}
-		if (curId == btnIds[i]) {
+		if (anchor == btnIds[i]) {
 			result += btnSize * dpi * 0.5f;
 			return result;
 		}
@@ -735,7 +783,7 @@ void ToolCap::initDragHandle()
 	dragHandle->setFlexShrink(0.f);
 	dragHandle->setAlignItems(Ling::Align::Center);
 	dragHandle->setJustifyContent(Ling::Justify::Center);
-	tip->bind(dragHandle, L"拖动");
+	// 拖拽手柄不给悬停提示：它只是移动工具条
 }
 
 void ToolCap::layout()
@@ -768,8 +816,19 @@ void ToolCap::onDragDown(POINT pos, bool isRight)
 	hoverSuppress = nullptr;
 }
 
-void ToolCap::onDragMove(POINT)
+void ToolCap::onDragMove(POINT pos)
 {
+	// 贴边自动隐藏：复用录屏工具栏那套 —— 缩进后只露一条边，鼠标移上去就滑出，
+	// 离开工具栏（及属性栏）150ms 后再缩回。
+	if (demoAutoHide && !draggingBar) {
+		if (pos.x == INT_MAX && pos.y == INT_MAX) {
+			if (!demoCollapsed) scheduleDemoCollapse();
+		}
+		else {
+			killTimer(demoEdgeTimerId);
+			if (demoCollapsed) demoExpandFromEdge();
+		}
+	}
 	if (!draggingBar) return;
 	POINT pt{};
 	GetCursorPos(&pt);
@@ -791,79 +850,109 @@ void ToolCap::onDragUp(POINT, bool)
 }
 
 // 演示模式：拖动结束后按「工具栏贴边」设置处理：
-//   0 吸附边缘 —— 停手即贴到最近的上/下屏幕边；
-//   1 自动隐藏 —— 先贴边，再把工具条收起（移出屏幕），鼠标移回该边缘时临时弹出。
+//   0 吸附边缘 —— 停手即贴到最近的上/下屏幕边（工作区，不压任务栏）；
+//   1 自动隐藏 —— 复用录屏工具栏的「贴边隐藏」：贴到屏幕上下沿后缩进，只露 4px 条，
+//                  鼠标移上去滑出、离开 150ms 再缩回；
+//   2 无 —— 不吸附、不自动隐藏，停在拖放位置。
 // 非演示模式（截图 / 贴图工具条）不走这套，保持落哪算哪。
 void ToolCap::applyDemoEdgeBehavior()
 {
 	if (!demoLayout || !winCap) return;
 	const int behavior = Setting::get()->getDemoEdgeBehavior();
-
-	const RECT wa = ToolbarChrome::workAreaNear(RECT{ x, y, x + (int)w, y + (int)h });
-	const int barW = (int)w, barH = (int)h;
-	const int distTop = y - wa.top;
-	const int distBottom = wa.bottom - (y + barH);
-	demoEdge = (distTop <= distBottom) ? 0 : 1;
-	demoExpandX = std::clamp(x, (int)wa.left, (int)wa.right - barW);
-	demoExpandY = (demoEdge == 0) ? wa.top : wa.bottom - barH;
+	if (behavior == 2) {
+		// 无：位置保持拖放结果，仅让属性栏按当前落点重排（箭头方向跟着变）
+		demoAutoHide = false;
+		demoCollapsed = false;
+		killTimer(demoEdgeTimerId);
+		if (auto* host = annotHost()) host->layoutTools();
+		return;
+	}
 
 	if (behavior != 1) {
-		// 吸附边缘
+		// 吸附边缘（工作区，避免压住任务栏）
+		const RECT wa = ToolbarChrome::workAreaNear(RECT{ x, y, x + (int)w, y + (int)h });
+		const int barW = (int)w, barH = (int)h;
+		const int distTop = y - wa.top;
+		const int distBottom = wa.bottom - (y + barH);
+		demoEdge = (distTop <= distBottom) ? 0 : 1;
+		demoExpandX = std::clamp(x, (int)wa.left, (int)wa.right - barW);
+		demoExpandY = (demoEdge == 0) ? wa.top : wa.bottom - barH;
 		demoAutoHide = false;
 		demoCollapsed = false;
 		killTimer(demoEdgeTimerId);
 		setPosition(demoExpandX, demoExpandY);
+		// 吸附后必须立刻重排属性栏：否则它还停在上一次的位置，
+		// 贴到底部时箭头也不会翻到上方。
+		if (auto* host = annotHost()) host->layoutTools();
 		return;
 	}
-	// 自动隐藏
+
+	// 自动隐藏：与录屏工具栏一致，贴边判定和缩进都用整块屏幕 rcMonitor
+	MONITORINFO mi{ sizeof(MONITORINFO) };
+	if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) return;
+	const RECT area = mi.rcMonitor;
+	const int barW = (int)w, barH = (int)h;
+	const int distTop = y - area.top;
+	const int distBottom = area.bottom - (y + barH);
+	demoEdge = (distTop <= distBottom) ? 0 : 1;
+	demoExpandX = std::clamp(x, (int)area.left, (int)area.right - barW);
+	demoExpandY = (demoEdge == 0) ? area.top : area.bottom - barH;
 	demoAutoHide = true;
+	demoCollapsed = false;
 	demoCollapseToEdge();
 }
 
+// 缩进边缘：藏到屏幕之外，只露出 demoPeekStripPx 高的一条（与录屏工具栏一致）
 void ToolCap::demoCollapseToEdge()
 {
 	if (!hwnd || !demoAutoHide) return;
+	killTimer(demoEdgeTimerId);
 	demoCollapsed = true;
-	RECT rc{ demoExpandX, demoExpandY, demoExpandX + (int)w, demoExpandY + (int)h };
 	MONITORINFO mi{ sizeof(MONITORINFO) };
-	RECT mon = rc;
-	if (GetMonitorInfo(MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST), &mi)) mon = mi.rcMonitor;
-	// 沿贴的那条边挪出屏幕：上边贴顶往上、下边贴底往下
-	const int offY = (demoEdge == 0) ? mon.top - (int)h : mon.bottom;
-	setPosition(demoExpandX, offY);
+	RECT rc{ demoExpandX, demoExpandY, demoExpandX + (int)w, demoExpandY + (int)h };
+	RECT area = rc;
+	if (GetMonitorInfoW(MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST), &mi)) area = mi.rcMonitor;
+	const int strip = (int)(demoPeekStripPx * dpi + 0.5f);
+	const int nx = std::clamp(demoExpandX, (int)area.left, (int)area.right - (int)w);
+	const int ny = (demoEdge == 0) ? area.top - ((int)h - strip) : area.bottom - strip;
+	if (x != nx || y != ny) setPosition(nx, ny);
 	if (auto* host = annotHost(); host && host->toolSub) host->toolSub->hideTools();
-	setTimer(120, demoEdgeTimerId);
 }
 
 void ToolCap::demoExpandFromEdge()
 {
 	if (!demoAutoHide) return;
+	killTimer(demoEdgeTimerId);
 	demoCollapsed = false;
 	setPosition(demoExpandX, demoExpandY);
 	// 收起时一并藏了属性栏，弹回来时按当前工具恢复
 	if (auto* host = annotHost()) host->layoutTools();
 }
 
+void ToolCap::scheduleDemoCollapse()
+{
+	if (!demoAutoHide || demoCollapsed || draggingBar) return;
+	setTimer(demoPeekHideDelayMs, demoEdgeTimerId);
+}
+
+// 延时到点：鼠标仍不在工具栏/属性栏上才缩回（避免从工具栏移到属性栏时被收起）
 void ToolCap::onDemoEdgeTimer()
 {
-	if (!demoAutoHide || !hwnd) { killTimer(demoEdgeTimerId); return; }
+	killTimer(demoEdgeTimerId);
+	if (!demoAutoHide || demoCollapsed || draggingBar) return;
 	POINT pt{};
 	if (!GetCursorPos(&pt)) return;
-	RECT rc{ demoExpandX, demoExpandY, demoExpandX + (int)w, demoExpandY + (int)h };
-	MONITORINFO mi{ sizeof(MONITORINFO) };
-	RECT mon = rc;
-	if (GetMonitorInfo(MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST), &mi)) mon = mi.rcMonitor;
-	const int pad = (int)(8.f * dpi + 0.5f);
-	const int trigger = (int)(4.f * dpi + 0.5f);
-	const bool inX = pt.x >= demoExpandX - pad && pt.x <= demoExpandX + (int)w + pad;
-	const bool nearEdge = (demoEdge == 0) ? (pt.y <= mon.top + trigger) : (pt.y >= mon.bottom - trigger);
-	if (demoCollapsed) {
-		if (nearEdge && inX) demoExpandFromEdge();
+	RECT bar{ x, y, x + (int)w, y + (int)h };
+	if (PtInRect(&bar, pt)) return;
+	if (auto* host = annotHost(); host && host->toolSub && host->toolSub->hwnd) {
+		RECT sub{};
+		if (GetWindowRect(host->toolSub->hwnd, &sub) && PtInRect(&sub, pt)) {
+			// 人还在属性栏上：延后再看一次（属性栏离开主工具栏后不会再有鼠标移出事件）
+			setTimer(demoPeekHideDelayMs, demoEdgeTimerId);
+			return;
+		}
 	}
-	else {
-		RECT cur{ x, y, x + (int)w, y + (int)h };
-		if (!PtInRect(&cur, pt)) demoCollapseToEdge();
-	}
+	demoCollapseToEdge();
 }
 
 void ToolCap::paintChrome()
@@ -950,11 +1039,33 @@ void ToolCap::cancelSelect()
 	}
 	curId.clear();
 	if (auto* host = annotHost()) {
-		if (host->toolSub) host->toolSub->hideTools();
+		// 白板属性栏不跟着绘图工具一起收：右键层级是先取消工具，再取消编辑背景，
+		// 最后才收属性栏（见 WinCap::handleLayerCancel）。
+		if (host->toolSub && !host->toolSub->boardToolsBuilt()) host->toolSub->hideTools();
 		// 再点水印/包浆取消选中时立刻撤掉视口滤镜（不要等到切到别的工具）
 		host->syncViewportFilters();
 		host->layoutTools();
+		// 白板属性栏只是被工具属性栏临时替换：取消工具后还回来
+		if (auto* cap = dynamic_cast<WinCap*>(host)) cap->restoreDemoBoardBar();
 	}
+}
+
+void ToolCap::restoreToolSelection(const std::wstring& id)
+{
+	if (id.empty()) return;
+	// 只改选中态与画笔模式，不打开属性栏（白板属性栏刚收起，不应该冒出别的东西）
+	if (auto* host = annotHost(); host && host->toolSub) host->toolSub->setPenSlotMode(id);
+	Ling::Button* target = nullptr;
+	for (auto b : btns) {
+		if (b->id == id) { target = b; break; }
+	}
+	if (!target) return;
+	for (auto b : btns) {
+		if (b->id == curId) applyNormalStyle(b);
+		if (b->id == id) applySelectedStyle(b);
+	}
+	curId = id;
+	if (auto* host = annotHost()) host->presentSelectedAnnotStyle();
 }
 
 void ToolCap::bindOwner(HWND ownerHwnd)
@@ -1042,13 +1153,18 @@ void ToolCap::onClickCap(Ling::Button* btn)
 	const auto eff = resolveToolId(btn->id);
 	// 「渐隐画笔 / 画笔」是一级同级槽位：都走画笔工具，靠 isPenFade 区分（见 startPenSlot）
 	if (winCap && (btn->id == L"laser" || btn->id == L"pen")) {
+		// 演示画布：再点一次当前画笔 = 取消选中，回到"未选工具"——
+		// 只有这个状态才能点选已有标注做二次编辑（见 WinCap::annotSkipHitSelect）
+		if (demoLayout && curId == btn->id) { cancelSelect(); return; }
 		winCap->startPenSlot(btn->id == L"laser");
 		return;
 	}
-	// 演示模式：重置画布、穿透、取消都走 WinCap 的演示动作
+	// 演示模式：重置画布、穿透、白板、取消都走 WinCap 的演示动作
 	if (demoLayout && winCap) {
 		if (btn->id == L"reset-canvas") { winCap->resetDemoCanvas(); return; }
 		if (btn->id == L"mouse-through") { winCap->toggleDemoThrough(); return; }
+		if (btn->id == L"whiteboard") { winCap->toggleDemoBoard(); return; }
+		if (btn->id == L"extra") { winCap->toggleDemoRecorder(); return; }
 		if (btn->id == L"close") { winCap->exitDemoCanvas(); return; }
 	}
 	// 「显示光标」：截图/导出时把会话开始那一刻的系统光标一起拍进去（开关类，不参与工具排他）

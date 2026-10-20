@@ -79,6 +79,8 @@ namespace {
 				cacheRequest->AddProperty(UIA_IsOffscreenPropertyId);
 				cacheRequest->AddProperty(UIA_ControlTypePropertyId);
 				cacheRequest->put_TreeScope((TreeScope)(TreeScope_Element | TreeScope_Children));
+				// 缓存只复用矩形等属性，节点本身还要继续展开，故保留完整引用模式
+				cacheRequest->put_AutomationElementMode(AutomationElementMode_Full);
 				IUIAutomationCondition* controlView{ nullptr };
 				if (SUCCEEDED(automation->get_ControlViewCondition(&controlView)) && controlView) {
 					cacheRequest->put_TreeFilter(controlView);
@@ -133,6 +135,12 @@ namespace {
 	bool rectContainsPt(const RECT& r, POINT pt)
 	{
 		return pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom;
+	}
+
+	/** b 完全落在 a 里（用于判断祖先容器） */
+	bool rectContainsRect(const RECT& a, const RECT& b)
+	{
+		return b.left >= a.left && b.top >= a.top && b.right <= a.right && b.bottom <= a.bottom;
 	}
 
 	RECT monitorRectAt(POINT screen)
@@ -212,62 +220,204 @@ namespace {
 		return (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0;
 	}
 
-	/** 不该被当作查找目标的窗口：遮罩自身 / 自家工具类浮窗 / 不可见·最小化·幽灵·桌面外壳·鼠标穿透。
-	 *  不再按"整个进程"一刀切排除，否则连自己的设置中心都查不到。 */
-	bool isBadWindow(HWND hwnd, HWND exclude)
+	// ---------------- 1) 会话级桌面快照 ----------------
+	// 同一次截图会话里，窗口几何基本稳定。以前每次悬停都重新枚举顶层窗、逐个查 DWM 属性、
+	// 再枚举一遍子窗，鼠标一动就重复几十上百次跨进程调用；现在这份结果按会话缓存，查询时
+	// 只做本地矩形比对，桌面快照过期再重建。
+	constexpr ULONGLONG kSnapshotTtlMs{ 400 };   // 新窗口/弹层出现后最多这么久能被看到
+	constexpr ULONGLONG kTreeTtlMs{ 700 };        // 无障碍树空闲超过这么久就重建一次
+	constexpr size_t kMaxCachedTrees{ 3 };
+	constexpr size_t kMaxTreeNodes{ 12000 };
+	// UIA 提供者超时（UIA_E_TIMEOUT）：目标进程刚被无障碍查询唤醒时常见，值得补一次
+	constexpr HRESULT kUiaTimeout = static_cast<HRESULT>(0x80131505u);
+
+	// 最新请求序号 / 缓存代次：新请求或取消都会推进它们，正在跑的查询据此提前收手
+	std::atomic<uint64_t> g_latestQuerySeq{ 0 };
+	std::atomic<uint64_t> g_cacheGeneration{ 0 };
+
+	struct ChildWin {
+		HWND hwnd{ nullptr };
+		RECT rect{};
+		int depth{ 0 };
+	};
+
+	struct WinEntry {
+		HWND hwnd{ nullptr };
+		RECT bounds{};
+		int cloaked{ -1 };                   // -1 未判定 / 0 正常 / 1 被 DWM 隐藏
+		bool childrenScanned{ false };
+		std::vector<ChildWin> children;
+	};
+
+	struct DesktopSnapshot {
+		std::vector<WinEntry> windows;       // 顺序 = 枚举顺序 = Z 序（前 -> 后）
+		HWND exclude{ nullptr };
+		ULONGLONG stamp{ 0 };
+		bool valid{ false };
+	};
+
+	// 只由元素查询工作线程访问，故不加锁
+	DesktopSnapshot& desktopSnapshot()
+	{
+		static DesktopSnapshot snap;
+		return snap;
+	}
+
+	/** 建快照时的廉价过滤：DWM 遮挡查询很贵，留到真正命中候选时再做。 */
+	bool isBadWindowCheap(HWND hwnd, HWND exclude)
 	{
 		if (!hwnd || hwnd == exclude) return true;
 		if (isOwnToolWindow(hwnd)) return true;
-		return isExcludedCaptureWindow(hwnd);
+		if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || isDesktopOrShell(hwnd)) return true;
+		return (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TRANSPARENT) != 0;
 	}
 
-	// ---------------- 1) 锚点：点下的"内容子窗" ----------------
-	/** 真正持有无障碍子树的那个子窗。
-	 *  顶层窗的无障碍元素往往只是一层壳（Chromium 把网页渲染进独立子窗），从顶层窗下钻几层就
-	 *  再无子节点、只能拿回整窗矩形。这里枚举**全部**后代子窗，只保留可见且含点的，取祖先层数
-	 *  最深者（同深度取面积最小者）。不用 ChildWindowFromPointEx：覆盖整个客户区的合成层会被它
-	 *  抢先命中，而合成层没有可用的无障碍子树。判定只看几何与可见性，与目标框架无关。 */
-	HWND deepestContainingChild(HWND top, POINT pt)
+	void buildDesktopSnapshot(DesktopSnapshot& snap, HWND exclude)
 	{
-		struct Pick {
-			HWND top{ nullptr };
-			HWND best{ nullptr };
-			int depth{ -1 };
-			LONGLONG area{ 0 };
-			POINT pt{};
-		} pick;
-		pick.top = top;
-		pick.pt = pt;
-		EnumChildWindows(top, [](HWND h, LPARAM lp) -> BOOL {
-			auto* p = reinterpret_cast<Pick*>(lp);
-			if (!IsWindowVisible(h)) return TRUE;
+		snap.windows.clear();
+		snap.exclude = exclude;
+		struct Ctx {
+			DesktopSnapshot* snap;
+			HWND exclude;
+		} c{ &snap, exclude };
+		EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
+			auto* cc = reinterpret_cast<Ctx*>(lp);
+			if (isBadWindowCheap(hwnd, cc->exclude)) return TRUE;
+			// 这里只用 GetWindowRect：DWM 的可见框查询留到真正命中时再做，
+			// 否则每次重建都要对整桌面的窗口各来一次 DWM 往返。
 			RECT r{};
-			if (!GetWindowRect(h, &r) || !rectContainsPt(r, p->pt)) return TRUE;
-			int depth = 0;
-			for (HWND up = GetParent(h); up && up != p->top && depth < 64; up = GetParent(up)) ++depth;
-			const LONGLONG area = (LONGLONG)(r.right - r.left) * (LONGLONG)(r.bottom - r.top);
-			if (depth > p->depth || (depth == p->depth && area < p->area)) {
-				p->depth = depth;
-				p->area = area;
-				p->best = h;
-			}
+			if (!GetWindowRect(hwnd, &r) || !rectValid(r)) return TRUE;
+			WinEntry e;
+			e.hwnd = hwnd;
+			e.bounds = r;
+			cc->snap->windows.push_back(std::move(e));
 			return TRUE;
-		}, reinterpret_cast<LPARAM>(&pick));
-		return pick.best ? pick.best : top;
+		}, reinterpret_cast<LPARAM>(&c));
+		snap.stamp = GetTickCount64();
+		snap.valid = true;
 	}
 
-	// ---------------- 2) 无障碍树逐层下钻 ----------------
+	/** 快照里 Z 序最靠前的命中窗；命中的候选才去查 DWM 遮挡，结果随快照一起记下。 */
+	WinEntry* topWindowAt(POINT pt, HWND exclude)
+	{
+		auto& snap = desktopSnapshot();
+		const ULONGLONG now = GetTickCount64();
+		if (!snap.valid || snap.exclude != exclude || now - snap.stamp > kSnapshotTtlMs)
+			buildDesktopSnapshot(snap, exclude);
+		for (auto& w : snap.windows) {
+			if (!rectContainsPt(w.bounds, pt)) continue;
+			if (!IsWindow(w.hwnd)) continue;
+			if (w.cloaked < 0) w.cloaked = isCloaked(w.hwnd) ? 1 : 0;
+			if (w.cloaked) continue;
+			return &w;
+		}
+		return nullptr;
+	}
+
+	void scanChildWindows(WinEntry& w)
+	{
+		w.childrenScanned = true;
+		struct Ctx {
+			HWND top;
+			std::vector<ChildWin>* out;
+		} c{ w.hwnd, &w.children };
+		EnumChildWindows(w.hwnd, [](HWND child, LPARAM lp) -> BOOL {
+			auto* cc = reinterpret_cast<Ctx*>(lp);
+			if (!IsWindowVisible(child)) return TRUE;
+			RECT r{};
+			if (!GetWindowRect(child, &r) || !rectValid(r)) return TRUE;
+			int depth = 0;
+			for (HWND up = GetParent(child); up && up != cc->top && depth < 64; up = GetParent(up)) ++depth;
+			cc->out->push_back(ChildWin{ child, r, depth });
+			return TRUE;
+		}, reinterpret_cast<LPARAM>(&c));
+	}
+
+	/** 无障碍子树常常挂在某个子窗上（Chromium 的渲染子窗就是典型），而不是顶层窗。
+	 *  取含点后代窗里层级最深、面积最小的那个作为下钻起点。 */
+	HWND anchorWindowAt(WinEntry& w, POINT pt)
+	{
+		if (!w.childrenScanned) scanChildWindows(w);
+		HWND best = w.hwnd;
+		int depth = -1;
+		LONGLONG area = 0;
+		for (const auto& c : w.children) {
+			if (!rectContainsPt(c.rect, pt)) continue;
+			const LONGLONG a = rectArea(c.rect);
+			if (c.depth > depth || (c.depth == depth && a < area)) {
+				depth = c.depth;
+				area = a;
+				best = c.hwnd;
+			}
+		}
+		return best;
+	}
+
+	// ---------------- 2) 无障碍树下钻（会话内复用） ----------------
+	/** 命中链：[0] 最细节点，末尾是下钻起点窗口。 */
+	using PickPath = std::vector<RECT>;
+
 	struct DrillNode {
-		IUIAutomationElement* el{ nullptr }; // 持有引用，由 DrillTree 统一释放
-		RECT rect{};                         // 已裁剪到窗口范围
+		IUIAutomationElement* el{ nullptr };        // 引用由 DrillTree 统一释放
+		IUIAutomationElementArray* pending{ nullptr }; // 尚未解码完的子节点集合
+		int pendingNext{ 0 };
+		int pendingTotal{ 0 };
+		RECT rect{};                                // 已裁剪到窗口范围
 		int parent{ -1 };
-		bool structural{ false };            // Pane/Group：可能是纯包裹层，回溯时可穿过
+		bool structural{ false };                   // Pane/Group：可能是纯包裹层，回溯时可穿过
+		bool fetched{ false };
 		bool expanded{ false };
-		bool dead{ false };                  // 取子失败（提供者报错），不再重试
-		std::vector<int> children;           // 兄弟顺序 = 绘制顺序
+		bool failed{ false };
+		bool retried{ false };
+		std::vector<int> children;                  // 兄弟顺序 = 绘制顺序
 	};
 
-	/** 是否"结构容器"（Pane/Group）—— 只有这类才允许回溯穿过 */
+	/** 一棵窗口的无障碍树。跨多次悬停保留：已展开的层不再向提供者重复索取，
+	 *  后续查询只在本地矩形里走；预算没花完的层留到下一次继续。 */
+	struct DrillTree {
+		HWND anchor{ nullptr };
+		RECT bounds{};
+		ULONGLONG stamp{ 0 };
+		IUIAutomation* automation{ nullptr };
+		IUIAutomationCacheRequest* creq{ nullptr };
+		IUIAutomation2* automation2{ nullptr };
+		std::vector<DrillNode> nodes;
+
+		void releaseNodes()
+		{
+			for (auto& n : nodes) {
+				if (n.pending) n.pending->Release();
+				if (n.el) n.el->Release();
+			}
+			nodes.clear();
+		}
+	};
+
+	// 同样只由查询工作线程访问
+	std::vector<std::unique_ptr<DrillTree>>& drillCache()
+	{
+		static std::vector<std::unique_ptr<DrillTree>> cache;
+		return cache;
+	}
+
+	void clearDrillCaches()
+	{
+		auto& cache = drillCache();
+		for (auto& t : cache)
+			if (t) t->releaseNodes();
+		cache.clear();
+	}
+
+	/** 按剩余预算给本次跨进程调用设超时（只有 IUIAutomation2 提供；拿不到就跳过）。 */
+	void armTimeout(DrillTree& tree, DWORD remainingMs)
+	{
+		if (!tree.automation2) return;
+		const DWORD ms = (std::max)((DWORD)1, (std::min)(remainingMs, (DWORD)60000));
+		tree.automation2->put_ConnectionTimeout(ms);
+		tree.automation2->put_TransactionTimeout(ms);
+	}
+
+	/** 是否"结构容器"（Pane/Group）—— 只有这类才允许回溯穿过。 */
 	bool isStructuralKind(IUIAutomationElement* el, IUIAutomationCacheRequest* creq)
 	{
 		CONTROLTYPEID ct{ 0 };
@@ -276,186 +426,256 @@ namespace {
 		return ct == UIA_PaneControlTypeId || ct == UIA_GroupControlTypeId;
 	}
 
-	/** 逐层下钻：每层只向提供者要**一层**子节点（缓存请求限 Element|Children 并预缓存矩形/
-	 *  屏幕外/控件类型），逐层按需展开，不一次拉整棵树 —— 一次拉整棵树的代价是整页所有节点的
-	 *  跨进程编码，几十毫秒起步，而其中绝大多数分支根本不会走。 */
-	struct DrillTree {
-		IUIAutomation* automation{ nullptr };
-		IUIAutomationCacheRequest* creq{ nullptr };
-		IUIAutomation2* automation2{ nullptr };
-		std::vector<DrillNode> nodes;
-		POINT pt{}; // 本次查询点（展开时判定"是否含点"用）
+	/** 取（或新建）某个窗口的下钻树。窗口移动、缓存过期或槽位被挤占时整棵树重建。 */
+	DrillTree* treeFor(HWND anchor, RECT bounds, IUIAutomation* automation,
+		IUIAutomationCacheRequest* creq, IUIAutomation2* automation2)
+	{
+		if (!automation || !creq || !rectValid(bounds)) return nullptr;
+		const ULONGLONG now = GetTickCount64();
+		auto& cache = drillCache();
 
-		~DrillTree()
-		{
-			for (auto& n : nodes)
-				if (n.el) n.el->Release();
+		for (auto& t : cache) {
+			if (!t || t->anchor != anchor) continue;
+			if (rectEqual(t->bounds, bounds) && now - t->stamp <= kTreeTtlMs) {
+				t->stamp = now;
+				return t.get();
+			}
 		}
 
-		/** 按剩余预算给本次跨进程调用设超时（只有 IUIAutomation2 提供；拿不到就跳过） */
-		void armTimeout(DWORD remainingMs)
-		{
-			if (!automation2) return;
-			const DWORD ms = (std::max)((DWORD)1, (std::min)(remainingMs, (DWORD)60000));
-			automation2->put_ConnectionTimeout(ms);
-			automation2->put_TransactionTimeout(ms);
+		DrillTree* slot = nullptr;
+		for (auto& t : cache) {
+			if (!t || t->anchor == anchor) { slot = t.get(); break; }
+		}
+		if (!slot) {
+			if (cache.size() >= kMaxCachedTrees) {
+				size_t oldest = 0;
+				for (size_t i = 1; i < cache.size(); ++i)
+					if (cache[i]->stamp < cache[oldest]->stamp) oldest = i;
+				cache[oldest]->releaseNodes();
+				slot = cache[oldest].get();
+			}
+			else {
+				cache.push_back(std::make_unique<DrillTree>());
+				slot = cache.back().get();
+			}
 		}
 
-		/** 展开一层子节点。返回 false = 这一层拿不到（预算尽 / 提供者报错）；空子节点是合法的叶子。
-		 *  ⚠ 全程按**下标**访问 nodes，绝不持有元素引用：nodes 是 vector，push_back 会把存储搬到
-		 *  新地址；一旦引用跨过 push_back，父节点的 children 就写进了已释放的内存 —— 症状是下钻
-		 *  永远只展开一层、随后"没有含点子节点"，而每一步看起来都成功。 */
-		bool expand(int index, DWORD deadline)
-		{
-			if (nodes[index].expanded) return true;
-			if (nodes[index].dead || !nodes[index].el) return false;
-			const LONGLONG remaining = (LONGLONG)deadline - (LONGLONG)GetTickCount();
-			if (remaining <= 1) return false;
-			armTimeout((DWORD)remaining);
+		slot->releaseNodes();
+		slot->anchor = anchor;
+		slot->bounds = bounds;
+		slot->automation = automation;
+		slot->creq = creq;
+		slot->automation2 = automation2;
+		slot->stamp = now;
 
-			// 根节点在建树时已经带好一层缓存；其余节点用 BuildUpdatedCache 现取这一层
+		IUIAutomationElement* root{ nullptr };
+		armTimeout(*slot, 600);
+		HRESULT hr = automation->ElementFromHandleBuildCache(anchor, creq, &root);
+		if ((FAILED(hr) || !root) && hr == kUiaTimeout) {
+			armTimeout(*slot, 600);
+			hr = automation->ElementFromHandleBuildCache(anchor, creq, &root);
+		}
+		if (FAILED(hr) || !root) {
+			slot->anchor = nullptr;
+			slot->stamp = 0;   // 空槽排到最旧，下次优先被别的窗口占用
+			return nullptr;
+		}
+		DrillNode rn;
+		rn.el = root;
+		rn.rect = bounds;
+		slot->nodes.push_back(std::move(rn));
+		return slot;
+	}
+
+	enum class ExpandState { Ok, Pending, Failed };
+
+	/** 展开一层子节点。
+	 *  Pending = 预算用尽或提供者暂时超时，集合留在节点里，下一次查询接着解码；
+	 *  Failed  = 提供者明确拒绝，这一支不再尝试。
+	 *  ⚠ 全程按**下标**访问 nodes：push_back 会搬移存储，任何引用都不能跨过它。 */
+	ExpandState expandNode(DrillTree& tree, int index, DWORD deadline, DWORD callLimit, uint64_t seq)
+	{
+		if (index < 0 || index >= (int)tree.nodes.size()) return ExpandState::Failed;
+		if (tree.nodes[index].expanded) return ExpandState::Ok;
+		if (tree.nodes[index].failed || !tree.nodes[index].el) return ExpandState::Failed;
+
+		if (!tree.nodes[index].fetched) {
+			// 单次跨进程调用再单独限一遍：一个卡住的提供者不该把整轮预算吃光
+			const LONGLONG remaining = (std::min)((LONGLONG)deadline - (LONGLONG)GetTickCount(),
+				(LONGLONG)callLimit);
+			if (remaining <= 1) return ExpandState::Pending;
+			armTimeout(tree, (DWORD)remaining);
+
 			IUIAutomationElement* holder{ nullptr };
+			HRESULT hr{ S_OK };
 			if (index == 0) {
-				nodes[0].el->AddRef();
-				holder = nodes[0].el;
+				// 根节点建树时已经带好一层缓存
+				tree.nodes[0].el->AddRef();
+				holder = tree.nodes[0].el;
 			}
-			else if (FAILED(nodes[index].el->BuildUpdatedCache(creq, &holder)) || !holder) {
-				nodes[index].dead = true;
-				return false;
+			else {
+				hr = tree.nodes[index].el->BuildUpdatedCache(tree.creq, &holder);
+				// 目标进程刚被唤醒时经常先回一次超时：同一节点补一次，多半就能过
+				if ((!holder || FAILED(hr)) && hr == kUiaTimeout && !tree.nodes[index].retried) {
+					tree.nodes[index].retried = true;
+					const LONGLONG again = (std::min)((LONGLONG)deadline - (LONGLONG)GetTickCount(),
+						(LONGLONG)callLimit);
+					if (again > 1) {
+						armTimeout(tree, (DWORD)again);
+						hr = tree.nodes[index].el->BuildUpdatedCache(tree.creq, &holder);
+					}
+				}
 			}
+
 			IUIAutomationElementArray* arr{ nullptr };
-			const HRESULT hr = holder->GetCachedChildren(&arr);
-			if (FAILED(hr)) {
-				holder->Release();
-				nodes[index].dead = true;
-				return false;
+			if (holder) hr = holder->GetCachedChildren(&arr);
+			else if (SUCCEEDED(hr)) hr = E_FAIL;
+			if (holder) holder->Release();
+			if (!holder || FAILED(hr)) {
+				tree.nodes[index].failed = true;
+				return ExpandState::Failed;
 			}
-			const RECT winRect = nodes[0].rect;
+			tree.nodes[index].pending = arr;   // 空集合 = 合法叶子
+			tree.nodes[index].pendingNext = 0;
+			tree.nodes[index].pendingTotal = 0;
 			if (arr) {
 				int len = 0;
-				arr->get_Length(&len);
-				for (int i = 0; i < len; ++i) {
-					IUIAutomationElement* child{ nullptr };
-					if (FAILED(arr->GetElement(i, &child)) || !child) continue;
-					BOOL off = FALSE;
-					const HRESULT ohr = creq ? child->get_CachedIsOffscreen(&off)
-						: child->get_CurrentIsOffscreen(&off);
-					RECT br{};
-					const HRESULT bhr = creq ? child->get_CachedBoundingRectangle(&br)
-						: child->get_CurrentBoundingRectangle(&br);
-					if ((SUCCEEDED(ohr) && off) || FAILED(bhr)) {
-						child->Release();
-						continue;
-					}
-					// 先按窗口范围裁剪、不相交的直接丢（坐标已失效的陈旧节点都过不了这关），
-					// 屏幕外的同样跳过（几何上"含点"，屏幕上并没有它）
-					if (rectValid(winRect)) br = intersectRect(br, winRect);
-					if (br.right - br.left < 2 || br.bottom - br.top < 2) {
-						child->Release();
-						continue;
-					}
-					DrillNode node;
-					node.el = child;
-					node.rect = br;
-					node.parent = index;
-					node.structural = isStructuralKind(child, creq);
-					const int self = (int)nodes.size();
-					nodes.push_back(node);
-					nodes[index].children.push_back(self); // 重新取下标：push_back 可能已搬移存储
-				}
-				arr->Release();
+				if (SUCCEEDED(arr->get_Length(&len)) && len > 0)
+					tree.nodes[index].pendingTotal = len;
 			}
-			nodes[index].expanded = true;
-			holder->Release();
-			return true;
+			tree.nodes[index].fetched = true;
+			tree.stamp = GetTickCount64();
 		}
 
-		/** 本层含点的最后一个兄弟；没有返回 -1。
-		 *  同一个位置被多个兄弟覆盖时，排在后面的那个是视觉上盖在上面的那个。 */
-		int lastContainingChild(int index) const
-		{
-			const std::vector<int>& sibs = nodes[index].children;
-			for (int i = (int)sibs.size() - 1; i >= 0; --i)
-				if (rectContainsPt(nodes[sibs[i]].rect, pt)) return sibs[i];
-			return -1;
-		}
+		IUIAutomationElementArray* arr = tree.nodes[index].pending;
+		while (tree.nodes[index].pendingNext < tree.nodes[index].pendingTotal) {
+			if ((LONGLONG)GetTickCount() >= (LONGLONG)deadline) return ExpandState::Pending;
+			if ((tree.nodes[index].pendingNext & 0x3F) == 0
+				&& g_latestQuerySeq.load(std::memory_order_relaxed) != seq)
+				return ExpandState::Pending;
+			if (tree.nodes.size() >= kMaxTreeNodes) break;   // 病态页面：截断，别无限长
 
-		/** 走死时的回溯：沿"与父同框的结构容器"向上退，找**更早**的、同样含点的兄弟分支。
-		 *  实测 Chromium 窗口外层就是这个形状：一个与内容分支等尺寸的包裹层排在它后面，自身和
-		 *  子节点都不含点 —— 不回退的话下钻在第一层就断，只能给出整窗框。只认"结构容器 + 与父
-		 *  同框"两个条件：真实控件、形状不同的容器框架一律原样保留优先级。 */
-		int earlierOverlappingBranch(int index) const
-		{
-			int cur = index;
-			while (true) {
-				const int parent = nodes[cur].parent;
-				if (parent < 0 || !nodes[cur].structural
-					|| !rectEqual(nodes[parent].rect, nodes[cur].rect))
-					return -1;
-				const std::vector<int>& sibs = nodes[parent].children;
-				// 只找排在 cur 之前的兄弟：排在后面的在绘制顺序上压在 cur 之上，不可能被 cur 挡住
-				for (int i = 0; i < (int)sibs.size(); ++i) {
-					const int ci = sibs[i];
-					if (ci == cur) break;
-					if (rectContainsPt(nodes[ci].rect, pt)) return ci; // 更早兄弟里最靠后的那个
-				}
-				cur = parent;
+			const int i = tree.nodes[index].pendingNext++;
+			IUIAutomationElement* child{ nullptr };
+			if (!arr || FAILED(arr->GetElement(i, &child)) || !child) continue;
+			BOOL off = FALSE;
+			const HRESULT ohr = child->get_CachedIsOffscreen(&off);
+			RECT br{};
+			const HRESULT bhr = child->get_CachedBoundingRectangle(&br);
+			if ((SUCCEEDED(ohr) && off) || FAILED(bhr)) {
+				child->Release();
+				continue;
 			}
+			// 先裁到窗口：坐标失效的陈旧节点会在这一步被丢掉
+			RECT clipped = intersectRect(br, tree.bounds);
+			if (clipped.right - clipped.left < 2 || clipped.bottom - clipped.top < 2) {
+				child->Release();
+				continue;
+			}
+			DrillNode node;
+			node.el = child;
+			node.rect = clipped;
+			node.parent = index;
+			node.structural = isStructuralKind(child, tree.creq);
+			const int self = (int)tree.nodes.size();
+			tree.nodes.push_back(std::move(node));
+			tree.nodes[index].children.push_back(self); // 重新取下标：push_back 可能已搬移
 		}
-	};
 
-	bool drillWindowTree(IUIAutomation* automation, IUIAutomationCacheRequest* creq,
-		IUIAutomation2* automation2, HWND hwnd, POINT pt, DWORD budgetMs, RECT& out)
+		if (tree.nodes[index].pending) {
+			tree.nodes[index].pending->Release();
+			tree.nodes[index].pending = nullptr;
+		}
+		tree.nodes[index].expanded = true;
+		return ExpandState::Ok;
+	}
+
+	/** 本层含点的最后一个兄弟；没有返回 -1。后出现的兄弟在绘制顺序上压在先出现的上面。 */
+	int lastContainingChild(const DrillTree& tree, int index, POINT pt)
 	{
-		if (!automation || !hwnd) return false;
-		DrillTree tree;
-		tree.automation = automation;
-		tree.creq = creq;
-		tree.automation2 = automation2;
-		tree.pt = pt;
+		const std::vector<int>& sibs = tree.nodes[index].children;
+		for (int i = (int)sibs.size() - 1; i >= 0; --i)
+			if (rectContainsPt(tree.nodes[sibs[i]].rect, pt)) return sibs[i];
+		return -1;
+	}
 
-		// 根 = 窗口自身的无障碍元素（ElementFromHandleBuildCache 会顺带缓存一层子节点）
-		IUIAutomationElement* root{ nullptr };
-		if (creq) {
-			if (FAILED(automation->ElementFromHandleBuildCache(hwnd, creq, &root)) || !root)
-				return false;
+	/** 走死时的回溯：只沿"与父同框的结构容器"向上退，去找更早的、同样含点的兄弟分支。
+	 *  Chromium 一类框架会在内容分支之后再挂一个等尺寸的包裹层，不回退就会在第一层断掉。 */
+	int earlierOverlappingBranch(const DrillTree& tree, int index, POINT pt)
+	{
+		int cur = index;
+		while (true) {
+			const int parent = tree.nodes[cur].parent;
+			if (parent < 0 || !tree.nodes[cur].structural
+				|| !rectEqual(tree.nodes[parent].rect, tree.nodes[cur].rect))
+				return -1;
+			const std::vector<int>& sibs = tree.nodes[parent].children;
+			for (int i = 0; i < (int)sibs.size(); ++i) {
+				const int ci = sibs[i];
+				if (ci == cur) break;
+				if (rectContainsPt(tree.nodes[ci].rect, pt)) return ci;
+			}
+			cur = parent;
 		}
-		else if (FAILED(automation->ElementFromHandle(hwnd, &root)) || !root) {
-			return false;
-		}
-		RECT wr{};
-		const RECT winRect = GetWindowRect(hwnd, &wr) ? wr : RECT{ 0, 0, 0, 0 };
-		DrillNode rootNode;
-		rootNode.el = root; // 引用交给节点表
-		rootNode.rect = winRect;
-		tree.nodes.push_back(rootNode);
+	}
 
+	PickPath buildPickPath(const DrillTree& tree, int cur, POINT pt)
+	{
+		PickPath reversed;
+		for (int i = cur; i >= 0 && i < (int)tree.nodes.size(); i = tree.nodes[i].parent) {
+			const RECT r = tree.nodes[i].rect;
+			if (r.right - r.left < 1 || r.bottom - r.top < 1) continue;
+			if (!rectContainsPt(r, pt)) continue;
+			if (!reversed.empty() && rectEqual(reversed.back(), r)) continue;
+			reversed.push_back(r);
+		}
+		return PickPath(reversed.rbegin(), reversed.rend());
+	}
+
+	/** 在缓存树里走到最细节点。
+	 *  pending 回写"还有没展开完的层"（预算/超时/被新请求打断），停稳后可以接着钻。 */
+	bool walkTree(DrillTree& tree, POINT pt, DWORD budgetMs, DWORD callLimitMs, bool refine,
+		uint64_t seq, const std::function<void(const PickPath&)>& publish,
+		bool& pending, PickPath& out)
+	{
+		pending = false;
+		out.clear();
 		const DWORD deadline = GetTickCount() + budgetMs;
 		constexpr int kMaxSteps = 80;
 		int cur = 0;
+		ULONGLONG lastPublish = 0;
 		for (int step = 0; step < kMaxSteps; ++step) {
-			if ((LONGLONG)GetTickCount() >= (LONGLONG)deadline) break;
-			if (!tree.expand(cur, deadline)) break;
-			const int child = tree.lastContainingChild(cur);
+			if (g_latestQuerySeq.load(std::memory_order_relaxed) != seq) {
+				pending = true;
+				break;
+			}
+			const ExpandState st = expandNode(tree, cur, deadline, callLimitMs, seq);
+			if (st == ExpandState::Pending) {
+				pending = true;
+				break;
+			}
+			if (st == ExpandState::Failed) break;
+
+			const int child = lastContainingChild(tree, cur, pt);
 			if (child >= 0) {
 				cur = child;
+				// 细化阶段边钻边回传：用户先看到大框，再一格格收到最细节点
+				if (refine && publish) {
+					const ULONGLONG now = GetTickCount64();
+					if (now - lastPublish >= 32) {
+						lastPublish = now;
+						PickPath partial = buildPickPath(tree, cur, pt);
+						if (!partial.empty()) publish(partial);
+					}
+				}
 				continue;
 			}
-			const int alt = tree.earlierOverlappingBranch(cur);
+			const int alt = earlierOverlappingBranch(tree, cur, pt);
 			if (alt < 0) break;
 			cur = alt;
 		}
-
-		// 终点向上第一个"不是整个窗口"的矩形 = 最具体的那层；全是窗口范围就说明没钻出东西
-		for (int i = cur; i >= 0; i = tree.nodes[i].parent) {
-			const RECT r = tree.nodes[i].rect;
-			if (r.right - r.left < 2 || r.bottom - r.top < 2) continue;
-			if (rectValid(winRect) && rectEqual(r, winRect)) continue;
-			if (!rectContainsPt(r, pt)) continue;
-			out = r;
-			return true;
-		}
-		return false;
+		out = buildPickPath(tree, cur, pt);
+		return !out.empty();
 	}
 
 	// ---------------- 3) 坐标命中测试（与 F12 选择器同源） ----------------
@@ -470,7 +690,12 @@ namespace {
 	 *  ⚠ 命中测试是**窗口级**的：遮罩若参与命中测试，返回的永远只是"遮罩自己的元素"，目标
 	 *  自己的命中测试（与 F12 选择器同一套逻辑）就被挡在外面。故只在这一次调用期间给遮罩
 	 *  临时加 WS_EX_TRANSPARENT（画面不变、不隐藏、不动 Z 序），查完立刻还原；鼠标有按键
-	 *  按下时绝不点穿 —— 那一下会漏给下层窗口。 */
+	 *  按下时绝不点穿 —— 那一下会漏给下层窗口。
+	 *  ⚠ 只加 WS_EX_TRANSPARENT 还不够：实测 UIA 的全局命中测试只对**分层窗口**认这个标志，
+	 *  而遮罩是 DirectComposition 窗口（WS_EX_NOREDIRECTIONBITMAP、没有重定向表面），不补
+	 *  WS_EX_LAYERED 的话命中测试照样返回遮罩自己 —— 浏览器 UI 就是这么一直找不到的。
+	 *  补上分层样式后画面完全不变（已用逐像素比对验证），所以补一次就长期保留，只反复切换
+	 *  TRANSPARENT。 */
 	bool pointHitElement(IUIAutomation* automation, HWND excludeOv, POINT pt, RECT& out)
 	{
 		if (!automation) return false;
@@ -482,6 +707,11 @@ namespace {
 			&& !(GetAsyncKeyState(VK_RBUTTON) & 0x8000)
 			&& !(GetAsyncKeyState(VK_MBUTTON) & 0x8000)) {
 			ovEx = GetWindowLongW(excludeOv, GWL_EXSTYLE);
+			if (!(ovEx & WS_EX_LAYERED)) {
+				SetWindowLongW(excludeOv, GWL_EXSTYLE, ovEx | WS_EX_LAYERED);
+				SetLayeredWindowAttributes(excludeOv, 0, 255, LWA_ALPHA);
+				ovEx |= WS_EX_LAYERED;   // 长期保留：还原时只回退 TRANSPARENT
+			}
 			if (!(ovEx & WS_EX_TRANSPARENT)) {
 				g_pointThroughPrevEx.store(ovEx);
 				g_pointThroughHwnd.store(excludeOv);
@@ -601,10 +831,39 @@ namespace {
 	}
 
 	// ---------------- 4) 桌面图标 ----------------
+	struct DesktopIconListCache {
+		HWND list{ nullptr };
+		HWND exclude{ nullptr };
+		ULONGLONG stamp{ 0 };
+		bool valid{ false };
+	};
+
+	DesktopIconListCache& desktopIconListCache()
+	{
+		static DesktopIconListCache cache;
+		return cache;
+	}
+
+	void resetDesktopIconListCache()
+	{
+		desktopIconListCache() = DesktopIconListCache{};
+	}
+
 	/** 桌面图标宿主（SysListView32）定位：桌面层在元素查找主链里被 isDesktopOrShell 整体排除
-	 *  （否则会选中壁纸/整屏），这里在 Progman / WorkerW 及其全部后代里找覆盖 pt 的可见列表窗。 */
+	 *  （否则会选中壁纸/整屏），这里在 Progman / WorkerW 及其全部后代里找覆盖 pt 的可见列表窗。
+	 *  结果按会话短缓存：鼠标在桌面上滑动时不必每次重扫窗口树。 */
 	HWND desktopIconListViewAt(POINT pt, HWND exclude)
 	{
+		auto& cache = desktopIconListCache();
+		const ULONGLONG now = GetTickCount64();
+		if (cache.valid && cache.exclude == exclude && now - cache.stamp <= kSnapshotTtlMs) {
+			if (!cache.list) return nullptr;
+			if (IsWindow(cache.list)) {
+				RECT r{};
+				if (GetWindowRect(cache.list, &r) && rectContainsPt(r, pt)) return cache.list;
+			}
+		}
+
 		struct Ctx {
 			POINT pt;
 			HWND exclude;
@@ -632,6 +891,11 @@ namespace {
 			}, reinterpret_cast<LPARAM>(cc));
 			return cc->hit ? FALSE : TRUE;
 		}, reinterpret_cast<LPARAM>(&c));
+
+		cache.list = c.hit;
+		cache.exclude = exclude;
+		cache.stamp = now;
+		cache.valid = true;
 		return c.hit;
 	}
 
@@ -758,12 +1022,15 @@ namespace {
 	}
 
 	// ---------------- 6) 主链 ----------------
-	/** 命中 screen 下最小可见元素包围盒（屏幕坐标）。coarse 回写"结果是否仍是整块级粗框"
-	 *  （浏览器树尚未就绪/页面未加载完，需要悬停驻留继续重查直到细化）。
-	 *  refine=false = 实时命中（鼠标还在移动，下钻给更小预算，必须尽快出结果）；
-	 *  refine=true  = 驻留重查（同一固定点稳定后的重查，下钻用完整预算，钻得更深更准）。 */
-	bool elementAtRaw(POINT screen, HWND exclude, bool refine, RECT& out, bool& coarse)
+	/** 命中 screen 下的元素，结果是一条命中链（out[0]=最细节点，末尾=窗口）。
+	 *  coarse 回写"结果还不够细"：可能仍是整块级容器，也可能还有层没展开完
+	 *  （下钻预算用尽、提供者超时），UI 侧据此在光标停稳后继续细化。
+	 *  refine=false = 实时命中（鼠标还在移动，用短预算尽快给结果）；
+	 *  refine=true  = 驻留细化（同一固定点，预算更长，并且边钻边回传中间结果）。 */
+	bool elementAtRaw(POINT screen, HWND exclude, bool refine, uint64_t seq,
+		const std::function<void(const PickPath&)>& progress, PickPath& out, bool& coarse)
 	{
+		out.clear();
 		const bool prevCoarse = g_lastCoarse;
 		g_lastCoarse = false;
 		coarse = false;
@@ -771,101 +1038,162 @@ namespace {
 		IUIAutomation* automation = ctx.automation;
 		IUIAutomationCacheRequest* creq = ctx.cacheRequest;
 
-		// EnumWindows 定顶层窗：遮罩自身 / 不可见 / 最小化 / 幽灵窗 / 桌面外壳一律排除，
-		// 全程无窗口样式改动、零闪烁
-		struct Ctx {
-			POINT pt;
-			HWND exclude;
-			HWND found{ nullptr };
-		} c{ screen, exclude, nullptr };
-		EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
-			auto* cc = reinterpret_cast<Ctx*>(lp);
-			if (isBadWindow(hwnd, cc->exclude)) return TRUE;
-			RECT r{};
-			if (!GetWindowRect(hwnd, &r) || !rectContainsPt(r, cc->pt)) return TRUE;
-			cc->found = hwnd;
-			return FALSE;
-		}, reinterpret_cast<LPARAM>(&c));
-
-		if (!c.found) {
-			// 桌面图标：桌面层(Progman/WorkerW)在主链里被整体跳过，顶层窗必为空。单独定位
-			// SysListView32 后取"图标+名称"项，可让查找元素命中桌面的文件/文件夹；空白桌面
-			// 无项则退回整屏兜底，不误报元素（全程不碰遮罩样式）。
+		// 顶层窗直接从会话快照取：遮挡/可见性都已在快照里筛过，查询时不再碰窗口样式
+		WinEntry* top = topWindowAt(screen, exclude);
+		if (!top) {
+			// 桌面图标：桌面层(Progman/WorkerW)不在候选里，这里单独定位 SysListView32。
+			// 命中"图标+名称"项；空白桌面退回整屏兜底，不误报元素。
 			const HWND list = automation ? desktopIconListViewAt(screen, exclude) : nullptr;
 			if (list) {
+				// 桌面图标也是 UIA 查询：给独立时间窗，别继承上一次下钻留下的 1ms
+				if (ctx.automation2) {
+					ctx.automation2->put_ConnectionTimeout(500);
+					ctx.automation2->put_TransactionTimeout(500);
+				}
 				const RECT r = desktopIconItemRectAt(screen, list, automation, creq);
 				if (rectValid(r) && rectContainsPt(r, screen)) {
-					out = r;
+					out.push_back(r);
 					return true;
 				}
 			}
-			out = monitorRectAt(screen);
+			out.push_back(monitorRectAt(screen));
 			coarse = true;
 			return true;
 		}
 
-		const HWND anchor = deepestContainingChild(c.found, screen);
+		const HWND topHwnd = top->hwnd;
+		const HWND anchor = anchorWindowAt(*top, screen);
 		const RECT anchorBounds = hwndBoundsRect(anchor);
 
-		if (automation) {
-			// 实时档 168ms（鼠标还在移动）；驻留档 1500ms（停稳了，可以钻深些）
+		if (automation && creq) {
+			// 1) 在缓存树上走一遍，拿到从根到最细节点的整条链
 			const DWORD budgetMs = refine ? 1500u : 168u;
-			RECT drilled{};
-			const bool drilledOk = drillWindowTree(automation, creq, ctx.automation2, anchor,
-				screen, budgetMs, drilled);
-			// 下钻结果为"整块级"矩形 = 未能继续下钻（多数情况是无障碍树尚未建立）。此时不能
-			// 作为结果发布：该层外壳会盖住真实元素，且发布后命中测试与无障碍脉冲这两个可纠正
-			// 结果的分支将不再执行。
-			if (drilledOk && !isPageLevelRect(drilled, anchorBounds)) {
-				out = drilled;
-				return true;
+			const DWORD callLimitMs = refine ? 500u : 168u;
+			PickPath drilled;
+			bool drilledPending = false;
+			bool drilledFiner = false;
+			RECT drilledBase = anchorBounds;
+
+			if (DrillTree* tree = treeFor(anchor, anchorBounds, automation, creq, ctx.automation2)) {
+				bool pending = false;
+				const bool ok = walkTree(*tree, screen, budgetMs, callLimitMs, refine, seq, progress, pending, drilled);
+				drilledPending = pending;
+				drilledFiner = ok && drilled.size() >= 2;
 			}
 
-			// 下钻钻不进去时，命中测试仍是可靠答案（浏览器标题栏/标签栏这类不在渲染子树里的
-			// 控件也只有它能给）
+			// 锚点只是子窗时，某些框架的树其实挂在顶层窗上。子窗这边"没有更细节点"或
+			// "只给到整块"时，换顶层再走一遍，取更细的那份结果。预算已用尽就先不换。
+			const bool anchorCoarse = drilledFiner && isPageLevelRect(drilled.front(), drilledBase);
+			if ((!drilledFiner || anchorCoarse) && !drilledPending && anchor != topHwnd) {
+				const RECT topBounds = hwndBoundsRect(topHwnd);
+				if (DrillTree* topTree = treeFor(topHwnd, topBounds, automation, creq, ctx.automation2)) {
+					PickPath topPath;
+					bool pending = false;
+					const bool ok = walkTree(*topTree, screen, budgetMs, callLimitMs, refine, seq, progress, pending, topPath);
+					if (pending) drilledPending = true;
+					const bool topFiner = ok && topPath.size() >= 2;
+					const bool better = topFiner && (!drilledFiner
+						|| rectArea(topPath.front()) < rectArea(drilled.front()));
+					if (better) {
+						drilled = std::move(topPath);
+						drilledFiner = true;
+						drilledBase = topBounds;
+					}
+				}
+			}
+
+			const bool drilledOk = drilledFiner;
+
+			// 2) 提供者自己的命中测试：与 F12 选择器同源，浏览器标题栏/标签栏这类不在渲染
+			//    子树里的控件只有它能给。它是全局命中测试，调用期间要给遮罩临时点穿并触发
+			//    一次重新合成，所以只在"下钻没结果/只有整页容器"或细化档才补。
+			const bool hitWorth = refine || !drilledOk || drilled.empty()
+				|| isPageLevelRect(drilled.front(), drilledBase);
 			RECT hit{};
-			if (pointHitElement(automation, exclude, screen, hit)
-				&& !isPageLevelRect(hit, anchorBounds)) {
-				out = hit;
+			bool hitOk = false;
+			if (hitWorth) {
+				// 下钻会把超时压到"剩余预算"，这里重置成独立时间窗
+				if (ctx.automation2) {
+					ctx.automation2->put_ConnectionTimeout(1000);
+					ctx.automation2->put_TransactionTimeout(1000);
+				}
+				hitOk = pointHitElement(automation, exclude, screen, hit)
+					&& rectContainsPt(hit, screen);
+			}
+
+			// 3) 选叶：命中测试与下钻都算候选，取面积最小的那个。下钻可能停在铺满整页的
+			//    容器上，命中测试有时反而更粗，只按面积挑才能落到真正看得见的那层。
+			//    整页级候选放在第二轮，只有拿不到更细节点时才用。
+			RECT leaf{};
+			bool haveLeaf = false;
+			auto consider = [&](const RECT& r, bool pageLevelAllowed) {
+				if (!rectValid(r) || rectEqual(r, drilledBase)) return;
+				const bool pageLevel = isPageLevelRect(r, drilledBase);
+				if (pageLevel && !pageLevelAllowed) return;
+				if (haveLeaf && pageLevel && !isPageLevelRect(leaf, drilledBase)) return;
+				if (haveLeaf && rectArea(r) >= rectArea(leaf)) return;
+				leaf = r;
+				haveLeaf = true;
+			};
+			if (hitOk) consider(hit, false);
+			if (drilledOk && !drilled.empty()) consider(drilled.front(), false);
+			if (!haveLeaf) {
+				if (hitOk) consider(hit, true);
+				if (drilledOk && !drilled.empty()) consider(drilled.front(), true);
+			}
+			if (!haveLeaf) {
+				// MSAA 机会回退：同样是提供者自己的命中测试，不依赖树遍历；失败即空、零副作用
+				const RECT ma = msaaHitAt(anchor, screen);
+				if (rectValid(ma) && ma.right - ma.left >= 4 && ma.bottom - ma.top >= 4) {
+					leaf = ma;
+					haveLeaf = true;
+				}
+			}
+
+			if (haveLeaf) {
+				out.push_back(leaf);
+				// 4) 祖先：下钻链里真正包含叶子的那些层，由内到外补齐，末尾放窗口本身
+				for (const RECT& r : drilled) {
+					if (rectEqual(r, out.back())) continue;
+					if (!rectContainsRect(r, out.back())) continue;
+					out.push_back(r);
+				}
+				if (rectValid(drilledBase) && !rectEqual(out.back(), drilledBase)
+					&& rectContainsRect(drilledBase, out.back()))
+					out.push_back(drilledBase);
+				coarse = isPageLevelRect(leaf, drilledBase) || drilledPending;
+				g_lastCoarse = coarse;
 				return true;
 			}
 
-			// MSAA 机会回退：同样是"提供者自己的命中测试"，不依赖树遍历；失败即空、零副作用
-			const RECT ma = msaaHitAt(anchor, screen);
-			if (rectValid(ma) && ma.right - ma.left >= 4 && ma.bottom - ma.top >= 4
-				&& !isPageLevelRect(ma, anchorBounds)) {
-				out = ma;
-				return true;
-			}
-
-			// 到这里说明只能用"整块级"结果兜底 → 树可能还没建好，给锚点窗补一次脉冲，
-			// 下一轮驻留重查再试
+			// 完全取不到节点：树可能还没建好，给锚点窗补一次脉冲，下一轮再试
 			nudgeAccessibility(anchor, prevCoarse);
-
-			if (drilledOk && rectValid(drilled)
-				&& drilled.right - drilled.left >= 4 && drilled.bottom - drilled.top >= 4) {
-				out = drilled;
-				coarse = true;
-				return true;
-			}
 		}
 
 		RECT r{};
 		if (!hwndBounds(anchor, r) || r.right - r.left < 4 || r.bottom - r.top < 4)
-			hwndBounds(c.found, r);
-		out = r;
+			hwndBounds(topHwnd, r);
+		if (!rectValid(r)) return false;
+		out.push_back(r);
+		g_lastCoarse = true;
 		coarse = true;
-		return rectValid(r);
+		return true;
 	}
 
-	bool elementAt(POINT screen, HWND exclude, bool refine, RECT& out, bool& coarse)
+	bool elementAt(POINT screen, HWND exclude, bool refine, uint64_t seq,
+		const std::function<void(const PickPath&)>& progress, PickPath& out, bool& coarse)
 	{
-		const bool ok = elementAtRaw(screen, exclude, refine, out, coarse);
-		// 按"光标所在那块屏幕"裁剪：不少容器节点的布局盒远大于屏幕（实测某列容器 1978×28081 =
-		// 整个文档高度），整框看着就像"没找到元素"。只保留屏幕上真正看得见的那部分，与浏览器
-		// F12 选择器的高亮行为一致；屏幕内的元素矩形不受影响。
+		const bool ok = elementAtRaw(screen, exclude, refine, seq, progress, out, coarse);
+		// 按"光标所在那块屏幕"裁剪：不少容器节点的布局盒远大于屏幕（实测整文档高的列容器），
+		// 整框看着就像"没找到元素"。只保留屏幕上真正可见的那部分。
 		const RECT mon = monitorRectAt(screen);
-		if (ok && rectValid(out) && rectValid(mon)) out = intersectRect(out, mon);
+		for (RECT& r : out) {
+			if (rectValid(r) && rectValid(mon)) r = intersectRect(r, mon);
+		}
+		if (!out.empty() && !rectValid(out.front())) {
+			out.clear();
+			return false;
+		}
 		return ok;
 	}
 
@@ -876,17 +1204,21 @@ namespace {
 	namespace HoverQuery
 	{
 		constexpr UINT kMsgResult{ WM_APP + 0x431 };
-		// coarse = 结果仍是"整块级粗框"（无障碍树还没建好），UI 侧据此武装驻留细化重查
-		using Sink = std::function<void(const RECT& rect, bool ok, uint64_t seq, bool coarse)>;
+		// path[0] = 最细节点，后面依次是祖先，末尾是窗口本身
+		// coarse   = 结果还不够细（整块级容器 / 还有层没展开完），UI 侧据此武装驻留细化
+		// progress = 细化过程中的中间链，只用于刷新高亮，不代表查询结束
+		using Sink = std::function<void(const PickPath& path, bool ok, uint64_t seq,
+			bool coarse, bool progress)>;
 
 		std::mutex g_mtx;
 		std::condition_variable g_cv;
 		bool g_pending{ false };
+		bool g_clearRequested{ false }; // 会话结束/取消：让工作线程释放缓存的 COM 对象
 		bool g_stop{ false };
 		bool g_started{ false };
 		POINT g_req{};
 		HWND g_reqExclude{ nullptr }; // 遮罩自身 HWND：命中测试必须排除掉，否则命中"莫须有"
-		bool g_reqRefine{ false };    // 驻留细化档：下钻用完整预算，钻得更深
+		bool g_reqRefine{ false };    // 驻留细化档：预算更长，钻得更深
 		uint64_t g_reqSeq{ 0 };
 		uint64_t g_seqSource{ 0 };
 		HWND g_ui{ nullptr };
@@ -895,9 +1227,10 @@ namespace {
 		Sink g_sink;
 
 		struct Payload {
-			RECT rect{};
+			PickPath path;
 			bool ok{ false };
 			bool coarse{ false };
+			bool progress{ false };
 			uint64_t seq{ 0 };
 		};
 
@@ -905,10 +1238,22 @@ namespace {
 		{
 			if (msg == kMsgResult) {
 				std::unique_ptr<Payload> p{ reinterpret_cast<Payload*>(lp) };
-				if (p && g_sink) g_sink(p->rect, p->ok, p->seq, p->coarse);
+				if (p && g_sink) g_sink(p->path, p->ok, p->seq, p->coarse, p->progress);
 				return 0;
 			}
 			return DefWindowProcW(hwnd, msg, wp, lp);
+		}
+
+		/** 缓存代次变了就丢掉下钻树/桌面快照（只在工作线程调用，COM 引用也在本线程释放）。 */
+		void dropCachesIfStale()
+		{
+			static uint64_t seen = 0;
+			const uint64_t gen = g_cacheGeneration.load(std::memory_order_relaxed);
+			if (gen == seen) return;
+			seen = gen;
+			clearDrillCaches();
+			desktopSnapshot().valid = false;
+			resetDesktopIconListCache();
 		}
 
 		void workerMain()
@@ -916,8 +1261,16 @@ namespace {
 			CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 			std::unique_lock lk(g_mtx);
 			while (true) {
-				g_cv.wait(lk, [] { return g_stop || g_pending; });
+				g_cv.wait(lk, [] { return g_stop || g_pending || g_clearRequested; });
 				if (g_stop) break;
+				if (g_clearRequested) {
+					g_clearRequested = false;
+					lk.unlock();
+					dropCachesIfStale();
+					lk.lock();
+					continue;
+				}
+
 				const POINT pt = g_req;
 				const HWND exclude = g_reqExclude;
 				const bool refine = g_reqRefine;
@@ -926,13 +1279,22 @@ namespace {
 				HWND ui = g_ui;
 				lk.unlock();
 
-				RECT rect{};
+				dropCachesIfStale();
+
+				PickPath path;
 				bool coarse = false;
-				const bool ok = elementAt(pt, exclude, refine, rect, coarse);
+				// 细化阶段把中间链直接回传：大框先出现，再逐级收到最细节点
+				auto publish = [ui, seq](const PickPath& p) {
+					if (!ui || p.empty()) return;
+					auto* payload = new Payload{ p, true, false, true, seq };
+					if (!PostMessageW(ui, kMsgResult, 0, reinterpret_cast<LPARAM>(payload)))
+						delete payload;
+				};
+				const bool ok = elementAt(pt, exclude, refine, seq, publish, path, coarse);
 
 				lk.lock();
 				if (g_stop || !ui) continue;
-				auto* payload = new Payload{ rect, ok, coarse, seq };
+				auto* payload = new Payload{ std::move(path), ok, coarse, false, seq };
 				if (!PostMessageW(ui, kMsgResult, 0, reinterpret_cast<LPARAM>(payload))) delete payload;
 			}
 			lk.unlock();
@@ -975,6 +1337,8 @@ namespace {
 				seq = ++g_seqSource;
 				g_reqSeq = seq;
 				g_pending = true;
+				// 正在跑的那一趟看到序号变了就会尽快收手，把线程让给这次新请求
+				g_latestQuerySeq.store(seq, std::memory_order_relaxed);
 			}
 			g_cv.notify_one();
 			return seq;
@@ -985,7 +1349,23 @@ namespace {
 		{
 			std::lock_guard lk(g_mtx);
 			g_pending = false;
-			return ++g_seqSource;
+			const uint64_t seq = ++g_seqSource;
+			g_latestQuerySeq.store(seq, std::memory_order_relaxed);
+			return seq;
+		}
+
+		/** 会话结束/取消：丢掉缓存的窗口快照与下钻树（元素引用必须在工作线程里释放）。 */
+		void invalidateCache()
+		{
+			g_cacheGeneration.fetch_add(1, std::memory_order_relaxed);
+			if (!g_started) return;
+			{
+				std::lock_guard lk(g_mtx);
+				g_pending = false;
+				g_clearRequested = true;
+				g_latestQuerySeq.store(++g_seqSource, std::memory_order_relaxed);
+			}
+			g_cv.notify_one();
 		}
 	}
 
@@ -1003,19 +1383,41 @@ namespace {
 
 CutMask::CutMask(Ling::WinBase* win) :win{ win }
 {
+	// 会话开始：清掉上一会话留下的窗口快照/下钻树
+	HoverQuery::invalidateCache();
 	// 查询线程的结果回到 UI 线程后在这里落地：序号比当前投递旧的结果直接丢（光标早已经移开）
-	HoverQuery::setSink([this](const RECT& r, bool ok, uint64_t seq, bool coarse) {
+	HoverQuery::setSink([this](const PickPath& path, bool ok, uint64_t seq, bool coarse, bool progress) {
+		if (!this->win || seq != hoverSeq_) return;
+		// 细化过程中的中间链：只刷新高亮，不结束查询，也不改写细化状态
+		if (progress) {
+			if (!ok || path.empty()) return;
+			hoverPath_.clear();
+			hoverPath_.reserve(path.size());
+			for (const RECT& r : path)
+				hoverPath_.push_back(clientRectFromScreen(r, this->win));
+			const D2D1_RECT_F next = hoverPath_.front();
+			if (!(next.right > next.left)) return;
+			// 只接受更小的框：细化链是逐级收窄的，ancestor 级别的大框不该把高亮放回去
+			const float nextArea = (next.right - next.left) * (next.bottom - next.top);
+			const float curArea = (hoverTarget_.right - hoverTarget_.left) * (hoverTarget_.bottom - hoverTarget_.top);
+			if (curArea > 0.f && nextArea >= curArea) return;
+			setHoverTarget(next, true);
+			return;
+		}
 		// 结果回来 = 查询结束，输入保护可以撤。只有"最新那一次"的结果才算信箱排空；
 		// 过期请求被"只做最新一次"合并丢弃时没有结果回来，靠 hoverGuardTimerId 的看门狗兜底。
-		if (seq == hoverSeq_) endQueryGuard();
-		if (!this->win || seq < hoverSeq_) return;
+		endQueryGuard();
 		hoverCoarse_ = coarse;
-		const D2D1_RECT_F next = ok ? clientRectFromScreen(r, this->win) : D2D1::RectF();
-		// 结果没变（含 1~2px 抖动）：仍是粗框就保留驻留重查，直到细化到位或预算耗尽
-		const bool same = rectEq(hoverTarget_, next)
-			|| (hoverTarget_.right > hoverTarget_.left && rectAlmost(hoverTarget_, next)
-				&& rectContains(next, lastHoverQueryPos_));
-		if (!same) setHoverTarget(next, true);
+		hoverPath_.clear();
+		if (ok) {
+			hoverPath_.reserve(path.size());
+			for (const RECT& r : path)
+				hoverPath_.push_back(clientRectFromScreen(r, this->win));
+		}
+		const D2D1_RECT_F next = hoverPath_.empty() ? D2D1::RectF() : hoverPath_.front();
+		// 只把亚像素差异当作"没变"。以前还容忍 1~2px，结果细化出来的更小元素被当成抖动丢掉，
+		// 光标下明明已经换成相邻的小元素，框却停在旧位置，单击确认时就差那 1~2px。
+		if (!rectEq(hoverTarget_, next)) setHoverTarget(next, true);
 		if (coarse) scheduleHoverRefine();
 		else stopHoverRefine();
 	});
@@ -1049,13 +1451,6 @@ bool CutMask::rectEq(const D2D1_RECT_F& a, const D2D1_RECT_F& b, float eps)
 		&& std::fabs(a.right - b.right) < eps && std::fabs(a.bottom - b.bottom) < eps;
 }
 
-bool CutMask::rectAlmost(const D2D1_RECT_F& a, const D2D1_RECT_F& b)
-{
-	return std::fabs(a.left - b.left) <= 2.f && std::fabs(a.top - b.top) <= 2.f
-		&& std::fabs((a.right - a.left) - (b.right - b.left)) <= 3.f
-		&& std::fabs((a.bottom - a.top) - (b.bottom - b.top)) <= 3.f;
-}
-
 bool CutMask::rectContains(const D2D1_RECT_F& r, POINT pos)
 {
 	return pos.x >= r.left && pos.x < r.right && pos.y >= r.top && pos.y < r.bottom;
@@ -1070,8 +1465,12 @@ void CutMask::clearHoverAnim()
 void CutMask::snapHoverTarget()
 {
 	clearHoverAnim();
-	if (hoverTarget_.right > hoverTarget_.left && hoverTarget_.bottom > hoverTarget_.top)
-		maskRect = hoverTarget_;
+	if (hoverTarget_.right <= hoverTarget_.left || hoverTarget_.bottom <= hoverTarget_.top) return;
+	// 确认时把命中框对齐到整像素：命中框来自屏幕坐标换算，可能带小数；截图是按整像素裁的，
+	// 不先对齐就会出现"框的一边比实际截到的大/小半个像素"的观感偏差。
+	maskRect = D2D1::RectF(std::floor(hoverTarget_.left), std::floor(hoverTarget_.top),
+		std::ceil(hoverTarget_.right), std::ceil(hoverTarget_.bottom));
+	hoverTarget_ = maskRect;
 }
 
 void CutMask::setHoverTarget(const D2D1_RECT_F& target, bool animate)
@@ -1127,24 +1526,26 @@ void CutMask::onHoverAnimTick(UINT timerId)
 	win->refresh();
 }
 
-bool CutMask::highlight(POINT pos)
+bool CutMask::highlight(POINT pos, bool force)
 {
+	hoverPicking_ = true;
 	const ULONGLONG now = GetTickCount64();
 	const int moved = std::abs(pos.x - lastHoverQueryPos_.x) + std::abs(pos.y - lastHoverQueryPos_.y);
-	// 元素查询是 UIA 跨进程调用（实测 Chrome 上 2~10ms 一次，深一点的 DOM 还要钻子节点）。
-	// 原来的节流是「间隔不够 **且** 位移不够」才跳过 —— 鼠标一动每次 WM_MOUSEMOVE 都会去查
-	// （125Hz 鼠标就是一秒上百次 UIA 调用），UI 线程被占满：悬停框跟不上、整屏重绘也卡，
-	// 体感就是"查找元素的时候移动卡卡的"。
-	// 现在改成：不管鼠标动多快都有硬下限；已经在当前目标框内时更慢（那只是在找更细的子节点）。
+	// 查询已经全部交给工作线程，界面这边只控制投递节奏：
+	//  · 不管鼠标多快都有硬下限，避免把请求都堆在同一帧里；
+	//  · 光标还在当前高亮框里时，多数时候只是在找更细的子节点，间隔可以放宽，
+	//    但位移明显时仍然立刻重查（否则在小元素上来回移动会显得粘滞）。
 	constexpr ULONGLONG kMinIntervalMs{ 24 };
-	constexpr ULONGLONG kInsideIntervalMs{ 90 };
-	constexpr int kInsideMinMovePx{ 14 };
-	if (lastHoverQueryMs_ > 0 && now - lastHoverQueryMs_ < kMinIntervalMs)
-		return false;
-	const bool inside = hoverTarget_.right > hoverTarget_.left && rectContains(hoverTarget_, pos);
-	if (inside && lastHoverQueryMs_ > 0 && now - lastHoverQueryMs_ < kInsideIntervalMs
-		&& moved < kInsideMinMovePx)
-		return false;
+	constexpr ULONGLONG kInsideIntervalMs{ 50 };
+	constexpr int kInsideMinMovePx{ 10 };
+	if (!force) {
+		if (lastHoverQueryMs_ > 0 && now - lastHoverQueryMs_ < kMinIntervalMs)
+			return false;
+		const bool inside = hoverTarget_.right > hoverTarget_.left && rectContains(hoverTarget_, pos);
+		if (inside && lastHoverQueryMs_ > 0 && now - lastHoverQueryMs_ < kInsideIntervalMs
+			&& moved < kInsideMinMovePx)
+			return false;
+	}
 
 	// 元素查询丢给工作线程（第一次问浏览器可能要几百毫秒，见 HoverQuery 的说明）。
 	// 这里只记下"最新一次问的是哪儿"，结果回来时按序号判断是否还有效。
@@ -1186,11 +1587,14 @@ void CutMask::endQueryGuard()
 
 void CutMask::cancelHoverQuery()
 {
+	hoverPicking_ = false;
 	stopHoverRefine();
 	hoverCoarse_ = false;
 	hoverRefineTries_ = 0;
 	// 在途结果全部作废：按下之后 hover 高亮不该再来改矩形（会跟拖框写的 maskRect 打架）
 	hoverSeq_ = HoverQuery::cancelPending();
+	// 悬停阶段结束：缓存里的无障碍元素也一并交还工作线程释放
+	HoverQuery::invalidateCache();
 	if (queryGuard_) {
 		queryGuard_ = false;
 		if (win) win->killTimer(hoverGuardTimerId);
@@ -1206,8 +1610,8 @@ void CutMask::cancelHoverQuery()
 
 void CutMask::scheduleHoverRefine()
 {
-	// 驻留细化预算：连续 5 次（每次 120ms + 一次细化查询）仍粗框就停 —— 与引擎侧
-	// kMaxWakeAttempts=5 对齐，避免"页面本就无更细节点"时持续空转；鼠标一动就重置预算。
+	// 驻留细化预算：连续 5 次（每次 80ms + 一次细化查询）仍不够细就停，
+	// 避免"页面本就无更细节点"时持续空转；鼠标一动就重置预算。
 	if (hoverRefineTries_ >= 5 || hoverRefineTimerOn_) return;
 	if (!(hoverTarget_.right > hoverTarget_.left) || !rectContains(hoverTarget_, lastHoverQueryPos_))
 		return; // 光标已不在当前粗框内：以新请求为准，别对陈旧位置空转
@@ -1294,10 +1698,21 @@ void CutMask::makeLayout()
 		content += iconGap + iconSlot;
 		if (showSwatch) content += swatchGap + swatch;
 		const float barW = padX + content + padX;
+		// 信息栏默认放在选区/命中元素的上方（框外，不挡内容）
 		layoutRect = D2D1::RectF(maskRect.left, maskRect.top - gap - barH, maskRect.left + barW, maskRect.top - gap);
 		if (layoutRect.top < 0.f) {
-			layoutRect = D2D1::RectF(maskRect.left + paddingMargin, maskRect.top + paddingMargin,
-				maskRect.left + paddingMargin + barW, maskRect.top + paddingMargin + barH);
+			// 上方放不下（元素贴着屏幕顶部，浏览器标签栏就是这种）：查找元素阶段先挪到
+			// 元素下方，避免一上来就盖住高亮的那个元素；已进入调整阶段时下方是主栏的位置，
+			// 仍按老规则落回内部。两处都放不下才退回内部。
+			const float belowTop = maskRect.bottom + gap;
+			if (hoverPicking_ && belowTop + barH <= (float)win->h) {
+				layoutRect = D2D1::RectF(maskRect.left, belowTop,
+					maskRect.left + barW, belowTop + barH);
+			}
+			else {
+				layoutRect = D2D1::RectF(maskRect.left + paddingMargin, maskRect.top + paddingMargin,
+					maskRect.left + paddingMargin + barW, maskRect.top + paddingMargin + barH);
+			}
 		}
 		float x = layoutRect.left + padX + posW + iconGap;
 		const float y = layoutRect.top + (barH - iconSlot) * 0.5f;
@@ -1549,6 +1964,8 @@ void CutMask::makeRect(POINT pos)
 {
 	clearHoverAnim();
 	hoverTarget_ = {};
+	hoverPath_.clear();
+	hoverPicking_ = false;
 	auto [left, right] = std::minmax(pressPos.x, pos.x);
 	auto [top, bottom] = std::minmax(pressPos.y, pos.y);
 	maskRect.left = (float)left;
@@ -1651,6 +2068,8 @@ void CutMask::clearRect()
 {
 	clearHoverAnim();
 	hoverTarget_ = {};
+	hoverPath_.clear();
+	hoverPicking_ = false;
 	lastHoverQueryMs_ = 0;
 	lastHoverQueryPos_ = {};
 	maskRect = {};
@@ -1973,44 +2392,61 @@ void CutMask::paint(ID2D1DeviceContext* ctx)
 				ctx->FillRectangle(maskRect, fill.Get());
 		}
 	}
+	if (showBorder) paintBorder(ctx);
+	if (showHandles) paintHandles(ctx);
+	paintLabel(ctx);
+}
 
-	if (showBorder) {
-		const float half = strokeWidth * 0.5f;
-		const float edgePad = strokeWidth + win->dpi;
-		float l = maskRect.left, t = maskRect.top, r = maskRect.right, b = maskRect.bottom;
-		if (l <= 0.5f) l = edgePad;
-		else l -= half;
-		if (t <= 0.5f) t = edgePad;
-		else t -= half;
-		if (r >= (float)win->w - 0.5f) r = (float)win->w - edgePad;
-		else r += half;
-		if (b >= (float)win->h - 0.5f) b = (float)win->h - edgePad;
-		else b += half;
-		if (r > l + 1.f && b > t + 1.f) {
-			const float ww = r - l, hh = b - t;
-			const float rad = clampRadiusToRect(selRadius_ * win->dpi, ww, hh);
-			if (rad > 0.5f)
-				ctx->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(l, t, r, b), rad, rad), brushBorder.Get(), strokeWidth);
-			else
-				ctx->DrawRectangle(D2D1::RectF(l, t, r, b), brushBorder.Get(), strokeWidth);
-		}
-	}
+// 录制期：选框描边/控点/尺寸标签改由独立的"排除捕获"窗口调用本函数绘制。
+// 主窗口仍然画遮罩、标注、鼠标高亮（这些要被录进视频），于是屏幕上选框还在、视频里没有它。
+void CutMask::paintChrome(ID2D1DeviceContext* ctx)
+{
+	if (!hasRect()) return;
+	paintSelShadow(ctx);
+	paintBorder(ctx);
+	paintHandles(ctx);
+	paintLabel(ctx);
+}
 
-	if (showHandles) {
-		const float hs = handleLogical * win->dpi * 0.5f;
-		const float cx = (maskRect.left + maskRect.right) * 0.5f;
-		const float cy = (maskRect.top + maskRect.bottom) * 0.5f;
-		const D2D1_POINT_2F pts[8] = {
-			{ maskRect.left, maskRect.top }, { cx, maskRect.top }, { maskRect.right, maskRect.top },
-			{ maskRect.right, cy }, { maskRect.right, maskRect.bottom }, { cx, maskRect.bottom },
-			{ maskRect.left, maskRect.bottom }, { maskRect.left, cy },
-		};
-		for (auto& p : pts) {
-			auto hr = D2D1::RectF(p.x - hs, p.y - hs, p.x + hs, p.y + hs);
-			ctx->FillRectangle(hr, brushHandleFill.Get());
-			ctx->DrawRectangle(hr, brushBorder.Get(), win->dpi);
-		}
+void CutMask::paintBorder(ID2D1DeviceContext* ctx)
+{
+	if (!hasRect()) return;
+	// 描边贴着选区内沿画：线的外沿正好落在选区边界上，屏幕看到的框才和实际截到的像素一致。
+	// 之前是沿边界向外扩半线宽再画，整条线落在选区外 1~2px，单击确认时就显得"框和结果差了一点"。
+	const float half = strokeWidth * 0.5f;
+	D2D1_RECT_F box = D2D1::RectF(maskRect.left + half, maskRect.top + half,
+		maskRect.right - half, maskRect.bottom - half);
+	// 选区比线宽还小时内缩会画没，退回沿边界画
+	if (box.right - box.left < 1.f || box.bottom - box.top < 1.f) box = maskRect;
+	const float ww = box.right - box.left, hh = box.bottom - box.top;
+	if (ww <= 0.f || hh <= 0.f) return;
+	const float rad = clampRadiusToRect(selRadius_ * win->dpi, ww, hh);
+	if (rad > 0.5f)
+		ctx->DrawRoundedRectangle(D2D1::RoundedRect(box, rad, rad), brushBorder.Get(), strokeWidth);
+	else
+		ctx->DrawRectangle(box, brushBorder.Get(), strokeWidth);
+}
+
+void CutMask::paintHandles(ID2D1DeviceContext* ctx)
+{
+	if (!hasRect()) return;
+	const float hs = handleLogical * win->dpi * 0.5f;
+	const float cx = (maskRect.left + maskRect.right) * 0.5f;
+	const float cy = (maskRect.top + maskRect.bottom) * 0.5f;
+	const D2D1_POINT_2F pts[8] = {
+		{ maskRect.left, maskRect.top }, { cx, maskRect.top }, { maskRect.right, maskRect.top },
+		{ maskRect.right, cy }, { maskRect.right, maskRect.bottom }, { cx, maskRect.bottom },
+		{ maskRect.left, maskRect.bottom }, { maskRect.left, cy },
+	};
+	for (auto& p : pts) {
+		auto hr = D2D1::RectF(p.x - hs, p.y - hs, p.x + hs, p.y + hs);
+		ctx->FillRectangle(hr, brushHandleFill.Get());
+		ctx->DrawRectangle(hr, brushBorder.Get(), win->dpi);
 	}
+}
+
+void CutMask::paintLabel(ID2D1DeviceContext* ctx)
+{
 	if (hideLabel || !layoutPos || !layoutSize) return;
 	const float padX = ToolbarTheme::infoPadX * win->dpi;
 	const float radius = ToolbarTheme::infoRadius * win->dpi;

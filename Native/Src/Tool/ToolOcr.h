@@ -4,6 +4,7 @@
 #include "../Ocr/OcrTypes.h"
 
 class Tip;
+class ToolOcrCompare;
 // 选区 OCR/翻译结果浮层：底色取自选区原图（采样）+ 多块可编辑文本
 // 宿主从 WinCap 泛化为 WinBase —— 截图窗（WinCap）与桌面贴图（WinPin）共用同一套面板。
 class ToolOcr : public Ling::WinBase
@@ -31,6 +32,10 @@ public:
 	const OcrResult& result() const { return result_; }
 	// 选区原图（BGRA）。翻译模式先建面板、后识别，识别直接复用这份像素，省掉再留一份。
 	const std::vector<BYTE>& srcImage() const { return srcImage_; }
+	// 截图宿主注入：双击文字 = 「完成」。text 为空表示"复制整段"（host 按原逻辑处理）；
+	// 非空表示拖选后按 Ctrl+C 的那一段 —— host 只复制这段并退出。
+	// 浮层是独立置顶窗口，双击/快捷键本来只会落到文字上，截图窗收不到。
+	void setOnConfirm(std::function<void(const std::wstring&)> fn) { onConfirm_ = std::move(fn); }
 	// 宿主注入：把（截图/贴图的）标注画到识别文字**之上**。识别结果浮层是独立置顶窗口，
 	// 而标注画在宿主窗口里，两个窗口没法互相穿插 —— 于是把标注"镜像"到本窗口顶层，
 	// 视觉上就变成"标注盖在识别结果上面"。
@@ -46,6 +51,12 @@ private:
 	// 把译文本行填进各区域的 displayText 并重算整段文字（不重绘）
 	void applyTranslateLines(const std::vector<std::wstring>& lines);
 	void copyAll();
+	// 右上角「对比」：弹出/收起选区原图浮窗
+	void toggleCompare();
+	// 对比浮窗打开时按钮显示选中态（主题强调色）
+	void refreshCompareBtnState();
+	// 悬停轮询：鼠标进入选区时显示右上角按钮，离开则隐藏
+	void updateButtonsHover();
 	// —— 跨行选区（每行是独立控件，选中范围由本类统一算）——
 	struct SelPoint { int line{ -1 }; int index{ 0 }; };
 	SelPoint hitSelPoint(POINT client) const;
@@ -67,6 +78,8 @@ private:
 	std::vector<Ling::Node*> bgs_;
 	OcrResult result_;
 	bool translateMode_{ false };
+	// 文本重排：整段结果放进一个普通可编辑文本框（Enter 换行），不再逐框覆盖原位置
+	bool reflow_{ false };
 	std::wstring banner_;
 	bool bannerError_{ false };
 	// 非空 = 正在翻译：提示条在此期间必须一直可见（见 setBusy）
@@ -75,7 +88,12 @@ private:
 	Ling::Label* bannerLabel{ nullptr };
 	std::vector<Ling::TextBox*> editors;
 	Ling::Button* copyBtn{ nullptr };
+	Ling::Button* compareBtn{ nullptr };
+	bool buttonsShown_{ false };
 	std::unique_ptr<Tip> tip;
+	// 与其它窗口的定时器 id 错开（属性栏 0x5000 / 系统按键 0x5100）
+	static constexpr UINT kHoverTimerId{ 0x5200 };
+	static constexpr UINT kHoverPollMs{ 100 };
 	int imgW{ 1 }, imgH{ 1 };
 	// —— 跨行选区状态（阅读顺序：行优先；index = 行内字符偏移）——
 	bool selActive_{ false };
@@ -83,8 +101,14 @@ private:
 	// —— 标注镜像层：盖在识别文字之上的画布 ——
 	Ling::Canvas* annotCanvas_{ nullptr };
 	std::function<void(ID2D1DeviceContext*)> annotPainter_;
+	std::function<void(const std::wstring&)> onConfirm_;
+	// 双击判定自己做：Ling 的窗口类没带 CS_DBLCLKS，WM_LBUTTONDBLCLK 不会来
+	ULONGLONG lastDownTick_{ 0 };
+	POINT lastDownPt_{};
 	// 选区原图（BGRA，逐行自上而下）——用于采样叠层底色；底面不透明，文字色按底色亮度反相
 	std::vector<BYTE> srcImage_;
 	uint32_t palBg_{ 0xFFFFFFF2 };
 	uint32_t palFg_{ 0x14181CFF };
+	// 对比原图浮窗（后声明：先于 srcImage_ 析构，浮窗不会读到已释放的像素）
+	std::unique_ptr<ToolOcrCompare> compare_;
 };

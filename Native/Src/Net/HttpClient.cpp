@@ -56,6 +56,8 @@ namespace {
 	{
 		::SnowHttp::Response out;
 		out.status = (int)resp.StatusCode();
+		try { out.finalUrl = resp.RequestMessage().RequestUri().ToString().c_str(); }
+		catch (...) {}
 		// 读响应体同样要设限：只认 header 不算完，body 卡住一样会挂死调用线程
 		auto op = resp.Content().ReadAsBufferAsync();
 		if (!waitOp(op, timeoutSec)) {

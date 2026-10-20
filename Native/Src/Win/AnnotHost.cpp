@@ -88,6 +88,11 @@ void AnnotHost::refreshFiltersAboveThrottled(ShapeBase* changed)
 	refreshFiltersAbove(changed);
 }
 
+void AnnotHost::setMainBarAnchorId(const std::wstring& id)
+{
+	if (toolCap) toolCap->setAnchorId(id);
+}
+
 bool AnnotHost::queryMainBarAnchor(MainBarAnchor& out) const
 {
 	if (!toolCap) return false;
@@ -147,13 +152,17 @@ ShapeBase* AnnotHost::hitShapeAt(float x, float y)
 		}
 		return s;
 	};
-	if (shapeHover && !shapeHover->isUndo && !shapeHover->isViewportFilter()) {
+	if (shapeHover && !shapeHover->isUndo && !shapeHover->isViewportFilter()
+		&& (!shapeHover->backgroundLayer || boardBackgroundEditing())) {
 		shapeHover->mouseMove(x, y);
 		if (shapeHover->hoverDraggerIndex >= 0) return groupOf(shapeHover);
 	}
+	const bool bgEdit = boardBackgroundEditing();
 	for (int i = (int)history->shapes.size() - 1; i >= 0; i--) {
 		auto* cur = history->shapes[i].get();
 		if (cur->isUndo || cur == shapeHover || cur->isViewportFilter() || cur->isEphemeral()) continue;
+		// 背景层标注只有在「编辑背景」打开时才可点选；平时它属于背景，不单独选中
+		if (cur->backgroundLayer && !bgEdit) continue;
 		cur->mouseMove(x, y);
 		if (cur->hoverDraggerIndex >= 0) return groupOf(cur);
 	}
@@ -171,7 +180,7 @@ void AnnotHost::clearAnnotSelection()
 
 // 清空标注列表的唯一入口：裸指针先归零再释放 shape，避免留下悬垂的 shapeHover。
 // （工具条按钮的 onClick 里会读 shapeHover，一旦悬垂就是「点一下工具栏就闪退」）
-void AnnotHost::clearAllShapes()
+void AnnotHost::clearAllShapes(bool keepBackground)
 {
 	if (editingText) editingText->finishEdit(); // 内部会置空 editingText / shapeHover
 	annotMouseDown = false;
@@ -183,7 +192,16 @@ void AnnotHost::clearAllShapes()
 	linkHoverTarget = nullptr;
 	linkPressTarget = nullptr;
 	if (history) {
-		history->shapes.clear();
+		if (keepBackground) {
+			auto& v = history->shapes;
+			v.erase(std::remove_if(v.begin(), v.end(),
+				[](const std::unique_ptr<ShapeBase>& s) {
+					return !s || !s->backgroundLayer;
+				}), v.end());
+		}
+		else {
+			history->shapes.clear();
+		}
 		onHistoryChanged();
 	}
 	refresh();
@@ -645,13 +663,18 @@ void AnnotHost::applyToolDrawCursor()
 ShapeBase* AnnotHost::probeShapeUnder(float x, float y, ShapeBase* preferFirst)
 {
 	if (!history) return nullptr;
-	if (preferFirst && !preferFirst->isUndo && !preferFirst->isViewportFilter() && !preferFirst->isEphemeral()) {
+	const bool bgEdit = boardBackgroundEditing();
+	if (preferFirst && !preferFirst->isUndo && !preferFirst->isViewportFilter()
+		&& !preferFirst->isEphemeral()
+		&& (!preferFirst->backgroundLayer || bgEdit)) {
 		preferFirst->mouseMove(x, y);
 		if (preferFirst->hoverDraggerIndex >= 0) return preferFirst;
 	}
 	for (int i = (int)history->shapes.size() - 1; i >= 0; i--) {
 		auto* cur = history->shapes[i].get();
 		if (cur->isUndo || cur->isViewportFilter() || cur->isEphemeral() || cur == preferFirst) continue;
+		// 背景层标注在关闭「编辑背景」时不可编辑：不参与悬停命中，也就不会变成手型
+		if (cur->backgroundLayer && !bgEdit) continue;
 		cur->mouseMove(x, y);
 		if (cur->hoverDraggerIndex >= 0) return cur;
 	}

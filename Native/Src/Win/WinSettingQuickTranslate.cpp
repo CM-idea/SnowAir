@@ -119,6 +119,15 @@ WinSettingQuickTranslate::WinSettingQuickTranslate(Ling::WinBase* parent) : Ling
 		if (id != kAnimTimerId) return;
 		animateHistory();
 	});
+	// 历史侧栏展开时，点击侧栏外的空白处收起它；点切换按钮本身交给 onClick，避免被这里
+	// 先收起来又被 onClick 展开（连点两次看起来像没反应）
+	mouseDownTok = win->onMouseDown.add([this, weakThis = getWeakThis()](POINT pos, bool isRight) {
+		if (!weakThis.lock() || isRight) return;
+		if (!visual.IsVisible() || !histOpen || histAnimRunning) return;
+		if (historyShell && historyShell->isPosIn(pos)) return;
+		if (histToggleBtn && histToggleBtn->isPosIn(pos)) return;
+		toggleHistory();
+	});
 	loadSessions();
 }
 
@@ -127,6 +136,7 @@ WinSettingQuickTranslate::~WinSettingQuickTranslate()
 	hideOptionsBox();
 	if (histAnimRunning) win->killTimer(kAnimTimerId);
 	win->onTimer.remove(timerTok);
+	win->onMouseDown.remove(mouseDownTok);
 	// 离开这一页就把离线翻译模型（几百 MB）还回去：截图会话那条链路已在 WinCap::onClosed
 	// 释放过，这里补上缺的那条 —— 否则在这一页翻过一次离线之后，模型会一直常驻到退出。
 	// release() 内部加锁，后台还在翻的那一段会先跑完，不会被抽掉。
@@ -298,6 +308,8 @@ void WinSettingQuickTranslate::buildTranslateTab(Ling::Node* p)
 	histToggleBtn->setFontSize(Icon::SizeSm);
 	histToggleBtn->setBorderRadius(SettingTheme::radiusSm);
 	histToggleBtn->setColor(SettingTheme::textMuted);
+	// 图标本身不变色：悬停只换背景
+	histToggleBtn->setHoverColor(SettingTheme::textMuted);
 	histToggleBtn->setHoverBg(SettingTheme::accent);
 	histToggleBtn->onClick.add([this](Ling::Button*) { toggleHistory(); });
 
@@ -462,8 +474,7 @@ void WinSettingQuickTranslate::buildTranslateTab(Ling::Node* p)
 	sendBtn->setHeight(36.f);
 	sendBtn->setBorderRadius(SettingTheme::radiusFull);
 	sendBtn->onClick.add([this](Ling::Button*) {
-		if (busy) return;
-		doTranslate(L"");
+		doTranslate(L"");   // 是否可发由 doTranslate 按"当前服务是否在翻"统一判断
 		});
 	updateSendBtn();   // 初始（无输入）：灰底黑图标
 
@@ -471,7 +482,7 @@ void WinSettingQuickTranslate::buildTranslateTab(Ling::Node* p)
 	auto weak = getWeakThis();
 	input->onTextChanged.add([this, weak](Ling::TextBox*, const std::wstring& val) {
 		if (!weak.lock()) return;
-		updateSendBtn();   // 有无输入 → 切换发送按钮配色
+		updateSendBtn();   // 有无输入 / 当前服务是否正在翻 → 切换发送按钮配色
 		// 输入字数（Label::setText 内部会刷新窗口）
 		if (counterLab)
 			counterLab->setText(std::to_wstring(val.size()) + L" / 5000");
@@ -480,6 +491,12 @@ void WinSettingQuickTranslate::buildTranslateTab(Ling::Node* p)
 		if (last != L'\r' && last != L'\n') return;
 		std::wstring t = val;
 		while (!t.empty() && (t.back() == L'\r' || t.back() == L'\n')) t.pop_back();
+		// 当前服务正在翻：回车不发送、也不清空输入，只去掉这次回车敲进去的换行。
+		// 换到别的服务后这条限制自然解除（请求按服务区分）。
+		if (providerBusy(Setting::get()->getTranslateProvider())) {
+			input->setText(t);
+			return;
+		}
 		input->setText(L"");
 		doTranslate(t);
 		});
@@ -498,18 +515,27 @@ void WinSettingQuickTranslate::refreshTopBar()
 	win->refresh();
 }
 
-// 发送按钮配色：无输入 = #E5E5E5 底 + 黑图标；有输入 = #0FDC78 底 + 白图标。
+// 发送按钮配色：无输入、或**当前所选服务**正在翻译 = #E5E5E5 底 + 黑图标（不可发送）；
+// 有输入 = #0FDC78 底 + 白图标。翻译请求按服务区分：换到别的服务立刻就能发。
 // 悬停底色/图标色取与常态同值 —— Button 悬停时靠 hoverBg/hoverColor 落笔，取同值就没有悬停效果。
 void WinSettingQuickTranslate::updateSendBtn()
 {
 	if (!sendBtn) return;
-	const bool hasText = input && !input->getText().empty();
-	const uint32_t bg = hasText ? 0x0FDC78FF : 0xE5E5E5FF;
-	const uint32_t fg = hasText ? 0xFFFFFFFF : 0x000000FF;
+	const bool canSend = input && !input->getText().empty()
+		&& !providerBusy(Setting::get()->getTranslateProvider());
+	const uint32_t bg = canSend ? 0x0FDC78FF : 0xE5E5E5FF;
+	const uint32_t fg = canSend ? 0xFFFFFFFF : 0x000000FF;
 	sendBtn->setBg(bg);
 	sendBtn->setColor(fg);
 	sendBtn->setHoverBg(bg);
 	sendBtn->setHoverColor(fg);
+}
+
+bool WinSettingQuickTranslate::providerBusy(const std::wstring& provider) const
+{
+	for (const auto& p : pending)
+		if (_wcsicmp(p.provider.c_str(), provider.c_str()) == 0) return true;
+	return false;
 }
 
 // 源为中文或自动识别时，目标默认英语（避免中译中）；用户手动改回中文后锁定不再纠偏
@@ -567,6 +593,8 @@ void WinSettingQuickTranslate::refreshProviderBtn()
 	if (!providerBtn) return;
 	int idx = providerIndex(Setting::get()->getTranslateProvider());
 	providerVal->setText(Lang::get(kProviders[idx].labKey));
+	// 换服务后"当前服务是否在翻"可能就变了 → 发送按钮立刻重算可用态
+	updateSendBtn();
 	win->refresh();
 }
 
@@ -581,13 +609,15 @@ void WinSettingQuickTranslate::showProviderBox(Ling::Button* btn)
 	showOptionsBox(btn, labs, curIdx, kProviderDdlW, [this, ids](int i) {
 		if (i < 0 || i >= (int)ids.size()) return;
 		Setting::get()->setTranslateProvider(ids[i]);
+		// 换服务不取消正在跑的那条请求：它继续尝试、结果照常回填自己的气泡；
+		// 只是发送按钮改成按**新服务**是否在翻来决定可用态（不同服务可以并行）。
 		refreshProviderBtn();
 		});
 }
 
 // ============ 翻译 ============
 
-void WinSettingQuickTranslate::appendBubble(const std::wstring& role, const std::wstring& text)
+Ling::Node* WinSettingQuickTranslate::appendBubble(const std::wstring& role, const std::wstring& text)
 {
 	// 一条消息 = block（整宽，Column）：上面右/左对齐的气泡行，下面挂释义卡（字典模式）
 	auto block = msgList->makeChild<Ling::Node>();
@@ -615,46 +645,35 @@ void WinSettingQuickTranslate::appendBubble(const std::wstring& role, const std:
 	// 译文 + 开了字典模式 → 词元流（英文单词可点），否则单标签
 	if (role != L"user" && dictModeOn()) {
 		buildResultContent(bubble, block, text);
-		pendingBubble = bubble;
-		pendingText = nullptr;
 	}
 	else {
 		auto lab = bubble->makeChild<Ling::Label>();
 		lab->setFontSize(13.f);
 		lab->setColor(role == L"user" ? SettingTheme::primaryForeground : SettingTheme::textPrimary);
 		lab->setText(wrapText(text, kBubbleMaxW));
-		if (role != L"user") {
-			pendingBubble = bubble;
-			pendingText = lab;
-		}
-		else {
-			pendingBubble = nullptr;
-			pendingText = nullptr;
-		}
 	}
 	scrollToBottom();
 	updateWelcome();
+	return bubble;
 }
 
-void WinSettingQuickTranslate::updatePendingBubble(const std::wstring& text)
+void WinSettingQuickTranslate::updateBubble(Ling::Node* bubble, const std::wstring& text)
 {
-	if (!pendingBubble) return;
+	if (!bubble) return;
 	// 消息 block = row(气泡) 的父节点
-	Ling::Node* block = (pendingBubble->parent ? pendingBubble->parent->parent : nullptr);
+	Ling::Node* block = (bubble->parent ? bubble->parent->parent : nullptr);
 	// 内容重建 → 挂在该条上的释义卡一并失效
 	if (dictCard && block && dictCard->parent == block) resetDictState();
-	while (!pendingBubble->children.empty())
-		pendingBubble->removeChild(pendingBubble->children.back().get());
-	pendingText = nullptr;
+	while (!bubble->children.empty())
+		bubble->removeChild(bubble->children.back().get());
 	if (dictModeOn() && block) {
-		buildResultContent(pendingBubble, block, text);
+		buildResultContent(bubble, block, text);
 	}
 	else {
-		auto lab = pendingBubble->makeChild<Ling::Label>();
+		auto lab = bubble->makeChild<Ling::Label>();
 		lab->setFontSize(13.f);
 		lab->setColor(SettingTheme::textPrimary);
 		lab->setText(wrapText(text, kBubbleMaxW));
-		pendingText = lab;
 	}
 	scrollToBottom();
 }
@@ -899,7 +918,10 @@ void WinSettingQuickTranslate::updateWelcome()
 
 void WinSettingQuickTranslate::doTranslate(const std::wstring& preset)
 {
-	if (busy) return;
+	// 请求按服务区分：同一个服务同时只允许一条（按钮已对它置灰）；
+	// 换到别的服务可以并行再发，旧请求继续跑、结果回填到自己的气泡。
+	const std::wstring provider = Setting::get()->getTranslateProvider();
+	if (providerBusy(provider)) return;
 	std::wstring text = trim(preset.empty() && input ? input->getText() : preset);
 	if (text.empty()) return;
 	if (input) input->setText(L"");
@@ -917,9 +939,12 @@ void WinSettingQuickTranslate::doTranslate(const std::wstring& preset)
 
 	Msg am;
 	am.role = L"assistant";
+	am.reqId = nextReqId++;
 	s->msgs.push_back(am);
-	appendBubble(L"assistant", Lang::get(L"quick.translating"));
-	busy = true;
+	const int reqId = am.reqId;
+	Ling::Node* bubble = appendBubble(L"assistant", Lang::get(L"quick.translating"));
+	pending.push_back(PendingReq{ reqId, provider, bubble });
+	updateSendBtn();   // 当前服务在翻：按钮置灰（换到别的服务会重新变绿）
 	saveSessions();
 	refreshHistoryList();
 
@@ -927,18 +952,27 @@ void WinSettingQuickTranslate::doTranslate(const std::wstring& preset)
 	req.text = text;
 	req.sourceLang = Setting::get()->getTranslateSourceLang();
 	req.targetLang = Setting::get()->getTranslateTargetLang();
-	req.provider = Setting::get()->getTranslateProvider();
+	req.provider = provider;
 	// 回调可能晚于页面销毁（快速切页）：getWeakThis() 哨兵保护，页面已销毁则直接丢弃。
+	// 并发请求各自带 reqId：回来只回填自己那条消息与气泡，不会盖掉别人的结果。
 	auto weak = getWeakThis();
-	TranslateService::instance().translate(req, [this, weak](const TranslateResult& r) {
-		Ling::App::get()->dq.TryEnqueue([this, weak, r]() {
-			if (!weak.lock() || !busy) return;
-			busy = false;
-			Session* s = currentSession();
-			if (s && !s->msgs.empty() && s->msgs.back().role == L"assistant") {
-				s->msgs.back().content = r.ok ? r.text
-					: (r.error.empty() ? Lang::get(L"quick.error") : r.error);
-				updatePendingBubble(s->msgs.back().content);
+	TranslateService::instance().translate(req, [this, weak, reqId](const TranslateResult& r) {
+		Ling::App::get()->dq.TryEnqueue([this, weak, reqId, r]() {
+			if (!weak.lock()) return;
+			auto it = std::find_if(pending.begin(), pending.end(),
+				[reqId](const PendingReq& p) { return p.id == reqId; });
+			if (it == pending.end()) return;   // 这条已不在等待（正常不会发生）
+			Ling::Node* bubble = it->bubble;
+			pending.erase(it);
+			updateSendBtn();
+			if (Session* s = currentSession()) {
+				for (auto& m : s->msgs) {
+					if (m.reqId != reqId) continue;
+					m.content = r.ok ? r.text
+						: (r.error.empty() ? Lang::get(L"quick.error") : r.error);
+					updateBubble(bubble, m.content);
+					break;
+				}
 			}
 			scrollToBottom();
 			saveSessions();
@@ -1012,7 +1046,8 @@ void WinSettingQuickTranslate::refreshHistoryList()
 		item->setHoverBg(sel ? SettingTheme::primary : SettingTheme::accent);
 		std::wstring sid = s.id;
 		item->onClick.add([this, sid](Ling::Button*) {
-			if (busy) return;
+			// 有请求在跑时不切会话：每条请求的结果要回填到它自己的气泡，消息列表不能重建
+			if (anyBusy()) return;
 			loadSession(sid);
 			});
 	}
@@ -1028,7 +1063,6 @@ void WinSettingQuickTranslate::loadSession(const std::wstring& id)
 	while (!msgList->children.empty()) {
 		msgList->removeChild(msgList->children.back().get());
 	}
-	pendingBubble = nullptr; pendingText = nullptr;
 	resetDictState();
 	for (auto& m : target->msgs) {
 		appendBubble(m.role, m.content);
@@ -1040,7 +1074,7 @@ void WinSettingQuickTranslate::loadSession(const std::wstring& id)
 
 void WinSettingQuickTranslate::startNewSession()
 {
-	if (busy) return;
+	if (anyBusy()) return;
 	if (auto* s = currentSession()) {
 		if (s->msgs.empty() && s->title.empty()) return;  // 空会话不重复建
 	}
@@ -1053,7 +1087,6 @@ void WinSettingQuickTranslate::startNewSession()
 	while (!msgList->children.empty()) {
 		msgList->removeChild(msgList->children.back().get());
 	}
-	pendingBubble = nullptr; pendingText = nullptr;
 	resetDictState();
 	if (input) input->setText(L"");
 	refreshHistoryList();
@@ -1063,13 +1096,12 @@ void WinSettingQuickTranslate::startNewSession()
 
 void WinSettingQuickTranslate::clearSessions()
 {
-	if (busy) return;
+	if (anyBusy()) return;
 	sessions.clear();
 	curId.clear();
 	while (!msgList->children.empty()) {
 		msgList->removeChild(msgList->children.back().get());
 	}
-	pendingBubble = nullptr; pendingText = nullptr;
 	resetDictState();
 	saveSessions();
 	refreshHistoryList();

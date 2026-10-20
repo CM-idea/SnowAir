@@ -6,6 +6,9 @@ class CapLong;
 class CapVideo;
 class ToolQrcode;
 class ToolOcr;
+// 录制期的选框层：独立的透明置顶窗，只画选框描边/控点/标签，并用 WDA_EXCLUDEFROMCAPTURE
+// 排除在录制画面之外（主窗口还要录标注/鼠标高亮，不能整窗排除）。定义见 WinCap.cpp。
+class SelectionChrome;
 // 截图主窗口：全屏底图上框选 + 同表面标注；导出/贴图再按选区裁切。
 class WinCap : public AnnotHost
 {
@@ -27,6 +30,47 @@ public:
 	void startPenSlot(bool fade);
 	// 演示模式：穿透开关（让出鼠标给桌面，标注仍留在屏幕上）
 	void toggleDemoThrough();
+	// —— 演示画布：白板（背景）——
+	void toggleDemoBoard();                       // 首次开启（白色铺满）/ 已开启则收展属性栏
+	bool demoBoardActive() const { return demoBoard_.mode != DemoBoard::Mode::None; }
+	bool demoBoardAdjusting() const { return demoBoard_.adjust; }
+	// 白板「编辑背景」期间画的标注归入背景层（见 ShapeBase::backgroundLayer）
+	bool boardBackgroundEditing() const override { return demoMode && demoBoard_.adjust; }
+	// 白板属性栏是否处于"打开"意图：选别的工具只是临时把它替换掉，
+	// 取消工具后要恢复回来（见 ToolCap::cancelSelect）
+	bool demoBoardBarOpen() const { return demoBoardBarOpen_; }
+	void restoreDemoBoardBar();
+	bool demoBoardPpt() const { return demoBoard_.mode == DemoBoard::Mode::Ppt; }
+	bool demoBoardImages() const { return demoBoard_.mode == DemoBoard::Mode::Images; }
+	UINT32 demoBoardColor() const { return demoBoard_.color; }
+	int demoBoardOpacity() const { return demoBoard_.opacity; }
+	void demoBoardSetOpacity(int percent);       // 纯色背景不透明度 0–100
+	int demoBoardPageCount() const { return (int)demoBoard_.pages.size(); }
+	void demoBoardClear();                        // 无色：清背景（PPT 同时结束放映）
+	void demoBoardSetColor(UINT32 color);
+	void demoBoardPickColor();                    // 「自定义」取色
+	void demoBoardPickBackground();               // 选择背景（图片多选 / PPT）
+	void demoBoardToggleAdjust();                 // 调整背景开关（PPT 时不可用）
+	void demoBoardStepPage(int delta);            // PgUp/PgDn
+	// 背景尺寸的撤销/重做：page<0 表示纯色背景，否则是图片页码
+	int demoBoardPageIndex() const;
+	void demoBoardRestoreRect(int page, const D2D1_RECT_F& r);
+	// —— 演示画布：屏幕录制 ——
+	// 点工具栏「屏幕录制」：展开/收起专用属性栏（录制中再点只是重新摆出来）
+	void toggleDemoRecorder();
+	void demoRecToggle();          // 开始 / 暂停 / 继续
+	void demoRecToggleAudio();
+	void demoRecToggleMic();
+	void demoRecToggleGif();
+	void demoRecSaveAs();          // 停止 → 保存对话框 → 留在演示
+	void demoRecCancel();          // 停止 → 丢弃 → 留在演示
+	void demoRecFinish();          // 停止 → 文件进剪贴板 → 退出演示
+	bool demoRecRunning() const { return demoRecRunning_; }
+	bool demoRecPaused() const { return demoRecPaused_; }
+	bool demoRecGifMode() const { return demoRecGif_; }
+	bool demoRecAudioOn() const { return demoRecAudio_; }
+	bool demoRecMicOn() const { return demoRecMic_; }
+	int demoRecElapsed() const { return demoRecElapsed_; }
 	// 演示模式：重置画布（清掉所有标注）
 	void resetDemoCanvas();
 	// 演示模式：退出演示（清掉标注并关掉窗口）
@@ -117,6 +161,8 @@ private:
 	void enterReselect();
 	void requestExitAfterRightUp();
 	void setPixPos(POINT pos);
+	// 放大镜此刻是否可见（绘制与 Ctrl+C 取色共用同一判据，避免"看得到提示却复制不到色值"）
+	bool magnifierVisible() const;
 	void paintPix(ID2D1DeviceContext* ctx);
 	void samplePixColor();
 	void onKey(UINT key);
@@ -141,7 +187,9 @@ private:
 	bool enterByArg();
 	void relayoutTool();
 	void enterLiveStage();
-	bool exportSelection(std::vector<BYTE>& pixels, int& cw, int& ch, bool includeAnnot = true);
+	// applyEffects=false：不要「选区圆角/阴影」这类导出效果，拿原始选区像素（OCR 叠加层要用）
+	bool exportSelection(std::vector<BYTE>& pixels, int& cw, int& ch, bool includeAnnot = true,
+		bool applyEffects = true);
 	// 记住本次选区（屏幕坐标），供全局热键「重复截图」重新抓同一块
 	void rememberLastRegion();
 	bool beginMaskResize(POINT pos);
@@ -179,6 +227,7 @@ private:
 	std::unique_ptr<CapVideo> capVideo;
 	std::unique_ptr<ToolQrcode> toolQrcode;
 	std::unique_ptr<ToolOcr> toolOcr;
+	std::unique_ptr<SelectionChrome> chrome_;
 	Ling::Canvas* canvas{ nullptr };
 	POINT pixPos{}, pixFocus{};
 	bool isPress{ false }, isClosed{ false }, isMouseTransparent{ false };
@@ -188,6 +237,57 @@ private:
 	bool pendingRecord{ false };
 	// 演示模式（全屏实时画布）：不画静帧、不画遮罩/选框，工具栏在顶部居中
 	bool demoMode{ false };
+	// —— 演示画布：白板背景 ——
+	struct DemoBoardPage {
+		std::wstring path;
+		Microsoft::WRL::ComPtr<ID2D1Bitmap> bmp;
+		D2D1_RECT_F rect{};              // 客户区坐标（原始尺寸居中）
+		UINT32 srcW{ 0 }, srcH{ 0 };
+	};
+	struct DemoBoard {
+		enum class Mode { None, Color, Images, Ppt } mode{ Mode::None };
+		UINT32 color{ 0xFFFFFFFF };      // RRGGBBAA（默认白色）
+		int opacity{ 100 };              // 纯色背景不透明度（0–100）
+		D2D1_RECT_F rect{};              // 纯色背景矩形
+		std::vector<std::shared_ptr<DemoBoardPage>> pages;
+		int page{ 0 };
+		bool adjust{ false };
+		bool dragging{ false };
+		int dragEdge{ 0 };               // 1 左 / 2 上 / 4 右 / 8 下
+		POINT dragStart{};
+		D2D1_RECT_F dragRect{};
+		HWND pptWnd{ nullptr };          // PowerPoint 放映窗口（转发按键 / 结束放映）
+		Microsoft::WRL::ComPtr<IDispatch> pptApp;   // PowerPoint / WPS 应用（晚绑定）
+		Microsoft::WRL::ComPtr<IDispatch> pptShow;  // 当前放映窗 SlideShowWindow
+		std::vector<D2D1_RECT_F> chips;  // 底部页码命中区
+	};
+	DemoBoard demoBoard_;
+	bool demoBoardBarOpen_{ false };   // 白板属性栏是否应保持打开（选工具时只是临时替换）
+	bool restoreLaserOnBoardBarClose_{ false };  // 开栏时临时取消了渐隐画笔，收起时还原
+	// —— 演示画布：屏幕录制 ——
+	bool demoRecBarOpen_{ false };     // 属性栏是否展开过（选别的工具会临时替换它）
+	bool demoRecRunning_{ false };
+	bool demoRecPaused_{ false };
+	bool demoRecGif_{ false };
+	bool demoRecAudio_{ true };
+	bool demoRecMic_{ false };
+	int demoRecElapsed_{ 0 };          // 已录秒数（暂停时不累加）
+	static constexpr UINT demoRecTickTimerId{ 0x5601 };
+	void startDemoRecording();
+	// 停止采集并复位状态；deleteFile=true 时把临时文件删掉（取消）
+	std::wstring stopDemoRecording(bool deleteFile);
+	void closeDemoRecBar();
+	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushBoard_;
+	void paintDemoBoard(ID2D1DeviceContext* ctx);
+	D2D1_RECT_F demoBoardCurrentRect() const;
+	bool demoBoardContains(POINT client) const;
+	int demoBoardEdgeAt(POINT client) const;
+	void demoBoardUpdateResize(POINT client);
+	void demoBoardLoadImages(const std::vector<std::wstring>& paths);
+	void demoBoardStartPpt(const std::wstring& path);
+	void demoBoardStopPpt();
+	HWND demoBoardPptWindow();
+	void demoBoardForwardKey(UINT key);
 	bool dpiChanged{ false };
 	// 「显示光标」：会话开始那一刻的系统光标位图 + 热点 + 屏幕位置（物理像素）
 	bool showCursor{ false };
@@ -204,15 +304,28 @@ private:
 	// 会话开始前记录的前台应用名（用于 {{FOCUS_WINDOW_APP_NAME}}）
 	std::wstring focusAppName_;
 	// 「录制中显示按键」浮层：文本 + 过期时刻；约 1.5s 后自动清掉
-	std::wstring keyOverlayText_;
+	// 录制中按键提示：最多保留最近 3 条（新的追加，同一组合补全时替换最后一条）
+	std::vector<std::wstring> keyOverlayLines_;
 	ULONGLONG keyOverlayUntil_{ 0 };
 	static constexpr UINT keyOverlayTimerId{ 0x5301 };
+	static constexpr UINT pptRaiseTimerId{ 0x5401 };   // PPT 放映出窗后把画布抬回最上层
+	// 白板"按点穿透"：窗口一旦带 WS_EX_TRANSPARENT 就收不到鼠标消息，
+	// 只能定时轮询光标，按当前位置决定这一帧是让鼠标过去还是自己接收。
+	static constexpr UINT boardPierceTimerId{ 0x5402 };
+	static constexpr UINT boardPierceTickMs{ 30 };
+	void demoBoardApplyPierce();               // 按光标位置切换整窗穿透样式
+	void restoreTemporaryLaser();              // 白板属性栏收起时还原临时取消的渐隐画笔
 	// 视频录制期间的光标覆盖物。穿透后本窗口收不到鼠标移动事件，故统一用定时器轮询光标：
 	//   · 「选框鼠标跟随」：光标贴近选区边缘时自动平移选区
 	//   · 「鼠标高亮提醒」：光标下垫一个半透明圆形色块，便于在录屏里找到光标
 	static constexpr UINT recCursorTimerId{ 0x5302 };
-	static constexpr UINT recCursorTickMs{ 33 };
+	// 还没框选时 Ctrl+C 只取色：成功提示显示一会儿后自动退出截图
+	static constexpr UINT colorCopyCloseTimerId{ 0x5501 };
+	static constexpr UINT recCursorTickMs{ 16 };
 	static constexpr float selFollowMargin{ 24.f };   // 判定"贴近边缘"的带宽（逻辑像素）
+	// 跟随平移的平滑参数：每帧只走剩余越界距离的 ease 倍，并限制单帧最大位移
+	static constexpr float selFollowEase{ 0.35f };
+	static constexpr float selFollowMaxStep{ 24.f };  // 逻辑像素/帧
 	static constexpr float mouseHlRadius{ 21.f };     // 高亮圆半径（逻辑像素，直径 42）
 	static constexpr float kMouseHlAlpha{ 0.35f };    // 高亮圆的透明度（固定）
 	void updateSelFollowCursor();

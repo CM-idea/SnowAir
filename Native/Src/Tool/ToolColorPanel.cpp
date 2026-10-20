@@ -121,20 +121,20 @@ void ToolColorPanel::applyActiveStyle(size_t index, bool on)
 	}
 }
 
-void ToolColorPanel::paintCustomSwatch()
+void PaintCustomColorSwatch(Ling::Canvas* canvas, float dpi)
 {
-	if (!customCanvas) return;
-	auto ctx = customCanvas->startPaint();
+	if (!canvas) return;
+	auto ctx = canvas->startPaint();
 	if (!ctx) return;
-	const float wPx = customCanvas->w;
-	const float hPx = customCanvas->h;
+	const float wPx = canvas->w;
+	const float hPx = canvas->h;
 	ctx->Clear(D2D1::ColorF(0, 0.f));
 	if (wPx <= 0.f || hPx <= 0.f) {
-		customCanvas->finishPaint();
+		canvas->finishPaint();
 		return;
 	}
 	auto d2d = Ling::D2D::get();
-	const float radius = swatchRadius * dpi;
+	const float radius = ToolbarTheme::swatchRadius * dpi;
 	ComPtr<ID2D1RoundedRectangleGeometry> clipGeo;
 	d2d->d2dFactory->CreateRoundedRectangleGeometry(
 		D2D1::RoundedRect(D2D1::RectF(0, 0, wPx, hPx), radius, radius),
@@ -170,7 +170,12 @@ void ToolColorPanel::paintCustomSwatch()
 		if (brush) ctx->FillGeometry(wedge.Get(), brush.Get());
 	}
 	if (clipGeo && layer) ctx->PopLayer();
-	customCanvas->finishPaint();
+	canvas->finishPaint();
+}
+
+void ToolColorPanel::paintCustomSwatch()
+{
+	PaintCustomColorSwatch(customCanvas, dpi);
 }
 
 void ToolColorPanel::rebuildBtns()

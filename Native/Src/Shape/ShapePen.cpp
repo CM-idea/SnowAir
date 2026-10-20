@@ -485,22 +485,29 @@ void ShapePen::mouseMove(const float x, const float y)
 	}
 	float lx, ly;
 	toLocal(x, y, lx, ly);
-	// 四角外侧一圈 = 旋转（角上仍是缩放）；只有已选中的标注才给旋转区
-	const int rotCorner = isSelected() ? hitRotateRing(lx, ly, rect) : -1;
-	if (rotCorner >= 0) {
-		hoverDraggerIndex = 9;
-		rotateCorner = rotCorner;
-		return;
+	// 命中规则按"选中态"分开，和矩形/箭头保持一致：
+	//  - 未选中：只有线迹本身可命中。包围盒内部不是画笔的"身体"——否则一条弯曲线会把整块
+	//    矩形区域都吃掉，在下一次落笔时被误判成"拖动旧图形"，区域内再也画不了新东西。
+	//  - 已选中：角外旋转 / 边框缩放 / 内部拖动，方便二次编辑。
+	if (isSelected()) {
+		// 四角外侧一圈 = 旋转（角上仍是缩放）；只有已选中的标注才给旋转区
+		const int rotCorner = hitRotateRing(lx, ly, rect);
+		if (rotCorner >= 0) {
+			hoverDraggerIndex = 9;
+			rotateCorner = rotCorner;
+			return;
+		}
+		const int edge = hitBoxEdgeOrCorner(lx, ly, rect, std::max(8.f * win->dpi, 6.f * win->dpi));
+		if (edge == 0 || edge == 2 || edge == 4 || edge == 6) {
+			hoverDraggerIndex = edge;
+			return;
+		}
+		if (lx >= rect.left && lx <= rect.right && ly >= rect.top && ly <= rect.bottom) {
+			hoverDraggerIndex = 8;
+			return;
+		}
 	}
-	const int edge = hitBoxEdgeOrCorner(lx, ly, rect, std::max(8.f * win->dpi, 6.f * win->dpi));
-	if (edge == 0 || edge == 2 || edge == 4 || edge == 6) {
-		hoverDraggerIndex = edge;
-		return;
-	}
-	if (lx >= rect.left && lx <= rect.right && ly >= rect.top && ly <= rect.bottom)
-		hoverDraggerIndex = 8;
-	else if (hitErase(x, y))
-		hoverDraggerIndex = 8;
+	if (hitErase(x, y)) hoverDraggerIndex = 8;
 }
 
 void ShapePen::mouseWheel(const float x, const float y, const short delta)

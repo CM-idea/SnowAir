@@ -6,10 +6,15 @@
 #include "../Util.h"
 
 #include <mutex>
+#include <algorithm>
+#include <cmath>
 #include <string>
 #include <vector>
 
 namespace {
+
+// 识别置信度下限：低于它的行整行丢弃（对齐 PP-OCR 官方后处理的 drop_score=0.5）
+constexpr float kMinScore = 0.5f;
 
 // 引擎与 DLL 都是进程级单例：OCR 会在后台线程被调用，故全程加锁
 std::mutex g_mtx;
@@ -57,6 +62,73 @@ std::filesystem::path modelsDir()
 {
 	return PluginPaths::ocrModels() / OcrPack::folderName(OcrPackVariant::Official);
 }
+
+bool isCjkChar(wchar_t c)
+{
+	return (c >= 0x3000 && c <= 0x303F) || (c >= 0x3040 && c <= 0x30FF)
+		|| (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0xAC00 && c <= 0xD7AF)
+		|| (c >= 0xFF00 && c <= 0xFFEF);
+}
+
+// 检测框把"图标 + 中文标签"并在了一行时（侧栏条目很常见），用像素列找图标与文字之间的空白。
+// 做法：以框最外一圈的中位亮度当底色（深底浅字/浅底深字都适用），逐列数墨迹像素；
+// 行首第一簇墨迹与其后内容之间若有一段明显空白，就把这段空白之后的起点当成真正的文字起点。
+// 正常字间距只有 1~3px，而图标与标签之间通常是 0.5 行高以上。
+// 返回 true 时 textStartX = 文字实际开始的列（绝对坐标）。
+bool findLeadingIconGap(const BYTE* bgr, int imgW, int imgH,
+	int x0, int y0, int x1, int y1, int& textStartX, int& gapW, int& clusterW)
+{
+	x0 = std::clamp(x0, 0, imgW - 1);
+	y0 = std::clamp(y0, 0, imgH - 1);
+	x1 = std::clamp(x1, x0 + 1, imgW);
+	y1 = std::clamp(y1, y0 + 1, imgH);
+	const int bw = x1 - x0, bh = y1 - y0;
+	if (bw < 8 || bh < 6) return false;
+
+	auto gray = [&](int x, int y) -> int {
+		const BYTE* p = bgr + ((size_t)y * imgW + x) * 3;
+		return (p[2] * 299 + p[1] * 587 + p[0] * 114) / 1000;
+	};
+	std::vector<int> border;
+	border.reserve((size_t)(bw + bh) * 2);
+	for (int x = x0; x < x1; ++x) { border.push_back(gray(x, y0)); border.push_back(gray(x, y1 - 1)); }
+	for (int y = y0; y < y1; ++y) { border.push_back(gray(x0, y)); border.push_back(gray(x1 - 1, y)); }
+	std::nth_element(border.begin(), border.begin() + border.size() / 2, border.end());
+	const int bg = border[border.size() / 2];
+
+	std::vector<int> cols((size_t)bw, 0);
+	for (int y = y0; y < y1; ++y) {
+		for (int x = x0; x < x1; ++x) {
+			if (std::abs(gray(x, y) - bg) > 40) ++cols[(size_t)(x - x0)];
+		}
+	}
+
+	int first = -1;
+	for (int c = 0; c < bw; ++c) if (cols[(size_t)c] > 0) { first = c; break; }
+	if (first < 0) return false;
+
+	// 图标本身可能是两三笔（列方向上被 1~2px 的缝分开），先按"小缝"把簇连起来，
+	// 再看这个簇后面有没有"大缝"。小缝阈值取 0.2 行高，大缝要求 0.45 行高以上。
+	const int smallGap = std::max(2, (int)std::lround(bh * 0.2f));
+	int c = first;
+	int clusterEnd = -1;
+	while (c < bw) {
+		if (cols[(size_t)c] > 0) { ++c; continue; }
+		const int s = c;
+		while (c < bw && cols[(size_t)c] == 0) ++c;
+		if (c - s >= smallGap) { clusterEnd = s; break; }
+	}
+	if (clusterEnd <= first) return false;
+	int n = clusterEnd;
+	while (n < bw && cols[(size_t)n] == 0) ++n;
+	if (n >= bw) return false;   // 整个框只有一簇：没有可切的东西
+
+	textStartX = x0 + n;
+	gapW = n - clusterEnd;
+	clusterW = clusterEnd - first;
+	return true;
+}
+
 
 // 加载 lw_ppocr_c.dll 并绑定符号。已加载则直接返回
 bool loadModule(std::wstring& err)
@@ -229,6 +301,45 @@ OcrResult LwPpOcrEngine::recognize(int w, int h, const BYTE* bgra)
 				minX = std::min(minX, xs[k]); maxX = std::max(maxX, xs[k]);
 				minY = std::min(minY, ys[k]); maxY = std::max(maxY, ys[k]);
 			}
+
+			// 丢弃低置信度结果（PP-OCR 官方后处理的 drop_score 默认就是 0.5）。
+			// 深色 UI 截图里的图标、分隔线常被误检成一两个字符，不滤掉会盖住原图非文字区域。
+			if (ln.recognition_score < kMinScore) continue;
+			// 单字符 + 框近似正方形 + 置信度不高 → 基本是图标被认成了字（侧栏图标实测为
+			// "8"/"@"/"口"/"×"，置信度 0.5~0.92；真正的单字符文本（表格里的 "5" 等）
+			// 不会有这么低的置信度）。这类结果只会污染识别文本、盖住图标。
+			const float bw = maxX - minX, bh = maxY - minY;
+			if (text.size() == 1 && ln.recognition_score < 0.95f
+				&& std::fabs(bw - bh) <= 0.35f * std::max(bw, bh))
+				continue;
+
+			// 行首图标：检测框把图标和中文标签并在了一起（侧栏 "H系统按键"），识别结果会多出一个
+			// 孤立字符，叠在原图上还会压住图标。三个条件同时成立才处理，避免误伤正常文本：
+			//   ① 行首是 ASCII 字符、后面紧跟（可隔一个空格）方块字；
+			//   ② 像素列上图标与文字之间有明显空白（≥0.45 行高，正常字间距只有 1~3px），
+			//      且行首那一簇的宽度像图标（0.55~1.2 行高；"1"、"l" 这类细字够不到下限）；
+			//   ③ 整行置信度不是满分（图标不是文字，会把这个值拉低）。
+			if (text.size() >= 3 && ln.recognition_score < 0.99f && text[0] > 0x20 && text[0] < 0x80) {
+				size_t k = 1;
+				if (k < text.size() && text[k] == L' ') ++k;
+				if (k < text.size() && isCjkChar(text[k])) {
+					int textStartX = 0, gapW = 0, clusterW = 0;
+					const float lineH = maxY - minY;
+					if (findLeadingIconGap(g_bgr.data(), w, h,
+							(int)std::floor(minX), (int)std::floor(minY),
+							(int)std::ceil(maxX), (int)std::ceil(maxY),
+							textStartX, gapW, clusterW)
+						&& (float)gapW >= std::max(4.f, lineH * 0.45f)
+						&& (float)clusterW >= lineH * 0.55f
+						&& (float)clusterW <= lineH * 1.2f) {
+						text.erase(0, k);
+						// 框图/文字都从文字实际起点开始，图标不再被盖住
+						minX = std::max(minX, (float)textStartX);
+						maxX = std::max(maxX, minX + 2.f);
+					}
+				}
+			}
+
 			// 按行高向外补一点边距。PP-OCRv6 的检测框比字身只大 1~2px（实测框高≈墨迹×1.13），
 			// 而下游 ToolOcr 的背景取样（取框最外一圈的边框带）与字号标定都是按 PP-OCRv5
 			// "带边距"的框调出来的 —— 当年系统 OCR 也是靠外扩 0.15×行高与 v5 对齐（见 SystemOcr）。

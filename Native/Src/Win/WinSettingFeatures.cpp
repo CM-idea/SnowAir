@@ -573,7 +573,8 @@ void WinSettingFeatures::buildBasic(Ling::Node* p)
 			{ Lang::get(L"setting.demoFadeBrush"), Lang::get(L"setting.demoBrush"), Lang::get(L"setting.demoNone") }, s->getDemoDefaultTool(),
 			[](int i, const std::wstring&) { Setting::get()->setDemoDefaultTool(i); }, true);
 		SettingUi::selectRow(g, Lang::get(L"setting.demoEdge"),
-			{ Lang::get(L"setting.demoEdgeSnap"), Lang::get(L"setting.demoEdgeHide") }, s->getDemoEdgeBehavior(),
+			{ Lang::get(L"setting.demoEdgeSnap"), Lang::get(L"setting.demoEdgeHide"), Lang::get(L"setting.demoNone") },
+			std::clamp(s->getDemoEdgeBehavior(), 0, 2),
 			[](int i, const std::wstring&) { Setting::get()->setDemoEdgeBehavior(i); }, true);
 		SettingUi::grid2Cells(g);
 	}
@@ -587,7 +588,7 @@ void WinSettingFeatures::buildRecord(Ling::Node* p)
 		{ L"480P", L"720P", L"1080P", L"2K", L"4K" }, s->getVideoQuality(),
 		[](int i, const std::wstring&) { Setting::get()->setVideoQuality(i); }, true);
 	SettingUi::selectRow(g, Lang::get(L"setting.fnRecFps"),
-		{ L"24", L"30", L"60" }, s->getVideoFps(),
+		{ L"24", L"30", L"60", L"15", L"10", L"5" }, s->getVideoFps(),
 		[](int i, const std::wstring&) { Setting::get()->setVideoFps(i); }, true);
 	SettingUi::selectRow(g, Lang::get(L"setting.fnRecGifQuality"),
 		{ L"480P", L"720P", L"1080P" }, s->getGifQuality(),
@@ -609,10 +610,18 @@ void WinSettingFeatures::buildRecord(Ling::Node* p)
 		[](int i, const std::wstring&) { Setting::get()->setEncodeSpeed(i); }, true);
 	SettingUi::toggleRow(g, Lang::get(L"setting.fnRecHwAccel"), s->getHwAccel(),
 		[](bool on) { Setting::get()->setHwAccel(on); }, true);
+	// 录屏默认开启鼠标穿透（开录即穿，录制中可临时开关）
+	SettingUi::toggleRow(g, Lang::get(L"setting.fnRecMousePierce"), L"", s->getRecordDefaultPierce(),
+		[](bool on) { Setting::get()->setRecordDefaultPierce(on); }, true,
+		Lang::get(L"setting.fnRecMousePierceTip"));
 	SettingUi::toggleRow(g, Lang::get(L"setting.fnRecHideToolbar"), s->getHideToolbarInRecord(),
 		[](bool on) { Setting::get()->setHideToolbarInRecord(on); }, true);
 	SettingUi::toggleRow(g, Lang::get(L"setting.fnRecKeystrokes"), s->getShowKeystrokes(),
 		[](bool on) { Setting::get()->setShowKeystrokes(on); }, true);
+	// 行为见 ToolVideo：手动把录屏工具栏拖到屏幕上/下边缘后自动缩进边缘，悬停滑出
+	SettingUi::toggleRow(g, Lang::get(L"setting.fnRecToolbarPeek"), L"", s->getRecordToolbarPeek(),
+		[](bool on) { Setting::get()->setRecordToolbarPeek(on); }, true,
+		Lang::get(L"setting.fnRecToolbarPeekTip"));
 	// 行为见 WinCap::updateSelFollowCursor（录制中 + 穿透态）
 	SettingUi::toggleRow(g, Lang::get(L"setting.fnRecSelFollowMouse"), s->getSelFollowMouse(),
 		[](bool on) { Setting::get()->setSelFollowMouse(on); }, true);
@@ -792,6 +801,11 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 				Setting::get()->setOcrEngine(engines[i]);
 				Setting::get()->setOcrCloudConfigId(cloudIds[i]);
 			}, true);
+		// 识别结果版式：原位覆盖（逐框贴回原位置）/ 文本重排（整段可编辑文本框）
+		SettingUi::selectRow(g, Lang::get(L"setting.fnOcrResultMode"),
+			{ Lang::get(L"setting.fnOcrResultOverlay"), Lang::get(L"setting.fnOcrResultReflow") },
+			std::clamp(s->getOcrResultMode(), 0, 1),
+			[](int i, const std::wstring&) { Setting::get()->setOcrResultMode(i); }, true);
 		SettingUi::grid2Cells(g);
 	}
 

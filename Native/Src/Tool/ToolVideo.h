@@ -58,6 +58,19 @@ private:
 	void onDragDown(POINT pos, bool isRight);
 	void onDragMove(POINT pos);
 	void onDragUp(POINT pos, bool isRight);
+	// —— 贴边隐藏（早期 QQ 那种）——
+	// 只有"手动拖动后松手贴在屏幕上/下边缘"才触发；自动布局本来就在边缘不算。
+	// 隐藏后只留一条边在屏幕上，鼠标移到边上滑出，移开后自动缩回。
+	void peekCollapse();
+	void peekReveal();
+	void schedulePeekCollapse();
+	enum class PeekEdge { None, Top, Bottom };
+	PeekEdge peekEdge_{ PeekEdge::None };
+	bool peekHidden_{ false };
+	bool dragMoved_{ false };
+	static constexpr UINT peekTimerId{ 101 };
+	static constexpr int peekStripPx{ 4 };          // 缩进后露出的条高（逻辑像素）
+	static constexpr UINT peekHideDelayMs{ 150 };   // 鼠标移出后多久缩回
 private:
 	WinCap* win;
 	bool dpiChanged{ false };
@@ -81,6 +94,8 @@ private:
 	std::wstring curAnnotId_;
 	int selectIndex{ 0 }; // 0=mp4 1=gif
 	int totalSeconds{ 0 };
+	// 开录 1 秒后把工作集里的空闲页换出去一次（采集/编码缓冲已分配、开场截图已释放）
+	bool trimmedAfterStart_{ false };
 	bool selectSpeaker{ true }, selectMic{ false };
 	bool isRecording{ false };
 	bool isPaused{ false };

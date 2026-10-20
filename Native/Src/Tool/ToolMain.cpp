@@ -157,7 +157,7 @@ void ToolMain::initDragHandle()
 	dragHandle->setFlexShrink(0.f);
 	dragHandle->setAlignItems(Ling::Align::Center);
 	dragHandle->setJustifyContent(Ling::Justify::Center);
-	tip->bind(dragHandle, L"拖动");
+	// 拖拽手柄不给悬停提示：它只是移动工具条
 }
 
 void ToolMain::onDragDown(POINT pos, bool isRight)

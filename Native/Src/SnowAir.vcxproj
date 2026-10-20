@@ -260,6 +260,7 @@
     <ClCompile Include="Tool\ToolMain.cpp" />
     <ClCompile Include="Tool\ToolNestedPanel.cpp" />
     <ClCompile Include="Tool\ToolOcr.cpp" />
+    <ClCompile Include="Tool\ToolOcrCompare.cpp" />
     <ClCompile Include="Tool\ToolPicker.cpp" />
     <ClCompile Include="Tool\ToolQrcode.cpp" />
     <ClCompile Include="Tool\ToolSub.cpp" />
@@ -281,6 +282,7 @@
     <ClCompile Include="Win\CapVideo.cpp" />
     <ClCompile Include="Win\CutMask.cpp" />
     <ClCompile Include="Win\HotkeyHook.cpp" />
+    <ClCompile Include="Win\ScreenCapture.cpp" />
     <ClCompile Include="Win\SettingWidgets.cpp" />
     <ClCompile Include="Win\WinCap.cpp" />
     <ClCompile Include="Win\WinPin.cpp" />
@@ -386,6 +388,7 @@
     <ClInclude Include="Tool\ToolMain.h" />
     <ClInclude Include="Tool\ToolNestedPanel.h" />
     <ClInclude Include="Tool\ToolOcr.h" />
+    <ClInclude Include="Tool\ToolOcrCompare.h" />
     <ClInclude Include="Tool\ToolPicker.h" />
     <ClInclude Include="Tool\ToolQrcode.h" />
     <ClInclude Include="Tool\ToolSub.h" />
@@ -411,6 +414,7 @@
     <ClInclude Include="Win\cgif\cgif_raw.h" />
     <ClInclude Include="Win\CutMask.h" />
     <ClInclude Include="Win\HotkeyHook.h" />
+    <ClInclude Include="Win\ScreenCapture.h" />
     <ClInclude Include="Win\SettingTheme.h" />
     <ClInclude Include="Win\SettingWidgets.h" />
     <ClInclude Include="Win\WinCap.h" />
