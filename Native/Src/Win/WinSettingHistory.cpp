@@ -1096,8 +1096,19 @@ void WinSettingHistory::rebuildFilterPanel()
 		*btnRowRef = btnRow;
 
 		auto weakR = getWeakThis();
-		auto deferCloseOnly = [this, weakR]() {
-			auto run = [this, weakR]() { if (weakR.lock()) this->closeFilterPanel(); };
+		// 取消：在「选择时间」里只退出日期区间选择，回到列表；气泡保持展开。
+		// 不在区间模式时（理论上按钮不可见）才收起整个气泡。
+		auto deferCancel = [this, weakR, applyMode, calOpen]() {
+			auto run = [this, weakR, applyMode, calOpen]() {
+				if (!weakR.lock()) return;
+				if (this->panelMode == 1) {
+					this->panelMode = 0;
+					*calOpen = false;
+					applyMode();
+					return;
+				}
+				this->closeFilterPanel();
+			};
 			if (auto* app = Ling::App::get()) app->dq.TryEnqueue(run);
 			else run();
 		};
@@ -1110,7 +1121,7 @@ void WinSettingHistory::rebuildFilterPanel()
 			if (auto* app = Ling::App::get()) app->dq.TryEnqueue(run);
 			else run();
 		};
-		SettingUi::btnOutline(btnRow, Lang::get(L"setting.cancel"), deferCloseOnly, 72.f)
+		SettingUi::btnOutline(btnRow, Lang::get(L"setting.cancel"), deferCancel, 72.f)
 			->setMarginRight(8.f);
 		SettingUi::btnPrimary(btnRow, Lang::get(L"setting.confirm"),
 			[this, startBox, endBox, deferApplyRange]() {
