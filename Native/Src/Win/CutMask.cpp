@@ -97,41 +97,6 @@ namespace {
 		return *ctx;
 	}
 
-	/** 读布尔属性：1=true / 0=false / -1=属性不可用（不据此判定，避免误杀实现不全的提供者）。 */
-	int boolProp(IUIAutomationElement* el, PROPERTYID id)
-	{
-		if (!el) return -1;
-		VARIANT v;
-		VariantInit(&v);
-		int r = -1;
-		if (SUCCEEDED(el->GetCurrentPropertyValue(id, &v)) && v.vt == VT_BOOL)
-			r = (v.boolVal == VARIANT_TRUE) ? 1 : 0;
-		VariantClear(&v);
-		return r;
-	}
-
-	/** 读整数属性：返回属性值，取不到返回 -1。 */
-	long intProp(IUIAutomationElement* el, PROPERTYID id)
-	{
-		if (!el) return -1;
-		VARIANT v;
-		VariantInit(&v);
-		long r = -1;
-		if (SUCCEEDED(el->GetCurrentPropertyValue(id, &v)) && v.vt == VT_I4)
-			r = v.lVal;
-		VariantClear(&v);
-		return r;
-	}
-
-	/** “屏幕上没有这个元素”判定：只用 offscreen 这一条硬事实（未绘制/滚出视口，树里只剩旧位置）。
-	 *  不按“内容元素/控件元素”再筛一道 —— 不少普通 DIV/容器在语义视图里两者都不算，按那条规则
-	 *  会把它们当成"莫须有"拒掉（表现就是"有些 DIV 找不到"）。属性取不到（-1）时不拒。 */
-	bool isPhantomElement(IUIAutomationElement* el)
-	{
-		if (!el) return true;
-		return boolProp(el, UIA_IsOffscreenPropertyId) == 1;
-	}
-
 	bool rectContainsPt(const RECT& r, POINT pt)
 	{
 		return pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom;
@@ -200,16 +165,6 @@ namespace {
 		if (!rectValid(r) || !rectValid(refBase)) return false;
 		return (r.right - r.left) >= (refBase.right - refBase.left) * 4 / 5
 			&& (r.bottom - r.top) >= (refBase.bottom - refBase.top) * 4 / 5;
-	}
-
-	/** 不该被当作查找目标的窗口：不可见 / 最小化 / 幽灵（DWM cloaked）/ 桌面外壳 / 鼠标穿透。 */
-	bool isExcludedCaptureWindow(HWND hwnd)
-	{
-		if (!hwnd) return true;
-		if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || isCloaked(hwnd) || isDesktopOrShell(hwnd))
-			return true;
-		const LONG ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
-		return (ex & WS_EX_TRANSPARENT) != 0;
 	}
 
 	/** 自家进程里的"工具类浮窗"：截图遮罩 / 工具条 / 下拉浮层 / 结果窗等一律带 WS_EX_TOOLWINDOW；
@@ -333,8 +288,9 @@ namespace {
 		}, reinterpret_cast<LPARAM>(&c));
 	}
 
-	/** 无障碍子树常常挂在某个子窗上（Chromium 的渲染子窗就是典型），而不是顶层窗。
-	 *  取含点后代窗里层级最深、面积最小的那个作为下钻起点。 */
+	/** 光标下最深的可见子窗：只在**顶层树没给出细节点**时作为第二次下钻的起点。
+	 *  浏览器自身 UI（标签栏/地址栏）挂在顶层窗口的树里，而 Chromium 的渲染子窗只覆盖
+	 *  网页区域 —— 所以不能一上来就从它开始钻。 */
 	HWND anchorWindowAt(WinEntry& w, POINT pt)
 	{
 		if (!w.childrenScanned) scanChildWindows(w);
@@ -621,15 +577,18 @@ namespace {
 
 	PickPath buildPickPath(const DrillTree& tree, int cur, POINT pt)
 	{
-		PickPath reversed;
+		// 从最细节点往上收，得到的就是"最细 → 窗口"的顺序（PickPath 约定 [0] 是最细节点）。
+		// 之前这里又 reverse 了一次，返回的是"窗口 → 最细"，下游把 front() 当叶子用，
+		// 于是永远拿到最外层整窗矩形 —— 浏览器标签栏/地址栏这类深层控件因此一直选不中。
+		PickPath path;
 		for (int i = cur; i >= 0 && i < (int)tree.nodes.size(); i = tree.nodes[i].parent) {
 			const RECT r = tree.nodes[i].rect;
 			if (r.right - r.left < 1 || r.bottom - r.top < 1) continue;
 			if (!rectContainsPt(r, pt)) continue;
-			if (!reversed.empty() && rectEqual(reversed.back(), r)) continue;
-			reversed.push_back(r);
+			if (!path.empty() && rectEqual(path.back(), r)) continue;
+			path.push_back(r);
 		}
-		return PickPath(reversed.rbegin(), reversed.rend());
+		return path;
 	}
 
 	/** 在缓存树里走到最细节点。
@@ -676,87 +635,6 @@ namespace {
 		}
 		out = buildPickPath(tree, cur, pt);
 		return !out.empty();
-	}
-
-	// ---------------- 3) 坐标命中测试（与 F12 选择器同源） ----------------
-	// 「临时点穿」是不是我们挂上去的 —— 查询线程加，UI 线程也必须能立刻撤（CutMask::cancelHoverQuery）
-	std::atomic<bool> g_pointThroughApplied{ false };
-	std::atomic<LONG> g_pointThroughPrevEx{ 0 };
-	std::atomic<HWND> g_pointThroughHwnd{ nullptr };
-
-	/** UIA ElementFromPoint：让提供者直接回答"点下是什么元素"，现代 Chrome/Edge 是对其内部
-	 *  可访问性树的命中测试，能直达比"窗口根 + 树遍历"更准的 DOM/Shadow DOM 叶节点。
-	 *
-	 *  ⚠ 命中测试是**窗口级**的：遮罩若参与命中测试，返回的永远只是"遮罩自己的元素"，目标
-	 *  自己的命中测试（与 F12 选择器同一套逻辑）就被挡在外面。故只在这一次调用期间给遮罩
-	 *  临时加 WS_EX_TRANSPARENT（画面不变、不隐藏、不动 Z 序），查完立刻还原；鼠标有按键
-	 *  按下时绝不点穿 —— 那一下会漏给下层窗口。
-	 *  ⚠ 只加 WS_EX_TRANSPARENT 还不够：实测 UIA 的全局命中测试只对**分层窗口**认这个标志，
-	 *  而遮罩是 DirectComposition 窗口（WS_EX_NOREDIRECTIONBITMAP、没有重定向表面），不补
-	 *  WS_EX_LAYERED 的话命中测试照样返回遮罩自己 —— 浏览器 UI 就是这么一直找不到的。
-	 *  补上分层样式后画面完全不变（已用逐像素比对验证），所以补一次就长期保留，只反复切换
-	 *  TRANSPARENT。 */
-	bool pointHitElement(IUIAutomation* automation, HWND excludeOv, POINT pt, RECT& out)
-	{
-		if (!automation) return false;
-		IUIAutomationElement* el{ nullptr };
-		LONG ovEx{ 0 };
-		bool passthrough{ false };
-		if (excludeOv && IsWindow(excludeOv)
-			&& !(GetAsyncKeyState(VK_LBUTTON) & 0x8000)
-			&& !(GetAsyncKeyState(VK_RBUTTON) & 0x8000)
-			&& !(GetAsyncKeyState(VK_MBUTTON) & 0x8000)) {
-			ovEx = GetWindowLongW(excludeOv, GWL_EXSTYLE);
-			if (!(ovEx & WS_EX_LAYERED)) {
-				SetWindowLongW(excludeOv, GWL_EXSTYLE, ovEx | WS_EX_LAYERED);
-				SetLayeredWindowAttributes(excludeOv, 0, 255, LWA_ALPHA);
-				ovEx |= WS_EX_LAYERED;   // 长期保留：还原时只回退 TRANSPARENT
-			}
-			if (!(ovEx & WS_EX_TRANSPARENT)) {
-				g_pointThroughPrevEx.store(ovEx);
-				g_pointThroughHwnd.store(excludeOv);
-				SetWindowLongW(excludeOv, GWL_EXSTYLE, ovEx | WS_EX_TRANSPARENT);
-				g_pointThroughApplied.store(true);
-				passthrough = true;
-			}
-			// 遮罩本来就带 WS_EX_TRANSPARENT（用户开了穿透）：绝不能"还原"，那会把穿透状态抹掉
-		}
-		const HRESULT phr = automation->ElementFromPoint(pt, &el);
-		if (passthrough) {
-			// UI 线程可能已经"按下即撤"抢先还原过了：那就绝不能再改一次样式 —— 重复的
-			// GWL_EXSTYLE 变更会让窗口重新合成，等于把"闪一下"又带回来
-			if (g_pointThroughApplied.exchange(false))
-				SetWindowLongW(excludeOv, GWL_EXSTYLE, ovEx);
-		}
-		if (FAILED(phr) || !el) return false;
-		RECT r{};
-		const HRESULT rhr = el->get_CurrentBoundingRectangle(&r);
-		const bool phantom = isPhantomElement(el);
-		const long pid = intProp(el, UIA_ProcessIdPropertyId);
-		UIA_HWND hwndVal{ nullptr };
-		el->get_CurrentNativeWindowHandle(&hwndVal);
-		el->Release();
-		if (FAILED(rhr) || !rectValid(r)) return false;
-		if (phantom || !rectContainsPt(r, pt)) return false;
-		// 全屏根容器/桌面：不采纳，交给下层细化
-		const RECT virt{ GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
-			GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
-			GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN) };
-		if (rectValid(virt) && (r.right - r.left) >= (virt.right - virt.left) - 2
-			&& (r.bottom - r.top) >= (virt.bottom - virt.top) - 2)
-			return false;
-		// 自家进程里只排除"工具类浮窗"（遮罩/工具条/下拉浮层…，均带 WS_EX_TOOLWINDOW）：命中测试是
-		// **全局**命中的，光标下最顶层常是我们的遮罩，它返回的"遮罩自己"的元素在页面上对应不到任何
-		// 东西。设置中心这类普通窗口是真实界面，应能被查找元素命中，故不再按整个进程一刀切排除。
-		if (hwndVal) {
-			const HWND h = reinterpret_cast<HWND>(hwndVal);
-			if (h == excludeOv || isOwnToolWindow(h) || isExcludedCaptureWindow(h)) return false;
-		}
-		else if (pid > 0 && pid == (long)GetCurrentProcessId()) {
-			return false;   // 无窗口句柄可判：保守拒绝自家元素
-		}
-		out = r;
-		return true;
 	}
 
 	/** MSAA 机会回退：同样是"提供者自己的命中测试"，不依赖树遍历。现代 Chrome/Edge 是纯 UIA
@@ -1066,64 +944,50 @@ namespace {
 		const RECT anchorBounds = hwndBoundsRect(anchor);
 
 		if (automation && creq) {
-			// 1) 在缓存树上走一遍，拿到从根到最细节点的整条链
+			// 1) 先从**顶层窗口**的树走一遍：浏览器自带的 UI（标签栏、地址栏、工具栏）挂在
+			//    顶层窗口的 UIA 树里。若先查"光标下最深的子窗"，Chromium 的渲染子窗只覆盖
+			//    网页区域，标签栏按不到，最后会被网页容器顶掉。
 			const DWORD budgetMs = refine ? 1500u : 168u;
 			const DWORD callLimitMs = refine ? 500u : 168u;
+			const RECT topBounds = hwndBoundsRect(topHwnd);
 			PickPath drilled;
 			bool drilledPending = false;
 			bool drilledFiner = false;
-			RECT drilledBase = anchorBounds;
+			RECT drilledBase = topBounds;
 
-			if (DrillTree* tree = treeFor(anchor, anchorBounds, automation, creq, ctx.automation2)) {
+			if (DrillTree* topTree = treeFor(topHwnd, topBounds, automation, creq, ctx.automation2)) {
 				bool pending = false;
-				const bool ok = walkTree(*tree, screen, budgetMs, callLimitMs, refine, seq, progress, pending, drilled);
+				const bool ok = walkTree(*topTree, screen, budgetMs, callLimitMs, refine, seq, progress, pending, drilled);
 				drilledPending = pending;
 				drilledFiner = ok && drilled.size() >= 2;
 			}
 
-			// 锚点只是子窗时，某些框架的树其实挂在顶层窗上。子窗这边"没有更细节点"或
-			// "只给到整块"时，换顶层再走一遍，取更细的那份结果。预算已用尽就先不换。
-			const bool anchorCoarse = drilledFiner && isPageLevelRect(drilled.front(), drilledBase);
-			if ((!drilledFiner || anchorCoarse) && !drilledPending && anchor != topHwnd) {
-				const RECT topBounds = hwndBoundsRect(topHwnd);
-				if (DrillTree* topTree = treeFor(topHwnd, topBounds, automation, creq, ctx.automation2)) {
-					PickPath topPath;
+			// 顶层树只给到整块、或压根没给结果时，再换"光标下的子窗"树钻一次
+			//（有些框架把无障碍子树只挂在子窗上，顶层树看不到内容）。两份结果取更细的那份。
+			const bool topCoarse = !drilledFiner || drilled.empty()
+				|| isPageLevelRect(drilled.front(), drilledBase);
+			if (topCoarse && anchor != topHwnd) {
+				if (DrillTree* anchorTree = treeFor(anchor, anchorBounds, automation, creq, ctx.automation2)) {
+					PickPath anchorPath;
 					bool pending = false;
-					const bool ok = walkTree(*topTree, screen, budgetMs, callLimitMs, refine, seq, progress, pending, topPath);
+					const bool ok = walkTree(*anchorTree, screen, budgetMs, callLimitMs, refine, seq, progress, pending, anchorPath);
 					if (pending) drilledPending = true;
-					const bool topFiner = ok && topPath.size() >= 2;
-					const bool better = topFiner && (!drilledFiner
-						|| rectArea(topPath.front()) < rectArea(drilled.front()));
+					const bool anchorFiner = ok && anchorPath.size() >= 2;
+					const bool better = anchorFiner && (!drilledFiner
+						|| rectArea(anchorPath.front()) < rectArea(drilled.front()));
 					if (better) {
-						drilled = std::move(topPath);
+						drilled = std::move(anchorPath);
 						drilledFiner = true;
-						drilledBase = topBounds;
+						drilledBase = anchorBounds;
 					}
 				}
 			}
 
 			const bool drilledOk = drilledFiner;
 
-			// 2) 提供者自己的命中测试：与 F12 选择器同源，浏览器标题栏/标签栏这类不在渲染
-			//    子树里的控件只有它能给。它是全局命中测试，调用期间要给遮罩临时点穿并触发
-			//    一次重新合成，所以只在"下钻没结果/只有整页容器"或细化档才补。
-			const bool hitWorth = refine || !drilledOk || drilled.empty()
-				|| isPageLevelRect(drilled.front(), drilledBase);
-			RECT hit{};
-			bool hitOk = false;
-			if (hitWorth) {
-				// 下钻会把超时压到"剩余预算"，这里重置成独立时间窗
-				if (ctx.automation2) {
-					ctx.automation2->put_ConnectionTimeout(1000);
-					ctx.automation2->put_TransactionTimeout(1000);
-				}
-				hitOk = pointHitElement(automation, exclude, screen, hit)
-					&& rectContainsPt(hit, screen);
-			}
-
-			// 3) 选叶：命中测试与下钻都算候选，取面积最小的那个。下钻可能停在铺满整页的
-			//    容器上，命中测试有时反而更粗，只按面积挑才能落到真正看得见的那层。
-			//    整页级候选放在第二轮，只有拿不到更细节点时才用。
+			// 2) 选叶：只用下钻得到的叶子（命中测试只查目标窗口自己的树，绝不改动遮罩的窗口样式，
+			//    因此悬停查询再慢也不会影响鼠标输入）。下钻有时只停在铺满整页的容器上，这时先让
+			//    MSAA 的提供者命中测试补一刀；仍没有更细节点才退回整页级容器。
 			RECT leaf{};
 			bool haveLeaf = false;
 			auto consider = [&](const RECT& r, bool pageLevelAllowed) {
@@ -1135,12 +999,7 @@ namespace {
 				leaf = r;
 				haveLeaf = true;
 			};
-			if (hitOk) consider(hit, false);
 			if (drilledOk && !drilled.empty()) consider(drilled.front(), false);
-			if (!haveLeaf) {
-				if (hitOk) consider(hit, true);
-				if (drilledOk && !drilled.empty()) consider(drilled.front(), true);
-			}
 			if (!haveLeaf) {
 				// MSAA 机会回退：同样是提供者自己的命中测试，不依赖树遍历；失败即空、零副作用
 				const RECT ma = msaaHitAt(anchor, screen);
@@ -1149,10 +1008,11 @@ namespace {
 					haveLeaf = true;
 				}
 			}
+			if (!haveLeaf && drilledOk && !drilled.empty()) consider(drilled.front(), true);
 
 			if (haveLeaf) {
 				out.push_back(leaf);
-				// 4) 祖先：下钻链里真正包含叶子的那些层，由内到外补齐，末尾放窗口本身
+				// 3) 祖先：下钻链里真正包含叶子的那些层，由内到外补齐，末尾放窗口本身
 				for (const RECT& r : drilled) {
 					if (rectEqual(r, out.back())) continue;
 					if (!rectContainsRect(r, out.back())) continue;
@@ -1404,9 +1264,8 @@ CutMask::CutMask(Ling::WinBase* win) :win{ win }
 			setHoverTarget(next, true);
 			return;
 		}
-		// 结果回来 = 查询结束，输入保护可以撤。只有"最新那一次"的结果才算信箱排空；
-		// 过期请求被"只做最新一次"合并丢弃时没有结果回来，靠 hoverGuardTimerId 的看门狗兜底。
-		endQueryGuard();
+		// 结果回来 = 这一轮查询结束；过期请求被"只做最新一次"合并丢弃时没有结果回来，
+		// 也不影响输入（查询全程不碰遮罩的窗口样式与鼠标捕获）。
 		hoverCoarse_ = coarse;
 		hoverPath_.clear();
 		if (ok) {
@@ -1439,7 +1298,7 @@ CutMask::CutMask(Ling::WinBase* win) :win{ win }
 
 CutMask::~CutMask()
 {
-	// 先撤掉查询留下的状态（临时点穿 / 临时捕获 / 驻留重查），再摘回填：
+	// 先撤掉查询留下的状态（在途结果作废 / 驻留重查），再摘回填：
 	// 工作线程可能还有一趟结果在路上（那个回调捕获了 this）
 	cancelHoverQuery();
 	HoverQuery::setSink(nullptr);
@@ -1549,40 +1408,13 @@ bool CutMask::highlight(POINT pos, bool force)
 
 	// 元素查询丢给工作线程（第一次问浏览器可能要几百毫秒，见 HoverQuery 的说明）。
 	// 这里只记下"最新一次问的是哪儿"，结果回来时按序号判断是否还有效。
-	// 投递前上"输入保护"：命中测试会给遮罩临时加 WS_EX_TRANSPARENT，那一瞬间鼠标按下会
-	// 漏给下层窗口，用临时捕获兜住（结果回来 / 150ms 看门狗 / 按下时立刻撤）。
-	beginQueryGuard();
+	// 查询全程不碰遮罩的窗口样式与鼠标捕获 —— 再慢也不会影响按下/拖框。
 	lastHoverQueryMs_ = now;
 	lastHoverQueryPos_ = pos;
 	hoverRefineTries_ = 0;   // 用户再次移动鼠标：重置驻留细化预算
 	stopHoverRefine();       // 新的实时命中投出，原驻留细化定时器作废
 	hoverSeq_ = HoverQuery::request(POINT{ pos.x + win->x, pos.y + win->y }, win->hwnd, false);
 	return true;
-}
-
-void CutMask::beginQueryGuard()
-{
-	if (queryGuard_) return;
-	if (!win || !win->hwnd || !IsWindow(win->hwnd)) return;
-	// 已经按着鼠标（正在拖拽/画框）：绝不抢捕获
-	if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) return;
-	// 捕获是线程态：只有拥有窗口的 UI 线程调用 GetCapture()/SetCapture() 才有效
-	if (GetCapture() == win->hwnd) return; // 已经在自己手上
-	SetCapture(win->hwnd);
-	queryGuard_ = true;
-	win->setTimer(kQueryGuardWatchdogMs, hoverGuardTimerId);
-}
-
-void CutMask::endQueryGuard()
-{
-	if (!queryGuard_) return;
-	queryGuard_ = false;
-	if (win) win->killTimer(hoverGuardTimerId);
-	if (!win || !win->hwnd) return;
-	// 查询期间用户真的按下了：这一下已被捕获送到本窗口，后续由 WinCap 自己 SetCapture 接管，
-	// 这里就别再动捕获 —— ReleaseCapture 反而会把刚建立的拖拽捕获弄丢。
-	if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) return;
-	if (GetCapture() == win->hwnd) ReleaseCapture();
 }
 
 void CutMask::cancelHoverQuery()
@@ -1595,17 +1427,6 @@ void CutMask::cancelHoverQuery()
 	hoverSeq_ = HoverQuery::cancelPending();
 	// 悬停阶段结束：缓存里的无障碍元素也一并交还工作线程释放
 	HoverQuery::invalidateCache();
-	if (queryGuard_) {
-		queryGuard_ = false;
-		if (win) win->killTimer(hoverGuardTimerId);
-		if (win && win->hwnd && GetCapture() == win->hwnd) ReleaseCapture();
-	}
-	// 命中测试的临时点穿若正挂着（工作线程刚加上）：UI 线程立刻还原，否则这一下按下会漏出去。
-	// 两个线程谁先 exchange 成功谁负责还原，绝不会重复改样式（重复改会让窗口重新合成、闪一下）。
-	if (g_pointThroughApplied.exchange(false)) {
-		const HWND ov = g_pointThroughHwnd.load();
-		if (ov && IsWindow(ov)) SetWindowLongW(ov, GWL_EXSTYLE, g_pointThroughPrevEx.load());
-	}
 }
 
 void CutMask::scheduleHoverRefine()
@@ -1629,11 +1450,6 @@ void CutMask::stopHoverRefine()
 
 void CutMask::onHoverDwellTimer(UINT timerId)
 {
-	if (timerId == hoverGuardTimerId) {
-		// 看门狗：请求被"只做最新一次"合并丢弃时不会有结果回来，捕获得自己放手
-		endQueryGuard();
-		return;
-	}
 	if (timerId != hoverRefineTimerId) return;
 	stopHoverRefine();
 	if (!win || !win->hwnd || !hoverCoarse_) return;
@@ -1646,7 +1462,6 @@ void CutMask::onHoverDwellTimer(UINT timerId)
 	ScreenToClient(win->hwnd, &cur);
 	if (std::abs(cur.x - lastHoverQueryPos_.x) > 6 || std::abs(cur.y - lastHoverQueryPos_.y) > 6)
 		return;
-	beginQueryGuard();
 	hoverSeq_ = HoverQuery::request(POINT{ lastHoverQueryPos_.x + win->x, lastHoverQueryPos_.y + win->y },
 		win->hwnd, true);
 }
@@ -2406,6 +2221,11 @@ void CutMask::paintChrome(ID2D1DeviceContext* ctx)
 	paintBorder(ctx);
 	paintHandles(ctx);
 	paintLabel(ctx);
+}
+
+void CutMask::paintBorderOverlay(ID2D1DeviceContext* ctx)
+{
+	paintBorder(ctx);
 }
 
 void CutMask::paintBorder(ID2D1DeviceContext* ctx)

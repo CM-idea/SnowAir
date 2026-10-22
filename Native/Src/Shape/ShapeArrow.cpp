@@ -5,6 +5,7 @@
 #include "ShapeArrow.h"
 #include "ShapeLink.h"
 #include <cmath>
+#include <random>
 
 using Microsoft::WRL::ComPtr;
 
@@ -17,6 +18,13 @@ ShapeArrow::ShapeArrow(AnnotHost* win) : ShapeBase(win)
 	headStyle = toolSub->arrowHead;
 	isDash = toolSub->isArrowDash;
 	isRound = toolSub->isArrowRound;
+	if (headStyle == ToolSub::ArrowFun) {
+		// 每条趣味箭头固定一套随机量（只在创建时算一次，拖动/重绘不变）
+		static std::mt19937 rng{ std::random_device{}() };
+		std::uniform_real_distribution<float> dist(-1.f, 1.f);
+		funLoopScale = 1.f + dist(rng) * 0.15f;
+		funLoopRot = dist(rng) * (7.f * 3.14159265f / 180.f);
+	}
 	ensureStrokeStyle();
 }
 
@@ -27,6 +35,11 @@ ShapeArrow::~ShapeArrow()
 bool ShapeArrow::isBig() const
 {
 	return headStyle == ToolSub::ArrowBig;
+}
+
+bool ShapeArrow::isFun() const
+{
+	return headStyle == ToolSub::ArrowFun;
 }
 
 float ShapeArrow::arrowSize() const
@@ -142,7 +155,9 @@ void ShapeArrow::ensureMinLength()
 		length += std::hypot(poly.pts[i].x - poly.pts[i - 1].x, poly.pts[i].y - poly.pts[i - 1].y);
 	const float minLen = isBig()
 		? arrowSize() + 8.f * win->dpi
-		: std::max(24.f * win->dpi, strokeWidth * 6.f);
+		: isFun()
+			? std::max(48.f * win->dpi, strokeWidth * 7.f)
+			: std::max(24.f * win->dpi, strokeWidth * 6.f);
 	if (length >= minLen) return;
 	auto& a = poly.pts[poly.pts.size() - 2];
 	auto& b = poly.pts.back();
@@ -162,10 +177,13 @@ void ShapeArrow::rebuild()
 	else bigPath.Reset();
 }
 
-void ShapeArrow::drawPolyline(ID2D1DeviceContext* ctx)
+void ShapeArrow::drawPolyline(ID2D1DeviceContext* ctx, D2D1_POINT_2F* tipFrom, float headBack)
 {
 	// 轴线（杆身）：虚线只作用于这条路径
-	auto path = ArrowParts::shaftPath(Ling::D2D::get()->d2dFactory.Get(), poly.pts);
+	auto factory = Ling::D2D::get()->d2dFactory.Get();
+	auto path = isFun()
+		? ArrowParts::funShaftPath(factory, poly.pts, funLoopScale, funLoopRot, tipFrom, headBack)
+		: ArrowParts::shaftPath(factory, poly.pts);
 	if (path) ctx->DrawGeometry(path.Get(), brush.Get(), strokeWidth, strokeStyle.Get());
 }
 
@@ -180,24 +198,35 @@ void ShapeArrow::paint(ID2D1DeviceContext* ctx)
 		return;
 	}
 	auto factory = Ling::D2D::get()->d2dFactory.Get();
-	drawPolyline(ctx);
 	const auto start = poly.front();
 	const auto startNext = poly.pts[1];
 	const auto end = poly.back();
 	const auto endPrev = poly.pts[poly.pts.size() - 2];
+	// 趣味箭头的头部要跟着杆身走，不能按起终点连线
+	D2D1_POINT_2F funTipFrom = endPrev;
+	// 头部长度以线宽为基准，但不超过箭头的 16%：箭头画得越小，头也跟着收，
+	// 否则大头压在末端的弯曲段上，V 会显得歪向一边
+	const float baseHeadLen = 10.f + strokeWidth * 2.f;
+	const float chordLen = std::hypot(end.x - start.x, end.y - start.y);
+	const float funHeadLen = std::min(baseHeadLen * 1.3f,
+		std::max(chordLen * 0.16f, 14.f + strokeWidth));
+	const float funHeadScale = funHeadLen / std::max(baseHeadLen, 1.f);
+	drawPolyline(ctx, isFun() ? &funTipFrom : nullptr, funHeadLen);
+	const auto headFrom = isFun() ? funTipFrom : endPrev;
 	// 箭头头部：圆头同样作用到它，且永远实线
 	if (headStyle == ToolSub::ArrowAnnot) {
 		auto bars = ArrowParts::annotBarsPath(factory, poly.pts, strokeWidth);
 		if (bars) ctx->DrawGeometry(bars.Get(), brush.Get(), strokeWidth, headStrokeStyle.Get());
 	}
 	else if (headStyle == ToolSub::ArrowBoth) {
-		if (auto head = ArrowParts::openHeadPath(factory, startNext, start, strokeWidth))
+		if (auto head = ArrowParts::openHeadPath(factory, startNext, start, strokeWidth, 1.1f))
 			ctx->DrawGeometry(head.Get(), brush.Get(), strokeWidth, headStrokeStyle.Get());
-		if (auto head = ArrowParts::openHeadPath(factory, endPrev, end, strokeWidth))
+		if (auto head = ArrowParts::openHeadPath(factory, endPrev, end, strokeWidth, 1.1f))
 			ctx->DrawGeometry(head.Get(), brush.Get(), strokeWidth, headStrokeStyle.Get());
 	}
 	else {
-		if (auto head = ArrowParts::openHeadPath(factory, endPrev, end, strokeWidth))
+		if (auto head = ArrowParts::openHeadPath(factory, headFrom, end, strokeWidth,
+			isFun() ? funHeadScale : 1.1f))
 			ctx->DrawGeometry(head.Get(), brush.Get(), strokeWidth, headStrokeStyle.Get());
 	}
 }
@@ -205,10 +234,11 @@ void ShapeArrow::paint(ID2D1DeviceContext* ctx)
 void ShapeArrow::paintDragger(ID2D1DeviceContext* ctx)
 {
 	const bool dragging = poly.drag != ArrowPolyState::DragKind::None;
-	// 大箭头与普通箭头同一套控点（端点/断点/虚中点）
+	// 大箭头与普通箭头同一套控点（端点/断点/虚中点）；
+	// 趣味箭头只给两个端点，不显示中间那个"加断点"的虚点
 	paintArrowPolyHandles(ctx, poly, win->dpi,
 		brushHandleFill.Get(), brushHandleBorder.Get(), brushHandleShadow.Get(),
-		dragging, true);
+		dragging, !isFun());
 }
 
 int ShapeArrow::hoverFromHit(const ArrowHitInfo& h) const
@@ -297,8 +327,8 @@ void ShapeArrow::mouseMove(const float x, const float y)
 {
 	ShapeLink::sync(win, poly);   // 命中/悬停都按"贴回边缘之后"的端点算
 	const bool dragging = poly.drag != ArrowPolyState::DragKind::None;
-	// 大箭头与普通箭头同一套命中/断点逻辑
-	const bool allowVirtual = isSelected();
+	// 大箭头与普通箭头同一套命中/断点逻辑；趣味箭头保持两点式，不响应"加点"
+	const bool allowVirtual = isSelected() && !isFun();
 	lastHit = poly.hit(x, y, win->dpi, dragging, allowVirtual);
 	if (lastHit.kind == ArrowHitInfo::Break && lastHit.insertAfter >= 0)
 		poly.breakHoverKey = lastHit.insertAfter + 1000;

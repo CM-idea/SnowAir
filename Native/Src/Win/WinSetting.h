@@ -20,6 +20,8 @@ public:
 	// 打开设置中心并切到指定菜单页（0 全局热键 / 1 快捷翻译 / 2 系统按键 / 3 外观 / 4 功能 / 5 截图历史 / 6 插件 / 7 关于）
 	static void init(int pageIndex);
 	static void dispose();
+	// 按「停用截图历史」开关同步侧栏「截图历史」菜单显隐（设置里切换后立即生效）
+	static void applyHistoryMenuVisibility();
 private:
 	WinSetting();
 	void initMenuItems(Ling::Node* menuBox);

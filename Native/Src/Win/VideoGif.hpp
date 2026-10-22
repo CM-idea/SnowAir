@@ -5,6 +5,7 @@
 #include <atomic>
 #include "pch.h"
 #include "Util.h"
+#include "Image/WebpCodec.h"
 #include <wincodec.h>
 #include "cgif/cgif.h"
 
@@ -296,8 +297,8 @@ namespace VideoGif {
     // =============================================================
 
     // ============================ WebP（动画） ============================
-    // 系统没有"动画 WebP"编码器，但 WIC 能编静态 WebP。于是每帧先用 WIC 编成静态 WebP，
-    // 抠出其中的图像块（VP8 / VP8L，含可选的 ALPH），再按动画 WebP 容器规范拼装：
+    // 内置 libwebp 逐帧编静态 WebP，抠出其中的图像块（VP8 / VP8L，含可选的 ALPH），
+    // 再按动画 WebP 容器规范拼装：
     // RIFF/WEBP + VP8X(动画标志) + ANIM + 每帧 ANMF(帧头 + 图像块) + pad。
     inline void putLe32(unsigned char* p, unsigned int v)
     {
@@ -331,80 +332,32 @@ namespace VideoGif {
         if (len & 1) v.push_back(0);
     }
 
-    // 用 WIC 把一帧 RGB 编成静态 WebP，抠出 ALPH(可选) + VP8/VP8L 图像块（按原样，含各自的头与对齐）
+    // 用内置 libwebp 把一帧 RGB 编成静态 WebP，抠出 ALPH(可选) + VP8/VP8L 图像块（按原样，含各自的头与对齐）
     inline bool encodeWebpFrame(const unsigned char* rgb, int w, int h,
-        std::vector<unsigned char>& imgChunksOut, IWICImagingFactory* factory)
+        std::vector<unsigned char>& imgChunksOut)
     {
-        if (!factory) return false;
-        IStream* stream = nullptr;
-        if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &stream)) || !stream) return false;
-        bool ok = false;
-        IWICBitmapEncoder* enc = nullptr;
-        IWICBitmapFrameEncode* frame = nullptr;
-        do {
-            if (FAILED(factory->CreateEncoder(GUID_ContainerFormatWebp, nullptr, &enc)) || !enc) break;
-            if (FAILED(enc->Initialize(stream, WICBitmapEncoderNoCache))) break;
-            if (FAILED(enc->CreateNewFrame(&frame, nullptr)) || !frame) break;
-            if (FAILED(frame->Initialize(nullptr))) break;
-            if (FAILED(frame->SetSize((UINT)w, (UINT)h))) break;
-            WICPixelFormatGUID fmt = GUID_WICPixelFormat24bppBGR;
-            if (FAILED(frame->SetPixelFormat(&fmt))) break;
-            const UINT stride = (UINT)w * 3;
-            const UINT bufBytes = stride * (UINT)h;
-            if (IsEqualGUID(fmt, GUID_WICPixelFormat24bppBGR)) {
-                if (FAILED(frame->WritePixels((UINT)h, stride, bufBytes, (BYTE*)rgb))) break;
+        std::vector<uint8_t> file;
+        // method 取 3：动图逐帧编码，优先保证录制帧率
+        if (!WebpCodec::EncodeRGB(rgb, w, h, w * 3, 90.f, 3, file)) return false;
+        const unsigned char* p = file.data();
+        const size_t n = file.size();
+        if (!p || n <= 12 || memcmp(p, "RIFF", 4) != 0 || memcmp(p + 8, "WEBP", 4) != 0) return false;
+        size_t pos = 12;
+        while (pos + 8 <= n) {
+            const unsigned int len = readLe32(p + pos + 4);
+            const size_t dataPos = pos + 8;
+            const size_t chunkLen = 8 + len + (len & 1);
+            if (dataPos + len > n) break;
+            const char* fourcc = (const char*)(p + pos);
+            if (memcmp(fourcc, "ALPH", 4) == 0 || memcmp(fourcc, "VP8 ", 4) == 0
+                || memcmp(fourcc, "VP8L", 4) == 0) {
+                const size_t copy = (std::min)(chunkLen, n - pos);
+                imgChunksOut.insert(imgChunksOut.end(), p + pos, p + pos + copy);
+                if (memcmp(fourcc, "VP8L", 4) == 0 || memcmp(fourcc, "VP8 ", 4) == 0) break; // 图像块之后不用再看
             }
-            else {
-                // 编码器改了像素格式（有的 WebP 编码器不收 24bppBGR）：先转换再写
-                IWICBitmap* src = nullptr;
-                IWICFormatConverter* conv = nullptr;
-                HRESULT h2 = E_FAIL;
-                if (SUCCEEDED(factory->CreateBitmapFromMemory((UINT)w, (UINT)h, GUID_WICPixelFormat24bppBGR,
-                    stride, bufBytes, (BYTE*)rgb, &src)) && src
-                    && SUCCEEDED(factory->CreateFormatConverter(&conv)) && conv) {
-                    h2 = conv->Initialize(src, fmt, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
-                    if (SUCCEEDED(h2)) h2 = frame->WriteSource(conv, nullptr);
-                }
-                if (conv) conv->Release();
-                if (src) src->Release();
-                if (FAILED(h2)) break;
-            }
-            if (FAILED(frame->Commit())) break;
-            if (FAILED(enc->Commit())) break;
-            ok = true;
-        } while (false);
-
-        if (ok) {
-            STATSTG stat{};
-            HGLOBAL hg = nullptr;
-            if (SUCCEEDED(stream->Stat(&stat, STATFLAG_NONAME))
-                && SUCCEEDED(GetHGlobalFromStream(stream, &hg)) && hg) {
-                auto p = (const unsigned char*)GlobalLock(hg);
-                const size_t n = (size_t)stat.cbSize.QuadPart;
-                if (p && n > 12 && memcmp(p, "RIFF", 4) == 0 && memcmp(p + 8, "WEBP", 4) == 0) {
-                    size_t pos = 12;
-                    while (pos + 8 <= n) {
-                        const unsigned int len = readLe32(p + pos);
-                        const size_t dataPos = pos + 8;
-                        const size_t chunkLen = 8 + len + (len & 1);
-                        if (dataPos + len > n) break;
-                        const char* fourcc = (const char*)(p + pos);
-                        if (memcmp(fourcc, "ALPH", 4) == 0 || memcmp(fourcc, "VP8 ", 4) == 0
-                            || memcmp(fourcc, "VP8L", 4) == 0) {
-                            const size_t copy = (std::min)(chunkLen, n - pos);
-                            imgChunksOut.insert(imgChunksOut.end(), p + pos, p + pos + copy);
-                            if (memcmp(fourcc, "VP8L", 4) == 0 || memcmp(fourcc, "VP8 ", 4) == 0) break; // 图像块之后不用再看
-                        }
-                        pos += chunkLen;
-                    }
-                }
-                if (p) GlobalUnlock(hg);
-            }
+            pos += chunkLen;
         }
-        if (frame) frame->Release();
-        if (enc) enc->Release();
-        stream->Release();
-        return ok && !imgChunksOut.empty();
+        return !imgChunksOut.empty();
     }
 
     inline bool assembleWebpAnim(const std::wstring& path, int w, int h, int fps,
@@ -452,28 +405,10 @@ namespace VideoGif {
         return true;
     }
 
-    // 探测系统是否装了 WIC 的 WebP 编码器（Win10 1809+ 通常自带）
-    inline bool webpEncoderAvailable()
-    {
-        IWICImagingFactory* f = nullptr;
-        if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-            __uuidof(IWICImagingFactory), (void**)&f)) || !f) return false;
-        IWICBitmapEncoder* e = nullptr;
-        HRESULT hr = f->CreateEncoder(GUID_ContainerFormatWebp, nullptr, &e);
-        if (e) e->Release();
-        f->Release();
-        return SUCCEEDED(hr);
-    }
-
     inline void createWebp(GifParam* param)
     {
         const int ow = param->outW > 0 ? param->outW : param->w;
         const int oh = param->outH > 0 ? param->outH : param->h;
-        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-        IWICImagingFactory* factory = nullptr;
-        CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-            __uuidof(IWICImagingFactory), (void**)&factory);
-        if (!factory) { CoUninitialize(); return; }
 
         std::vector<unsigned char> bgra_buffer((size_t)param->w * 4 * param->h);
         std::vector<unsigned char> rgb_buffer((size_t)ow * oh * 3);
@@ -489,7 +424,7 @@ namespace VideoGif {
             auto tickStart = GetTickCount64();
             grabFrame(hScreenDC, hMemDC, hBitmap, bmi, param, bgra_buffer, rgb_buffer, ow, oh);
             std::vector<unsigned char> chunks;
-            if (!encodeWebpFrame(rgb_buffer.data(), ow, oh, chunks, factory)) break;
+            if (!encodeWebpFrame(rgb_buffer.data(), ow, oh, chunks)) break;
             frames.push_back(std::move(chunks));
             int sleepTime = delayMs - (int)(GetTickCount64() - tickStart);
             if (sleepTime > 0) Sleep(sleepTime);
@@ -500,8 +435,6 @@ namespace VideoGif {
         DeleteObject(hBitmap);
         DeleteDC(hMemDC);
         ReleaseDC(nullptr, hScreenDC);
-        factory->Release();
-        CoUninitialize();
     }
     // =====================================================================
 

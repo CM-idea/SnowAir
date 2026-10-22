@@ -55,7 +55,10 @@ Tip::~Tip()
 void Tip::bind(Ling::Button* btn, const std::wstring& text)
 {
 	// btn 挂在宿主窗口的节点树上，与 Tip 同生死（都随窗口销毁），捕获裸指针安全
-	btn->onEnter.add([this, text](Ling::Button* b) { showAbove(b, text); });
+	btn->onEnter.add([this, text](Ling::Button* b) {
+		if (suppressed && suppressed()) return;
+		showAbove(b, text);
+	});
 	btn->onLeave.add([this](Ling::Button* b) { hide(b); });
 }
 

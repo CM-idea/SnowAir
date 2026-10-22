@@ -25,6 +25,8 @@ namespace Icon
 	inline constexpr const wchar_t* UnlockAlt = L"\ue642";      // 解锁2
 	inline constexpr const wchar_t* Play = L"\ue646";           // 开始 / 播放
 	inline constexpr const wchar_t* Pause = L"\ue645";          // 暂停
+	inline constexpr const wchar_t* ScrollStart = L"\ue678";    // 开始滚动（长截图）
+	inline constexpr const wchar_t* ScrollPause = L"\ue679";    // 暂停滚动（长截图）
 	inline constexpr const wchar_t* Audio = L"\ue644";          // 音频（系统声）
 	inline constexpr const wchar_t* Rect = L"\ue632";           // 矩形
 	inline constexpr const wchar_t* Ellipse = L"\ue605";        // 椭圆

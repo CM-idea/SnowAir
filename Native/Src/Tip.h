@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <include/Ling.h>
 
 // 鼠标悬停提示。包的是系统 tooltip 控件（comctl32 的 TOOLTIPS_CLASS），
@@ -28,6 +29,9 @@ public:
 	// 把提示气泡从屏幕捕获里摘出去。气泡是独立的顶层窗口，宿主窗口被摘出去它不跟着走，
 	// 得单独说一声。录屏工具条（ToolVideo）用得上，别的工具条不需要
 	void excludeFromCapture();
+public:
+	// 宿主可设置：返回 true 时不弹提示（例如页面被气泡 / 遮罩盖住，下层控件不该再冒提示）
+	std::function<bool()> suppressed;
 public:
 	// 锚点相对控件上边缘往里的距离：提示压在控件上边缘 4 像素处，与 2.4.25 的观感一致。
 	// 自己算锚点的调用方（比如跟着鼠标走的滑块提示）也用它，免得两处数值不一样。

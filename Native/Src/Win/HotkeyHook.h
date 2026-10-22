@@ -1,13 +1,13 @@
 #pragma once
+#include <Windows.h>
 #include <functional>
 #include <string>
 #include <vector>
 
-// 全局热键兜底：RegisterHotKey 是"先注册先独占"，没有优先级可抢 —— 打开软件那一刻这个组合
-// 若已被别的程序（浏览器/浏览器插件、聊天工具、输入法…）占着，我们那次注册就失败，而且失败得
-// 静悄悄，表现就是"软件热键被浏览器抢了，得去设置里重新设一次才好使"。
-// 这里提供兜底：注册失败时改装低级键盘钩子。钩子比任何程序的热键/加速键都先取得按键，
-// 匹配上即吞掉该按键，效果等同于"这个组合归本程序"。
+// 全局热键兜底：RegisterHotKey 是"先注册先独占"的语义，没有可调优先级 —— 启动时若目标
+// 组合已被其他进程注册，本次注册会直接失败且不产生任何提示，表现为该热键暂不生效。
+// 这里提供兜底：注册失败时改用低级键盘钩子。钩子先于常规热键与加速键取得按键事件，
+// 命中后即消费该事件，效果等同于该组合由本进程持有。
 // 一个钩子线程同时承载多条组合键：命中哪条就回调哪条。
 namespace HotkeyHook
 {
@@ -28,4 +28,13 @@ namespace HotkeyHook
 	void setSessionBindings(std::vector<Binding> bindings);
 	void uninstall();
 	bool installed();
+
+	// —— 按键录制模式（设置页等待用户按键时）——
+	// 录制期间使用一个临时低级键盘钩子接管键盘输入：按键在进入系统热键分发之前即被消费，
+	// 再异步转交给 UI 线程。这样即使目标组合已被其他进程注册，也能被正常录制。
+	// 回调在 UI 线程执行；vk 已把左右修饰键归一成 VK_CONTROL / VK_SHIFT / VK_MENU。
+	using CaptureCallback = std::function<void(UINT vk, bool up)>;
+	void beginCapture(CaptureCallback cb);
+	void endCapture();
+	bool capturing();
 }

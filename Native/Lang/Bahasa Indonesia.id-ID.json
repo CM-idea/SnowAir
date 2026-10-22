@@ -88,6 +88,8 @@
         "retention7d": "7 hari",
         "retention30d": "30 hari",
         "retentionForever": "Selamanya",
+        "retentionDays": "Masa simpan file",
+        "disableHistory": "Nonaktifkan riwayat tangkapan",
         "currentCount": "Entri riwayat saat ini: %1",
         "noHistory": "Belum ada riwayat tangkapan",
         "historyFilterAll": "Semua waktu",

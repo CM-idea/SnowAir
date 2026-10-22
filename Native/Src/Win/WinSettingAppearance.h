@@ -47,6 +47,7 @@ private:
 	// —— 工具栏编辑器 ——
 	void tbSetKind(int kind);
 	void tbRebuildZones();
+	bool appearanceAtDefaults() const;   // 当前子页是否全部为默认值（用于「恢复默认」置灰判定）
 	void tbPersist();
 	void tbRefreshRestore();
 	void tbRestoreDefaults();
@@ -107,6 +108,12 @@ private:
 	Ling::Node* tbPreviewWrap{ nullptr };   // 预览容器（可整体隐藏）
 	Ling::Button* tbRestoreBtn{ nullptr };
 	Ling::Button* tbPreviewBtn{ nullptr };   // 「预览效果」：仅工具栏外观页显示
+	// 「其他外观」页的行控件（恢复默认时直接回写显示，不重建整页）
+	Ling::Button* otherFeatureTipsBtn{ nullptr };
+	Ling::Button* otherHotkeyTipBtn{ nullptr };
+	Ling::Button* otherRememberStyleBtn{ nullptr };
+	Ling::Button* otherToolWidthBtn{ nullptr };
+	Ling::Label* otherToolWidthLabel{ nullptr };   // 下拉按钮里显示当前值的 Label
 	int tbKind{ 0 };
 	std::vector<std::wstring> tbActive, tbInactive;
 	std::vector<Ling::Button*> tbChips;     // 与 tbActive 顺序同步
@@ -146,11 +153,15 @@ private:
 
 	// —— 软件外观 · 贴图边框 ——
 	Ling::Node* pinPreview{ nullptr };        // 右侧效果预览框
+	Ling::Button* pinBorderSw{ nullptr };     // 「默认启用」开关
 	Ling::Button* pinColorSwatch{ nullptr };
 	Ling::Label* pinColorHex{ nullptr };
 	Ling::Label* pinWidthVal{ nullptr };
 	Ling::Label* pinRadiusVal{ nullptr };
+	Ling::Slider* pinWidthSlider{ nullptr };
+	Ling::Slider* pinRadiusSlider{ nullptr };
 	// —— 软件外观 · 托盘图标 ——
+	Ling::Button* trayEnableSw{ nullptr };       // 「显示托盘图标」开关
 	std::array<Ling::Button*, 4> trayRadios{};   // 单选外圈（实心圆 → 叠白色内圆成圆环）
 	std::array<Ling::Node*, 4> trayDots{};       // 单选中心点（选中态绿色实心圆）
 	Ling::Button* trayColorGlyph{ nullptr };     // 「自定义颜色」格：可点字形（点开系统取色器）

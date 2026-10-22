@@ -110,7 +110,7 @@ private:
     void removeHostHooks();
     void installHook();
     void uninstallHook();
-    // 全局低级鼠标钩子：点击浮层窗口之外的任何位置（其它软件/宿主空白/桌面）都关闭浮层。
+    // 全局低级鼠标钩子：点击浮层窗口之外的任何位置（其他进程窗口/宿主空白/桌面）都关闭浮层。
     // 不依赖宿主是否持有焦点/激活，是"点击外部即关闭"的确定性实现（下拉互斥，同一时刻仅一个）。
     static Popup* sOpen;
     static LRESULT CALLBACK lowLevelProc(int code, WPARAM wParam, LPARAM lParam);
@@ -174,7 +174,8 @@ class ConfirmDialog : public Ling::WinBase {
 public:
     static void ask(Ling::WinBase* host, const std::wstring& message,
         std::function<void(bool)> onResult,
-        std::wstring confirmText = L"", std::wstring cancelText = L"");
+        std::wstring confirmText = L"", std::wstring cancelText = L"",
+        bool noticeOnly = false);   // noticeOnly = 只提示：不显示「取消」，只有一个确定按钮
     static bool isOpen();
     ~ConfirmDialog();
 protected:
@@ -343,6 +344,13 @@ inline Ling::Button* selectRow(Ling::Node* parent,
 }
 // 下拉按钮本体（不包含行容器/标签，用于自定义布局）
 Ling::Button* selectDdl(Ling::Node* parent,
+    const std::vector<std::wstring>& options,
+    int current,
+    std::function<void(int, const std::wstring&)> onChange);
+
+// 方形图标下拉：外观同 Outline 按钮，只显示一个图标；点击弹出选项列表
+Ling::Button* selectDdlIcon(Ling::Node* parent,
+    const std::wstring& glyph,
     const std::vector<std::wstring>& options,
     int current,
     std::function<void(int, const std::wstring&)> onChange);

@@ -134,6 +134,9 @@ void ToolLong::applyLongBtnStyle()
 	const uint32_t c = on ? Icon::ColorActive : Icon::ColorNormal;
 	btnLong->setColor(c);
 	btnLong->setHoverColor(c);
+	// 第一个按钮是「开始/暂停滚动」：空闲/暂停显示「开始滚动」，滚动中显示「暂停滚动」；
+	// 这一轮长图完成后回到长截图图标（此时按钮不再响应）
+	btnLong->setText(finished ? Icon::LongShot : (on ? Icon::ScrollPause : Icon::ScrollStart));
 }
 
 void ToolLong::bindLongTip()
@@ -264,7 +267,7 @@ void ToolLong::buildBar()
 	// 拖拽手柄不给悬停提示：它只是移动工具条
 
 	if (!editMode_) {
-		btnLong = makeIconBtn(Icon::LongShot, L"long");
+		btnLong = makeIconBtn(Icon::ScrollStart, L"long");
 		btnLong->onClick.add([this](Ling::Button* b) { onClick(b); });
 		applyLongBtnStyle();
 		bindLongTip();

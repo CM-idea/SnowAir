@@ -1438,7 +1438,7 @@ void WinCap::onCreated()
     ScreenToClient(hwnd, &pos);
     setPixPos(pos);
     show();
-    // 覆盖窗必须真的拿到键盘焦点：热键唤起截图时前台还是别的程序，不主动抢焦点的话
+    // 覆盖窗必须真的拿到键盘焦点：热键唤起截图时前台仍属于其他进程，不主动抢焦点的话
     // Ctrl+C（取色）/ 方向键 / Enter 这些窗口内按键全都送不到这里。
     // SetForegroundWindow 可能被前台锁挡下，用「临时置顶再取消」兜底（与设置窗同招）。
     if (hwnd) {
@@ -1497,10 +1497,11 @@ void WinCap::layout()
         // 拖选区时不画控点，少一圈 FillRectangle（对齐跟手）
         const bool editingSel = isPress && (stage == CapStage::Adjust || maskDragging
             || videoCanAdjust() || (stage == CapStage::Select));
-		const bool longEdit = stage == CapStage::Long && capLong && capLong->isEditMode();
+		// 长图：选区已锁定（滚动/暂停/编辑都不能拖边），四周控点从进入长图起就不画
+        const bool longEdit = stage == CapStage::Long && capLong && capLong->isEditMode();
 		// 长图编辑：对齐贴图——保留边框，隐藏四周调选区控点
-        cutMask->showHandles = !editingSel && !longEdit
-			&& (stage == CapStage::Adjust || stage == CapStage::Long || videoCanAdjust());
+        cutMask->showHandles = stage != CapStage::Long && !editingSel && !longEdit
+			&& (stage == CapStage::Adjust || videoCanAdjust());
 		cutMask->showBorder = true;
         cutMask->drawQrcodeFill = (toolQrcode != nullptr);
         cutMask->paint(ctx);
@@ -1518,6 +1519,10 @@ void WinCap::layout()
             capLong->endLongAnnotPaint(ctx, oldXform);
         }
     }
+    // 长图：拼接预览/标注会盖在 cutMask 之上，把描边压掉 —— 内容之后补画一遍，
+    // 让绿框在滚动、暂停、编辑全程持续可见（不再只在暂停那一瞬间闪一下）
+    if (stage == CapStage::Long && cutMask && !demoMode)
+        cutMask->paintBorderOverlay(ctx);
     paintPix(ctx);
     paintMouseHighlight(ctx);
     paintCursor(ctx);
@@ -1968,7 +1973,7 @@ bool WinCap::runCommand(const std::wstring& id)
 	if (id == L"cmd_close") {
 		// 演示画布 + 穿透中：第一次先退出穿透，再按一次才关画布
 		if (demoMode && isMouseTransparent) { toggleDemoThrough(); return true; }
-		close();
+		closeByUser();
 		return true;
 	}
 	if (id == L"cmd_done") {
@@ -2073,7 +2078,7 @@ bool WinCap::runCommand(const std::wstring& id)
 	}
 	if (id == L"cmd_show_cursor") { toggleShowCursor(); return true; }
 	if (id == L"cmd_scan_qrcode") { startQrcode(); return true; }
-	if (id == L"cmd_scroll_pause") { if (capLong) capLong->togglePaused(); return true; }
+	if (id == L"cmd_scroll_pause") { if (capLong) capLong->toggleCapture(); return true; }
 	return false;
 }
 
@@ -2084,7 +2089,7 @@ void WinCap::forwardKey(UINT key)
 
 // 会话期间把「系统按键」里 Scope::Global 的那几条**临时**挂到全局钩子上；surface=0 即撤。
 // 为什么非挂不可：录屏时焦点在被录的程序上，而鼠标穿透 / 收起工具栏之后焦点也不在本软件上 ——
-// 窗口内根本收不到这些键。其余命令键一律**不挂**（免得在任何程序里吞掉用户的键）。
+// 窗口内根本收不到这些键。其余命令键一律**不挂**（以免在其他进程中消费用户的按键）。
 void WinCap::syncGlobalCommandKeys(unsigned surface)
 {
 	std::vector<HotkeyHook::Binding> list;
@@ -2361,8 +2366,8 @@ LRESULT WinCap::onHitTest(const POINT pos)
 
 void WinCap::onDown(POINT pos, bool isRight)
 {
-    // 按下即撤查找元素的查询保护：查询期间遮罩可能挂着"临时点穿 + 临时捕获"，
-    // 不先撤掉这一下按下会漏给下层窗口，也会把下面要 SetCapture 的拖框捕获弄丢
+    // 按下即结束"查找元素"：作废在途查询，免得悬停高亮的结果回来再改矩形、和下面的拖框打架。
+    // 查询本身不碰遮罩样式与鼠标捕获，所以这里不需要为输入做任何补救。
     if (cutMask) cutMask->cancelHoverQuery();
     if (isRight) {
         if (handleLayerCancel(false))
@@ -3557,7 +3562,29 @@ void WinCap::hollowWin()
 {
     HRGN rgn1 = CreateRectRgn(0, 0, (int)w, (int)h);
     auto& r = cutMask->maskRect;
-    HRGN rgn2 = CreateRectRgn((int)r.left, (int)r.top, (int)r.right, (int)r.bottom);
+    // 挖洞时把选区向内收一个描边宽度：绿框贴着选区内沿画，整块挖掉会把框一起裁掉 ——
+    // 表现就是滚动时看不到框、暂停/继续时"闪一下"。内收 2px 不影响页面滚动。
+    int left = (int)r.left, top = (int)r.top, right = (int)r.right, bottom = (int)r.bottom;
+    const int inset = (int)std::lround(cutMask->strokeWidth);
+    HRGN rgn2{ nullptr };
+    if (right - left > inset * 2 && bottom - top > inset * 2) {
+        left += inset;
+        top += inset;
+        right -= inset;
+        bottom -= inset;
+        // 选区带圆角时，洞也做成同心的圆角：描边的内沿半径 = 选区半径 - 半线宽
+        int radius = 0;
+        if (cutMask->selRadius() > 0.f) {
+            const float dpiScale = dpi > 0.f ? dpi : 1.f;
+            radius = (int)std::lround(std::max(0.f,
+                cutMask->selRadius() * dpiScale - cutMask->strokeWidth * 0.5f));
+        }
+        rgn2 = CreateRoundRectRgn(left, top, right, bottom, radius * 2, radius * 2);
+    }
+    else {
+        // 选区太小、收不了描边：退回整块挖掉，至少保证还能滚动
+        rgn2 = CreateRectRgn((int)r.left, (int)r.top, (int)r.right, (int)r.bottom);
+    }
     CombineRgn(rgn1, rgn1, rgn2, RGN_DIFF);
     DeleteObject(rgn2);
     if (SetWindowRgn(hwnd, rgn1, TRUE) == 0) {
@@ -4054,10 +4081,7 @@ void WinCap::saveToFile(bool keepOpen)
         return;
     }
     if (Util::saveToFile(path, cw, ch, pixels.data())) {
-        // 记一条截图历史（只在会话收工时；keepOpen 的中间态复制不算）。
-        // 来源一律记 capture：点选窗口元素只是"框选"的一种，历史上不该显示成「焦点窗口」——
-        // 那个标记留给全局热键「截取焦点窗口」那条路径（见 App::captureFocusedWindowSilent）。
-        if (!keepOpen) Setting::get()->addHistoryItem(pixels, cw, ch, L"capture");
+        Setting::get()->addHistoryFile(path, cw, ch, L"capture");
         if (!keepOpen) close();
     }
     else {
@@ -4077,14 +4101,29 @@ void WinCap::copyToClipboard(bool keepOpen)
     int cw{ 0 }, ch{ 0 };
     if (!exportSelection(pixels, cw, ch)) return;
     if (!keepOpen) rememberLastRegion();
-    Util::saveToClipboard(cw, ch, pixels.data());
-    // 「截图后自动保存」：收工时静默落盘。点选窗口元素也算普通框选，走「自动保存文件名格式」——
-    // 「焦点窗口文件名格式」只归全局热键那条路径（App::captureFocusedWindowSilent）
-    if (!keepOpen) Util::quietSaveCapture(pixels, cw, ch, false, focusAppName_);
-    // 记一条截图历史（只在会话收工时；演示画布 keepOpen=true 不算）
-    // 来源一律 capture（点选窗口元素不记 focused，理由见上面保存分支的注释）
-    if (!keepOpen) Setting::get()->addHistoryItem(pixels, cw, ch, L"capture");
+    // 收工即落盘（历史以真实文件为准）；「以文件复制」时剪贴板放文件，否则放位图
+    std::wstring saved;
+    if (!keepOpen) saved = Util::saveCompletedCapture(pixels, cw, ch, focusAppName_);
+    if (!saved.empty() && Setting::get()->getCopyAsFile()) Util::addFileToClipboard(saved);
+    else Util::saveToClipboard(cw, ch, pixels.data());
+    if (!saved.empty()) Setting::get()->addHistoryFile(saved, cw, ch, L"capture");
     if (!keepOpen) close();
+}
+
+// 用户主动退出截图（Esc / 关闭按钮）：开启「截图自动保存」时，把当前选区 + 标注静默落盘。
+// 只落盘、不进剪贴板；落盘成功就登记进历史。
+void WinCap::closeByUser()
+{
+    auto* s = Setting::get();
+    if (s && s->getAutoSaveAfterCapture() && !demoMode && stage == CapStage::Adjust) {
+        std::vector<BYTE> pixels;
+        int cw{ 0 }, ch{ 0 };
+        if (exportSelection(pixels, cw, ch)) {
+            const auto path = Util::quietSaveCapture(pixels, cw, ch, focusAppName_);
+            if (!path.empty()) s->addHistoryFile(path, cw, ch, L"autosave");
+        }
+    }
+    close();
 }
 
 bool WinCap::exportSelection(std::vector<BYTE>& pixels, int& cw, int& ch, bool includeAnnot,

@@ -12,7 +12,7 @@
  *   - 「已安装组件：N」统计行
  *   - 每个插件一张卡片：标题行、说明、右上角方形图标下载按钮、下方绿色「已安装」徽章行
  *   - 右上角下载按钮非常驻：鼠标停在卡片上才显示
- *   - 底部「打开组件目录」按钮
+ *   - 底部「自定义插件目录」方形按钮 +「打开组件目录」按钮
  */
 class WinSettingPlugins : public Ling::Node
 {
@@ -48,6 +48,8 @@ private:
 	void setBadges(Ling::Node* row, const std::vector<std::wstring>& labels);
 	PackUi makePack(Ling::Node* parent, const std::wstring& title, const std::wstring& desc);
 	void updateHover(POINT pos);
+	// 选一个目录作为插件根目录：把已下载的组件搬过去，成功后切换并清掉旧目录
+	void choosePluginDir();
 	void startOcrDownload();
 	void startTrDownload();
 	void deleteCard(int idx);

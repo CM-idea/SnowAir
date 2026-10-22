@@ -79,9 +79,17 @@ namespace ArrowParts
 	// 轴线（杆身）折线路径：虚线只挂这条
 	Microsoft::WRL::ComPtr<ID2D1PathGeometry> shaftPath(
 		ID2D1Factory* factory, const std::vector<D2D1_POINT_2F>& pts);
+	// 趣味箭头轴线：整条杆身（含起笔侧的圈）按起笔段方向/长度整体映射，
+	// 圈始终落在杆身下方；loopScale/loopRot 给每条箭头一点手绘差异；
+	// tipFrom 回传头部方向参考点（沿杆身往回 headBack 距离）
+	Microsoft::WRL::ComPtr<ID2D1PathGeometry> funShaftPath(
+		ID2D1Factory* factory, const std::vector<D2D1_POINT_2F>& pts,
+		float loopScale = 1.f, float loopRot = 0.f,
+		D2D1_POINT_2F* tipFrom = nullptr, float headBack = 0.f);
 	// 开口箭头 V（左翼 → 尖端 → 右翼）：圆头时尖端走圆角，平头时是尖角
 	Microsoft::WRL::ComPtr<ID2D1PathGeometry> openHeadPath(
-		ID2D1Factory* factory, D2D1_POINT_2F from, D2D1_POINT_2F to, float strokeWidth);
+		ID2D1Factory* factory, D2D1_POINT_2F from, D2D1_POINT_2F to, float strokeWidth,
+		float headScale = 1.f);
 	// 标注箭头：两端各一条垂直于端段的短竖线
 	Microsoft::WRL::ComPtr<ID2D1PathGeometry> annotBarsPath(
 		ID2D1Factory* factory, const std::vector<D2D1_POINT_2F>& pts, float strokeWidth);

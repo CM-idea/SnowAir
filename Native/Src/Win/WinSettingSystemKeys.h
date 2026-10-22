@@ -22,6 +22,8 @@ private:
 	void endCapture();
 	void onKeyDown(UINT key);
 	void onSpinnerTick(UINT id);
+	// 录制中的实时预览：按当前按住的修饰键刷新按钮里的文案（如 "Ctrl+Shift+"）
+	void refreshCapturePreview();
 	std::wstring keyToStr(UINT vkCode);
 	// 把某条命令的当前键位刷到它的键位框上（空 = 「点击设置」占位、muted 色）
 	void refreshRow(const std::wstring& id);
@@ -34,7 +36,7 @@ private:
 	winrt::event_token onMouseMoveToken{};
 	Ling::Button* curBtn{ nullptr };   // 正在录制的那个框
 	std::wstring curId;                // 正在录制的命令 id
-	winrt::event_token onMouseDownToken, onKeyDownToken, onTimerToken, onBlurToken;
+	winrt::event_token onMouseDownToken, onKeyDownToken, onKeyUpToken, onTimerToken, onBlurToken;
 	Ling::Label* curSpinner{ nullptr };
 	Ling::Label* curLabel{ nullptr };
 	int spinIdx{ 0 };

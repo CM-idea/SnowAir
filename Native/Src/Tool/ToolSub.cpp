@@ -211,11 +211,11 @@ void ToolSub::showArrowTools()
 {
 	beginTool(L"arrow");
 	isArrowFill = true;
-	if (arrowHead < ArrowDefault || arrowHead > ArrowAnnot) arrowHead = ArrowDefault;
+	if (arrowHead < ArrowDefault || arrowHead > ArrowFun) arrowHead = ArrowDefault;
 	// 线段/各种箭头共用 arrow 滑条，不因切子样式改量程
 	loadStrokeSlider(L"arrow");
-	initSize(6, true);
-	// 顺序：大箭头 | 线段 | 双箭头 | 标注 | 虚线 | 圆头
+	initSize(7, true); // 6 个样式按钮 + 色块，再加滑条（新增趣味箭头后为 7）
+	// 顺序：大箭头 | 线段 | 趣味箭头 | 双箭头 | 标注 | 虚线 | 圆头
 	makeArrowHeadBtn(Icon::ArrowBig, ArrowBig, L"tool.arrowBig");
 	lineBtn = contentNode->makeChild<Ling::Button>();
 	lineBtn->setText(Icon::Line);
@@ -233,6 +233,7 @@ void ToolSub::showArrowTools()
 		}
 		win->onToolStyleChanged();
 	});
+	makeArrowHeadBtn(Icon::FunArrow, ArrowFun, L"tool.arrowFun");
 	makeArrowHeadBtn(Icon::ArrowBoth, ArrowBoth, L"tool.arrowBoth");
 	makeArrowHeadBtn(Icon::AnnotBoth, ArrowAnnot, L"tool.arrowAnnot");
 	refreshArrowHeadBtns();
@@ -1201,6 +1202,9 @@ void ToolSub::makeArrowHeadBtn(const wchar_t* icon, int style, const wchar_t* ti
 			isLine = false;
 			if (lineBtn) applyToggleStyle(lineBtn, false);
 		}
+		// 记忆工具样式：记住这次选的箭头样式
+		if (Setting::get()->getRememberToolStyle())
+			Setting::get()->setLastArrowHead(arrowHead);
 		refreshArrowHeadBtns();
 		win->onToolStyleChanged();
 	});
@@ -1211,6 +1215,7 @@ void ToolSub::makeArrowHeadBtns()
 {
 	arrowHeadBtns.clear();
 	makeArrowHeadBtn(Icon::ArrowBig, ArrowBig, L"tool.arrowBig");
+	makeArrowHeadBtn(Icon::FunArrow, ArrowFun, L"tool.arrowFun");
 	makeArrowHeadBtn(Icon::ArrowBoth, ArrowBoth, L"tool.arrowBoth");
 	makeArrowHeadBtn(Icon::AnnotBoth, ArrowAnnot, L"tool.arrowAnnot");
 	refreshArrowHeadBtns();
@@ -1218,8 +1223,8 @@ void ToolSub::makeArrowHeadBtns()
 
 void ToolSub::refreshArrowHeadBtns()
 {
-	const int styles[] = { ArrowBig, ArrowBoth, ArrowAnnot };
-	for (size_t i = 0; i < arrowHeadBtns.size() && i < 3; i++) {
+	const int styles[] = { ArrowBig, ArrowFun, ArrowBoth, ArrowAnnot };
+	for (size_t i = 0; i < arrowHeadBtns.size() && i < ARRAYSIZE(styles); i++) {
 		applyToggleStyle(arrowHeadBtns[i], arrowHead == styles[i]);
 	}
 }

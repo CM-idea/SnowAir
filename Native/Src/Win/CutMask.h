@@ -65,6 +65,9 @@ public:
 	void paint(ID2D1DeviceContext* ctx);
 	// 录制期用：只画选框描边/控点/尺寸标签（不画压暗），由"排除捕获"的选框层窗口调用
 	void paintChrome(ID2D1DeviceContext* ctx);
+	// 长图阶段：预览图/长图在 cutMask 之后绘制，会把先画的描边盖住。
+	// 内容层画完后再调它把绿框补画一遍，「滚动中 / 暂停 / 编辑」全程都能看到选区边界。
+	void paintBorderOverlay(ID2D1DeviceContext* ctx);
 	// 信息栏控件
 	InfoHit hitInfoControl(POINT pos) const;
 	bool onInfoDown(POINT pos);
@@ -91,11 +94,9 @@ public:
 	// 查找元素高亮补间（指数追赶 + 查询节流，去掉重开顿挫）
 	void onHoverAnimTick(UINT timerId);
 	void snapHoverTarget();
-	// 查找元素的两个辅助定时器（同一个 onTimer 通道，按 id 分流）：
-	//  · 驻留细化重查：光标停稳后对同一点用完整预算再钻一次，直到细化或预算耗尽
-	//  · 查询捕获看门狗：请求被"只做最新一次"合并丢弃时没有结果回来，兜底放开临时捕获
+	// 查找元素的辅助定时器：光标停稳后对同一点用完整预算再钻一次，直到细化或预算耗尽
 	void onHoverDwellTimer(UINT timerId);
-	// 按下/退出时立刻撤销查询状态（临时点穿、临时捕获、驻留重查、在途结果作废）
+	// 按下/退出时立刻撤销查询状态（驻留重查、在途结果作废）；查询本身从不改动遮罩样式或鼠标捕获
 	void cancelHoverQuery();
 private:
 	void makeLayout();
@@ -124,10 +125,6 @@ private:
 	Microsoft::WRL::ComPtr<IDWriteTextLayout> makeIconLayout(const wchar_t* code, float slot);
 	void setHoverTarget(const D2D1_RECT_F& target, bool animate);
 	void clearHoverAnim();
-	// 查询期间给遮罩上/撤"临时鼠标捕获"：命中测试会给遮罩临时加 WS_EX_TRANSPARENT，
-	// 那一瞬间鼠标按下会漏给下层窗口。捕获是线程态，只能在 UI 线程做。
-	void beginQueryGuard();
-	void endQueryGuard();
 	void scheduleHoverRefine();
 	void stopHoverRefine();
 	static bool rectEq(const D2D1_RECT_F& a, const D2D1_RECT_F& b, float eps = 0.5f);
@@ -193,12 +190,9 @@ private:
 	bool hoverPicking_{ false };
 	int hoverRefineTries_{ 0 };      // 驻留细化预算：最多 5 次，鼠标移动重置
 	bool hoverRefineTimerOn_{ false };
-	bool queryGuard_{ false };       // 查询期间临时拿到的鼠标捕获（按下/结果回来/看门狗到期撤）
 	static constexpr UINT hoverAnimTimerId{ 0x5201 };
 	static constexpr UINT hoverRefineTimerId{ 0x5202 };
-	static constexpr UINT hoverGuardTimerId{ 0x5203 };
 	static constexpr UINT kHoverRefineMs{ 80 };         // 驻留多久算"停稳了"
-	static constexpr UINT kQueryGuardWatchdogMs{ 150 }; // 捕获兜底放手
 	static constexpr float hoverChaseRate{ 75.f }; // 约 40ms 贴合
 	static constexpr UINT hoverTickMs{ 16 };
 };

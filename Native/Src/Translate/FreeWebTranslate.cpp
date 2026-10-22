@@ -119,8 +119,8 @@ TranslateResult googleTranslate(const TranslateRequest& req)
 }
 
 // ============ 微软：Bing 翻译网页接口（免费，无需密钥） ============
-// 流程与 SnowAirQT6 一致：先取 /translator 页面里的 params_AbusePreventionHelper(key/token)、
-// IG、data-iid，再 POST /ttranslatev3?IG=..&IID=..。
+// 先取 /translator 页面里的 params_AbusePreventionHelper(key/token)、IG、data-iid，
+// 再 POST /ttranslatev3?IG=..&IID=..。
 // 注意：凭证与站点绑定 —— 页面被重定向到 cn.bing.com 时，POST 也必须发到 cn.bing.com，
 // 否则接口会回 200 + 空体。host 由响应里的最终地址决定。
 
@@ -320,7 +320,7 @@ TranslateResult youdaoTranslate(const TranslateRequest& req)
 	return r;
 }
 
-// ============ 百度：官方通用翻译 API（AppId + MD5 Sign，与 SnowAirQT6 同一套凭证） ============
+// ============ 百度：官方通用翻译 API（AppId + MD5 Sign） ============
 std::wstring baiduLang(const std::wstring& lang)
 {
 	if (lang.empty() || _wcsicmp(lang.c_str(), L"auto") == 0) return L"auto";
@@ -351,7 +351,7 @@ TranslateResult baiduTranslate(const TranslateRequest& req)
 	TranslateResult r;
 	r.providerUsed = TranslateProvider::Baidu;
 
-	// 旧 Easydict 内置的 AppId 已在百度侧失效（54001 Invalid Sign），这里用 QT6 里可用的那套
+	// 百度通用翻译 API 的 AppId / 密钥（旧的内置凭证已失效，会返回 54001 Invalid Sign）
 	static const std::wstring appId = L"20240601002067575";
 	static const std::wstring secret = L"FR7xu9EngQpmqAcvcC27";
 

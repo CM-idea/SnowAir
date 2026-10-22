@@ -53,7 +53,7 @@ namespace MenuTheme
 	}
 
 	// —— 尺寸（逻辑像素，和托盘菜单一致）——
-	inline constexpr int kMenuW{ 180 };
+	inline constexpr int kMenuW{ 168 };
 	inline constexpr int kRowH{ 28 };
 	inline constexpr int kMenuPadY{ 4 };
 	inline constexpr int kSepMarginX{ 10 };

@@ -941,7 +941,15 @@ void AnnotHost::paintSizePreview(ID2D1DeviceContext* ctx)
 		// 与 ShapeArrow::paint 同一套部件：杆身画到尖端（勿缩短，否则平头会卡在三角头里），
 		// 虚线只作用于杆身，圆头同时作用于杆身与箭头头部
 		auto bodyStyle = ArrowParts::makeShaftStyle(factory, stroke, roundCap, toolSub->isArrowDash);
-		auto shaft = ArrowParts::shaftPath(factory, pts);
+		const bool isFunHead = toolSub->arrowHead == ToolSub::ArrowFun;
+		const float baseHeadLen = 10.f + stroke * 2.f;
+		const float funHeadLen = std::min(baseHeadLen * 1.3f,
+			std::max(std::fabs(x2 - x1) * 0.16f, 14.f + stroke));
+		const float funHeadScale = funHeadLen / std::max(baseHeadLen, 1.f);
+		D2D1_POINT_2F funTipFrom{ x1, cy };
+		auto shaft = isFunHead
+			? ArrowParts::funShaftPath(factory, pts, 1.f, 0.f, &funTipFrom, funHeadLen)
+			: ArrowParts::shaftPath(factory, pts);
 		if (shaft) ctx->DrawGeometry(shaft.Get(), brush.Get(), stroke, bodyStyle.Get());
 
 		auto headStyle = ArrowParts::makeHeadStyle(factory, roundCap);
@@ -950,13 +958,15 @@ void AnnotHost::paintSizePreview(ID2D1DeviceContext* ctx)
 			if (bars) ctx->DrawGeometry(bars.Get(), brush.Get(), stroke, headStyle.Get());
 		}
 		else if (toolSub->arrowHead == ToolSub::ArrowBoth) {
-			if (auto head = ArrowParts::openHeadPath(factory, { x2, cy }, { x1, cy }, stroke))
+			if (auto head = ArrowParts::openHeadPath(factory, { x2, cy }, { x1, cy }, stroke, 1.1f))
 				ctx->DrawGeometry(head.Get(), brush.Get(), stroke, headStyle.Get());
-			if (auto head = ArrowParts::openHeadPath(factory, { x1, cy }, { x2, cy }, stroke))
+			if (auto head = ArrowParts::openHeadPath(factory, { x1, cy }, { x2, cy }, stroke, 1.1f))
 				ctx->DrawGeometry(head.Get(), brush.Get(), stroke, headStyle.Get());
 		}
 		else {
-			if (auto head = ArrowParts::openHeadPath(factory, { x1, cy }, { x2, cy }, stroke))
+			const D2D1_POINT_2F headFrom = isFunHead ? funTipFrom : D2D1::Point2F(x1, cy);
+			if (auto head = ArrowParts::openHeadPath(factory, headFrom, { x2, cy }, stroke,
+				isFunHead ? funHeadScale : 1.1f))
 				ctx->DrawGeometry(head.Get(), brush.Get(), stroke, headStyle.Get());
 		}
 		pop();

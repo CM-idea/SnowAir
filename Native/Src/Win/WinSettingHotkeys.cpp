@@ -5,6 +5,7 @@
 #include "WinSettingHotkeys.h"
 #include "SettingTheme.h"
 #include "SettingWidgets.h"
+#include "HotkeyHook.h"
 #include "../Tool/IconCodes.h"
 #include <algorithm>
 #include <cctype>
@@ -26,15 +27,25 @@ namespace {
         return key == L"PrintScreen" || key == L"ScrollLock" || key == L"Pause";
     }
 
-    bool isReservedShortcut(const std::wstring& shortcut)
+    // 全局热键的「保留键」分两类，处理方式不同：
+    //   System：Windows 保留（任务切换 / 锁定 / 任务管理器…），注册不会成功 → 直接拒绝并说明原因；
+    //   Common：编辑 / 保存类通用组合，注册后会对所有程序的同名快捷键生效 → 先警告、由用户决定。
+    enum class ShortcutReserved { None, System, Common };
+    ShortcutReserved reservedKindOf(const std::wstring& shortcut)
     {
-        static const std::vector<std::wstring> reserved{
-            L"Ctrl+C", L"Ctrl+V", L"Ctrl+X", L"Ctrl+Z", L"Ctrl+Y", L"Ctrl+A", L"Ctrl+S",
+        static const std::vector<std::wstring> system{
             L"Ctrl+Alt+Delete", L"Ctrl+Shift+Esc", L"Ctrl+Esc",
             L"Alt+Tab", L"Alt+Esc", L"Alt+F4",
             L"Win+L", L"Win+D", L"Win+E", L"Win+R", L"Win+Tab",
         };
-        return std::find(reserved.begin(), reserved.end(), shortcut) != reserved.end();
+        static const std::vector<std::wstring> common{
+            L"Ctrl+C", L"Ctrl+V", L"Ctrl+X", L"Ctrl+Z", L"Ctrl+Y", L"Ctrl+A", L"Ctrl+S",
+        };
+        if (std::find(system.begin(), system.end(), shortcut) != system.end())
+            return ShortcutReserved::System;
+        if (std::find(common.begin(), common.end(), shortcut) != common.end())
+            return ShortcutReserved::Common;
+        return ShortcutReserved::None;
     }
 
     std::wstring joinShortcutKeys(const std::vector<std::wstring>& keys)
@@ -45,6 +56,63 @@ namespace {
             result += (key == L"LWin" || key == L"RWin") ? L"Win" : key;
         }
         return result;
+    }
+
+    // 录制中的实时预览：按当前按住的修饰键拼前缀（顺序与落盘口径一致，末尾带 "+"）。
+    // 只反映修饰键，主键一按下就整条落盘并结束录制，所以预览到这里为止。
+    std::wstring liveModifierPrefix()
+    {
+        std::wstring out;
+        auto add = [&out](const wchar_t* name) {
+            if (!out.empty()) out += L"+";
+            out += name;
+        };
+        if (GetAsyncKeyState(VK_CONTROL) & 0x8000) add(L"Ctrl");
+        if (GetAsyncKeyState(VK_MENU) & 0x8000) add(L"Alt");
+        if (GetAsyncKeyState(VK_SHIFT) & 0x8000) add(L"Shift");
+        if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN)) & 0x8000) add(L"Win");
+        if (!out.empty()) out += L"+";
+        return out;
+    }
+
+    // 组合键规范化比较：拆成"修饰键位 + 主键"，与键名大小写、修饰键书写顺序无关。
+    // 用于冲突判定 —— "Shift+Ctrl+A" 与 "Ctrl+Shift+A" 是同一把键，不能当成两条绑上去。
+    bool sameChord(const std::wstring& a, const std::wstring& b)
+    {
+        auto split = [](const std::wstring& chord, unsigned& mods, UINT& key) {
+            mods = 0;
+            key = 0;
+            std::wstring lower = chord;
+            std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+            for (auto& part : Ling::Util::splitStr(lower, L'+')) {
+                if (part == L"ctrl") mods |= MOD_CONTROL;
+                else if (part == L"alt") mods |= MOD_ALT;
+                else if (part == L"shift") mods |= MOD_SHIFT;
+                else if (part == L"win" || part == L"lwin" || part == L"rwin") mods |= MOD_WIN;
+                else key = Ling::Util::strToKey(part);
+            }
+            return key != 0;
+        };
+        unsigned ma = 0, mb = 0;
+        UINT ka = 0, kb = 0;
+        if (!split(a, ma, ka) || !split(b, mb, kb)) return false;
+        return ma == mb && ka == kb;
+    }
+
+    // 提示文案填充：%1 = 键位、%2 = 占用者（没有 %2 的文案传空即可）
+    std::wstring fillMessage(const wchar_t* key, const std::wstring& chord, const std::wstring& otherLabel)
+    {
+        std::wstring s = Lang::get(key);
+        auto replaceAll = [](std::wstring& str, const std::wstring& from, const std::wstring& to) {
+            size_t pos = 0;
+            while ((pos = str.find(from, pos)) != std::wstring::npos) {
+                str.replace(pos, from.size(), to);
+                pos += to.size();
+            }
+        };
+        replaceAll(s, L"%1", chord);
+        replaceAll(s, L"%2", otherLabel);
+        return s;
     }
 
     bool isValidShortcutKeys(const std::vector<std::wstring>& keys)
@@ -63,8 +131,8 @@ namespace {
         if (!hasModifier && !canBeUsedAlone(normalKey)) return false;
         std::wstring lowerKey = normalKey;
         std::transform(lowerKey.begin(), lowerKey.end(), lowerKey.begin(), ::towlower);
-        if (Ling::Util::strToKey(lowerKey) == 0) return false;
-        return !isReservedShortcut(joinShortcutKeys(keys));
+        // 保留键不在这里拦：由 onKeyDown 按 System / Common 分别提示（见 reservedKindOf）
+        return Ling::Util::strToKey(lowerKey) != 0;
     }
 
     // 暂缓启用的全局热键：设置页保留这一行但**置灰不可点**，
@@ -159,8 +227,15 @@ WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
         }},
     };
 
-    for (const auto& g : groups)
-        buildGroup(g.title, g.items, this);
+    // 「停用截图历史」开启时，隐藏「打开截图历史」这一行的键位设置
+    for (const auto& g : groups) {
+        std::vector<std::pair<std::wstring, std::wstring>> items;
+        for (const auto& it : g.items) {
+            if (it.first == L"open_history" && Setting::get()->getDisableCaptureHistory()) continue;
+            items.push_back(it);
+        }
+        buildGroup(g.title, items, this);
+    }
 
     // 内容区只有外层 content 提供底部留白(20)：清掉末尾 optionRow 的 marginBottom，
     // 使底部间距与左右一致。
@@ -171,6 +246,12 @@ WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
         if (!weakThis.lock()) return;
         if (this->curKey.empty()) return;
         this->onKeyDown(key);
+        });
+    // 松开修饰键：录制还没结束，把按钮里的预览退回（或退到剩余仍按住的修饰键）
+    onKeyUpToken = win->onKeyUp.add([this, weakThis](UINT) {
+        if (!weakThis.lock()) return;
+        if (this->curKey.empty()) return;
+        this->refreshCapturePreview();
         });
     onMouseDownToken = win->onMouseDown.add([this, weakThis](POINT pos, bool) {
         if (!weakThis.lock()) return;
@@ -183,7 +264,7 @@ WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
         if (!weakThis.lock()) return;
         this->onSpinnerTick(id);
         });
-    // 等待按键期间窗口失焦（切到别的程序）→ 直接取消这次录制，不留悬挂状态。
+    // 等待按键期间窗口失焦（前台切换到其他进程）→ 直接取消这次录制，不留悬挂状态。
     onBlurToken = win->onBlur.add([this, weakThis]() {
         if (!weakThis.lock()) return;
         if (this->curKey.empty()) return;
@@ -241,17 +322,22 @@ void WinSettingHotkeys::buildGroup(const std::wstring& grpTitle,
         applyShortcutLabel(btn, it.first);   // 文字色最后定：未绑定 = 灰
         btn->onClick.add([this](Ling::Button* b) { this->onBtnClick(b); });
         btns.push_back(btn);
+        labelById.push_back({ it.first, it.second });
     }
 }
 
 WinSettingHotkeys::~WinSettingHotkeys()
 {
     // 页面在录制中途被销毁（切走/关窗）时，热键仍是挂起状态，这里兜底恢复
-    if (!curKey.empty()) Setting::get()->resumeShortcutKeys();
+    if (!curKey.empty()) {
+        HotkeyHook::endCapture();
+        Setting::get()->resumeShortcutKeys();
+    }
     win->killTimer(kSpinnerTimerId);
     win->onMouseMove.remove(onMouseMoveToken);
     win->onMouseDown.remove(onMouseDownToken);
     win->onKeyDown.remove(onKeyDownToken);
+    win->onKeyUp.remove(onKeyUpToken);
     win->onTimer.remove(onTimerToken);
     win->onBlur.remove(onBlurToken);
 }
@@ -286,10 +372,21 @@ void WinSettingHotkeys::beginCapture(Ling::Button* btn)
     curLabel->setText(Lang::get(L"shortcut.pressKey"));
     curLabel->setFontSize(SettingTheme::fontBase);
     curLabel->setColor(kHotkeyCaptureFg);   // 绿底上白字
+    refreshCapturePreview();                // 点按钮时若已按住修饰键，立刻显示出来
 
-    // 录制期间挂起全局热键：否则按下的组合键会先被全局热键（RegisterHotKey / 低级钩子）吞掉，
-    // 根本传不到设置窗口，导致录不进任何热键。
+    // 录制期间挂起全局热键：否则按下的组合键会先被全局热键（RegisterHotKey / 低级钩子）
+    // 消费，传不到设置窗口，导致无法录制。
     Setting::get()->suspendShortcutKeys();
+
+    // 再挂一个临时低级键盘钩子接管键盘输入：目标组合可能已被其他进程注册为全局热键，
+    // 按键会在系统热键分发阶段被消费，设置窗口收不到 WM_KEYDOWN。录制期间由这里
+    // 先行消费所有按键（含系统快捷键），再转回本页。
+    auto weakThis = getWeakThis();
+    HotkeyHook::beginCapture([this, weakThis](UINT vk, bool up) {
+        if (!weakThis.lock() || curKey.empty()) return;
+        if (up) { refreshCapturePreview(); return; }   // 松开修饰键：预览退回
+        onKeyDown(vk);
+    });
 
     spinIdx = 0;
     win->setTimer(kSpinnerMs, kSpinnerTimerId);
@@ -309,6 +406,8 @@ void WinSettingHotkeys::endCapture()
         }
     }
     curKey.clear();
+    // 先撤录制钩子，再恢复全局热键：顺序反了会让重装后的钩子仍处于消费所有按键的状态
+    HotkeyHook::endCapture();
     // 录制结束（保存或取消）：按挂起前的组合键恢复全局热键
     Setting::get()->resumeShortcutKeys();
 }
@@ -321,14 +420,23 @@ void WinSettingHotkeys::onSpinnerTick(UINT id)
     curSpinner->setText(kSpinnerFrames[spinIdx]);
 }
 
+void WinSettingHotkeys::refreshCapturePreview()
+{
+    if (!curLabel) return;
+    const std::wstring prefix = liveModifierPrefix();
+    curLabel->setText(prefix.empty() ? Lang::get(L"shortcut.pressKey") : prefix);
+}
+
 void WinSettingHotkeys::onKeyDown(UINT key)
 {
+    // Esc = 取消这次录制（页面提示里的承诺）：不落盘、保持原键位
+    if (key == VK_ESCAPE) { endCapture(); return; }
     // 主键按下即完成录制：不再等抬起。否则用户在组合还没按全时先松任意一个修饰键
     //（或改主意换修饰键）就会被当成"松手保存"，三键组合经常录不进去。
     auto keyStr = keyToStr(key);
     if (keyStr.empty()) return;
-    // 只按修饰键：继续等主键，不结束录制
-    if (isShortcutModifierKey(keyStr)) return;
+    // 只按修饰键：立即把已按住的修饰键显示出来，继续等主键（纯修饰键不落盘）
+    if (isShortcutModifierKey(keyStr)) { refreshCapturePreview(); return; }
 
     const bool ctrl  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
     const bool alt   = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
@@ -353,10 +461,75 @@ void WinSettingHotkeys::onKeyDown(UINT key)
     keys.push_back(keyStr);
 
     // 最多三键（两个修饰键 + 一个主键）；不合法就丢弃，保持原键位
-    if (keys.size() <= 3 && isValidShortcutKeys(keys)) {
-        Setting::get()->setShortcutKey(curKey, keys);
-    }
+    if (keys.size() > 3 || !isValidShortcutKeys(keys)) { endCapture(); return; }
+
+    const std::wstring id = curKey;
+    const std::wstring chord = joinShortcutKeys(keys);
+    // ⚠ 先收尾再弹窗：按钮在确认前必须回到原值（取消 = 什么都不变）
     endCapture();
+
+    // Windows 保留的组合：注册无法成功，直接说明原因（不再静默丢弃）
+    if (reservedKindOf(chord) == ShortcutReserved::System) {
+        SettingUi::ConfirmDialog::ask(win,
+            fillMessage(L"shortcut.reservedSystem", chord, L""),
+            [](bool) {}, Lang::get(L"setting.confirm"), L"", true);
+        return;
+    }
+    // 通用编辑 / 保存键：可以设置，但会对所有程序的同名快捷键生效 → 先警告，由用户决定
+    if (reservedKindOf(chord) == ShortcutReserved::Common) {
+        auto weakThis = getWeakThis();
+        SettingUi::ConfirmDialog::ask(win,
+            fillMessage(L"shortcut.reservedCommon", chord, L""),
+            [this, weakThis, id, keys](bool yes) {
+                if (!weakThis.lock() || !yes) return;
+                this->applyShortcut(id, keys);
+            },
+            Lang::get(L"setting.confirm"), Lang::get(L"setting.cancel"));
+        return;
+    }
+    applyShortcut(id, keys);
+}
+
+// 落值：先判同页撞键（确认后解绑旧主），再写入并刷新按钮文字。
+// 调用前录制已经收尾（endCapture），所以这里只负责数据与显示。
+void WinSettingHotkeys::applyShortcut(const std::wstring& id, const std::vector<std::wstring>& keys)
+{
+    const std::wstring chord = joinShortcutKeys(keys);
+    const std::wstring otherId = conflictOwner(chord, id);
+    if (otherId.empty()) {
+        Setting::get()->setShortcutKey(id, keys);
+        for (auto* b : this->btns) applyShortcutLabel(b, b->id);
+        return;
+    }
+    auto weakThis = getWeakThis();
+    const std::wstring otherLabel = labelOf(otherId);
+    SettingUi::ConfirmDialog::ask(win,
+        fillMessage(L"cmdkey.conflict", chord, otherLabel),
+        [this, weakThis, id, otherId, keys](bool yes) {
+            if (!weakThis.lock() || !yes) return;
+            Setting::get()->setShortcutKey(otherId, {});   // 先解绑旧主
+            Setting::get()->setShortcutKey(id, keys);
+            for (auto* b : this->btns) applyShortcutLabel(b, b->id);
+        },
+        Lang::get(L"setting.confirm"), Lang::get(L"setting.cancel"));
+}
+
+std::wstring WinSettingHotkeys::conflictOwner(const std::wstring& chord, const std::wstring& selfId) const
+{
+    if (chord.empty()) return {};
+    for (auto* b : btns) {
+        if (b->id == selfId) continue;
+        if (sameChord(Setting::get()->getShortcutKey(b->id), chord)) return b->id;
+    }
+    return {};
+}
+
+std::wstring WinSettingHotkeys::labelOf(const std::wstring& id) const
+{
+    for (const auto& it : labelById) {
+        if (it.first == id) return it.second;
+    }
+    return id;
 }
 
 std::wstring WinSettingHotkeys::keyToStr(UINT vkCode)
@@ -389,9 +562,10 @@ std::wstring WinSettingHotkeys::keyToStr(UINT vkCode)
     case VK_SCROLL:  return L"ScrollLock";
     case VK_PAUSE:   return L"Pause";
     case VK_NUMLOCK: return L"NumLock";
-    case VK_MULTIPLY: return L"*"; case VK_ADD: return L"+";
-    case VK_SUBTRACT: return L"-"; case VK_DIVIDE: return L"/";
-    case VK_DECIMAL:  return L".";
+    // 小键盘符号用 NumXxx 专名：与主键盘的 - = / . 分开，录制按的是哪个键就存哪个
+    case VK_MULTIPLY: return L"Num*"; case VK_ADD: return L"NumAdd";
+    case VK_SUBTRACT: return L"Num-"; case VK_DIVIDE: return L"Num/";
+    case VK_DECIMAL:  return L"Num.";
     default:
         if (vkCode >= 'A' && vkCode <= 'Z') return std::wstring(1, static_cast<wchar_t>(vkCode));
         if (vkCode >= '0' && vkCode <= '9') return std::wstring(1, static_cast<wchar_t>(vkCode));

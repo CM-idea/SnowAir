@@ -11,6 +11,7 @@
 #include "../Ocr/OcrRuntimeManager.h"
 #include "../Ocr/OcrPackVariant.h"
 #include "../Translate/TranslateTypes.h"
+#include "WinSetting.h"
 #include <shobjidl.h>
 #include <commdlg.h>
 
@@ -743,7 +744,36 @@ void WinSettingFeatures::buildOutput(Ling::Node* p)
 	auto* s = Setting::get();
 	const std::wstring defDir = Util::defaultOutputDir().wstring();
 
-	// 截图输出组：手动/自动/焦点窗口 文件名格式 + 截图文件路径
+	// 顶部：历史相关——文件保留天数 / 停用截图历史
+	{
+		auto* g = SettingUi::grid2(p);
+		const std::vector<std::wstring> retOpts = {
+			Lang::get(L"setting.retention1d"),
+			Lang::get(L"setting.retention3d"),
+			Lang::get(L"setting.retention7d"),
+			Lang::get(L"setting.retention30d"),
+			Lang::get(L"setting.retentionForever"),
+		};
+		static const int kRetDays[] = { 1, 3, 7, 30, -1 };
+		int retIdx = 4;   // 认不出的值按「永久」
+		for (int i = 0; i < 5; ++i)
+			if (kRetDays[i] == s->getHistoryRetentionDays()) { retIdx = i; break; }
+
+		SettingUi::selectRow(g, Lang::get(L"setting.retentionDays"), retOpts, retIdx,
+			[](int i, const std::wstring&) {
+				static const int d[] = { 1, 3, 7, 30, -1 };
+				Setting::get()->setHistoryRetentionDays(d[i < 0 || i > 4 ? 4 : i]);
+				Setting::get()->pruneExpiredHistory();
+			}, true);
+		SettingUi::toggleRow(g, Lang::get(L"setting.disableHistory"), s->getDisableCaptureHistory(),
+			[](bool on) {
+				Setting::get()->setDisableCaptureHistory(on);
+				WinSetting::applyHistoryMenuVisibility();
+			}, true);
+		SettingUi::grid2Cells(g);
+	}
+
+	// 截图输出组：手动/自动 文件名格式 + 截图文件路径
 	SettingUi::groupLabel(p, Lang::get(L"setting.screenshotOutput"), Lang::get(L"setting.outputSectionTip"));
 	outputRow(p, Lang::get(L"setting.manualSaveFmt"),
 		s->getManualSaveFormat(), Setting::defaultManualSaveFormat(), OutputRowKind::Format,
@@ -751,9 +781,6 @@ void WinSettingFeatures::buildOutput(Ling::Node* p)
 	outputRow(p, Lang::get(L"setting.autoSaveFmt"),
 		s->getAutoSaveFormat(), Setting::defaultAutoSaveFormat(), OutputRowKind::Format,
 		[](const std::wstring& v) { Setting::get()->setAutoSaveFormat(v); });
-	outputRow(p, Lang::get(L"setting.focusedWindowFmt"),
-		s->getFocusedWindowFormat(), Setting::defaultFocusedWindowFormat(), OutputRowKind::Format,
-		[](const std::wstring& v) { Setting::get()->setFocusedWindowFormat(v); });
 	outputRow(p, Lang::get(L"setting.fnScreenshotDir"), s->getScreenshotDir(), defDir,
 		OutputRowKind::Dir,
 		[](const std::wstring& v) { Setting::get()->setScreenshotDir(v); });

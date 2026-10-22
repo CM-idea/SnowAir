@@ -213,6 +213,8 @@ void WinSettingAppearance::showTab(int index)
         if (!tabs[i]) continue;
         if (i == index) tabs[i]->show(); else tabs[i]->hide();
     }
+    // 「恢复默认」的可用态跟随当前子页
+    tbRefreshRestore();
 }
 
 // 顶部 3 个分段胶囊：保留现有「选中 primary 黑底白字 / 未选中透明黑字 + hover 高亮」样式，
@@ -466,28 +468,61 @@ void WinSettingAppearance::buildOtherTab(Ling::Node* host)
 {
     // 双栏：与「软件外观」等页的开关排布一致
     auto* grid = SettingUi::grid2(host);
-    SettingUi::toggleRow(grid,
-        Lang::get(L"setting.featureTips"),
-        Setting::get()->getFeatureTips(),
-        [](bool on) {
-            Setting::get()->setFeatureTips(on);
+    // 开关的点击状态以 Setting 当前值为准（而非构建该行时捕获的值），
+    // 避免「恢复默认」程序化改写设置后，下一次点击仍按过期状态取反而失效
+    auto mkStateToggle = [&](const std::wstring& labelKey,
+                             std::function<bool()> get,
+                             std::function<void(bool)> set,
+                             std::function<void(bool)> after) -> Ling::Button* {
+        auto r = SettingUi::optionRow(grid, Lang::get(labelKey), L"", true, SettingUi::kToggleH);
+        auto* sw = r.ctrlBox->makeChild<Ling::Button>();
+        SettingUi::styleToggle(sw, get());
+        sw->onClick.add([this, sw, get, set, after](Ling::Button*) {
+            const bool next = !get();
+            set(next);
+            SettingUi::styleToggle(sw, next);
+            if (after) after(next);
+            this->tbRefreshRestore();
+        });
+        return sw;
+    };
+    otherFeatureTipsBtn = mkStateToggle(L"setting.featureTips",
+        [] { return Setting::get()->getFeatureTips(); },
+        [](bool on) { Setting::get()->setFeatureTips(on); },
+        [](bool) {
             // 立刻把已经创建出来的「?」一起显示/隐藏，不用退出设置页才生效
             SettingUi::applyFeatureTipsVisibility();
-        }, true);
+        });
     // 「快捷键提示」：开关只影响之后弹出的停悬气泡（已显示的提示仍带旧文字，属预期）
-    SettingUi::toggleRow(grid,
-        Lang::get(L"setting.hotkeyTip"),
-        Setting::get()->getHotkeyTip(),
-        [](bool on) { Setting::get()->setHotkeyTip(on); }, true);
+    otherHotkeyTipBtn = mkStateToggle(L"setting.hotkeyTip",
+        [] { return Setting::get()->getHotkeyTip(); },
+        [](bool on) { Setting::get()->setHotkeyTip(on); }, {});
+    // 记忆工具样式：记住上次标注工具样式（如大箭头），下次截图自动复用；默认关闭
+    otherRememberStyleBtn = mkStateToggle(L"setting.rememberToolStyle",
+        [] { return Setting::get()->getRememberToolStyle(); },
+        [](bool on) { Setting::get()->setRememberToolStyle(on); }, {});
     // 线迹标注类工具的默认宽度（1–10，默认 4）
     {
         std::vector<std::wstring> widths;
         for (int i = 1; i <= 10; ++i) widths.push_back(std::to_wstring(i));
-        SettingUi::selectRow(grid,
+        otherToolWidthBtn = SettingUi::selectRow(grid,
             Lang::get(L"setting.toolDefaultWidth"),
             widths,
             std::clamp(Setting::get()->getToolDefaultWidth(), 1, 10) - 1,
-            [](int i, const std::wstring&) { Setting::get()->setToolDefaultWidth(i + 1); }, true);
+            [this](int i, const std::wstring&) {
+                Setting::get()->setToolDefaultWidth(i + 1);
+                this->tbRefreshRestore();
+            }, true);
+        // selectDdl 内部用一个 Label 显示当前值（Button 自身还有一个 Text 子节点，
+        // 两者类型不同，必须按类型找，不能直接取 front()）
+        if (otherToolWidthBtn) {
+            for (auto& ch : otherToolWidthBtn->children) {
+                if (auto* lab = dynamic_cast<Ling::Label*>(ch.get())) {
+                    otherToolWidthLabel = lab;
+                    break;
+                }
+            }
+        }
     }
     SettingUi::grid2Cells(grid);
 }
@@ -554,11 +589,13 @@ void WinSettingAppearance::initPinBorderCtrls(Ling::Node* p)
     auto* headGrow = head->makeChild<Ling::Node>();
     headGrow->setFlexGrow(1.f);
     auto* sw = head->makeChild<Ling::Button>();
+    pinBorderSw = sw;
     SettingUi::styleToggle(sw, Setting::get()->getPinBorderDefaultEnabled());
-    sw->onClick.add([sw](Ling::Button*) {
+    sw->onClick.add([this, sw](Ling::Button*) {
         const bool on = !Setting::get()->getPinBorderDefaultEnabled();
         Setting::get()->setPinBorderDefaultEnabled(on);
         SettingUi::styleToggle(sw, on);
+        this->tbRefreshRestore();
         });
 
     // 主体：左列（颜色 + 粗细 + 圆角）+ 右侧效果预览
@@ -647,17 +684,21 @@ void WinSettingAppearance::initPinBorderCtrls(Ling::Node* p)
         Setting::get()->getPinBorderWidth(), 12, &pinWidthVal);
     auto* rSlider = addSliderRow(Lang::get(L"setting.pinBorderRadius"),
         Setting::get()->getPinBorderRadius(), 24, &pinRadiusVal);
+    pinWidthSlider = wSlider;
+    pinRadiusSlider = rSlider;
     wSlider->onValueChanged.add([this](Ling::Slider*, float v) {
         const int iv = (int)(v + 0.5f);
         Setting::get()->setPinBorderWidth(iv);
         if (this->pinWidthVal) this->pinWidthVal->setText(std::to_wstring(iv) + L"px");
         this->refreshPinPreview();
+        this->tbRefreshRestore();
         });
     rSlider->onValueChanged.add([this](Ling::Slider*, float v) {
         const int iv = (int)(v + 0.5f);
         Setting::get()->setPinBorderRadius(iv);
         if (this->pinRadiusVal) this->pinRadiusVal->setText(std::to_wstring(iv) + L"px");
         this->refreshPinPreview();
+        this->tbRefreshRestore();
         });
 
     // 右侧效果预览（宽 136；高度改矮，与左侧三行齐平，避免卡片被撑高）
@@ -710,6 +751,7 @@ void WinSettingAppearance::pickPinColor()
         pinColorHex->setText(buf);
     }
     refreshPinPreview();
+    tbRefreshRestore();
 }
 
 // ---- 托盘图标卡（开关 + 5 样式预览 + 单选 + 上传） ----
@@ -732,12 +774,14 @@ void WinSettingAppearance::initTrayCtrls(Ling::Node* p)
     auto* headGrow = head->makeChild<Ling::Node>();
     headGrow->setFlexGrow(1.f);
     auto* sw = head->makeChild<Ling::Button>();
+    trayEnableSw = sw;
     SettingUi::styleToggle(sw, Setting::get()->getTrayEnabled());
-    sw->onClick.add([sw](Ling::Button*) {
+    sw->onClick.add([this, sw](Ling::Button*) {
         const bool on = !Setting::get()->getTrayEnabled();
         Setting::get()->setTrayEnabled(on);
         SettingUi::styleToggle(sw, on);
         TrayIcon::apply();
+        this->tbRefreshRestore();
         });
 
     auto* grid = card->makeChild<Ling::Node>();
@@ -780,6 +824,7 @@ void WinSettingAppearance::initTrayCtrls(Ling::Node* p)
             TrayIcon::apply();
             this->refreshTrayRadios();
             this->refreshTrayPreviews();
+            this->tbRefreshRestore();
             });
         this->trayRadios[idx] = r;
         this->trayDots[idx] = dot;
@@ -932,6 +977,7 @@ void WinSettingAppearance::pickTrayColor()
     TrayIcon::apply();
     refreshTrayRadios();
     refreshTrayPreviews();
+    tbRefreshRestore();
 }
 
 void WinSettingAppearance::pickTrayIcon()
@@ -946,6 +992,7 @@ void WinSettingAppearance::pickTrayIcon()
     TrayIcon::apply();
     refreshTrayRadios();
     refreshTrayPreviews();
+    tbRefreshRestore();
 }
 
 void WinSettingAppearance::setAutoStartBtn(Ling::Button* btn)
@@ -1075,19 +1122,87 @@ void WinSettingAppearance::tbRebuildZones()
 void WinSettingAppearance::tbPersist()
 {
     ToolbarStore::saveLayout(tbKind, ToolbarStore::LayoutState{ tbActive, tbInactive });
+    tbRefreshRestore();   // 布局改动后同步「恢复默认」的可用态
+}
+
+// 当前子页是否全部为默认值：三个子页共用同一判据，决定「恢复默认」是否置灰
+bool WinSettingAppearance::appearanceAtDefaults() const
+{
+    auto* s = Setting::get();
+    if (tabIndex == 1) {
+        return s->getPinBorderDefaultEnabled()
+            && s->getPinBorderColor() == 0x34C759FFu
+            && s->getPinBorderWidth() == 2 && s->getPinBorderRadius() == 6
+            && s->getTrayEnabled() && s->getTrayIconStyle() == 0;
+    }
+    if (tabIndex == 2) {
+        return s->getFeatureTips() && !s->getHotkeyTip()
+            && !s->getRememberToolStyle() && s->getToolDefaultWidth() == 4;
+    }
+    auto def = ToolbarStore::defaultLayout(tbKind);
+    return tbActive == def.active && tbInactive == def.inactive;
 }
 
 void WinSettingAppearance::tbRefreshRestore()
 {
     if (!tbRestoreBtn) return;
-    auto def = ToolbarStore::defaultLayout(tbKind);
-    bool isDef = (tbActive == def.active && tbInactive == def.inactive);
+    const bool isDef = appearanceAtDefaults();
     tbRestoreBtn->setColor(isDef ? SettingTheme::textMuted : SettingTheme::textPrimary);
     tbRestoreBtn->setHoverColor(isDef ? SettingTheme::textMuted : SettingTheme::textPrimary);
 }
 
 void WinSettingAppearance::tbRestoreDefaults()
 {
+    // 已是默认值：按钮置灰，点击不产生任何改动（三个子页规则一致）
+    if (appearanceAtDefaults()) return;
+    // 「软件外观」页：恢复贴图边框与托盘图标到默认值，并回写控件显示
+    if (tabIndex == 1) {
+        auto* s = Setting::get();
+        const uint32_t defColor = 0x34C759FF;   // 默认主题绿
+        s->setPinBorderDefaultEnabled(true);
+        s->setPinBorderColor(defColor);
+        s->setPinBorderWidth(2);
+        s->setPinBorderRadius(6);
+        s->setTrayEnabled(true);
+        s->setTrayIconStyle(0);
+        if (pinBorderSw) SettingUi::styleToggle(pinBorderSw, true);
+        if (pinColorSwatch) { pinColorSwatch->setBg(defColor); pinColorSwatch->setHoverBg(defColor); }
+        if (pinColorHex) {
+            wchar_t buf[16];
+            swprintf_s(buf, L"#%02X%02X%02X", (defColor >> 24) & 0xFF, (defColor >> 16) & 0xFF, (defColor >> 8) & 0xFF);
+            pinColorHex->setText(buf);
+        }
+        if (pinWidthSlider) pinWidthSlider->setValue(2.f);
+        if (pinWidthVal) pinWidthVal->setText(L"2px");
+        if (pinRadiusSlider) pinRadiusSlider->setValue(6.f);
+        if (pinRadiusVal) pinRadiusVal->setText(L"6px");
+        refreshPinPreview();
+        if (trayEnableSw) SettingUi::styleToggle(trayEnableSw, true);
+        TrayIcon::apply();
+        refreshTrayRadios();
+        refreshTrayPreviews();
+        tbRefreshRestore();
+        win->refresh();
+        return;
+    }
+    // 「其他外观」页：恢复本页开关/选项到默认值（功能提示开、快捷键提示关、
+    // 记忆工具样式关、标注默认值 4），直接回写控件显示，不重建整页
+    if (tabIndex == 2) {
+        auto* s = Setting::get();
+        s->setFeatureTips(true);
+        SettingUi::applyFeatureTipsVisibility();
+        s->setHotkeyTip(false);
+        s->setRememberToolStyle(false);
+        s->setToolDefaultWidth(4);
+        if (otherFeatureTipsBtn) SettingUi::styleToggle(otherFeatureTipsBtn, true);
+        if (otherHotkeyTipBtn) SettingUi::styleToggle(otherHotkeyTipBtn, false);
+        if (otherRememberStyleBtn) SettingUi::styleToggle(otherRememberStyleBtn, false);
+        if (otherToolWidthLabel) otherToolWidthLabel->setText(std::to_wstring(4));
+        tbRefreshRestore();
+        win->refresh();
+        return;
+    }
+    // 「工具栏外观」页：重建 chip 并把布局写回默认
     ToolbarStore::restoreDefaults(tbKind);
     tbSetKind(tbKind);
     // 强制刷新（tbSetKind 里 kind==tbKind 会直接 return）

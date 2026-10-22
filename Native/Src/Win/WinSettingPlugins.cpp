@@ -1,14 +1,18 @@
 #include "pch.h"
 #include <filesystem>
 #include <cstdio>
+#include <shobjidl.h>
+#include <wrl/client.h>
 #include "WinSettingPlugins.h"
 #include "SettingWidgets.h"
 #include "SettingTheme.h"
 #include "../Ocr/OcrModelManager.h"
 #include "../Ocr/OcrRuntimeManager.h"
 #include "../Ocr/OcrPackVariant.h"
+#include "../Ocr/LwPpOcrEngine.h"
 #include "../Ocr/PluginPaths.h"
 #include "../Translate/TranslateModelManager.h"
+#include "../Translate/BergamotEngine.h"
 #include "../Lang.h"
 #include "../Setting.h"
 #include "../Tool/IconCodes.h"
@@ -21,6 +25,76 @@ namespace {
 		if (!std::filesystem::is_directory(p, ec)) return false;
 		auto it = std::filesystem::directory_iterator(p, ec);
 		return !ec && it != std::filesystem::directory_iterator();
+	}
+
+	// 语言文案里的 %1 替换
+	std::wstring fillArg(std::wstring t, const std::wstring& arg)
+	{
+		if (auto pos = t.find(L"%1"); pos != std::wstring::npos) t.replace(pos, 2, arg);
+		return t;
+	}
+
+	// 选择文件夹（IFileOpenDialog + FOS_PICKFOLDERS）；取消返回空
+	std::wstring pickFolder(HWND owner, const std::wstring& initial)
+	{
+		using Microsoft::WRL::ComPtr;
+		ComPtr<IFileOpenDialog> dlg;
+		if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+			IID_PPV_ARGS(dlg.GetAddressOf()))) || !dlg)
+			return {};
+		DWORD opts{};
+		dlg->GetOptions(&opts);
+		dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+		const auto title = Lang::get(L"setting.pluginsCustomDir");
+		dlg->SetTitle(title.c_str());
+		if (!initial.empty()) {
+			ComPtr<IShellItem> folder;
+			if (SUCCEEDED(SHCreateItemFromParsingName(initial.c_str(), nullptr,
+				IID_PPV_ARGS(folder.GetAddressOf()))) && folder)
+				dlg->SetFolder(folder.Get());
+		}
+		if (FAILED(dlg->Show(owner))) return {};   // 用户取消
+		ComPtr<IShellItem> item;
+		if (FAILED(dlg->GetResult(item.GetAddressOf())) || !item) return {};
+		PWSTR raw{ nullptr };
+		if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &raw)) || !raw) return {};
+		std::wstring out{ raw };
+		CoTaskMemFree(raw);
+		return out;
+	}
+
+	// 把旧插件目录里的组件复制到新目录（合并；同名文件以当前已下载的为准）。
+	// 返回空 = 成功；否则返回出错的顶层条目名。
+	std::wstring copyPluginComponents(const std::filesystem::path& from, const std::filesystem::path& to)
+	{
+		std::error_code ec;
+		if (!std::filesystem::is_directory(from, ec)) return {};   // 还没装过组件
+		std::filesystem::create_directories(to, ec);
+		if (ec) return to.wstring();
+
+		std::filesystem::directory_iterator it(from, ec);
+		if (ec) return from.wstring();
+		for (const auto& entry : it) {
+			std::error_code cec;
+			std::filesystem::copy(entry.path(), to / entry.path().filename(),
+				std::filesystem::copy_options::recursive
+				| std::filesystem::copy_options::overwrite_existing, cec);
+			if (cec) return entry.path().filename().wstring();
+		}
+		return {};
+	}
+
+	// 清掉旧目录（尽力而为）：正在被占用的 DLL 删不掉就留着，不影响新目录
+	void removePluginComponents(const std::filesystem::path& dir)
+	{
+		std::error_code ec;
+		std::filesystem::directory_iterator it(dir, ec);
+		if (ec) return;
+		// 先收集再删：边遍历边删目录在部分实现上会让迭代器失效
+		std::vector<std::filesystem::path> entries;
+		for (const auto& entry : it) entries.push_back(entry.path());
+		for (const auto& p : entries) std::filesystem::remove_all(p, ec);
+		std::filesystem::remove(dir, ec);   // 空了才删得掉
 	}
 	// 离线文字识别只提供 PP-OCRv6（v5/v4 的 RapidOCR.dll 方案已下架，见 OcrPackVariant.h）
 	constexpr OcrPackVariant kOcrVariant = OcrPackVariant::Official;
@@ -311,11 +385,26 @@ void WinSettingPlugins::build()
 	});
 	cards.push_back({ gh.card, gh.dlBtn, gh.delBtn, false, false, false });
 
-	// —— 底部：左「打开组件目录」，右「已安装组件：N」（对齐截图历史页右下角的计数文案）——
+	// —— 底部：左「自定义插件目录」方形按钮 +「打开组件目录」，右「已安装组件：N」
+	//    （对齐截图历史页右下角的计数文案）——
 	auto* row = makeChild<Ling::Node>();
 	row->setFlexDirection(Ling::FlexDirection::Row);
 	row->setWidthPercent(100.f);
 	row->setAlignItems(Ling::Align::Center);
+
+	// 方形文件夹按钮：悬停提示「自定义插件目录」，点击后选目录并迁移已下载的组件。
+	// 直接复用 btnOutline 工厂，高度与旁边「打开组件目录」完全一致（同一个 ctrlH），
+	// 只把宽度收成方形、换成图标字体。
+	auto* dirBtn = SettingUi::btnOutline(row, Icon::Folder, [this]() { this->choosePluginDir(); });
+	dirBtn->setFontFamily(Icon::Family);
+	dirBtn->setFontSize(16.f);
+	dirBtn->setWidth(SettingTheme::ctrlH);
+	dirBtn->setPadding(0.f, 0.f, 0.f, 0.f);
+	dirBtn->setMarginRight(SettingTheme::sp2);
+	// 与设置页其它悬停说明共用同一套气泡（无系统 tooltip 的 1 秒延迟）
+	if (auto* ht = SettingUi::helpTip())
+		ht->bind(dirBtn, Lang::get(L"setting.pluginsCustomDir"));
+
 	SettingUi::btnOutline(row, Lang::get(L"setting.pluginsOpenDir"), []() {
 		auto dir = PluginPaths::root();
 		std::filesystem::create_directories(dir);
@@ -334,6 +423,75 @@ void WinSettingPlugins::build()
 	refreshStatus();
 	// 内容区只有外层 content 提供底部留白：清掉末尾元素的 marginBottom，使底部与左右一致。
 	SettingUi::trimTrailingGap(this);
+}
+
+// 选一个目录作为插件根目录：先把已下载的组件复制过去，成功了再切换配置并清理旧目录。
+// 复制失败时旧目录保持原样、配置不变，不会出现"组件只搬了一半"的坏状态。
+void WinSettingPlugins::choosePluginDir()
+{
+	namespace fs = std::filesystem;
+	auto* s = Setting::get();
+	if (!s) return;
+
+	// 下载中改目录会让正在写入的组件被搬走/复制成不完整的文件
+	for (const auto& c : cards) {
+		if (!c.busy) continue;
+		SettingUi::ConfirmDialog::ask(win, Lang::get(L"setting.pluginsDirBusy"), nullptr,
+			Lang::get(L"setting.confirm"), L"", true);
+		return;
+	}
+
+	const fs::path oldRoot = PluginPaths::root();
+	std::wstring initial = oldRoot.wstring();
+	{
+		std::error_code ec;
+		if (!fs::is_directory(oldRoot, ec)) initial = s->getDataPath().wstring();
+	}
+	const std::wstring picked = pickFolder(win->hwnd, initial);
+	if (picked.empty()) return;   // 取消
+
+	const fs::path newRoot{ picked };
+	// 规范化后按 Windows 规则做大小写无关比较（path 自身的 == / lexically_relative
+	// 是大小写敏感的，C:\Foo 与 c:\foo 会被当成两个目录）
+	auto lowerKey = [](const fs::path& p) {
+		std::wstring s = p.native();
+		for (auto& c : s) c = (wchar_t)towlower(c);
+		if (s.empty() || (s.back() != L'\\' && s.back() != L'/')) s += L'\\';
+		return s;
+	};
+	std::error_code e1, e2;
+	const fs::path oldCanon = fs::weakly_canonical(oldRoot, e1);
+	const fs::path newCanon = fs::weakly_canonical(newRoot, e2);
+	if (!e1 && !e2) {
+		const std::wstring oldKey = lowerKey(oldCanon);
+		const std::wstring newKey = lowerKey(newCanon);
+		if (oldKey == newKey) {              // 已经是这个目录：固定下来即可
+			s->setPluginDir(newRoot.wstring());
+			return;
+		}
+		// 不能选当前插件目录的子目录：否则会把自己复制进自己
+		if (newKey.compare(0, oldKey.size(), oldKey) == 0) {
+			SettingUi::ConfirmDialog::ask(win, Lang::get(L"setting.pluginsDirNested"), nullptr,
+				Lang::get(L"setting.confirm"), L"", true);
+			return;
+		}
+	}
+
+	// 先解除引擎对 DLL 的占用（否则旧目录里的 dll 删不掉）
+	LwPpOcrEngine::release();
+	BergamotEngine::release();
+
+	const std::wstring failed = copyPluginComponents(oldRoot, newRoot);
+	if (!failed.empty()) {
+		SettingUi::ConfirmDialog::ask(win,
+			fillArg(Lang::get(L"setting.pluginsDirMoveFailed"), failed), nullptr,
+			Lang::get(L"setting.confirm"), L"", true);
+		return;
+	}
+
+	s->setPluginDir(newRoot.wstring());
+	removePluginComponents(oldRoot);
+	refreshStatus();
 }
 
 // 鼠标移动：光标落在哪张卡片上就显示哪张卡片的按钮，其余隐藏。

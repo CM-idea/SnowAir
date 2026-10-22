@@ -88,6 +88,8 @@
         "retention7d": "7 дней",
         "retention30d": "30 дней",
         "retentionForever": "Навсегда",
+        "retentionDays": "Срок хранения файлов",
+        "disableHistory": "Отключить историю снимков",
         "currentCount": "Записей в истории: %1",
         "noHistory": "История снимков пуста",
         "historyFilterAll": "Всё время",

@@ -65,12 +65,13 @@ protected:
 // setValue：回写选中文本到触发按钮（按钮文本由子 Label 控制，不能用 setText 覆盖）
 void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int current,
                std::function<void(int, const std::wstring&)> onChange,
-               std::function<void(const std::wstring&)> setValue = nullptr)
+               std::function<void(const std::wstring&)> setValue = nullptr,
+               bool headerFromOptions = false)
 {
     // 选中值放进共享状态：展开时按「最新选中」渲染首行/排除项，选项被选中后即时更新。
     // 否则 current 是绑定那一刻的值，再次展开看到的还是初始默认项（首行恒为默认选项的 BUG）。
     auto sel = std::make_shared<int>(current);
-    btn->onClick.add([btn, options, sel, onChange, setValue](Ling::Button*) mutable {
+    btn->onClick.add([btn, options, sel, onChange, setValue, headerFromOptions](Ling::Button*) mutable {
         auto* w = btn->win;
         // 开关切换：若浮层已展开且正好锚定在该按钮上，再次点击仅关闭（toggle 关），不再重开。
         // 注意顺序：全局低级鼠标钩子在消息派发前已先于按钮 onClick 运行，若它在此处关闭了浮层，
@@ -82,9 +83,11 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
             return;
         }
         destroyPopup();
+        // 图标触发框（headerFromOptions）：浮层挂在按钮下方，不复刻首行、也不遮盖按钮。
+        const bool below = headerFromOptions;
         // 展开期间把触发框自己的描边藏起来：浮层顶部与触发框重合，
         // 两条描边叠在一起会多出一圈边，看着"不对"。关闭时再恢复（见下方各处 destroyPopup）。
-        btn->setBorderWidth(0.f);
+        if (!below) btn->setBorderWidth(0.f);
 
         // ── 一体面板：浮层顶到触发框上缘并盖住它，面板首行复刻触发框
         //    （同高度/同左右内边距/同字号与箭头），下面直接接选项列表 → 视觉上就是"触发框 + 列表"
@@ -102,7 +105,7 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
             if (i != cur) rows.push_back(i);
         const float rowN = rows.empty() ? 1.f : (float)rows.size();
 
-        const float contentH = headerH + pad + itemH * rowN + itemGap * std::max(0.f, rowN - 1.f) + pad;
+        const float contentH = (below ? 0.f : headerH) + pad + itemH * rowN + itemGap * std::max(0.f, rowN - 1.f) + pad;
         // 面板高度按内容来（不再固定砍到 280：选项多时会把内容挤出窗口，列表里就冒出滚动条）。
         // 只在"内容确实放不下"时（顶到显示器工作区下沿）才收缩，这时滚动条才是合理的。
         float maxH = 4000.f;
@@ -122,7 +125,7 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
         // 下拉宽度跟随触发按钮实际宽度（约定：弹层与触发按钮严格等宽），避免"弹出项比下拉栏宽/窄"的错位。
         // 触发按钮未布局出宽度时才退回 dropdownWidth。btn->w 为物理像素，除以 dpi 换算回逻辑尺寸。
         float pw = SettingTheme::dropdownWidth;
-        if (btn->w > 0.f && w && w->dpi > 0.f)
+        if (!headerFromOptions && btn->w > 0.f && w && w->dpi > 0.f)
             pw = btn->w / w->dpi;
 
         // 1px 描边不用圆角节点直接 setBorder：描边外沿与圆角 clip 边缘重合会被二次抗锯齿，
@@ -130,8 +133,10 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
         // 代价：窗口四周各多留 edge 个逻辑像素当外环，面板内容整体内缩同样宽度（place() 里把窗口回退对齐触发框）。
         const float edge = (w && w->dpi > 0.f) ? 1.f / w->dpi : 1.f;   // 1 个物理像素对应的逻辑长度
         gPopup = std::make_unique<SettingUi::Popup>(w, pw + edge * 2.f, totalH + edge * 2.f);
-        gPopup->setAttachTop(true);
-        gPopup->setHitTransparentTop(headerH * dpi + 1.f);   // 顶部那条=触发框：点击透给宿主触发框
+        if (!below) {
+            gPopup->setAttachTop(true);
+            gPopup->setHitTransparentTop(headerH * dpi + 1.f);   // 顶部那条=触发框：点击透给宿主触发框
+        }
         auto* box = gPopup->box();
         box->setBg(SettingTheme::border);   // 外壳填描边色：内底内缩后正好露出一圈 1px 外环
         box->setBorder(0.f, 0);
@@ -149,6 +154,8 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
         panel->setFlexShrink(1.f);
 
         // 首行：复刻触发框（同高/同左右内边距/同字号与箭头），左内边距用触发框自己的值。
+        // 图标触发框（below）在按钮下方展开，不复刻首行。
+        if (!below) {
         const auto btnPad = btn->getPadding();
         auto* head = panel->makeChild<Ling::Button>();
         head->setText(L"");   // 文本/图标都交给子 Label，字体族才能与触发框一致
@@ -172,7 +179,13 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
             val->setFontSize(SettingTheme::fontBase);
             val->setColor(SettingTheme::popupFg);
             val->setFlexShrink(1.f);
-            val->setText(cur >= 0 && cur < (int)options.size() ? options[cur] : L"");
+            // 首行要复刻「触发框当前显示的文字」，不能直接用 options[cur]：
+            // 有些下拉的触发框会显示加过前缀的文案（如「保留 7 天」），列表项仍是「7 天」。
+            std::wstring shown = (cur >= 0 && cur < (int)options.size()) ? options[cur] : L"";
+            for (auto& c : btn->children) {
+                if (auto* lab = dynamic_cast<Ling::Label*>(c.get())) { shown = lab->getText(); break; }
+            }
+            val->setText(shown);
             auto* spacer = head->makeChild<Ling::Node>();
             spacer->setFlexGrow(1.f);
             spacer->setFlexShrink(1.f);
@@ -183,6 +196,7 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
             icon->setColor(SettingTheme::textMuted);
             icon->setFlexShrink(0.f);
             icon->setMarginLeft(6.f);
+        }
         }
 
         // 选项区
@@ -364,7 +378,7 @@ void Popup::open()
         SetWindowPos(hwnd, HWND_TOPMOST, (int)x, (int)y, (int)w, (int)h,
                      SWP_SHOWWINDOW | SWP_NOACTIVATE);
     }
-    // 打开即挂全局低级鼠标钩子：点击浮层窗口之外的任何位置（其它软件/宿主空白/桌面）
+    // 打开即挂全局低级鼠标钩子：点击浮层窗口之外的任何位置（其他进程窗口/宿主空白/桌面）
     // 都能命中并关闭浮层，不再依赖宿主是否失焦/失活。同一时刻仅一个浮层 → sOpen 单例。
     sOpen = this;
     installHook();
@@ -405,18 +419,23 @@ void Popup::place()
     // 默认向下弹出：定位到锚定按钮正下缘 + 间距。
     POINT pt{ static_cast<LONG>(anchor->x), static_cast<LONG>(anchor->y - sy + anchor->h) + gap };
     ClientToScreen(host->hwnd, &pt);
-    // 按钮贴近屏幕底部时，向下弹出会超出工作区被裁剪（发送按钮下拉被截断）→ 翻转向上。
     MONITORINFO mi{ sizeof(MONITORINFO) };
-    if (HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)) {
-        GetMonitorInfo(mon, &mi);
-        if (pt.y + (LONG)h > mi.rcWork.bottom) {
-            POINT top{ static_cast<LONG>(anchor->x), static_cast<LONG>(anchor->y - sy) };
-            ClientToScreen(host->hwnd, &top);
-            setPosition(top.x, top.y - (LONG)h - gap);
-            return;
-        }
+    const HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    if (mon) GetMonitorInfo(mon, &mi);
+    LONG px = pt.x;
+    LONG py = pt.y;
+    // 按钮贴近屏幕右缘时，向左展开到"浮层右缘与按钮右缘对齐"，避免整块浮层出屏。
+    const LONG aRight = pt.x + static_cast<LONG>(anchor->w);
+    if (mon && px + static_cast<LONG>(w) > mi.rcWork.right - gap)
+        px = aRight - static_cast<LONG>(w);
+    if (mon && px < mi.rcWork.left) px = mi.rcWork.left;
+    // 按钮贴近屏幕底部时，向下弹出会超出工作区被裁剪（发送按钮下拉被截断）→ 翻转向上。
+    if (mon && py + static_cast<LONG>(h) > mi.rcWork.bottom) {
+        POINT top{ static_cast<LONG>(anchor->x), static_cast<LONG>(anchor->y - sy) };
+        ClientToScreen(host->hwnd, &top);
+        py = top.y - static_cast<LONG>(h) - gap;
     }
-    setPosition(pt.x, pt.y);
+    setPosition(px, py);
 }
 
 void Popup::removeHostHooks()
@@ -428,10 +447,10 @@ void Popup::removeHostHooks()
 }
 
 // ─── 全局低级鼠标钩子：点击浮层之外的任意位置即关闭 ────────────────────
-//   Popup 是带 WS_EX_NOACTIVATE 的独立置顶窗口：点击其它软件时宿主（设置窗口）失焦失活，
-//   但 Popup 自身不参与激活、也不会收到任何失活通知，导致其持续悬浮在别的软件之上。
+//   Popup 是带 WS_EX_NOACTIVATE 的独立置顶窗口：点击其他进程窗口时宿主（设置窗口）失焦失活，
+//   但 Popup 自身不参与激活、也不会收到任何失活通知，导致其持续悬浮在其他窗口之上。
 //   办法：浮层打开期间挂 WH_MOUSE_LL 钩子，捕获全系统鼠标按下事件；若落点不在浮层窗口
-//   内（其它软件 / 宿主空白 / 桌面），立即关闭浮层。这是"点击外部即关闭"的确定性实现，
+//   内（其他进程窗口 / 宿主空白 / 桌面），立即关闭浮层。这是"点击外部即关闭"的确定性实现，
 //   不依赖宿主焦点状态机，也天然满足所有下拉互斥（同一时刻仅 sOpen 一个）。
 LRESULT CALLBACK Popup::lowLevelProc(int code, WPARAM wParam, LPARAM lParam)
 {
@@ -471,7 +490,7 @@ LRESULT CALLBACK Popup::lowLevelProc(int code, WPARAM wParam, LPARAM lParam)
             }
         }
     }
-    // 必须放行，否则会吞掉全系统的鼠标消息（浮层内部点击、其它软件点击均受影响）。
+    // 必须放行，否则会消费全系统的鼠标消息（浮层内部点击、其他进程窗口点击均受影响）。
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
@@ -500,8 +519,9 @@ constexpr float kTipPadY{ 8.f };    // 文本上下内边距（比系统 tooltip
 constexpr float kTipGap{ 4.f };     // 三角尖端到锚定控件边缘的间距
 constexpr float kTipProbeH{ 400.f };// 首次测量的探测高度（只为取折行后的文本高）
 // 颜色按 RRGGBBAA 解析（Ling::Color 的约定）
-constexpr uint32_t kTipBg{ 0xE5E5E5FF };   // 气泡底色 #E5E5E5
-constexpr uint32_t kTipFg{ 0x262626FF };   // 文字深灰（浅底必须用深字才读得清）
+// 气泡配色随主题反转：浅色模式深底白字（更醒目），深色模式浅底深字（在暗背景上才跳出来）
+uint32_t tipBg() { return SettingTheme::isDark() ? 0xE5E5E5FF : 0x262626FF; }
+uint32_t tipFg() { return SettingTheme::isDark() ? 0x262626FF : 0xFFFFFFFF; }
 }
 
 HoverTip::HoverTip(Ling::WinBase* host) : Ling::WinBase(), host(host)
@@ -530,7 +550,7 @@ void HoverTip::onCreated()
     auto d2d = Ling::D2D::get();
     if (d2d && d2d->deviceContext) {
         d2d->deviceContext->CreateSolidColorBrush(
-            Ling::Color(kTipBg).getD2DColor(), brushBg.GetAddressOf());
+            Ling::Color(tipBg()).getD2DColor(), brushBg.GetAddressOf());
     }
     body->setBg(0);
     // 外壳（圆角 + 三角）由 Canvas 手绘；节点层只负责文本。
@@ -549,7 +569,7 @@ void HoverTip::onCreated()
     ToolbarChrome::applyPropBubbleContentPad(content, tipDown);
     label = content->makeChild<Ling::Label>();
     label->setFontSize(SettingTheme::fontSm);
-    label->setColor(Ling::Color(kTipFg));
+    label->setColor(Ling::Color(tipFg()));
 }
 
 void HoverTip::layout()
@@ -838,8 +858,13 @@ namespace {
     // 设置窗口在 onCreated 里注册进来的悬停气泡（工具栏停悬气泡那套外壳：圆角矩形 + 小三角）。
     // 未注册时 helpTipButton 返回 nullptr —— 构建期不产生问号。
     HoverTip* s_helpTip{ nullptr };
-    // 已创建的问号按钮：总开关切换时直接 show/hide，不必重建整页
-    std::vector<Ling::Button*> s_helpButtons;
+    // 已创建的问号按钮：总开关切换时直接 show/hide，不必重建整页。
+    // 页面切换或重建会销毁这些按钮，因此同时记录存活哨兵；遍历时跳过已失效条目。
+    struct HelpBtn {
+        Ling::Button* btn;
+        std::weak_ptr<bool> alive;
+    };
+    std::vector<HelpBtn> s_helpButtons;
 
     // 选项说明文案表：键 = 中文选项原文；
     // 英文界面下语言包给的是英文，查不到 → 不出问号）。
@@ -850,9 +875,9 @@ namespace {
             { L"以管理员身份运行", L"避免因权限不足导致快捷键注册失败、无法截取高权限窗口等问题" },
             { L"查找窗口元素", L"截图时识别并框选窗口内的子元素" },
             { L"“取消”弹窗", L"已绘制标注时，截图里按取消会先确认，避免误触丢失内容" },
-            { L"以文件形式复制", L"截图先保存到指定目录，再以文件形式复制到剪贴板" },
-            { L"截图后保存", L"截图完成后自动保存到指定目录" },
-            { L"以鼠标为中心缩放", L"滚轮缩放贴图时以鼠标位置为中心" },
+            { L"以文件复制", L"截图先保存到指定目录，再以文件形式复制到剪贴板" },
+            { L"截图自动保存", L"按键取消或关闭截图时，自动把选区内容保存至截图目录" },
+            { L"光标中心缩放", L"滚轮缩放贴图时以鼠标位置为中心" },
             { L"自动文本识别", L"贴图后自动进行文本识别" },
             { L"自动缩放窗口", L"贴图超出显示器时自动缩放窗口，完整显示内容" },
             { L"托盘图标", L"在系统托盘显示图标" },
@@ -868,8 +893,10 @@ namespace {
             { L"动图清晰度", L"动图的输出高度上限，同样只缩不放" },
             { L"动图格式", L"GIF 兼容最好 / WebP 体积最小 / APNG 无损" },
             { L"麦克风", L"选择录制使用的麦克风，无设备时使用系统默认" },
-            { L"截图文件路径", L"截图与「以文件形式复制」的保存位置，留空用默认目录" },
+            { L"截图文件路径", L"截图与「以文件复制」的保存位置，留空用默认目录" },
             { L"录屏文件路径", L"录屏与动图的保存位置，留空用默认目录" },
+            { L"文件保留天数", L"超过该天数的截图/录屏文件会自动清理；「永久保留」则不再自动清理" },
+            { L"停用截图历史", L"停用侧栏 / 托盘 / 快捷键里的历史入口，截图仍正常保存" },
             { L"字典模式", L"点击译文中的英文单词，即可查看详细释义" },
             { L"快捷键提示", L"显示当前工具快捷键" },
             { L"排除工具栏", L"避免录屏工具栏被录入画面" },
@@ -877,6 +904,7 @@ namespace {
             { L"选框鼠标跟随", L"鼠标穿透模式下，光标靠近录制范围边缘时选区自动跟随光标，使操作始终处于录制画面内" },
             { L"鼠标高亮提醒", L"录制时在光标下显示半透明色块，便于在画面中定位光标；点击色块或输入色号可自定义颜色" },
             { L"标注默认值", L"设置线迹标注类工具默认宽度，默认是4" },
+            { L"记忆工具样式", L"记住上次标注工具样式，下次截图自动复用" },
             // —— 「系统按键」页的条目说明 ——
             { L"工具循环", L"在工具栏的绘图工具之间按顺序循环切换" },
             { L"开始/暂停录制", L"临时全局键：开始/暂停屏幕录制" },
@@ -894,9 +922,11 @@ void attachHelpTip(HoverTip* tip) { s_helpTip = tip; s_helpButtons.clear(); }
 void applyFeatureTipsVisibility()
 {
     const bool on = Setting::get() && Setting::get()->getFeatureTips();
-    for (auto* b : s_helpButtons) {
-        if (!b) continue;
-        if (on) b->show(); else b->hide();
+    // 清理所属页面已销毁的条目，避免列表持续增长
+    std::erase_if(s_helpButtons, [](const HelpBtn& hb) { return !hb.alive.lock(); });
+    for (auto& hb : s_helpButtons) {
+        if (!hb.btn) continue;
+        if (on) hb.btn->show(); else hb.btn->hide();
     }
 }
 
@@ -909,12 +939,12 @@ Ling::Button* helpTipButton(Ling::Node* parent, const std::wstring& text)
     if (!Setting::get() || !Setting::get()->getFeatureTips()) return nullptr;  // 总开关关闭
 
     // 问号按钮：用图标字库里的「问题」字形（无圆底/描边）。
-    // 常态用次级灰（不抢眼），悬停提亮到前景色 —— 深色下即变白；浅色下变深（否则白字在白卡片上看不见）。
+    // 常态：浅色 #E5E5E5 / 深色 #434343（都比正文淡，不抢眼），悬停提亮到前景色。
     auto* btn = parent->makeChild<Ling::Button>();
     btn->setText(Icon::Problem);
     btn->setFontFamily(Icon::Family);
     btn->setFontSize(16.f);
-    btn->setColor(SettingTheme::textMuted);
+    btn->setColor(SettingTheme::isDark() ? 0x434343FF : 0xE5E5E5FF);
     btn->setHoverColor(SettingTheme::textPrimary);
     btn->setSize(18.f, 18.f);
     btn->setPadding(0.f, 0.f, 0.f, 0.f);
@@ -924,7 +954,7 @@ Ling::Button* helpTipButton(Ling::Node* parent, const std::wstring& text)
     btn->setJustifyContent(Ling::Justify::Center);
     btn->setAlignItems(Ling::Align::Center);
     s_helpTip->bind(btn, text);
-    s_helpButtons.push_back(btn);
+    s_helpButtons.push_back({ btn, btn->getWeakThis() });
     return btn;
 }
 
@@ -942,7 +972,7 @@ static Ling::Label* makeGroupLabelRow(Ling::Node* parent, const std::wstring& te
 
     auto* lab = row->makeChild<Ling::Label>();
     lab->setText(text);
-    lab->setFontSize(SettingTheme::fontBase);
+    lab->setFontSize(SettingTheme::fontSm);   // 与页面标题下的说明文字同字号（12）
     // 组名用次级灰，避免与正文（textPrimary）同色
     lab->setColor(SettingTheme::textMuted);
     lab->setFlexShrink(1.f);
@@ -1212,6 +1242,28 @@ Ling::Button* selectDdl(Ling::Node* parent,
 
     bindPopup(btn, options, current, onChange,
         [valueLab](const std::wstring& t) { valueLab->setText(t); });
+    return btn;
+}
+
+// 方形图标下拉：外观同 Outline 按钮（白底 + 描边），只显示一个图标；点击弹出选项列表
+Ling::Button* selectDdlIcon(Ling::Node* parent,
+                            const std::wstring& glyph,
+                            const std::vector<std::wstring>& options,
+                            int current,
+                            std::function<void(int, const std::wstring&)> onChange)
+{
+    auto* btn = btnOutline(parent, glyph, nullptr);
+    btn->setFontFamily(Icon::Family);
+    btn->setFontSize(16.f);
+    btn->setWidth(SettingTheme::ctrlH);
+    btn->setHeight(SettingTheme::ctrlH);
+    btn->setPadding(0.f, 0.f, 0.f, 0.f);
+    btn->setFlexShrink(0.f);
+    // 图标：常态为「恢复默认」那种灰；停悬只把图标转纯白，底色沿用 Outline 的停悬底色
+    btn->setColor(SettingTheme::textMuted);
+    btn->setHoverColor(0xFFFFFFFF);
+    // 图标按钮没有文字：弹层首行直接显示当前选项
+    bindPopup(btn, options, current, onChange, nullptr, true);
     return btn;
 }
 
@@ -1746,7 +1798,7 @@ ConfirmDialog::ConfirmDialog(Ling::WinBase* host, std::wstring message,
 {
     if (host) dpi = host->dpi;
     // 置顶属性跟随宿主：宿主本身是置顶窗口（如全屏截图覆盖窗）才置顶，否则做成普通弹窗，
-    // 免得软件失焦后还压在别的程序上面。普通宿主下靠 owned 关系依旧盖在宿主之上。
+    // 免得本窗口失焦后仍悬浮在其他窗口之上。普通宿主下靠 owned 关系依旧盖在宿主之上。
     DWORD exStyle = WS_EX_TOOLWINDOW;
     if (host && host->hwnd && (GetWindowLongPtrW(host->hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST))
         exStyle |= WS_EX_TOPMOST;
@@ -1768,11 +1820,12 @@ bool ConfirmDialog::isOpen()
 }
 
 void ConfirmDialog::ask(Ling::WinBase* host, const std::wstring& message,
-    std::function<void(bool)> onResult, std::wstring confirmText, std::wstring cancelText)
+    std::function<void(bool)> onResult, std::wstring confirmText, std::wstring cancelText,
+    bool noticeOnly)
 {
     if (s_open) return;   // 同一时刻只弹一个
     if (confirmText.empty()) confirmText = Lang::get(L"setting.confirm");
-    if (cancelText.empty()) cancelText = Lang::get(L"setting.cancel");
+    if (cancelText.empty() && !noticeOnly) cancelText = Lang::get(L"setting.cancel");
     auto* dlg = new ConfirmDialog(host, message, std::move(confirmText),
         std::move(cancelText), std::move(onResult));
     s_open = dlg;
@@ -1859,7 +1912,7 @@ void ConfirmDialog::onCreated()
     keyTok = onKeyDown.add([this](UINT key) {
         if (key == VK_ESCAPE) this->finish(false);
     });
-    // 失焦即取消：点到别的程序 / Alt+Tab 失去键盘焦点时自动收掉弹窗（等同取消），
+    // 失焦即取消：点到其他进程窗口 / Alt+Tab 失去键盘焦点时自动收掉弹窗（等同取消），
     // 不缠着把窗口一直挂在最上面。
     blurTok = onBlur.add([this]() { this->finish(false); });
 

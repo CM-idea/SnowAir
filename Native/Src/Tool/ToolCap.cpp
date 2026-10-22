@@ -467,7 +467,12 @@ void ToolCap::showToolSubForEffective(const std::wstring& eff)
 	auto* host = annotHost();
 	if (!host || !host->toolSub) return;
 	if (eff == L"rect") host->toolSub->showRectTools();
-	else if (eff == L"arrow") host->toolSub->showArrowTools();
+	else if (eff == L"arrow") {
+		// 记忆工具样式：还原上次用的箭头样式（大箭头 / 双箭头 …）
+		if (Setting::get()->getRememberToolStyle())
+			host->toolSub->arrowHead = Setting::get()->getLastArrowHead();
+		host->toolSub->showArrowTools();
+	}
 	else if (eff == L"pen") host->toolSub->showPenTools();
 	else if (eff == L"number") host->toolSub->showNumberTools();
 	else if (eff == L"text") host->toolSub->showTextTools();
@@ -1239,11 +1244,11 @@ void ToolCap::requestCaptureClose()
 		SettingUi::ConfirmDialog::ask(winCap, Lang::get(L"setting.cancelCaptureConfirm"),
 			[this, weak](bool ok) {
 				if (!ok || !weak.lock()) return;
-				if (winCap) winCap->close();
+				if (winCap) winCap->closeByUser();
 			});
 		return;
 	}
-	winCap->close();
+	winCap->closeByUser();
 }
 
 void ToolCap::onClickPin(Ling::Button* btn)

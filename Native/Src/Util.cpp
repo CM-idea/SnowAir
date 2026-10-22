@@ -1,10 +1,12 @@
 #include "pch.h"
 #include <wincodec.h>
 #include <shobjidl.h>
+#include <shellapi.h>
 #include <winver.h>
 #include <format>
 #include <fstream>
 #include "Util.h"
+#include "Image/WebpCodec.h"
 #include "Lang.h"
 #include "Setting.h"
 #include "Win/WinPin.h"
@@ -143,9 +145,11 @@ namespace {
 		std::wstring e;
 		e.reserve(ext.size());
 		for (auto c : ext) e.push_back((wchar_t)towlower(c));
+		// 调用方传的是 path::extension()，带前导点（".jpg" / ".bmp"），先去掉再比较，
+		// 否则 jpg/bmp 永远匹配不上，会静默退化成 PNG（扩展名却是 .jpg / .bmp）。
+		if (!e.empty() && e.front() == L'.') e.erase(e.begin());
 		if (e == L"jpg" || e == L"jpeg") { container = GUID_ContainerFormatJpeg; quality = 0.92f; }
 		else if (e == L"bmp") { container = GUID_ContainerFormatBmp; quality = -1.f; }
-		else if (e == L"webp") { container = GUID_ContainerFormatWebp; quality = 0.9f; }
 		else { container = GUID_ContainerFormatPng; quality = -1.f; }
 	}
 
@@ -316,21 +320,26 @@ void Util::saveToClipboard(const int w, const int h, BYTE* data)
 bool Util::saveToFile(const std::wstring& path, const int w, const int h, BYTE* data)
 {
 	if (path.empty() || w <= 0 || h <= 0 || !data) return false;
-	// 按扩展名选编码容器（PNG/JPEG/WebP/BMP）。临时文件与历史缩略图固定走 .png，
+	std::wstring ext = std::filesystem::path(path).extension().wstring();
+	for (auto& c : ext) c = (wchar_t)towlower(c);
+	// WebP 走内置编码器（libwebp）：系统 WIC 不一定带 WebP 编码器，不能再依赖它。
+	// data 是 top-down BGRA，stride = w * 4。
+	if (ext == L".webp") {
+		std::vector<uint8_t> encoded;
+		if (!WebpCodec::EncodeBGRA(data, w, h, w * 4, 90.f, false, encoded))
+			return false;
+		std::ofstream file(path, std::ios::binary | std::ios::trunc);
+		if (!file) return false;
+		file.write(reinterpret_cast<const char*>(encoded.data()), (std::streamsize)encoded.size());
+		return file.good();
+	}
+	// 按扩展名选编码容器（PNG/JPEG/BMP）。临时文件与历史缩略图固定走 .png，
 	// 所以这里的格式切换只影响用户可见的落盘文件。
 	GUID container{}; float quality = -1.f;
-	containerForExt(std::filesystem::path(path).extension().wstring(), container, quality);
+	containerForExt(ext, container, quality);
 	ComPtr<IWICImagingFactory> factory;
 	auto hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.GetAddressOf()));
 	if (FAILED(hr)) return false;
-	// 目标编码器不可用（如系统没装 WebP 编解码器）：退回 PNG 无损，至少把图存下来
-	{
-		ComPtr<IWICBitmapEncoder> probe;
-		if (FAILED(factory->CreateEncoder(container, nullptr, probe.GetAddressOf()))) {
-			container = GUID_ContainerFormatPng;
-			quality = -1.f;
-		}
-	}
 	ComPtr<IWICStream> stream;
 	hr = factory->CreateStream(stream.GetAddressOf());
 	if (FAILED(hr)) return false;
@@ -682,6 +691,9 @@ static std::wstring findHistoryFilePath(const std::wstring& id)
 {
 	auto list = Setting::get()->getHistoryItems();
 	for (auto& it : list) if (it.id == id) return it.filePath;
+	// 目录扫描出来的条目把路径直接当 id
+	std::error_code ec;
+	if (std::filesystem::exists(id, ec)) return id;
 	return L"";
 }
 
@@ -919,21 +931,61 @@ std::wstring Util::foregroundAppName()
 	return processBaseName(pid);
 }
 
-// 截图会话收工后按「截图后自动保存」静默落盘（不弹对话框）。
-// fromWindow=true（点选到了窗口元素）用「焦点窗口文件名格式」，否则用「自动保存文件名格式」，
-// 扩展名统一取「保存格式」。返回落盘路径（空 = 未开启 / 失败）。
-std::wstring Util::quietSaveCapture(const std::vector<BYTE>& bgra, const int w, const int h,
-	const bool fromWindow, const std::wstring& focusAppName)
+// 删除文件到系统回收站：SHFileOperation 的 FOF_ALLOWUNDO；失败再退回永久删除
+bool Util::moveToRecycleBin(const std::wstring& path)
 {
+	if (path.empty()) return false;
+	std::wstring from = path;
+	from.push_back(L'\0');   // SHFileOperation 要求双空结尾
+	SHFILEOPSTRUCTW op{};
+	op.wFunc = FO_DELETE;
+	op.pFrom = from.c_str();
+	op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+	const bool ok = SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted;
+	if (ok) return true;
+	std::error_code ec;
+	return std::filesystem::remove(path, ec);
+}
+
+// 自动落盘（取消退出共用）：用「自动保存文件名格式」+「保存格式」写到截图目录。
+// 返回落盘路径（空 = 失败）。
+std::wstring Util::saveAutoCapture(const std::vector<BYTE>& bgra, const int w, const int h,
+	const std::wstring& focusAppName)
+{
+	if (w <= 0 || h <= 0 || bgra.empty()) return {};
 	auto* s = Setting::get();
-	if (!s || !s->getAutoSaveAfterCapture() || w <= 0 || h <= 0 || bgra.empty()) return {};
+	if (!s) return {};
 	const std::wstring ext = extensionFromSaveFormat(s->getSaveFormat());
-	const std::wstring fmt = fromWindow ? s->getFocusedWindowFormat() : s->getAutoSaveFormat();
-	const std::wstring def = fromWindow ? Setting::defaultFocusedWindowFormat() : Setting::defaultAutoSaveFormat();
-	const std::wstring path = buildSavePath(fmt, def, ext, focusAppName);
+	const std::wstring path = buildSavePath(s->getAutoSaveFormat(), Setting::defaultAutoSaveFormat(),
+		ext, focusAppName);
 	if (path.empty()) return {};
 	if (!saveToFile(path, w, h, const_cast<BYTE*>(bgra.data()))) return {};
 	return path;
+}
+
+// 正常完成截图落盘：用「手动保存文件名格式」（和“自动保存”文件名区分开，
+// 历史页就能按文件名把两种来源分开）。
+std::wstring Util::saveCompletedCapture(const std::vector<BYTE>& bgra, const int w, const int h,
+	const std::wstring& focusAppName)
+{
+	if (w <= 0 || h <= 0 || bgra.empty()) return {};
+	auto* s = Setting::get();
+	if (!s) return {};
+	const std::wstring ext = extensionFromSaveFormat(s->getSaveFormat());
+	const std::wstring path = buildSavePath(s->getManualSaveFormat(), Setting::defaultManualSaveFormat(),
+		ext, focusAppName);
+	if (path.empty()) return {};
+	if (!saveToFile(path, w, h, const_cast<BYTE*>(bgra.data()))) return {};
+	return path;
+}
+
+// 用户主动退出截图（Esc / 关闭）时按「截图自动保存」静默落盘（不弹对话框、不进剪贴板）。
+std::wstring Util::quietSaveCapture(const std::vector<BYTE>& bgra, const int w, const int h,
+	const std::wstring& focusAppName)
+{
+	auto* s = Setting::get();
+	if (!s || !s->getAutoSaveAfterCapture()) return {};
+	return saveAutoCapture(bgra, w, h, focusAppName);
 }
 
 

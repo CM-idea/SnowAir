@@ -83,7 +83,7 @@ public:
 	void forwardKey(UINT key) override;
 	void setMouseTransparent(bool transparent);
 	bool mouseTransparent() const { return isMouseTransparent; }
-	// 会话开始那一刻前台窗口的应用名（不含扩展名）；供「焦点窗口文件名格式」用
+	// 会话开始那一刻前台窗口的应用名（不含扩展名）；供 {{FOCUS_WINDOW_APP_NAME}} 用
 	const std::wstring& focusAppName() const { return focusAppName_; }
 	// 「录制中显示按键」：全局键盘钩子把按键组合写进来（钩子回调在 UI 线程，可直接调用）
 	void onGlobalKeyCombo(const std::wstring& text);
@@ -125,6 +125,8 @@ public:
 	// keepOpen：演示画布用 —— 复制/保存后不关窗（画布只由 ✕ / Esc 退出）
 	void saveToFile(bool keepOpen = false);
 	void copyToClipboard(bool keepOpen = false);
+	// 用户主动退出截图（Esc / 关闭按钮）：开启「截图自动保存」时先把当前选区落盘再关
+	void closeByUser();
 	bool isAnnotating() const { return annotLive; }
 	void startMp4(bool useSpeaker, bool useMic);
 	void startGif();
@@ -299,7 +301,7 @@ private:
 	Microsoft::WRL::ComPtr<ID2D1Bitmap1> cursorBmp;
 	// 框选：仅真正拖动后才显示放大镜（单击不触发）
 	bool selectDragging_{ false };
-	// 「查找元素」点选到的窗口元素（无拖拽即确认）→ 命中「焦点窗口文件名格式」与历史来源 focused
+	// 「查找元素」点选到的窗口元素（无拖拽即确认）→ 用 {{FOCUS_WINDOW_APP_NAME}} 与历史来源 focused
 	bool selectionFromElement_{ false };
 	// 会话开始前记录的前台应用名（用于 {{FOCUS_WINDOW_APP_NAME}}）
 	std::wstring focusAppName_;

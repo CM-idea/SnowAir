@@ -79,11 +79,17 @@ public:
 	// 「保存格式」设置（如 "JPEG (*.jpg)"）→ 扩展名；认不出来一律 png
 	static std::wstring extensionFromSaveFormat(const std::wstring& fmt);
 	// 当前前台窗口所属进程名（不含扩展名），本进程自己（截图覆盖窗等）返回空。
-	// 供「焦点窗口文件名格式」的 {{FOCUS_WINDOW_APP_NAME}} 用，需在覆盖窗出现前调用。
+	// 供文件名模板里的 {{FOCUS_WINDOW_APP_NAME}} 用，需在覆盖窗出现前调用。
 	static std::wstring foregroundAppName();
-	// 截图会话收工后按「截图后自动保存」静默落盘（不弹对话框）：
-	// fromWindow=true 用「焦点窗口文件名格式」，否则用「自动保存文件名格式」，扩展名取「保存格式」。
-	// 返回落盘路径（空 = 未开启 / 失败）。
+	// 删除文件到系统回收站（失败才退回永久删除），避免用户误删
+	static bool moveToRecycleBin(const std::wstring& path);
+	// 自动落盘（取消/退出截图用）：用「自动保存文件名格式」+「保存格式」写到截图目录
+	static std::wstring saveAutoCapture(const std::vector<BYTE>& bgra, const int w, const int h,
+		const std::wstring& focusAppName = L"");
+	// 正常完成截图落盘：用「手动保存文件名格式」+「保存格式」写到截图目录
+	static std::wstring saveCompletedCapture(const std::vector<BYTE>& bgra, const int w, const int h,
+		const std::wstring& focusAppName = L"");
+	// 用户主动退出截图时按「截图自动保存」开关决定是否落盘（不弹对话框、不进剪贴板）
 	static std::wstring quietSaveCapture(const std::vector<BYTE>& bgra, const int w, const int h,
-		const bool fromWindow, const std::wstring& focusAppName = L"");
+		const std::wstring& focusAppName = L"");
 };

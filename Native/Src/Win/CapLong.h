@@ -28,11 +28,11 @@ public:
 	// 绘图工具 / 工具循环用 —— 长图阶段的工具在这条工具条上，不在截图条上。
 	ToolLong* toolBar() const { return tool.get(); }
 	void raiseTool();
+	// 开始/暂停/继续滚动（「系统按键」截图组的「开始/暂停滚动」，默认 Space）：
+	// 未开始时按键即开滚；滚动中按键暂停；暂停中再按继续。
 	void toggleCapture();
 	void startCapture();
 	void setPaused(bool on);
-	// 暂停/继续（「系统按键」截图组的「暂停/继续滚动」，默认 Space）
-	void togglePaused();
 	// 是否处于滚动截图会话中（含暂停与编辑态，它们属同一次滚动）。
 	// 选区锁定判定用；⚠ 不可命名为 isCapturing（成员变量已占用该名字）
 	bool capturing() const { return isCapturing; }

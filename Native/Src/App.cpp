@@ -35,6 +35,9 @@ void App::init()
 
 void App::dispose()
 {
+    // 托盘单例的析构还会去碰 Ling 的事件表、菜单窗口和图标缓存，必须赶在它们之前拆；
+    // 留到静态析构时，图标缓存（TrayIcon 里的 g_cache）可能已被先一步销毁 → 退出时崩溃
+    Tray::dispose();
     // 窗口对象是文件级静态变量，交给静态析构就晚了（那时 CoUninitialize 已经跑完），
     // 所以趁这里把还开着的窗口先放掉
     WinPin::dispose();
@@ -138,11 +141,12 @@ void App::captureFullScreenSilent()
 
 	if (Setting::get()->getCopyAsFile() && saved) Util::addFileToClipboard(path);
 	else Util::saveToClipboard(sw, sh, pixels.data());
-	if (saved) Setting::get()->addHistoryItem(pixels, sw, sh, L"fullscreen");
+	if (saved) Setting::get()->addHistoryFile(path, sw, sh, L"fullscreen");
 }
 
 // 全局热键「截取焦点窗口」：静默抓当前前台窗口，全程不建窗口。
-// 与 captureFullScreenSilent 的差别只在"抓哪块"和"文件名模板"（走焦点窗口那一套 + {{FOCUS_WINDOW_APP_NAME}}）。
+// 与 captureFullScreenSilent 的差别只在"抓哪块"；文件名统一走「手动保存文件名格式」，
+// 其中 {{FOCUS_WINDOW_APP_NAME}} 会替换成前台应用名。
 void App::captureFocusedWindowSilent()
 {
 	HWND fg = GetForegroundWindow();
@@ -166,13 +170,14 @@ void App::captureFocusedWindowSilent()
 	if (pixels.empty()) return;
 
 	const std::wstring ext = Util::extensionFromSaveFormat(Setting::get()->getSaveFormat());
+	// 文件名走「手动保存文件名格式」（已并入原焦点窗口格式），仍支持 {{FOCUS_WINDOW_APP_NAME}}
 	const std::wstring path = Util::buildSavePath(
-		Setting::get()->getFocusedWindowFormat(), Setting::defaultFocusedWindowFormat(), ext, appName);
+		Setting::get()->getManualSaveFormat(), Setting::defaultManualSaveFormat(), ext, appName);
 	const bool saved = !path.empty() && Util::saveToFile(path, w, h, pixels.data());
 
 	if (Setting::get()->getCopyAsFile() && saved) Util::addFileToClipboard(path);
 	else Util::saveToClipboard(w, h, pixels.data());
-	if (saved) Setting::get()->addHistoryItem(pixels, w, h, L"focused");
+	if (saved) Setting::get()->addHistoryFile(path, w, h, L"focused");
 }
 
 // 全局热键「重复截图」：按上一次记住的选区（屏幕坐标）静默再抓一次，全程不建窗口。
@@ -193,10 +198,11 @@ void App::captureLastRegionSilent()
 	auto pixels = ScreenCapture::captureOrGdi(rx, ry, rw, rh);
 	if (pixels.empty()) return;
 
-	// 与手动「区域截图」收工一致：进剪贴板 + 记历史；勾了「截图后自动保存」才静默落盘
-	Util::saveToClipboard(rw, rh, pixels.data());
-	Util::quietSaveCapture(pixels, rw, rh, false, L"");
-	Setting::get()->addHistoryItem(pixels, rw, rh, L"capture");
+	// 与区域截图收工一致：落盘 + 剪贴板 + 历史
+	const auto saved = Util::saveCompletedCapture(pixels, rw, rh);
+	if (!saved.empty() && Setting::get()->getCopyAsFile()) Util::addFileToClipboard(saved);
+	else Util::saveToClipboard(rw, rh, pixels.data());
+	if (!saved.empty()) Setting::get()->addHistoryFile(saved, rw, rh, L"capture");
 }
 
 App::App()

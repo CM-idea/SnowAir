@@ -91,7 +91,7 @@
       <PreprocessorDefinitions>_DEBUG;_UNICODE;UNICODE;NOMINMAX;WIN32_LEAN_AND_MEAN;QUIRC_MAX_REGIONS=65534;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(RepoRoot);$(RepoRoot)deps\Ling;$(RepoRoot)deps\zxing-cpp\core\src;$(RepoRoot)deps\zxing-cpp\build\core;$(RepoRoot)Src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(RepoRoot);$(RepoRoot)deps\Ling;$(RepoRoot)deps\libwebp\src;$(RepoRoot)deps\zxing-cpp\core\src;$(RepoRoot)deps\zxing-cpp\build\core;$(RepoRoot)Src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
@@ -102,7 +102,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(RepoRoot)$(Platform)\$(Configuration);$(RepoRoot)deps\zxing-cpp\build\core\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>dwmapi.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>dwmapi.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;libwebp.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -121,7 +121,7 @@
       <PreprocessorDefinitions>_DEBUG;_UNICODE;UNICODE;NOMINMAX;WIN32_LEAN_AND_MEAN;QUIRC_MAX_REGIONS=65534;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(RepoRoot);$(RepoRoot)deps\Ling;$(RepoRoot)deps\zxing-cpp\core\src;$(RepoRoot)deps\zxing-cpp\build\core;$(RepoRoot)Src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(RepoRoot);$(RepoRoot)deps\Ling;$(RepoRoot)deps\libwebp\src;$(RepoRoot)deps\zxing-cpp\core\src;$(RepoRoot)deps\zxing-cpp\build\core;$(RepoRoot)Src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
@@ -132,7 +132,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(RepoRoot)$(Platform)\$(Configuration);$(RepoRoot)deps\zxing-cpp\build\core\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>dwmapi.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>dwmapi.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;libwebp.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -152,7 +152,7 @@
       <PreprocessorDefinitions>NDEBUG;_UNICODE;UNICODE;NOMINMAX;WIN32_LEAN_AND_MEAN;QUIRC_MAX_REGIONS=65534;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(RepoRoot);$(RepoRoot)deps\Ling;$(RepoRoot)deps\zxing-cpp\core\src;$(RepoRoot)deps\zxing-cpp\build\core;$(RepoRoot)Src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(RepoRoot);$(RepoRoot)deps\Ling;$(RepoRoot)deps\libwebp\src;$(RepoRoot)deps\zxing-cpp\core\src;$(RepoRoot)deps\zxing-cpp\build\core;$(RepoRoot)Src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
@@ -163,7 +163,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(RepoRoot)$(Platform)\$(Configuration);$(RepoRoot)deps\zxing-cpp\build\core\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>dwmapi.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>dwmapi.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;libwebp.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OptimizeReferences>true</OptimizeReferences>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
@@ -186,7 +186,7 @@
       <PreprocessorDefinitions>NDEBUG;_UNICODE;UNICODE;NOMINMAX;WIN32_LEAN_AND_MEAN;QUIRC_MAX_REGIONS=65534;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(RepoRoot);$(RepoRoot)deps\Ling;$(RepoRoot)deps\zxing-cpp\core\src;$(RepoRoot)deps\zxing-cpp\build\core;$(RepoRoot)Src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(RepoRoot);$(RepoRoot)deps\Ling;$(RepoRoot)deps\libwebp\src;$(RepoRoot)deps\zxing-cpp\core\src;$(RepoRoot)deps\zxing-cpp\build\core;$(RepoRoot)Src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
@@ -197,7 +197,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(RepoRoot)$(Platform)\$(Configuration);$(RepoRoot)deps\zxing-cpp\build\core\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>dwmapi.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>dwmapi.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;libwebp.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OptimizeReferences>true</OptimizeReferences>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
@@ -274,6 +274,7 @@
     <ClCompile Include="Tray.cpp" />
     <ClCompile Include="TrayIcon.cpp" />
     <ClCompile Include="Update.cpp" />
+    <ClCompile Include="Image\WebpCodec.cpp" />
     <ClCompile Include="Util.cpp" />
     <ClCompile Include="Win\AnnotHost.cpp" />
     <ClCompile Include="Win\CapLong.cpp" />
@@ -404,6 +405,7 @@
     <ClInclude Include="Tray.h" />
     <ClInclude Include="TrayIcon.h" />
     <ClInclude Include="Update.h" />
+    <ClInclude Include="Image\WebpCodec.h" />
     <ClInclude Include="Util.h" />
     <ClInclude Include="Win\AnnotHost.h" />
     <ClInclude Include="Win\CapLong.h" />
@@ -441,6 +443,9 @@
     <Font Include="Res\SnowAirIcons.ttf" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\deps\libwebp\libwebp.vcxproj">
+      <Project>{6e4f3a7c-2b1d-4c8e-9f0a-7d5b3c1e2a90}</Project>
+    </ProjectReference>
     <ProjectReference Include="..\deps\Ling\yoga\yoga.vcxproj">
       <Project>{28bb8cf9-fdec-47f2-9b06-600b089caaf5}</Project>
     </ProjectReference>

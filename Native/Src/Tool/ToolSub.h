@@ -76,8 +76,8 @@ private:
 public:
 	// numberStyle: 0 数字 / 1 字母 / 2 Emoji（三种序号，无中文）
 	enum NumberStyle : int { NumberDigit = 0, NumberLetter = 1, NumberEmoji = 2 };
-	// arrowHead: 0 普通 / 1 大箭头 / 2 双箭头 / 3 标注箭头（对齐产品属性气泡）
-	enum ArrowHead : int { ArrowDefault = 0, ArrowBig = 1, ArrowBoth = 2, ArrowAnnot = 3 };
+	// arrowHead: 0 普通 / 1 大箭头 / 2 双箭头 / 3 标注箭头 / 4 趣味箭头（对齐产品属性气泡）
+	enum ArrowHead : int { ArrowDefault = 0, ArrowBig = 1, ArrowBoth = 2, ArrowAnnot = 3, ArrowFun = 4 };
 	bool isRectFill{ false }, isEllipse{ false }, isRectDash{ false };
 	bool isArrowFill{ true }, isNumberFill{ true };
 	bool isLine{ false }; // 箭头属性栏内切换直线（无独立主栏按钮）

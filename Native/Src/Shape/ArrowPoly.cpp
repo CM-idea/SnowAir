@@ -90,7 +90,7 @@ namespace {
 		const float px = -uy, py = ux;
 		const float tipHalf = 0.5f;
 		const float bodyHalf = std::max(strokeWidth, 1.f) * 0.5f;
-		const float headHalf = std::max(bodyHalf * 2.2f, bodyHalf + 4.f);
+		const float headHalf = std::max(bodyHalf * 2.45f, bodyHalf + 4.f);
 		const float headLength = std::min(length * 0.42f,
 			std::max(std::max(strokeWidth * 3.2f, headHalf * 1.6f), 14.f));
 		const auto neck = D2D1::Point2F(end.x - ux * headLength, end.y - uy * headLength);
@@ -126,7 +126,7 @@ std::vector<D2D1_POINT_2F> ArrowPolyState::buildBigArrowPolygon(
 
 	const float tipHalf = 0.5f;
 	const float bodyHalf = std::max(strokeWidth, 1.f) * 0.5f;
-	const float headHalf = std::max(bodyHalf * 2.2f, bodyHalf + 4.f);
+	const float headHalf = std::max(bodyHalf * 2.45f, bodyHalf + 4.f);
 	const float headLength = std::min(total * 0.42f,
 		std::min(std::max(std::max(strokeWidth * 3.2f, headHalf * 1.6f), 14.f),
 			std::max(6.f, total - 2.f)));
@@ -417,18 +417,152 @@ ComPtr<ID2D1PathGeometry> shaftPath(ID2D1Factory* factory, const std::vector<D2D
 	return path;
 }
 
-ComPtr<ID2D1PathGeometry> openHeadPath(ID2D1Factory* factory, D2D1_POINT_2F from, D2D1_POINT_2F to, float strokeWidth)
+namespace {
+	// 趣味箭头SVG02.svg 的原始坐标：A 起笔、N 绕圈挂点、T 尖端
+	struct FunCubic { float x1, y1, x2, y2, x, y; bool loop; };
+	constexpr float kFunAx = 1.00024f, kFunAy = 5.43897f;
+	constexpr float kFunTx = 180.2200f, kFunTy = 69.8590f;
+	constexpr float kFunNx = 81.3054f, kFunNy = 16.9368f; // 圈的挂点
+	// A→N、N→底→N（圈）、N→T
+	const FunCubic kFunCubics[] = {
+		{ 11.5302f, 2.17897f, 28.3902f, -1.21103f, 47.9202f, 2.87897f, false },
+		{ 54.5544f, 4.26699f, 70.1543f, 7.53169f, 81.3054f, 16.9368f, false },
+		{ 85.0972f, 20.1350f, 88.3747f, 24.0431f, 90.6102f, 28.8290f, true },
+		{ 92.0104f, 31.8308f, 95.6153f, 39.5592f, 92.1202f, 46.7790f, true },
+		{ 88.9802f, 53.2690f, 81.2502f, 56.9790f, 74.1702f, 56.2790f, true },
+		{ 63.4802f, 55.2290f, 55.9302f, 44.2890f, 56.9702f, 35.6190f, true },
+		{ 58.2402f, 25.0590f, 72.0102f, 20.0290f, 76.4302f, 18.4190f, true },
+		{ 78.0464f, 17.8291f, 79.6729f, 17.3376f, 81.3054f, 16.9368f, true },
+		{ 112.5520f, 9.26524f, 146.0140f, 34.8083f, 152.0100f, 39.3890f, false },
+		{ 165.1000f, 49.3790f, 174.1200f, 60.5490f, 180.2200f, 69.8590f, false },
+	};
+}
+
+ComPtr<ID2D1PathGeometry> funShaftPath(
+	ID2D1Factory* factory, const std::vector<D2D1_POINT_2F>& pts,
+	float loopScale, float loopRot, D2D1_POINT_2F* tipFrom, float headBack)
+{
+	ComPtr<ID2D1PathGeometry> path;
+	if (!factory || pts.size() < 2) return path;
+	if (FAILED(factory->CreatePathGeometry(path.GetAddressOf())) || !path) return {};
+	ComPtr<ID2D1GeometrySink> sink;
+	if (FAILED(path->Open(sink.GetAddressOf())) || !sink) return {};
+
+	const float dx = pts[1].x - pts[0].x;
+	const float dy = pts[1].y - pts[0].y;
+	const float len = std::hypot(dx, dy);
+
+	sink->BeginFigure(pts[0], D2D1_FIGURE_BEGIN_HOLLOW);
+	if (len < 12.f) {
+		// 太短就不绕圈，退回普通折线
+		for (size_t i = 1; i < pts.size(); i++) sink->AddLine(pts[i]);
+	}
+	else {
+		// 把 SVG 的整条杆身（含圈）整体旋转/缩放到起笔段上：
+		// 圈的形状、交叉角度、杆身下沉的弧度都原样保留
+		const float ux = dx / len;
+		// 圈要在屏幕下方：杆身朝左时把整条图形镜像一次（左→右画手绘感也更自然）
+		const bool flip = ux < 0.f;
+		const float svgDx = kFunTx - kFunAx;
+		const float svgDy = (flip ? -1.f : 1.f) * (kFunTy - kFunAy);
+		const float svgLen = std::hypot(svgDx, svgDy);
+		const float scale = len / svgLen;
+		const float rot = std::atan2(dy, dx) - std::atan2(svgDy, svgDx);
+		const float cs = std::cos(rot), sn = std::sin(rot);
+		auto map = [&](float x, float y) {
+			const float px = (x - kFunAx) * scale;
+			const float py = (y - kFunAy) * scale * (flip ? -1.f : 1.f);
+			return D2D1::Point2F(
+				pts[0].x + px * cs - py * sn,
+				pts[0].y + px * sn + py * cs);
+		};
+		// 头部方向取「尖端往回 headBack 距离」的连线方向：
+		// 尖端的瞬时切线在末端弯得厉害时会让 V 看起来歪向一边，
+		// 用头部自身覆盖的那一段杆身的平均方向才视觉居中
+		if (tipFrom) {
+			const D2D1_POINT_2F tip = map(kFunTx, kFunTy);
+			D2D1_POINT_2F anchor = tip;
+			if (headBack > 0.5f && len > 12.f) {
+				auto cubicAt = [](D2D1_POINT_2F p0, D2D1_POINT_2F p1,
+					D2D1_POINT_2F p2, D2D1_POINT_2F p3, float t) {
+					const float u = 1.f - t;
+					const float a = u * u * u, b = 3.f * u * u * t;
+					const float c = 3.f * u * t * t, d = t * t * t;
+					return D2D1::Point2F(
+						p0.x * a + p1.x * b + p2.x * c + p3.x * d,
+						p0.y * a + p1.y * b + p2.y * c + p3.y * d);
+				};
+				// 从尖端往回到挂点：最后两段 → 圈之前的两段（跳过圈本身）
+				const int order[] = { 9, 8, 1, 0 };
+				float walked = 0.f;
+				bool done = false;
+				for (int idx : order) {
+					if (done || idx >= (int)ARRAYSIZE(kFunCubics)) break;
+					const auto& c = kFunCubics[idx];
+					const auto p0 = (idx > 0)
+						? map(kFunCubics[idx - 1].x, kFunCubics[idx - 1].y)
+						: map(kFunAx, kFunAy);
+					const auto p1 = map(c.x1, c.y1);
+					const auto p2 = map(c.x2, c.y2);
+					const auto p3 = map(c.x, c.y);
+					auto last = p3;
+					for (int s = 1; s <= 24 && !done; s++) {
+						const auto q = cubicAt(p0, p1, p2, p3, 1.f - s / 24.f);
+						const float seg = std::hypot(q.x - last.x, q.y - last.y);
+						if (walked + seg >= headBack) {
+							anchor = q;
+							done = true;
+							break;
+						}
+						walked += seg;
+						last = q;
+					}
+					if (!done) anchor = last;
+				}
+			}
+			*tipFrom = anchor;
+		}
+		// 每条箭头给圈一点缩放/旋转差异（挂点不动，杆身仍接得上）
+		const float jc = std::cos(loopRot), js = std::sin(loopRot);
+		auto jitter = [&](float x, float y) {
+			const float lx = (x - kFunNx) * loopScale;
+			const float ly = (y - kFunNy) * loopScale;
+			return D2D1::Point2F(kFunNx + lx * jc - ly * js,
+				kFunNy + lx * js + ly * jc);
+		};
+		for (const auto& c : kFunCubics) {
+			auto p1 = D2D1::Point2F(c.x1, c.y1);
+			auto p2 = D2D1::Point2F(c.x2, c.y2);
+			auto p3 = D2D1::Point2F(c.x, c.y);
+			if (c.loop) { // 只抖圈本身
+				p1 = jitter(p1.x, p1.y);
+				p2 = jitter(p2.x, p2.y);
+				p3 = jitter(p3.x, p3.y);
+			}
+			sink->AddBezier(D2D1::BezierSegment(
+				map(p1.x, p1.y), map(p2.x, p2.y), map(p3.x, p3.y)));
+		}
+		for (size_t i = 2; i < pts.size(); i++) sink->AddLine(pts[i]);
+	}
+	sink->EndFigure(D2D1_FIGURE_END_OPEN);
+	if (FAILED(sink->Close())) return {};
+	return path;
+}
+
+ComPtr<ID2D1PathGeometry> openHeadPath(ID2D1Factory* factory, D2D1_POINT_2F from, D2D1_POINT_2F to, float strokeWidth, float headScale)
 {
 	ComPtr<ID2D1PathGeometry> path;
 	const float dx = to.x - from.x;
 	const float dy = to.y - from.y;
 	if (!factory || std::hypot(dx, dy) < 2.f) return path;
 	const float angle = std::atan2(dy, dx);
-	const float len = 10.f + strokeWidth * 2.f;
-	const float lx = to.x - len * std::cos(angle - kPi / 6.f);
-	const float ly = to.y - len * std::sin(angle - kPi / 6.f);
-	const float rx = to.x - len * std::cos(angle + kPi / 6.f);
-	const float ry = to.y - len * std::sin(angle + kPi / 6.f);
+	// headScale 同时放大翼长和张开角，趣味箭头用略大的头部
+	const float len = (10.f + strokeWidth * 2.f) * headScale;
+	const float spread = (kPi / 6.f) * headScale;
+	const float lx = to.x - len * std::cos(angle - spread);
+	const float ly = to.y - len * std::sin(angle - spread);
+	const float rx = to.x - len * std::cos(angle + spread);
+	const float ry = to.y - len * std::sin(angle + spread);
 
 	if (FAILED(factory->CreatePathGeometry(path.GetAddressOf())) || !path) return {};
 	ComPtr<ID2D1GeometrySink> sink;

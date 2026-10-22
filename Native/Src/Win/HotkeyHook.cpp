@@ -6,6 +6,7 @@ namespace
 {
 	constexpr const wchar_t* kHookClass{ L"SnowAirHotkeyHook" };
 	constexpr UINT kMsgFire{ WM_APP + 0x422 };
+	constexpr UINT kMsgCapture{ WM_APP + 0x423 };
 
 	// 钩子线程独占的可变状态（mods/key/按键边沿）。回调不放这里 —— 回调由 UI 线程持有，
 	// 避免钩子线程与 UI 线程同时碰同一个对象。
@@ -14,7 +15,7 @@ namespace
 		UINT mods{ 0 };
 		UINT key{ 0 };
 		bool keyDown{ false };    // 主键已按下：长按只触发一次
-		bool swallowUp{ false };  // 这一次抬起也要吃掉
+		bool swallowUp{ false };  // 这一次抬起也需要消费
 	};
 
 	HWND g_wnd{ nullptr };            // UI 线程上的隐藏窗口：钩子线程 Post 到这里，回调在 UI 线程跑
@@ -30,6 +31,13 @@ namespace
 	std::vector<std::function<void()>> g_callbacks;
 	// 绑定换代号：换代前 Post 出去、换代后才到 UI 线程的旧 kMsgFire 一律丢弃
 	std::atomic<unsigned> g_generation{ 0 };
+
+	// —— 录制模式 ——
+	// g_capturing 同时被钩子线程（读）和 UI 线程（写）访问；g_captureCb 只在 UI 线程读写。
+	// g_captureGen 用来丢弃"上一次录制残留"的按键消息。
+	std::atomic<bool> g_capturing{ false };
+	std::atomic<unsigned> g_captureGen{ 0 };
+	HotkeyHook::CaptureCallback g_captureCb;
 
 	// 与 Ling::App::regHotKey 同一套键名解析口径，且**不要求带修饰键**：
 	// 只挡 keyCode == 0。F1、` 等裸键（三条临时全局键即为此形态）必须能被装进钩子，
@@ -61,6 +69,18 @@ namespace
 		}
 	}
 
+	// 低级钩子报的是左右键码（VK_LCONTROL / VK_RCONTROL…），录制回调统一成通用修饰键，
+	// 与设置页 keyToStr 的口径对齐
+	UINT normMod(DWORD vk)
+	{
+		switch (vk) {
+		case VK_LCONTROL: case VK_RCONTROL: return VK_CONTROL;
+		case VK_LMENU: case VK_RMENU: return VK_MENU;
+		case VK_LSHIFT: case VK_RSHIFT: return VK_SHIFT;
+		default: return (UINT)vk;
+		}
+	}
+
 	LRESULT CALLBACK hookProc(int code, WPARAM wp, LPARAM lp)
 	{
 		if (code != HC_ACTION) return CallNextHookEx(nullptr, code, wp, lp);
@@ -68,6 +88,15 @@ namespace
 		// 自己合成的按键不参与匹配（免得绕回来）
 		if (kb->flags & LLKHF_INJECTED) return CallNextHookEx(nullptr, code, wp, lp);
 		const bool up = (kb->flags & LLKHF_UP) != 0;
+		// 录制模式：消费所有按键，包括已被其他进程注册的全局热键。
+		// 否则设置页等待按键时，该组合会在系统热键分发阶段被消费，设置窗口收不到 WM_KEYDOWN。
+		if (g_capturing.load(std::memory_order_relaxed)) {
+			if (const UINT bit = modBit(kb->vkCode)) {
+				if (up) g_liveMods &= ~bit; else g_liveMods |= bit;
+			}
+			if (g_wnd) PostMessageW(g_wnd, kMsgCapture, (WPARAM)normMod(kb->vkCode), up ? 1 : 0);
+			return 1;
+		}
 		if (const UINT bit = modBit(kb->vkCode)) {
 			if (up) g_liveMods &= ~bit;
 			else g_liveMods |= bit;
@@ -123,6 +152,25 @@ namespace
 
 	LRESULT CALLBACK hookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	{
+		if (msg == kMsgCapture) {
+			const unsigned gen = g_captureGen.load(std::memory_order_relaxed);
+			auto cb = g_captureCb;
+			const UINT vk = (UINT)wp;
+			const bool up = lp != 0;
+			// 延后一拍再回调：回调里会 endCapture()（可能拆掉本窗口和钩子线程），
+			// 不能在窗口过程里同步拆自己。
+			if (auto* app = Ling::App::get()) {
+				app->dq.TryEnqueue([cb, vk, up, gen]() {
+					if (!g_capturing.load(std::memory_order_relaxed)) return;
+					if (gen != g_captureGen.load(std::memory_order_relaxed)) return;
+					if (cb) cb(vk, up);
+				});
+			}
+			else if (cb) {
+				cb(vk, up);
+			}
+			return 0;
+		}
 		if (msg == kMsgFire) {
 			// 换代前的旧消息直接丢；否则按索引回调（索引在 setBindings 时与回调表一起换）
 			if ((unsigned)lp == g_generation.load(std::memory_order_relaxed)) {
@@ -161,6 +209,25 @@ namespace
 	std::vector<HotkeyHook::Binding> g_main;
 	std::vector<HotkeyHook::Binding> g_session;
 
+	// 起钩子线程（已起则直接返回）；返回钩子是否真的装上
+	bool startHookThread()
+	{
+		if (g_thread) return g_hookOk;
+		if (!ensureWindow()) return false;
+		g_ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+		g_thread = CreateThread(nullptr, 0, hookThread, nullptr, 0, &g_tid);
+		if (!g_thread) {
+			if (g_ready) { CloseHandle(g_ready); g_ready = nullptr; }
+			return false;
+		}
+		if (g_ready) {
+			WaitForSingleObject(g_ready, 500);
+			CloseHandle(g_ready);
+			g_ready = nullptr;
+		}
+		return g_hookOk;
+	}
+
 	void installMerged()
 	{
 		HotkeyHook::uninstall();
@@ -178,28 +245,14 @@ namespace
 		add(g_session);
 		add(g_main);
 		if (parsed.empty()) return;
-		if (!ensureWindow()) return;
 
 		g_liveMods = 0;
 		g_bindings = std::move(parsed);
 		g_callbacks = std::move(callbacks);
 		g_generation.fetch_add(1, std::memory_order_relaxed);
 
-		g_ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-		g_thread = CreateThread(nullptr, 0, hookThread, nullptr, 0, &g_tid);
-		if (!g_thread) {
-			if (g_ready) { CloseHandle(g_ready); g_ready = nullptr; }
-			g_bindings.clear();
-			g_callbacks.clear();
-			return;
-		}
-		if (g_ready) {
-			WaitForSingleObject(g_ready, 500);
-			CloseHandle(g_ready);
-			g_ready = nullptr;
-		}
 		// 钩子未安装成功：不留"看似已安装但无效"的状态（重试定时器仍在运行，会继续尝试 RegisterHotKey）
-		if (!g_hookOk) HotkeyHook::uninstall();
+		if (!startHookThread()) HotkeyHook::uninstall();
 	}
 }
 
@@ -219,6 +272,10 @@ namespace HotkeyHook
 
 	void uninstall()
 	{
+		// 录制状态随钩子一起撤销：否则钩子下次重装后会一直处于消费所有按键的状态
+		g_capturing.store(false, std::memory_order_relaxed);
+		g_captureGen.fetch_add(1, std::memory_order_relaxed);
+		g_captureCb = nullptr;
 		if (g_thread) {
 			if (g_tid) PostThreadMessageW(g_tid, WM_QUIT, 0, 0);
 			WaitForSingleObject(g_thread, 1500);
@@ -239,5 +296,33 @@ namespace HotkeyHook
 	bool installed()
 	{
 		return g_thread != nullptr;
+	}
+
+	void beginCapture(CaptureCallback cb)
+	{
+		g_captureCb = std::move(cb);
+		g_captureGen.fetch_add(1, std::memory_order_relaxed);
+		g_capturing.store(true, std::memory_order_relaxed);
+		// 录制开始时全局热键刚被 suspendShortcutKeys() 摘掉，钩子线程通常停着，这里重新拉起；
+		// 如果已有常驻绑定在兜底，直接复用同一条钩子。
+		if (!startHookThread()) {
+			g_capturing.store(false, std::memory_order_relaxed);
+			g_captureCb = nullptr;
+			uninstall();
+		}
+	}
+
+	void endCapture()
+	{
+		if (!g_capturing.exchange(false, std::memory_order_relaxed)) return;
+		g_captureGen.fetch_add(1, std::memory_order_relaxed);
+		g_captureCb = nullptr;
+		// 没有常驻绑定就把临时钩子线程一并收掉；有绑定则留着（录制结束后马上会重装）
+		if (g_thread && g_bindings.empty()) uninstall();
+	}
+
+	bool capturing()
+	{
+		return g_capturing.load(std::memory_order_relaxed);
 	}
 }

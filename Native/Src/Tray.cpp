@@ -46,6 +46,12 @@ namespace {
 		{ kCmdExit,              L"tray.exit",              nullptr },
 	};
 
+	// 「停用截图历史」开启时，托盘里不显示「截图历史」这一项（隐私用途，只隐藏入口）
+	bool trayRowVisible(UINT cmd)
+	{
+		return !(cmd == kCmdHistory && Setting::get()->getDisableCaptureHistory());
+	}
+
 	// 菜单外观（配色/尺寸）统一由 Win/MenuTheme.h 提供，托盘与贴图右键菜单共用。
 	using MenuPalette = MenuTheme::Palette;
 	using namespace MenuTheme;
@@ -68,7 +74,10 @@ namespace {
 		float logicalHeight() const
 		{
 			float h = kMenuPadY * 2.f;
-			for (const auto& row : kMenuRows) h += (row.id == 0 ? (float)kSepH : (float)kRowH);
+			for (const auto& row : kMenuRows) {
+				if (row.id != 0 && !trayRowVisible(row.id)) continue;
+				h += (row.id == 0 ? (float)kSepH : (float)kRowH);
+			}
 			return h;
 		}
 
@@ -119,6 +128,7 @@ namespace {
 			// 置灰项的"灰"：同前景色、只把 alpha 压到 0x66（配色跟着主题走，别写死颜色）
 			const uint32_t fgDisabled = (p.fg & 0xFFFFFF00u) | 0x66u;
 			for (const auto& row : kMenuRows) {
+				if (row.id != 0 && !trayRowVisible(row.id)) continue;
 				if (row.id == 0) {
 					auto* line = shell->makeChild<Ling::Node>();
 					line->setHeight(1.f);
@@ -248,7 +258,7 @@ private:
 		case kCmdRecord:             WinCap::beginRecordPick(); break;
 		case kCmdDemoCanvas:         WinCap::beginDemoCanvas(); break;
 		case kCmdQuickTranslate:     WinSetting::init(1); break;
-		case kCmdHistory:            WinSetting::init(5); break;
+		case kCmdHistory:            if (trayRowVisible(kCmdHistory)) WinSetting::init(5); break;
 		case kCmdOpenDir:            openOutputDir(); break;
 		case kCmdSettings:           WinSetting::init(0); break;
 		case kCmdExit:               if (auto* app = Ling::App::get()) app->quit(0); break;
@@ -264,7 +274,7 @@ Tray::Tray()
 	// 按用户设置应用托盘图标样式（内置=Logo 字形上色 / 自定义=图片文件）+ 显隐
 	TrayIcon::apply();
 	Setting::get()->initShortcutKeys();
-	lingApp->onTrayMouseEvent.add([this](bool isDown, bool isRight) {
+	mouseTok = lingApp->onTrayMouseEvent.add([this](bool isDown, bool isRight) {
 		if (isDown) return;
 		if (isRight) { this->onTrayRightClick(); return; }
 		switch (Setting::get()->getTrayClickAction()) {
@@ -275,12 +285,25 @@ Tray::Tray()
 	});
 }
 
-Tray::~Tray() { closeTrayMenu(); TrayIcon::dispose(); }
+Tray::~Tray()
+{
+	// 先摘事件：否则托盘点击可能在对象销毁后回调到已失效的 this
+	if (auto* app = Ling::App::get()) app->onTrayMouseEvent.remove(mouseTok);
+	closeTrayMenu();
+	TrayIcon::dispose();
+}
 
 void Tray::init()
 {
 	auto ptr = new Tray();
 	trayIns.reset(ptr);
+}
+
+void Tray::dispose()
+{
+	if (trayIns) trayIns.reset();
+	// 图标句柄缓存放在这里释放：等进程静态析构时，TrayIcon 里的 g_cache 可能已经先被销毁
+	TrayIcon::dispose();
 }
 
 Tray* Tray::get() { return trayIns.get(); }

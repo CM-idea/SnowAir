@@ -17,13 +17,14 @@ namespace ToolbarChrome
 
 	// 圆角栏 + 箭头，同一套柔化
 	void paintBarWithCaret(ID2D1DeviceContext* ctx, const D2D1_RECT_F& bar, float radiusPx,
-		ID2D1Brush* bg, float borderWidthPx, float caretX, float tipY, float baseY);
+		ID2D1Brush* bg, float borderWidthPx, float caretX, float tipY, float baseY,
+		uint32_t borderRgba = 0);
 
 	// 属性栏 / 色板 / 悬停气泡共用外壳：tipDown=false 尖朝上，true 尖朝下
-	// borderWidthPx 传 0 即无描边（悬停气泡不要边框）。
+	// borderWidthPx 传 0 即无描边（悬停气泡不要边框）；borderRgba=0 时用工具栏主题的描边色
 	void paintPropBubble(ID2D1DeviceContext* ctx, float winW, float winH, float dpi,
 		ID2D1Brush* bg, float caretX, bool tipDown,
-		float borderWidthPx = ToolbarTheme::borderWidth);
+		float borderWidthPx = ToolbarTheme::borderWidth, uint32_t borderRgba = 0);
 
 	// 内容区相对窗口的逻辑边距（与 paintPropBubble 配套）
 	struct ContentPad { float top, bottom; };

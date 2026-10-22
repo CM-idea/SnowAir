@@ -180,7 +180,8 @@ void paintInfoBar(ID2D1DeviceContext* ctx, const D2D1_RECT_F& bar, float radiusP
 }
 
 void paintBarWithCaret(ID2D1DeviceContext* ctx, const D2D1_RECT_F& bar, float radiusPx,
-	ID2D1Brush* bg, float borderWidthPx, float caretX, float tipY, float baseY)
+	ID2D1Brush* bg, float borderWidthPx, float caretX, float tipY, float baseY,
+	uint32_t borderRgba)
 {
 	if (!ctx || !bg) return;
 	enableSmooth(ctx);
@@ -213,14 +214,14 @@ void paintBarWithCaret(ID2D1DeviceContext* ctx, const D2D1_RECT_F& bar, float ra
 		}
 		c->FillGeometry(geo.Get(), bg);
 		if (borderWidthPx > 0.f) {
-			auto stroke = makeBrush(c, ToolbarTheme::border);
+			auto stroke = makeBrush(c, borderRgba ? borderRgba : ToolbarTheme::border);
 			if (stroke) c->DrawGeometry(geo.Get(), stroke.Get(), borderWidthPx * scale);
 		}
 	});
 }
 
 void paintPropBubble(ID2D1DeviceContext* ctx, float winW, float winH, float dpi,
-	ID2D1Brush* bg, float caretX, bool tipDown, float borderWidthPx)
+	ID2D1Brush* bg, float caretX, bool tipDown, float borderWidthPx, uint32_t borderRgba)
 {
 	if (!ctx || !bg) return;
 	const float pad = ToolbarTheme::shadowPad * dpi;
@@ -232,12 +233,12 @@ void paintPropBubble(ID2D1DeviceContext* ctx, float winW, float winH, float dpi,
 	if (tipDown) {
 		const float barBottom = std::floor(winH) - pad - caret;
 		paintBarWithCaret(ctx, { left, pad, right, barBottom }, radius, bg, bw,
-			caretX, std::floor(winH) - pad, barBottom);
+			caretX, std::floor(winH) - pad, barBottom, borderRgba);
 	}
 	else {
 		const float barTop = pad + caret;
 		paintBarWithCaret(ctx, { left, barTop, right, std::floor(winH) - pad }, radius, bg, bw,
-			caretX, pad, barTop);
+			caretX, pad, barTop, borderRgba);
 	}
 }
 

@@ -10,12 +10,14 @@
 #include "Win/WinSetting.h"
 #include "App.h"
 #include <algorithm>
+#include <set>
+#include <cwctype>
 
 namespace {
     std::unique_ptr<Setting> setting;
     // 全局热键表：id（配置键 = 设置页那一行）→ msgId（RegisterHotKey 的 id，也是 onHotKey 收到的值）。
     // ⚠ 只有**真正接了动作**的行才在这里；设置页里其余几行（show_cursor / translate_selection /
-    //   toggle_pins）目前没有对应实现，不注册 —— 否则就是"按键被吞掉却什么都不发生"。
+    //   toggle_pins）目前没有对应实现，不注册 —— 否则会出现"按键被消费但没有任何效果"。
     struct HotkeyEntry { const wchar_t* id; UINT msgId; };
     const HotkeyEntry kHotkeys[] = {
         { L"capture",                100 },
@@ -690,6 +692,10 @@ void Setting::setToolDefaultWidth(int v)
 {
 	setFeatInt(L"toolDefaultWidth", std::clamp(v, 1, 10));
 }
+bool Setting::getRememberToolStyle() { return featBool(L"rememberToolStyle", false); }
+void Setting::setRememberToolStyle(bool on) { setFeatBool(L"rememberToolStyle", on); }
+int Setting::getLastArrowHead() { return featInt(L"lastArrowHead", 0); }
+void Setting::setLastArrowHead(int v) { setFeatInt(L"lastArrowHead", v); }
 bool Setting::getAutoSaveAfterCapture() { return featBool(L"autoSaveAfterCapture", false); }
 void Setting::setAutoSaveAfterCapture(bool on) { setFeatBool(L"autoSaveAfterCapture", on); }
 std::wstring Setting::getSaveFormat() { return featStr(L"saveFormat", L"PNG (*.png)"); }
@@ -701,6 +707,8 @@ void Setting::setCancelConfirmDialog(bool on) { setFeatBool(L"cancelConfirmDialo
 
 void Setting::restoreFunctionScreenshotDefaults()
 {
+	setAutoStart(false);
+	setRunAsAdmin(false);
 	setFindWindowElements(true);
 	setCancelConfirmDialog(false);
 	setAutoSaveAfterCapture(false);
@@ -708,7 +716,6 @@ void Setting::restoreFunctionScreenshotDefaults()
 	setSaveFormat(L"PNG (*.png)");
 	setManualSaveFormat(L"");
 	setAutoSaveFormat(L"");
-	setFocusedWindowFormat(L"");
 	setVideoRecordFormat(L"");
 	setTrayClickAction(0);
 	setDemoDefaultTool(0);
@@ -748,7 +755,6 @@ void Setting::restoreFunctionOutputDefaults()
 {
 	setManualSaveFormat(L"");
 	setAutoSaveFormat(L"");
-	setFocusedWindowFormat(L"");
 	setScreenshotDir(L"");
 	setVideoRecordFormat(L"");
 	setRecordDir(L"");
@@ -760,6 +766,7 @@ void Setting::restoreFunctionOcrDefaults()
 {
 	setOcrEngine(0);
 	setOcrCloudConfigId(L"");
+	setOcrResultMode(0);
 }
 
 // 翻译：回到默认在线服务与「非」字典模式；语种不在本子页里，不动
@@ -773,10 +780,13 @@ void Setting::restoreFunctionTranslateDefaults()
 // 判据统一取"restore* 会不会真的改动什么"：每项都与 restore 写回的值比一遍。改默认值时两处一起改。
 bool Setting::functionScreenshotAtDefaults()
 {
-	return getFindWindowElements() && !getCancelConfirmDialog() && !getAutoSaveAfterCapture()
+	// 内置 Administrator 账户的「以管理员身份运行」恒为开且无法关闭，故不参与判定；
+	// 否则该子页永远不会被判为默认状态，「恢复默认」按钮将始终可用
+	const bool runAsAdminDefault = Util::isBuiltinAdminAccount() || !getRunAsAdmin();
+	return !getAutoStart() && runAsAdminDefault
+		&& getFindWindowElements() && !getCancelConfirmDialog() && !getAutoSaveAfterCapture()
 		&& !getCopyAsFile() && getSaveFormat() == L"PNG (*.png)"
 		&& getManualSaveFormat().empty() && getAutoSaveFormat().empty()
-		&& getFocusedWindowFormat().empty()
 		&& getVideoRecordFormat().empty() && getTrayClickAction() == 0
 		&& getDemoDefaultTool() == 0 && getDemoEdgeBehavior() == 0
 		&& !getPinZoomAtCursor() && !getPinAutoOcr() && getPinAutoFit()
@@ -796,13 +806,13 @@ bool Setting::functionRecordAtDefaults()
 bool Setting::functionOutputAtDefaults()
 {
 	return getManualSaveFormat().empty() && getAutoSaveFormat().empty()
-		&& getFocusedWindowFormat().empty() && getScreenshotDir().empty()
+		&& getScreenshotDir().empty()
 		&& getVideoRecordFormat().empty() && getRecordDir().empty();
 }
 
 bool Setting::functionOcrAtDefaults()
 {
-	return getOcrEngine() == 0 && getOcrCloudConfigId().empty();
+	return getOcrEngine() == 0 && getOcrCloudConfigId().empty() && getOcrResultMode() == 0;
 }
 
 bool Setting::functionTranslateAtDefaults()
@@ -854,15 +864,12 @@ void Setting::setMouseHighlightColor(UINT32 rgba)
 
 std::wstring Setting::defaultManualSaveFormat() { return L"SnowAir_{{YYYY-MM-DD_HH-mm-ss}}"; }
 std::wstring Setting::defaultAutoSaveFormat() { return L"SnowAir_auto_{{YYYY-MM-DD_HH-mm-ss}}"; }
-std::wstring Setting::defaultFocusedWindowFormat() { return L"{{FOCUS_WINDOW_APP_NAME}}/SnowAir_{{YYYY-MM-DD_HH-mm-ss}}"; }
 std::wstring Setting::defaultVideoRecordFormat() { return L"SnowAir_Video_{{YYYY-MM-DD_HH-mm-ss}}"; }
 
 std::wstring Setting::getManualSaveFormat() { return featStr(L"manualSaveFormat", L""); }
 void Setting::setManualSaveFormat(const std::wstring& v) { setFeatStr(L"manualSaveFormat", v); }
 std::wstring Setting::getAutoSaveFormat() { return featStr(L"autoSaveFormat", L""); }
 void Setting::setAutoSaveFormat(const std::wstring& v) { setFeatStr(L"autoSaveFormat", v); }
-std::wstring Setting::getFocusedWindowFormat() { return featStr(L"focusedWindowFormat", L""); }
-void Setting::setFocusedWindowFormat(const std::wstring& v) { setFeatStr(L"focusedWindowFormat", v); }
 std::wstring Setting::getVideoRecordFormat() { return featStr(L"videoRecordFormat", L""); }
 void Setting::setVideoRecordFormat(const std::wstring& v) { setFeatStr(L"videoRecordFormat", v); }
 
@@ -871,17 +878,19 @@ void Setting::setScreenshotDir(const std::wstring& v) { setFeatStr(L"screenshotD
 std::wstring Setting::getRecordDir() { return featStr(L"recordDir", L""); }
 void Setting::setRecordDir(const std::wstring& v) { setFeatStr(L"recordDir", v); }
 
-int Setting::getHistoryRetentionDays() { return featInt(L"historyRetentionDays", 7); }
+int Setting::getHistoryRetentionDays() { return featInt(L"historyRetentionDays", -1); }
 void Setting::setHistoryRetentionDays(int days) { setFeatInt(L"historyRetentionDays", days); }
+bool Setting::getDisableCaptureHistory() { return featBool(L"disableCaptureHistory", false); }
+void Setting::setDisableCaptureHistory(bool on) { setFeatBool(L"disableCaptureHistory", on); }
 int Setting::getAppTheme() { return featInt(L"appTheme", 0); }
 void Setting::setAppTheme(int v) { setFeatInt(L"appTheme", v); }
 
-// 全局热键。RegisterHotKey 是"先注册先独占"：组合键已被别的程序（浏览器插件、聊天工具、
-// 输入法…）占着时我们这次注册直接失败，系统里也没有"提高优先级"这回事。所以这里的策略是：
+// 全局热键。RegisterHotKey 是"先注册先独占"的语义，没有可调优先级：组合键已被其他进程注册
+// 时，本次注册会直接失败。所以这里的策略是：
 //   1) 每条都先正常 RegisterHotKey；
-//   2) 失败的那些攒起来，整体装一个低级键盘钩子兜底 —— 钩子比任何程序的热键/加速键都先拿到
-//      按键，匹配上就吃掉，效果上等于"这个组合归我们"，浏览器抢不走；
-//   3) 同时起一个低频重试，等对方把组合让出来再切回干净的 RegisterHotKey（并摘掉钩子）。
+//   2) 失败的那些攒起来，整体装一个低级键盘钩子兜底 —— 钩子先于常规热键与加速键取得按键，
+//      命中后消费该事件，效果上等同于该组合由本进程持有；
+//   3) 同时起一个低频重试，等其他进程释放该组合后再切回 RegisterHotKey（并摘掉钩子）。
 void Setting::applyHotkeys()
 {
     auto* lingApp = Ling::App::get();
@@ -915,7 +924,7 @@ void Setting::runHotkeyAction(const std::wstring& id)
     if (id == L"record") { WinCap::beginRecordPick(); return; }
     if (id == L"show_main") { WinSetting::init(0); return; }
     if (id == L"toggle_pins") { WinPin::toggleAllHidden(); return; }
-    if (id == L"open_history") { WinSetting::init(5); return; }
+    if (id == L"open_history") { if (!getDisableCaptureHistory()) WinSetting::init(5); return; }
     if (id == L"open_screenshot_dir") {
         const auto dir = Util::outputDir();
         if (!dir.empty()) ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -1078,14 +1087,13 @@ static JsonObject historyStore(JsonObject& features)
     return features.GetNamedObject(L"history");
 }
 
-std::filesystem::path Setting::getHistoryDir()
+std::filesystem::path Setting::getHistoryThumbDir()
 {
+    // 只存录屏封面的小图，不是历史副本
     auto dir = dataPath;
-    dir.append(L"History");
-    if (!std::filesystem::exists(dir)) {
-        std::error_code ec;
-        std::filesystem::create_directories(dir, ec);
-    }
+    dir.append(L"ThumbCache");
+    std::error_code ec;
+    if (!std::filesystem::exists(dir, ec)) std::filesystem::create_directories(dir, ec);
     return dir;
 }
 
@@ -1122,7 +1130,11 @@ std::vector<Setting::HistoryItem> Setting::getHistoryItems()
     std::vector<HistoryItem> list;
     for (auto const& v : arr) {
         if (v.ValueType() != JsonValueType::Object) continue;
-        list.push_back(historyItemFromJson(v.GetObjectW()));
+        auto it = historyItemFromJson(v.GetObjectW());
+        // 文件被用户在资源管理器里删掉/移走后不再显示（索引保留，盘符恢复后还能回来）
+        std::error_code ec;
+        if (it.filePath.empty() || !std::filesystem::exists(it.filePath, ec)) continue;
+        list.push_back(it);
     }
     // 按创建时间倒序 (新的在前)
     std::sort(list.begin(), list.end(), [](const HistoryItem& a, const HistoryItem& b) {
@@ -1131,42 +1143,227 @@ std::vector<Setting::HistoryItem> Setting::getHistoryItems()
     return list;
 }
 
-// 记一条截图历史：把图像编码成 PNG 写进历史目录（History/<id>.png），再登记到
-// features.history.items。历史自带一份文件，删条目/清空历史只动历史目录里的副本。
-std::wstring Setting::addHistoryItem(const std::vector<BYTE>& bgra, int width, int height, const std::wstring& source)
+namespace {
+    bool historyExtMatch(const std::wstring& path, std::initializer_list<const wchar_t*> exts)
+    {
+        const auto dot = path.find_last_of(L'.');
+        if (dot == std::wstring::npos) return false;
+        std::wstring e = path.substr(dot + 1);
+        for (auto& c : e) c = (wchar_t)towlower(c);
+        for (auto x : exts) if (e == x) return true;
+        return false;
+    }
+    std::wstring historyPathKey(const std::wstring& path)
+    {
+        std::wstring k = path;
+        for (auto& c : k) c = (wchar_t)towlower(c);
+        return k;
+    }
+    long long historyFileTimeMs(const std::filesystem::path& p)
+    {
+        std::error_code ec;
+        const auto ft = std::filesystem::last_write_time(p, ec);
+        if (ec) return 0;
+        const auto sys = std::chrono::time_point_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now() + (ft - std::filesystem::file_time_type::clock::now()));
+        return (long long)sys.time_since_epoch().count();
+    }
+}
+
+// 历史页用：索引 + 扫描「截图文件路径 / 录屏文件路径」里已有的媒体文件。
+// 这些文件没走过登记流程（如旧版本、手动拷进来的）也照样显示，保证“可见即所得”。
+std::vector<Setting::HistoryItem> Setting::getHistoryItemsForUi(bool forceRescan)
 {
-    if (bgra.empty() || width <= 0 || height <= 0) return L"";
-    HistoryItem it;
-    // 时间戳（毫秒）+ 递增序号，避免同一毫秒内连续写入时 id 撞车
+    const auto nowTick = GetTickCount64();
+    if (!forceRescan && !historyUiCacheDirty_ && nowTick - historyUiCacheAt_ < 1500)
+        return historyUiCache_;
+
+    auto list = getHistoryItems();
+    std::set<std::wstring> seen;
+    for (const auto& it : list) seen.insert(historyPathKey(it.filePath));
+
+    auto scanDir = [&](const std::filesystem::path& dir) {
+        std::error_code ec;
+        if (dir.empty() || !std::filesystem::is_directory(dir, ec)) return;
+        for (std::filesystem::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            std::error_code fec;
+            if (!it->is_regular_file(fec)) continue;
+            const auto path = it->path();
+            const std::wstring ws = path.wstring();
+            const bool video = historyExtMatch(ws, { L"mp4", L"gif", L"apng" });
+            const bool image = historyExtMatch(ws, { L"png", L"jpg", L"jpeg", L"webp", L"bmp", L"avif", L"jxl" });
+            if (!video && !image) continue;
+            if (!seen.insert(historyPathKey(ws)).second) continue;
+            HistoryItem item;
+            item.id = ws;              // 目录里已有的文件没有索引 id，直接用路径
+            item.filePath = ws;
+            item.source = video ? L"record" : L"capture";
+            item.createdAt = historyFileTimeMs(path);
+            list.push_back(std::move(item));
+        }
+    };
+    scanDir(Util::outputDir());
+    if (const auto rec = getRecordDir(); !rec.empty()) scanDir(std::filesystem::path{ rec });
+
+    // 文件名带「自动保存文件名格式」固定前缀的截图 → 标成自动保存。
+    // 兼容旧版本：那时取消退出存下来的文件被登记成了 capture，现在按文件名纠正。
+    std::wstring autoFmt = getAutoSaveFormat();
+    if (autoFmt.empty()) autoFmt = Setting::defaultAutoSaveFormat();
+    const auto brace = autoFmt.find(L"{{");
+    std::wstring autoPrefix = brace == std::wstring::npos ? autoFmt : autoFmt.substr(0, brace);
+    if (const auto slash = autoPrefix.find_last_of(L"/\\"); slash != std::wstring::npos)
+        autoPrefix = autoPrefix.substr(slash + 1);
+    const auto prefixKey = historyPathKey(autoPrefix);
+    if (!prefixKey.empty()) {
+        for (auto& it : list) {
+            if (it.source != L"capture") continue;
+            const auto name = historyPathKey(std::filesystem::path(it.filePath).filename().wstring());
+            if (name.size() >= prefixKey.size() && name.compare(0, prefixKey.size(), prefixKey) == 0)
+                it.source = L"autosave";
+        }
+    }
+
+    std::sort(list.begin(), list.end(), [](const HistoryItem& a, const HistoryItem& b) {
+        return a.createdAt > b.createdAt;
+    });
+    historyUiCache_ = list;
+    historyUiCacheAt_ = nowTick;
+    historyUiCacheDirty_ = false;
+    return list;
+}
+
+// ================ 历史自定义标签（按文件路径） ================
+namespace {
+    JsonArray historyTagsArr(JsonObject& store)
+    {
+        if (store.HasKey(L"tags") && store.GetNamedValue(L"tags").ValueType() == JsonValueType::Array)
+            return store.GetNamedArray(L"tags");
+        return JsonArray{};
+    }
+}
+
+std::vector<std::wstring> Setting::getHistoryTags(const std::wstring& filePath)
+{
+    std::vector<std::wstring> out;
+    if (filePath.empty()) return out;
+    auto features = featuresObj();
+    auto store = historyStore(features);
+    const auto key = historyPathKey(filePath);
+    const auto all = historyTagsArr(store);
+    if (!all) return out;
+    for (auto const& v : all) {
+        if (v.ValueType() != JsonValueType::Object) continue;
+        auto o = v.GetObjectW();
+        if (historyPathKey(o.GetNamedString(L"path", L"").c_str()) != key) continue;
+        if (o.HasKey(L"tags") && o.GetNamedValue(L"tags").ValueType() == JsonValueType::Array) {
+            for (auto const& t : o.GetNamedArray(L"tags")) {
+                if (t.ValueType() != JsonValueType::String) continue;
+                std::wstring s = t.GetString().c_str();
+                if (!s.empty()) out.push_back(std::move(s));
+            }
+        }
+        break;
+    }
+    return out;
+}
+
+void Setting::setHistoryTags(const std::wstring& filePath, const std::vector<std::wstring>& tags)
+{
+    if (filePath.empty()) return;
+    auto features = featuresObj();
+    auto store = historyStore(features);
+    const auto key = historyPathKey(filePath);
+
+    JsonArray arr;
+    const auto old = historyTagsArr(store);
+    if (old) {
+        for (auto const& v : old) {
+            if (v.ValueType() != JsonValueType::Object) continue;
+            auto o = v.GetObjectW();
+            if (historyPathKey(o.GetNamedString(L"path", L"").c_str()) == key) continue;   // 旧记录丢弃，稍后按新值重建
+            arr.Append(v);
+        }
+    }
+    if (!tags.empty()) {
+        JsonObject o;
+        o.SetNamedValue(L"path", JsonValue::CreateStringValue(filePath));
+        JsonArray ts;
+        for (auto& t : tags) ts.Append(JsonValue::CreateStringValue(t));
+        o.SetNamedValue(L"tags", ts);
+        arr.Append(o);
+    }
+    store.SetNamedValue(L"tags", arr);
+    features.SetNamedValue(L"history", store);
+    save();
+    historyUiCacheDirty_ = true;
+}
+
+std::vector<std::wstring> Setting::getAllHistoryTags()
+{
+    std::set<std::wstring> uniq;
+    auto features = featuresObj();
+    auto store = historyStore(features);
+    const auto all = historyTagsArr(store);
+    if (!all) return {};
+    for (auto const& v : all) {
+        if (v.ValueType() != JsonValueType::Object) continue;
+        auto o = v.GetObjectW();
+        const std::wstring path = o.GetNamedString(L"path", L"").c_str();
+        std::error_code ec;
+        if (path.empty() || !std::filesystem::exists(path, ec)) continue;
+        if (!o.HasKey(L"tags") || o.GetNamedValue(L"tags").ValueType() != JsonValueType::Array) continue;
+        for (auto const& t : o.GetNamedArray(L"tags")) {
+            if (t.ValueType() != JsonValueType::String) continue;
+            std::wstring s = t.GetString().c_str();
+            if (!s.empty()) uniq.insert(std::move(s));
+        }
+    }
+    std::vector<std::wstring> out(uniq.begin(), uniq.end());
+    return out;
+}
+
+// 登记一条已落盘的历史文件（截图 / 长图 / 静默截图 / 录屏）：
+// 历史只记真实路径，不再复制一份图像。返回条目 id。
+std::wstring Setting::addHistoryFile(const std::wstring& filePath, int width, int height,
+    const std::wstring& source)
+{
+    if (filePath.empty()) return L"";
+    std::error_code ec;
+    if (!std::filesystem::exists(filePath, ec)) return L"";
+    historyUiCacheDirty_ = true;
+
     static UINT64 seq = 0;
     const auto now = std::chrono::system_clock::now();
     const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+
+    HistoryItem it;
     it.id = std::format(L"h{}-{}", nowMs, ++seq);
+    it.filePath = filePath;
     it.source = source.empty() ? L"capture" : source;
     it.width = width;
     it.height = height;
     it.createdAt = (long long)nowMs;
 
-    auto file = getHistoryDir() / (it.id + L".png");
-    if (!Util::saveToFile(file.wstring(), width, height, const_cast<BYTE*>(bgra.data()))) return L"";
-    it.filePath = file.wstring();
-
     JsonArray arr;
     arr.Append(historyItemToJson(it));   // 新的排在前面（与 getHistoryItems 的排序一致）
-    for (auto& old : getHistoryItems()) arr.Append(historyItemToJson(old));
+    for (auto& old : getHistoryItems()) {
+        if (old.filePath == filePath) continue;   // 同一文件只留一条
+        arr.Append(historyItemToJson(old));
+    }
 
     auto features = featuresObj();
     auto store = historyStore(features);
     store.SetNamedValue(L"items", arr);
     features.SetNamedValue(L"history", store);
     save();
-    return it.filePath;
+    return it.id;
 }
 
 std::wstring Setting::addHistoryMedia(const std::wstring& mediaPath, int width, int height,
     const std::wstring& source, const std::vector<BYTE>& coverBgra)
 {
     if (mediaPath.empty()) return L"";
+    historyUiCacheDirty_ = true;
     HistoryItem it;
     static UINT64 seq = 0;
     const auto now = std::chrono::system_clock::now();
@@ -1178,26 +1375,27 @@ std::wstring Setting::addHistoryMedia(const std::wstring& mediaPath, int width, 
     it.createdAt = (long long)nowMs;
     it.filePath = mediaPath;          // 原视频路径：不复制，历史只记引用
 
-    // 封面：网格拿它当缩略图（视频本身 ImageBox 解不了）。写不进去也不影响这条记录
+    // 封面只是给网格用的缩略图，写进缓存目录；视频本体不复制
     if (!coverBgra.empty() && width > 0 && height > 0
         && (size_t)width * (size_t)height * 4 <= coverBgra.size()) {
-        auto dir = getHistoryDir();
-        std::error_code ec;
-        std::filesystem::create_directories(dir, ec);
+        auto dir = getHistoryThumbDir();
         Util::saveToFile((dir / (it.id + L".png")).wstring(), width, height,
             const_cast<BYTE*>(coverBgra.data()));
     }
 
     JsonArray arr;
     arr.Append(historyItemToJson(it));   // 新的排在前面（与 getHistoryItems 的排序一致）
-    for (auto& old : getHistoryItems()) arr.Append(historyItemToJson(old));
+    for (auto& old : getHistoryItems()) {
+        if (old.filePath == mediaPath) continue;   // 同一文件只留一条
+        arr.Append(historyItemToJson(old));
+    }
 
     auto features = featuresObj();
     auto store = historyStore(features);
     store.SetNamedValue(L"items", arr);
     features.SetNamedValue(L"history", store);
     save();
-    return it.filePath;
+    return it.id;
 }
 
 void Setting::pruneExpiredHistory()
@@ -1209,16 +1407,18 @@ void Setting::pruneExpiredHistory()
     auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
     long long cutoff = nowMs - static_cast<long long>(days) * 24LL * 3600LL * 1000LL;
 
+    historyUiCacheDirty_ = true;
     auto list = getHistoryItems();
     std::vector<HistoryItem> keep;
     for (auto& it : list) {
+        // 超过保留天数的截图与录屏都会清理
         if (it.createdAt >= cutoff) {
             keep.push_back(it);
-        } else {
-            // 删除过期文件
-            std::error_code ec;
-            if (!it.filePath.empty()) std::filesystem::remove(it.filePath, ec);
+            continue;
         }
+        std::error_code ec;
+        if (!it.filePath.empty()) std::filesystem::remove(it.filePath, ec);
+        std::filesystem::remove(getHistoryThumbDir() / (it.id + L".png"), ec);
     }
     // 写回
     JsonArray arr;
@@ -1232,20 +1432,25 @@ void Setting::pruneExpiredHistory()
 
 void Setting::removeHistoryItem(const std::wstring& id)
 {
+    historyUiCacheDirty_ = true;
     auto list = getHistoryItems();
     std::vector<HistoryItem> keep;
+    bool found = false;
     for (auto& it : list) {
         if (it.id == id) {
+            found = true;
+            // 历史即真实文件：删条目就删文件（走回收站，避免误删）
             std::error_code ec;
-            if (it.source == L"record") {
-                // 录屏条目：视频是用户自己保存的文件，删条目只删封面
-                std::filesystem::remove(getHistoryDir() / (it.id + L".png"), ec);
-            } else if (!it.filePath.empty()) {
-                std::filesystem::remove(it.filePath, ec);
-            }
+            if (!it.filePath.empty()) Util::moveToRecycleBin(it.filePath);
+            std::filesystem::remove(getHistoryThumbDir() / (it.id + L".png"), ec);
         } else {
             keep.push_back(it);
         }
+    }
+    // 目录扫描出来的条目没有索引 id（id 就是文件路径）：直接删文件
+    if (!found) {
+        std::error_code ec;
+        if (std::filesystem::exists(id, ec)) Util::moveToRecycleBin(id);
     }
     JsonArray arr;
     for (auto& it : keep) arr.Append(historyItemToJson(it));
@@ -1256,21 +1461,29 @@ void Setting::removeHistoryItem(const std::wstring& id)
     save();
 }
 
-void Setting::clearAllHistory()
+void Setting::clearAllHistory(int sourceTab)
 {
-    auto list = getHistoryItems();
+    historyUiCacheDirty_ = true;
+    // 历史页上看得见的都要删（含目录里已有的文件）；按当前导航分类限定范围
+    auto list = getHistoryItemsForUi(true);
     for (auto& it : list) {
+        const bool isRecord = (it.source == L"record");
+        if (sourceTab == 1 && isRecord) continue;   // 只清截图
+        if (sourceTab == 2 && !isRecord) continue;  // 只清录屏
         std::error_code ec;
-        if (it.source == L"record") {
-            // 同上：录屏只清封面，不动用户保存的视频
-            std::filesystem::remove(getHistoryDir() / (it.id + L".png"), ec);
-        } else if (!it.filePath.empty()) {
-            std::filesystem::remove(it.filePath, ec);
-        }
+        if (!it.filePath.empty()) Util::moveToRecycleBin(it.filePath);
+        std::filesystem::remove(getHistoryThumbDir() / (it.id + L".png"), ec);
+    }
+    // 索引里保留没被清掉的分类
+    JsonArray arr;
+    for (auto& it : getHistoryItems()) {
+        const bool isRecord = (it.source == L"record");
+        if ((sourceTab == 1 && isRecord) || (sourceTab == 2 && !isRecord))
+            arr.Append(historyItemToJson(it));
     }
     auto features = featuresObj();
     auto store = historyStore(features);
-    store.SetNamedValue(L"items", JsonArray{});
+    store.SetNamedValue(L"items", arr);
     features.SetNamedValue(L"history", store);
     save();
 }

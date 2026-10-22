@@ -90,6 +90,16 @@ void WinSetting::init(int pageIndex)
 	winSetting->showPage(pageIndex);
 }
 
+// 侧栏「截图历史」菜单（索引 5）按开关显隐：关掉历史后设置里不再出现这一项
+void WinSetting::applyHistoryMenuVisibility()
+{
+	if (!winSetting || winSetting->menus.size() <= 5) return;
+	auto* item = winSetting->menus[5];
+	if (!item) return;
+	if (Setting::get()->getDisableCaptureHistory()) item->hide();
+	else item->show();
+}
+
 void WinSetting::dispose()
 {
 	// 先真正 DestroyWindow 再释放对象：~WinBase 不会销毁 HWND，而退出时消息循环已经结束，
@@ -361,6 +371,8 @@ void WinSetting::initMenuItems(Ling::Node* sideNav)
 		menuItem->onClick.add([this](auto mi) { onMenuItemClick(mi); });
 		menus.push_back(menuItem);
 	}
+	// 「停用截图历史」开启时隐藏该菜单项
+	applyHistoryMenuVisibility();
 }
 
 void WinSetting::onMenuItemClick(Ling::Button* menuItem)

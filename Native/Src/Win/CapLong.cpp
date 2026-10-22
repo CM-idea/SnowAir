@@ -288,10 +288,13 @@ void CapLong::paintPreviewViewFrame(ID2D1DeviceContext* ctx)
 	const float stroke = std::max(1.5f, 1.5f * win->dpi);
 	const float boxW = right - left - stroke;
 	const float boxH = cy1 - cy0 - stroke;
-	const float boxR = std::min(6.f * win->dpi, std::min(boxW, boxH) * 0.5f);
+	// 与外层预览图的圆角**同心**：预览裁切圆角是 rr，线框在它里面再内缩 stroke/2，
+	// 所以线框圆角要同步减掉这份内缩；否则线框顶到预览上/下沿时，四角比裁切弧更靠外而被削掉。
+	const float inset = stroke * 0.5f;
+	const float boxR = std::min(std::max(0.f, rr - inset), std::min(boxW, boxH) * 0.5f);
 	ctx->DrawRoundedRectangle(
 		D2D1::RoundedRect(
-			D2D1::RectF(left + stroke * 0.5f, cy0 + stroke * 0.5f, right - stroke * 0.5f, cy1 - stroke * 0.5f),
+			D2D1::RectF(left + inset, cy0 + inset, right - inset, cy1 - inset),
 			boxR, boxR),
 		previewFrameBrush.Get(), stroke);
 	ctx->PopLayer();
@@ -706,11 +709,6 @@ void CapLong::startCapture()
 	firstStep();
 	syncToolBtn();
 	win->refresh();
-}
-
-void CapLong::togglePaused()
-{
-	setPaused(!isPaused);
 }
 
 void CapLong::setPaused(bool on)
@@ -1155,10 +1153,11 @@ void CapLong::copyToClipboard()
 {
 	std::vector<BYTE> pixels;
 	if (!exportPixels(pixels)) return;
-	Util::saveToClipboard(imgW, resultH, pixels.data());
-	Setting::get()->addHistoryItem(pixels, imgW, resultH, L"long");
-	// 「截图后自动保存」：长图收工同样静默落盘
-	Util::quietSaveCapture(pixels, imgW, resultH, false, win ? win->focusAppName() : L"");
+	// 与区域截图收工一致：落盘 + 剪贴板 + 历史（「以文件复制」时剪贴板放文件）
+	const auto saved = Util::saveCompletedCapture(pixels, imgW, resultH, win ? win->focusAppName() : L"");
+	if (!saved.empty() && Setting::get()->getCopyAsFile()) Util::addFileToClipboard(saved);
+	else Util::saveToClipboard(imgW, resultH, pixels.data());
+	if (!saved.empty()) Setting::get()->addHistoryFile(saved, imgW, resultH, L"long");
 }
 
 bool CapLong::saveToFile()
@@ -1173,7 +1172,7 @@ bool CapLong::saveToFile()
 		Util::extensionFromSaveFormat(Setting::get()->getSaveFormat()), defName, Util::desktopDir().wstring());
 	if (path.empty()) return false;
 	if (!Util::saveToFile(path, imgW, resultH, pixels.data())) return false;
-	Setting::get()->addHistoryItem(pixels, imgW, resultH, L"long");
+	Setting::get()->addHistoryFile(path, imgW, resultH, L"long");
 	return true;
 }
 

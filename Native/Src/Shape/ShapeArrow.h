@@ -36,9 +36,10 @@ private:
 	void ensureMinLength();
 	float arrowSize() const;
 	void ensureStrokeStyle();
-	void drawPolyline(ID2D1DeviceContext* ctx);
+	void drawPolyline(ID2D1DeviceContext* ctx, D2D1_POINT_2F* tipFrom = nullptr, float headBack = 0.f);
 	void constrainToEightDirections(const float anchorX, const float anchorY, const float mouseX, const float mouseY, float& targetX, float& targetY);
 	bool isBig() const;
+	bool isFun() const;
 	bool hitBody(float x, float y);
 	int hoverFromHit(const ArrowHitInfo& h) const;
 private:
@@ -50,6 +51,9 @@ private:
 	Microsoft::WRL::ComPtr<ID2D1StrokeStyle> headStrokeStyle;
 	float strokeWidth{ 0 };
 	int headStyle{ 0 };
+	// 趣味箭头：每条箭头的圈给一点随机缩放/旋转，避免千篇一律
+	float funLoopScale{ 1.f };
+	float funLoopRot{ 0.f };
 	bool isDash{ false };
 	bool isRound{ false };
 	bool creating{ false };

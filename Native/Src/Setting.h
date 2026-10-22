@@ -39,7 +39,7 @@ public:
 	void setLang(const std::wstring& lang);
 	void initShortcutKeys();
 	// 录制热键期间挂起/恢复全局热键：挂起后系统热键与低级键盘钩子都不再拦截按键，
-	// 否则用户在设置页录入热键时按键会先被全局热键吞掉而录不进去。
+	// 否则用户在设置页录入热键时，按键会先被全局热键消费而无法录入。
 	void suspendShortcutKeys();
 	void resumeShortcutKeys();
 	void purgeRemovedAiSettings();
@@ -106,6 +106,11 @@ public:
 	// 线迹标注类工具（矩形/箭头/画笔/高亮）的默认宽度，1–10
 	int getToolDefaultWidth();
 	void setToolDefaultWidth(int v);
+	// 记忆工具样式：记住上次选中的标注工具样式（如箭头样式），不记忆滑动条
+	bool getRememberToolStyle();
+	void setRememberToolStyle(bool on);
+	int getLastArrowHead();
+	void setLastArrowHead(int v);
 	bool getAutoSaveAfterCapture();
 	void setAutoSaveAfterCapture(bool on);
 	std::wstring getSaveFormat();
@@ -169,8 +174,6 @@ public:
 	void setManualSaveFormat(const std::wstring& v);
 	std::wstring getAutoSaveFormat();
 	void setAutoSaveFormat(const std::wstring& v);
-	std::wstring getFocusedWindowFormat();
-	void setFocusedWindowFormat(const std::wstring& v);
 	std::wstring getVideoRecordFormat();
 	void setVideoRecordFormat(const std::wstring& v);
 	// 文件输出目录：空串表示用默认目录（图片\SnowAir）
@@ -181,10 +184,12 @@ public:
 
 	static std::wstring defaultManualSaveFormat();
 	static std::wstring defaultAutoSaveFormat();
-	static std::wstring defaultFocusedWindowFormat();
 	static std::wstring defaultVideoRecordFormat();
 	int getHistoryRetentionDays();
 	void setHistoryRetentionDays(int days);
+	// 「停用截图历史」：开启后设置中心不再显示「截图历史」菜单（不影响已生成的文件与索引）
+	bool getDisableCaptureHistory();
+	void setDisableCaptureHistory(bool on);
 	int getAppTheme();
 	void setAppTheme(int v);
 
@@ -218,11 +223,10 @@ public:
 	std::vector<std::wstring> getWindowBlacklist();
 	void setWindowBlacklist(const std::vector<std::wstring>& titles);
 
-	// —— History 目录/条目/过期清理 ——
+	// —— 历史：只索引真实存在的输出文件，不复制内容 ——
 	struct HistoryItem {
 		std::wstring id;
-		// 截图条目：历史目录里那份 PNG 的路径；
-		// 录屏条目：用户保存的**原视频**路径（不复制），封面在历史目录的 <id>.png
+		// 真实文件路径（截图/长图/静默截图在截图目录，录屏在用户保存的位置）
 		std::wstring filePath;
 		// "fullscreen" / "focused" / "capture" / "long" / "record"
 		std::wstring source;
@@ -230,23 +234,35 @@ public:
 		int height{ 0 };
 		long long createdAt{ 0 };  // ms epoch
 	};
-	std::filesystem::path getHistoryDir();
+	// 录屏封面缩略图缓存目录（只存小图，不是历史副本）
+	std::filesystem::path getHistoryThumbDir();
+	// 索引里的条目（只含登记过的真实文件）
 	std::vector<HistoryItem> getHistoryItems();
-	// 记一条截图历史：图像写进历史目录（历史条目自带一份，与用户输出目录解耦，
-	// 清空历史不会误删用户自己的截图），返回落盘文件路径（失败返回空）
-	std::wstring addHistoryItem(const std::vector<BYTE>& bgra, int width, int height, const std::wstring& source);
-	// 记一条录屏历史：视频文件**不复制**（避免双份大文件），只记媒体路径；
-	// coverBgra 非空时另存一张封面到 历史目录/<id>.png（网格拿它当缩略图）。
-	// 删条目/清空历史只会删掉这张封面，绝不碰用户保存的视频。
+	// 历史页用：索引 + 扫描截图/录屏目录里已有的文件（可见即所得）
+	std::vector<HistoryItem> getHistoryItemsForUi(bool forceRescan = false);
+	// 登记一条已落盘的历史文件；文件不存在则不登记。返回条目 id
+	std::wstring addHistoryFile(const std::wstring& filePath, int width, int height,
+		const std::wstring& source);
+	// 录屏：登记视频路径，coverBgra 只写进缩略图缓存当网格缩略图
 	std::wstring addHistoryMedia(const std::wstring& mediaPath, int width, int height,
 		const std::wstring& source, const std::vector<BYTE>& coverBgra = {});
+	// 自定义标签：按真实文件路径存（目录扫描出来、未登记的条目也能打标签）
+	std::vector<std::wstring> getHistoryTags(const std::wstring& filePath);
+	void setHistoryTags(const std::wstring& filePath, const std::vector<std::wstring>& tags);
+	// 所有可用标签（去重 + 字典序，只保留文件仍存在的条目）
+	std::vector<std::wstring> getAllHistoryTags();
 	void pruneExpiredHistory();
 	void removeHistoryItem(const std::wstring& id);
-	void clearAllHistory();
+	// sourceTab：0 全部 / 1 只清截图 / 2 只清录屏（与历史页导航一致）
+	void clearAllHistory(int sourceTab = 0);
 private:
 	Setting();
+	// 历史页目录扫描缓存：鼠标移动/滚动会频繁取列表，不能每次都遍历目录
+	std::vector<HistoryItem> historyUiCache_;
+	unsigned long long historyUiCacheAt_{ 0 };
+	bool historyUiCacheDirty_{ true };
 	// —— 全局热键 ——
-	// 注册/重注册全部全局热键：先走系统 RegisterHotKey；被别的程序占了就退到低级键盘钩子兜底
+	// 注册/重注册全部全局热键：先走系统 RegisterHotKey；注册失败则退到低级键盘钩子兜底
 	void applyHotkeys();
 	// 执行一条全局热键的动作（id 取自 Setting.cpp 的 kHotkeys）
 	void runHotkeyAction(const std::wstring& id);

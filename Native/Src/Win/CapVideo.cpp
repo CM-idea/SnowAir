@@ -355,9 +355,8 @@ void CapVideo::startGif()
     gifParam->w = (int)(cutMask->maskRect.right - cutMask->maskRect.left);
     gifParam->h = (int)(cutMask->maskRect.bottom - cutMask->maskRect.top);
     // 「动图格式」：0 = GIF / 1 = WebP / 2 = APNG。
-    // WebP 依赖系统的 WIC WebP 编码器，缺失时退回 GIF —— 否则会写出与扩展名不符的内容
+    // WebP 由内置编码器输出，不再依赖系统 WIC，无需降级
     int gifFmt = std::clamp(Setting::get()->getGifFormat(), 0, 2);
-    if (gifFmt == 1 && !VideoGif::webpEncoderAvailable()) gifFmt = 0;
     static const wchar_t* kGifExt[]{ L"gif", L"webp", L"png" };
     gifParam->format = gifFmt;
     gifParam->path = recordTempPath(kGifExt[gifFmt]);
