@@ -91,9 +91,8 @@ namespace {
 			ctx->Clear(0);
 			const float d = (win && win->dpi > 0.f) ? win->dpi : 1.f;
 			Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> bg;
-			// 与截图工具栏属性气泡同一套配色/圆角/描边：
-			// 填充和描边共用一条闭合路径（圆角矩形 + 三角），接缝处不会多出一条线。
-			ctx->CreateSolidColorBrush(Ling::Color(ToolbarTheme::background).getD2DColor(), bg.GetAddressOf());
+			// 气泡底与描边跟随软件主题（与设置页浮层同色），不沿用截图工具栏配色
+			ctx->CreateSolidColorBrush(Ling::Color(SettingTheme::popover).getD2DColor(), bg.GetAddressOf());
 			ToolbarChrome::paintPropBubble(ctx, w, h, d, bg.Get(), arrowX_, tipDown_,
 				ToolbarTheme::borderWidth, SettingTheme::border);
 			finishPaint();
@@ -233,7 +232,7 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 	filterBtn->setPadding(0.f, 0.f, 0.f, 0.f);
 	filterBtn->setFlexShrink(0.f);
 	filterBtn->setColor(SettingTheme::textMuted);
-	filterBtn->setHoverColor(0xFFFFFFFF);
+	filterBtn->setHoverColor(SettingTheme::textPrimary);
 
 	// ---- 中部：空态 / 缩略图网格（互斥显示，同占顶行与底行之间的剩余空间）----
 	// 空态直接作为中部区域的 flex 兄弟（flexGrow 占满），文字在其中上下居中。
@@ -419,7 +418,7 @@ void WinSettingHistory::setFilterBtnActive(bool on)
 {
 	if (!filterBtn) return;
 	filterBtn->setColor(on ? SettingTheme::success : SettingTheme::textMuted);
-	filterBtn->setHoverColor(on ? SettingTheme::success : 0xFFFFFFFF);
+	filterBtn->setHoverColor(on ? SettingTheme::success : SettingTheme::textPrimary);
 	filterBtn->setBg(on ? SettingTheme::accent : SettingTheme::card);
 	filterBtn->setHoverBg(SettingTheme::accent);
 }
@@ -445,11 +444,16 @@ void WinSettingHistory::rebuildFilterPanel()
 	if (!filterBtn) return;
 	setFilterBtnActive(true);
 	if (tip) tip->hide();     // 已经挂着的停悬提示先收掉
-	ToolbarTheme::refresh();   // 取工具栏当前配色，气泡与属性栏保持一致
-	const uint32_t tFg = ToolbarTheme::iconNormal;
-	const uint32_t tHover = ToolbarTheme::hoverBg;
-	const uint32_t tActive = ToolbarTheme::iconActive;   // 标签选中态
+	// 气泡内所有配色跟随软件主题（不使用截图工具栏主题）
+	const uint32_t tFg = SettingTheme::textPrimary;
+	const uint32_t tHover = SettingTheme::accent;
+	const uint32_t tActive = SettingTheme::brand;   // 标签选中态
 	const uint32_t fgFaint = (tFg & 0xFFFFFF00u) | 0x66u;
+	// 日历格：今天 = 次级底 + 主文字；选中 = 主色底 + 主色前景（深/浅主题各自成立）
+	const uint32_t todayBg = SettingTheme::secondary;
+	const uint32_t todayFg = SettingTheme::textPrimary;
+	const uint32_t selBg = SettingTheme::primary;
+	const uint32_t selFg = SettingTheme::primaryForeground;
 
 	const float d = win->dpi > 0.f ? win->dpi : 1.f;
 	const float pageW = w / d;
@@ -728,7 +732,8 @@ void WinSettingHistory::rebuildFilterPanel()
 		endBox->onClick.add([openCal](Ling::Button*) { openCal(1); });
 
 		// 按当前年月刷新标题 / 日期格 / 月份格 / 年份格（只改文字与配色，不动控件）
-		*updateCal = [this, cal, ui, startBox, endBox, tFg, tHover, fgFaint]() {
+		*updateCal = [this, cal, ui, startBox, endBox, tFg, tHover, fgFaint,
+			todayBg, todayFg, selBg, selFg]() {
 			const int y = cal->year, m = cal->month;
 
 			wchar_t yb[32]{};
@@ -755,7 +760,7 @@ void WinSettingHistory::rebuildFilterPanel()
 			struct tm tn{};
 			localtime_s(&tn, &nowT);
 
-			// 月份网格：默认态只有当前月带 #262626；用户点过的月份才显示选中态 #FAFAFA
+			// 月份网格：默认态只有当前月带底色；用户点过的月份才显示选中态
 			for (int i = 0; i < (int)ui->monthCells.size(); ++i) {
 				auto* b = ui->monthCells[i];
 				wchar_t tb[16]{};
@@ -765,17 +770,17 @@ void WinSettingHistory::rebuildFilterPanel()
 				const bool future = (y > tn.tm_year + 1900)
 					|| (y == tn.tm_year + 1900 && i > tn.tm_mon);
 				const bool sel = (ui->pickedMonth == i);
-				b->setBg(sel ? 0xFAFAFAFF : (isThisMonth ? 0x262626FF : 0));
-				b->setHoverBg(sel ? 0xFAFAFAFF
-					: (isThisMonth ? 0x262626FF : (future ? 0 : tHover)));
-				if (sel) b->setColor(0x262626FF);
-				else if (isThisMonth) b->setColor(0xFAFAFAFF);
+				b->setBg(sel ? selBg : (isThisMonth ? todayBg : 0));
+				b->setHoverBg(sel ? selBg
+					: (isThisMonth ? todayBg : (future ? 0 : tHover)));
+				if (sel) b->setColor(selFg);
+				else if (isThisMonth) b->setColor(todayFg);
 				else b->setColor(future ? fgFaint : tFg);
-				b->setHoverColor(sel ? 0x262626FF
-					: (isThisMonth ? 0xFAFAFAFF : (future ? fgFaint : tFg)));
+				b->setHoverColor(sel ? selFg
+					: (isThisMonth ? todayFg : (future ? fgFaint : tFg)));
 			}
 
-			// 年份网格：默认态只有当前年带 #262626；用户点过的年份才显示选中态 #FAFAFA
+			// 年份网格：默认态只有当前年带底色；用户点过的年份才显示选中态
 			for (int i = 0; i < (int)ui->yearCells.size(); ++i) {
 				const int yy = ui->yearPage + i;
 				auto* b = ui->yearCells[i];
@@ -785,13 +790,13 @@ void WinSettingHistory::rebuildFilterPanel()
 				const bool future = (yy > tn.tm_year + 1900);
 				const bool isThisYear = (yy == tn.tm_year + 1900);
 				const bool sel = (ui->pickedYear == yy);
-				b->setBg(sel ? 0xFAFAFAFF : (isThisYear ? 0x262626FF : 0));
-				b->setHoverBg(sel ? 0xFAFAFAFF : (isThisYear ? 0x262626FF : (future ? 0 : tHover)));
-				if (sel) b->setColor(0x262626FF);
-				else if (isThisYear) b->setColor(0xFAFAFAFF);
+				b->setBg(sel ? selBg : (isThisYear ? todayBg : 0));
+				b->setHoverBg(sel ? selBg : (isThisYear ? todayBg : (future ? 0 : tHover)));
+				if (sel) b->setColor(selFg);
+				else if (isThisYear) b->setColor(todayFg);
 				else b->setColor(future ? fgFaint : tFg);
-				b->setHoverColor(sel ? 0x262626FF
-					: (isThisYear ? 0xFAFAFAFF : (future ? fgFaint : tFg)));
+				b->setHoverColor(sel ? selFg
+					: (isThisYear ? todayFg : (future ? fgFaint : tFg)));
 			}
 
 			// 不能往后翻到未来：右箭头置灰且点击无效
@@ -840,10 +845,10 @@ void WinSettingHistory::rebuildFilterPanel()
 				const bool future = (td.tm_year > tn.tm_year)
 					|| (td.tm_year == tn.tm_year && td.tm_mon > tn.tm_mon)
 					|| (td.tm_year == tn.tm_year && td.tm_mon == tn.tm_mon && day > tn.tm_mday);
-				// 选中：浅底深字；今天：深底浅字；其余透明 + 停悬底色
-				const uint32_t cellBg = selected ? 0xFAFAFAFF : (isToday ? 0x262626FF : 0);
-				const uint32_t cellFg = selected ? 0x262626FF
-					: (isToday ? 0xFAFAFAFF : ((inMonth && !future) ? tFg : fgFaint));
+				// 选中：主色底 + 主色前景；今天：次级底 + 主文字；其余透明 + 停悬底色
+				const uint32_t cellBg = selected ? selBg : (isToday ? todayBg : 0);
+				const uint32_t cellFg = selected ? selFg
+					: (isToday ? todayFg : ((inMonth && !future) ? tFg : fgFaint));
 				cell->setBg(cellBg);
 				cell->setHoverBg(selected || isToday || future ? cellBg : tHover);
 				cell->setColor(cellFg);
