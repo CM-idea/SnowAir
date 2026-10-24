@@ -33,6 +33,11 @@ public:
 	static std::tuple<int, int, std::vector<BYTE>> loadImagePixels(const std::wstring& path);
 	// 只读图片头拿像素尺寸（不解码像素；失败返回 {0,0}）—— 停悬大图预览按宽高比定窗口用
 	static std::pair<int, int> imageSize(const std::wstring& path);
+	// 剪切板文本是不是一段 SVG 代码（<svg …>…</svg>）
+	static bool isSvgText(const std::wstring& text);
+	// 用 Direct2D 的 SVG 能力把代码渲染成 BGRA、top-down、行紧凑（步长 = w*4）；
+	// 最长边不超过 maxDim。系统不支持 D2D SVG（Win10 1703 以前）或代码有误时返回 false
+	static bool renderSvgText(const std::wstring& svg, int maxDim, int& w, int& h, std::vector<BYTE>& pixels);
 	// —— History 操作 —— 根据条目 id 找到 Setting 的历史条目，然后执行对应动作
 	static void copyHistoryFileToClipboard(const std::wstring& historyId);
 	static void pinHistoryFile(const std::wstring& historyId);

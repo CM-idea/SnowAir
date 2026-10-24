@@ -613,7 +613,7 @@ namespace {
 		if (looksLikeLink(s)) return ClipTextKind::Link;
 		return ClipTextKind::Plain;
 	}
-	// 剪切板条目的类型标签：图片 / 视频 / 文字 / 文件
+	// 剪切板条目的类型标签：图片 / 视频 / 文字 / SVG / 文件
 	std::wstring clipTypeTag(const Setting::HistoryItem& it)
 	{
 		if (!it.files.empty()) {
@@ -623,6 +623,7 @@ namespace {
 			return Lang::get(L"setting.tagFile");
 		}
 		if (!it.filePath.empty()) return Lang::get(L"setting.tagImage");
+		if (Util::isSvgText(it.text)) return L"SVG";
 		const auto kind = clipTextKind(it.text);
 		if (kind == ClipTextKind::Link) return Lang::get(L"setting.tagLink");
 		if (kind == ClipTextKind::Color) return Lang::get(L"setting.tagColor");
@@ -655,6 +656,39 @@ namespace {
 		const int x = (int)rc.left + (std::max)(0, (areaW - w) / 2);
 		const int y = (int)rc.top + (std::max)(0, (areaH - h) / 2);
 		WinPin::initFromData(x, y, w, h, px);
+	}
+	// 剪切板里的 SVG 代码：渲染成图片后贴到屏幕中央
+	void pinSvgText(const std::wstring& svg)
+	{
+		int w = 0, h = 0;
+		std::vector<BYTE> px;
+		if (!Util::renderSvgText(svg, 1024, w, h, px)) return;
+		RECT rc{};
+		SystemParametersInfo(SPI_GETWORKAREA, 0, &rc, 0);
+		const int areaW = (int)rc.right - (int)rc.left;
+		const int areaH = (int)rc.bottom - (int)rc.top;
+		const int x = (int)rc.left + (std::max)(0, (areaW - w) / 2);
+		const int y = (int)rc.top + (std::max)(0, (areaH - h) / 2);
+		WinPin::initFromData(x, y, w, h, px);
+	}
+	// 卡片缩略图：SVG 代码渲染成 PNG 缓存（同一 id 只渲染一次；空图 / 坏图会重渲）
+	std::wstring svgPreviewPath(const Setting::HistoryItem& it)
+	{
+		if (it.id.empty()) return {};
+		auto dir = Setting::get()->getClipboardDir();
+		std::error_code ec;
+		std::filesystem::create_directories(dir, ec);
+		const auto path = dir / (it.id + L".svg2.png");
+		if (std::filesystem::exists(path, ec)) {
+			const auto [pw, ph] = Util::imageSize(path.wstring());
+			if (pw > 0 && ph > 0) return path.wstring();
+			std::filesystem::remove(path, ec);
+		}
+		int w = 0, h = 0;
+		std::vector<BYTE> px;
+		if (!Util::renderSvgText(it.text, 512, w, h, px)) return {};
+		if (!Util::saveToFile(path.wstring(), w, h, px.data())) return {};
+		return path.wstring();
 	}
 }
 
@@ -2204,6 +2238,8 @@ void WinSettingHistory::refreshGrid()
 		const bool clipFiles = clip && !it.files.empty();
 		const bool clipImageBitmap = clip && !clipFiles && !it.filePath.empty();
 		const bool clipText = clip && !clipFiles && !clipImageBitmap;
+		// 剪切板里的 SVG 代码：当图片处理（卡片渲染预览、贴图也贴成图）
+		const bool clipSvg = clipText && Util::isSvgText(it.text);
 		const bool clipImageKind = clip && (clipImageBitmap || (clipFiles && clipAllFiles(it.files, true)));
 		// 文字里识别为链接的条目：额外提供「打开」（默认浏览器）
 		const bool clipLink = clipText && clipTextKind(it.text) == ClipTextKind::Link;
@@ -2260,7 +2296,8 @@ void WinSettingHistory::refreshGrid()
 		// 多个文件夹与其余未分类（视频 / 普通文件 / 混合多选）=「插件集成」。
 		if (clip) {
 			const wchar_t* headGlyph = Icon::Plugin;
-			if (clipText) {
+			if (clipSvg) headGlyph = Icon::ImageBackground;
+			else if (clipText) {
 				const auto kind = clipTextKind(it.text);
 				if (kind == ClipTextKind::Link) headGlyph = Icon::UnlockAspect;
 				else if (kind == ClipTextKind::Color) headGlyph = Icon::Appearance;
@@ -2320,7 +2357,19 @@ void WinSettingHistory::refreshGrid()
 		}
 		Ling::ScrollerBox* imgScroll = nullptr;   // 剪切板图片的滚动容器（无滑条）
 		Ling::TextBox* textScroll = nullptr;      // 剪切板文字预览（省略显示，不滚动）
-		if (clipText) {
+		std::wstring svgPreview;
+		if (clipSvg) svgPreview = svgPreviewPath(it);
+		if (!svgPreview.empty()) {
+			// SVG 代码：渲染成图片，卡片里居中显示（不拉伸，超出就等比收缩）
+			auto* img = thumbHost->makeChild<Ling::ImageBox>();
+			img->setWidthPercent(100.f);
+			img->setHeightPercent(100.f);
+			img->setPadding(8.f, 8.f, 8.f, 8.f);
+			img->setJustifyContent(Ling::Justify::Center);
+			img->setAlignItems(Ling::Align::Center);
+			img->loadImg(svgPreview, 800.f * win->dpi, 3200.f * win->dpi);
+		}
+		else if (clipText) {
 			// 换行 / 制表都压成空格，交给 TextBox 按卡片实际高度裁剪并加省略号
 			std::wstring preview = it.text;
 			for (auto& ch : preview)
@@ -2409,9 +2458,10 @@ void WinSettingHistory::refreshGrid()
 		auto* delBtn = mkIconBtn(thumbHost, Icon::Remove, 6.f, true,
 			[this, id, clip]() {
 				if (this->overlayOpen()) return;
-				// 单条删除只删记录，不动磁盘上的文件；剪切板条目删索引（位图缓存一起删）
+				// 剪切板条目只删索引（源文件/图片缓存由 removeClipboardItem 处理）；
+				// 截图 / 录屏 / 其他里的文件删条目时移入回收站，避免误删后找不回
 				if (clip) Setting::get()->removeClipboardItem(id);
-				else Setting::get()->removeHistoryItem(id, false);
+				else Setting::get()->removeHistoryItem(id, true);
 				// 延后一拍重建：这个按钮自己就在要被拆掉的格子里，同步重建会在它自己的
 				// 点击回调里把它销毁；
 				auto weak = getWeakThis();
@@ -2421,8 +2471,11 @@ void WinSettingHistory::refreshGrid()
 			});
 		auto* pinBtn = clip
 			? mkIconBtn(thumbHost, Icon::Pin, 38.f, false,
-				[clipText, clipImageBitmap, clipImageKind, clipTextData, filePath, clipFileList]() {
-					if (clipText) {
+				[clipText, clipSvg, clipImageBitmap, clipImageKind, clipTextData, filePath, clipFileList]() {
+					if (clipSvg) {
+						pinSvgText(clipTextData);
+					}
+					else if (clipText) {
 						ClipPin::showText(clipTextData);
 					}
 					else if (clipImageBitmap) {

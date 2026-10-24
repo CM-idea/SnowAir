@@ -1,10 +1,13 @@
 #include "pch.h"
 #include <wincodec.h>
+#include <d2d1_3.h>
 #include <shobjidl.h>
 #include <shellapi.h>
 #include <winver.h>
 #include <format>
 #include <fstream>
+#include <cwctype>
+#include <cwchar>
 #include "Util.h"
 #include "Image/WebpCodec.h"
 #include "Lang.h"
@@ -749,6 +752,157 @@ std::pair<int, int> Util::imageSize(const std::wstring& path)
 	UINT w = 0, h = 0;
 	if (FAILED(frame->GetSize(&w, &h)) || w == 0 || h == 0) return { 0, 0 };
 	return { (int)w, (int)h };
+}
+
+namespace {
+	std::wstring svgLower(const std::wstring& s, size_t maxLen = 1u << 20)
+	{
+		std::wstring out = s.substr(0, (std::min)(s.size(), maxLen));
+		for (auto& c : out) c = (wchar_t)towlower(c);
+		return out;
+	}
+
+	float svgAttr(const std::wstring& lowerTag, const wchar_t* name, float fallback)
+	{
+		std::wstring key = L" ";
+		key += name;
+		key += L"=";
+		auto pos = lowerTag.find(key);
+		if (pos == std::wstring::npos) return fallback;
+		pos += key.size();
+		while (pos < lowerTag.size() && (lowerTag[pos] == L'"' || lowerTag[pos] == L'\'')) ++pos;
+		wchar_t* end = nullptr;
+		const float v = wcstof(lowerTag.c_str() + pos, &end);
+		return (end && end != lowerTag.c_str() + pos && v > 0.f) ? v : fallback;
+	}
+
+	// 取 SVG 的宽高比：优先 viewBox，其次 width / height，兜底 1:1
+	float svgAspect(const std::wstring& svg)
+	{
+		const std::wstring low = svgLower(svg, 4096);
+		const auto vb = low.find(L"viewbox=");
+		if (vb != std::wstring::npos) {
+			const wchar_t* p = low.c_str() + vb + 8;
+			while (*p == L'"' || *p == L'\'') ++p;
+			float v[4]{};
+			int n = 0;
+			while (n < 4) {
+				wchar_t* end = nullptr;
+				v[n] = wcstof(p, &end);
+				if (end == p) break;
+				p = end;
+				while (*p == L' ' || *p == L',' || *p == L'\t' || *p == L'\n' || *p == L'\r') ++p;
+				++n;
+			}
+			if (n == 4 && v[2] > 1.f && v[3] > 1.f) return v[2] / v[3];
+		}
+		const auto tagEnd = low.find(L'>');
+		const std::wstring head = low.substr(0, tagEnd == std::wstring::npos ? low.size() : tagEnd);
+		const float w = svgAttr(head, L"width", 0.f);
+		const float h = svgAttr(head, L"height", 0.f);
+		if (w > 1.f && h > 1.f) return w / h;
+		return 1.f;
+	}
+}
+
+bool Util::isSvgText(const std::wstring& text)
+{
+	if (text.size() < 16 || text.size() > (16u << 20)) return false;
+	const std::wstring low = svgLower(text);
+	const auto open = low.find(L"<svg");
+	if (open == std::wstring::npos) return false;          // 允许前面有 <?xml …?> / 注释
+	if (low.find(L"</svg", open) != std::wstring::npos) return true;
+	return low.find(L"/>", open) != std::wstring::npos;     // 兼容自闭合的 <svg … />
+}
+
+bool Util::renderSvgText(const std::wstring& svg, int maxDim, int& w, int& h, std::vector<BYTE>& pixels)
+{
+	w = 0;
+	h = 0;
+	pixels.clear();
+	if (maxDim < 8 || !isSvgText(svg)) return false;
+	auto d2d = Ling::D2D::get();
+	if (!d2d || !d2d->d2dDevice) return false;
+	// 自己开一个离屏 device context，不动 Ling 正在用的那个（改它的 target 会打断窗口绘制）
+	ComPtr<ID2D1DeviceContext> ctxBase;
+	if (FAILED(d2d->d2dDevice->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+		ctxBase.GetAddressOf())) || !ctxBase) return false;
+	ComPtr<ID2D1DeviceContext5> ctx;
+	if (FAILED(ctxBase.As(&ctx)) || !ctx) return false;   // 老系统没有 D2D SVG
+
+	const int bytes = WideCharToMultiByte(CP_UTF8, 0, svg.c_str(), (int)svg.size(), nullptr, 0, nullptr, nullptr);
+	if (bytes <= 0) return false;
+	std::string utf8((size_t)bytes, '\0');
+	WideCharToMultiByte(CP_UTF8, 0, svg.c_str(), (int)svg.size(), utf8.data(), bytes, nullptr, nullptr);
+	HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, utf8.size());
+	if (!mem) return false;
+	if (void* p = GlobalLock(mem)) {
+		memcpy(p, utf8.data(), utf8.size());
+		GlobalUnlock(mem);
+	}
+	ComPtr<IStream> stream;
+	if (FAILED(CreateStreamOnHGlobal(mem, TRUE, stream.GetAddressOf())) || !stream) {
+		GlobalFree(mem);
+		return false;
+	}
+
+	// 按最长边算输出尺寸：宽高比从 viewBox / width / height 取
+	const float aspect = svgAspect(svg);
+	int ow = maxDim, oh = maxDim;
+	if (aspect >= 1.f) oh = (std::max)(1, (int)std::lround((float)maxDim / aspect));
+	else ow = (std::max)(1, (int)std::lround((float)maxDim * aspect));
+
+	ComPtr<ID2D1SvgDocument> doc;
+	if (FAILED(ctx->CreateSvgDocument(stream.Get(), D2D1::SizeF((float)ow, (float)oh),
+		doc.GetAddressOf())) || !doc) return false;
+
+	const D2D1_BITMAP_PROPERTIES1 targetProps = D2D1::BitmapProperties1(
+		D2D1_BITMAP_OPTIONS_TARGET,
+		D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+	ComPtr<ID2D1Bitmap1> target;
+	if (FAILED(ctx->CreateBitmap(D2D1::SizeU((UINT32)ow, (UINT32)oh), nullptr, 0,
+		&targetProps, target.GetAddressOf()))) return false;
+	ctx->SetTarget(target.Get());
+	// D2D 是批量提交的：必须 BeginDraw/EndDraw 包起来，否则 CopyFromBitmap 读到的是空位图
+	ctx->BeginDraw();
+	ctx->Clear(D2D1::ColorF(0.f, 0.f, 0.f, 0.f));
+	ctx->DrawSvgDocument(doc.Get());
+	const HRESULT endHr = ctx->EndDraw();
+	ctx->SetTarget(nullptr);
+	if (FAILED(endHr)) return false;
+
+	const D2D1_BITMAP_PROPERTIES1 readProps = D2D1::BitmapProperties1(
+		D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+		D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+	ComPtr<ID2D1Bitmap1> readback;
+	if (FAILED(ctx->CreateBitmap(D2D1::SizeU((UINT32)ow, (UINT32)oh), nullptr, 0,
+		&readProps, readback.GetAddressOf()))) return false;
+	if (FAILED(readback->CopyFromBitmap(nullptr, target.Get(), nullptr))) return false;
+	D2D1_MAPPED_RECT map{};
+	if (FAILED(readback->Map(D2D1_MAP_OPTIONS_READ, &map))) return false;
+	pixels.resize((size_t)ow * oh * 4);
+	bool anyInk = false;
+	for (int y = 0; y < oh; ++y) {
+		BYTE* dst = pixels.data() + (size_t)y * ow * 4;
+		memcpy(dst, map.bits + (size_t)y * map.pitch, (size_t)ow * 4);
+		// D2D 出来是预乘 alpha，PNG / 贴图要直通 alpha
+		for (int x = 0; x < ow; ++x) {
+			const int a = dst[x * 4 + 3];
+			if (a > 0) {
+				anyInk = true;
+				if (a < 255) {
+					for (int c = 0; c < 3; ++c)
+						dst[x * 4 + c] = (BYTE)(std::min)(255, (int)dst[x * 4 + c] * 255 / a);
+				}
+			}
+		}
+	}
+	readback->Unmap();
+	// 什么都没画出来（不支持的语法 / 空文档）当失败处理，让调用方回退成文字
+	if (!anyInk) return false;
+	w = ow;
+	h = oh;
+	return true;
 }
 
 void Util::copyHistoryFileToClipboard(const std::wstring& historyId)
