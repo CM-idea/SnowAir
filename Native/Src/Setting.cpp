@@ -1208,7 +1208,56 @@ namespace {
         ClipPin::showFiles(paths);
     }
 
-    // 资源管理器当前窗口里选中的项目
+    // 从某个 shell 文件夹视图里取出选中项的磁盘路径
+    void appendSelectionPaths(IFolderView* folderView, std::vector<std::wstring>& out)
+    {
+        if (!folderView) return;
+        Microsoft::WRL::ComPtr<IShellItemArray> items;
+        if (FAILED(folderView->Items(SVGIO_SELECTION,
+            IID_PPV_ARGS(items.GetAddressOf()))) || !items) return;
+        DWORD n = 0;
+        items->GetCount(&n);
+        for (DWORD k = 0; k < n; ++k) {
+            Microsoft::WRL::ComPtr<IShellItem> item;
+            if (FAILED(items->GetItemAt(k, item.GetAddressOf())) || !item) continue;
+            PWSTR path = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                out.emplace_back(path);
+                CoTaskMemFree(path);
+            }
+        }
+    }
+
+    // 桌面图标选区：桌面不是前台资源管理器窗口，按 SWC_DESKTOP 单独找桌面 shell 视图
+    std::vector<std::wstring> desktopSelection()
+    {
+        std::vector<std::wstring> out;
+        Microsoft::WRL::ComPtr<IShellWindows> windows;
+        if (FAILED(CoCreateInstance(CLSID_ShellWindows, nullptr, CLSCTX_ALL,
+            IID_PPV_ARGS(windows.GetAddressOf()))) || !windows) return out;
+        VARIANT loc{};
+        loc.vt = VT_I4;
+        loc.lVal = CSIDL_DESKTOP;
+        VARIANT root{};
+        root.vt = VT_EMPTY;
+        long shellHwnd = 0;
+        Microsoft::WRL::ComPtr<IDispatch> disp;
+        if (FAILED(windows->FindWindowSW(&loc, &root, SWC_DESKTOP, &shellHwnd,
+            SWFO_NEEDDISPATCH, disp.GetAddressOf())) || !disp) return out;
+        Microsoft::WRL::ComPtr<IServiceProvider> provider;
+        if (FAILED(disp.As(&provider)) || !provider) return out;
+        Microsoft::WRL::ComPtr<IShellBrowser> browser;
+        if (FAILED(provider->QueryService(SID_STopLevelBrowser,
+            IID_PPV_ARGS(browser.GetAddressOf()))) || !browser) return out;
+        Microsoft::WRL::ComPtr<IShellView> view;
+        if (FAILED(browser->QueryActiveShellView(view.GetAddressOf())) || !view) return out;
+        Microsoft::WRL::ComPtr<IFolderView> folderView;
+        if (FAILED(view.As(&folderView)) || !folderView) return out;
+        appendSelectionPaths(folderView.Get(), out);
+        return out;
+    }
+
+    // 资源管理器 / 桌面当前选中的项目
     std::vector<std::wstring> explorerSelection()
     {
         std::vector<std::wstring> out;
@@ -1216,6 +1265,10 @@ namespace {
         if (!fg) return out;
         wchar_t cls[64]{};
         if (!GetClassNameW(fg, cls, 64)) return out;
+        // 桌面（壁纸 / 图标）也算一次「选中文件」的来源
+        if (_wcsicmp(cls, L"Progman") == 0 || _wcsicmp(cls, L"WorkerW") == 0
+            || _wcsicmp(cls, L"SysListView32") == 0)
+            return desktopSelection();
         if (_wcsicmp(cls, L"CabinetWClass") != 0 && _wcsicmp(cls, L"ExploreWClass") != 0)
             return out;
 
@@ -1248,20 +1301,7 @@ namespace {
             if (FAILED(browser->QueryActiveShellView(view.GetAddressOf())) || !view) continue;
             Microsoft::WRL::ComPtr<IFolderView> folderView;
             if (FAILED(view.As(&folderView)) || !folderView) continue;
-            Microsoft::WRL::ComPtr<IShellItemArray> items;
-            if (FAILED(folderView->Items(SVGIO_SELECTION,
-                IID_PPV_ARGS(items.GetAddressOf()))) || !items) continue;
-            DWORD n = 0;
-            items->GetCount(&n);
-            for (DWORD k = 0; k < n; ++k) {
-                Microsoft::WRL::ComPtr<IShellItem> item;
-                if (FAILED(items->GetItemAt(k, item.GetAddressOf())) || !item) continue;
-                PWSTR path = nullptr;
-                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
-                    out.emplace_back(path);
-                    CoTaskMemFree(path);
-                }
-            }
+            appendSelectionPaths(folderView.Get(), out);
             break;
         }
         return out;

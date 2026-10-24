@@ -2298,7 +2298,9 @@ void WinSettingHistory::refreshGrid()
 		// 顶部多一行，内容区相应减高：整张卡高度保持一致
 		thumbHost->setHeight(kThumbH - kHeaderH - kHeaderGap);
 		thumbHost->setFlexShrink(0.f);
-		thumbHost->setBg(0x111111FFu);
+		// 剪切板卡片里是文字/文件名预览，底要走主题色（浅色下深底会让深色文字看不见）；
+		// 截图/录屏都是图片铺满，保留深底当图片留白的衬底。
+		thumbHost->setBg(clip ? SettingTheme::secondary : 0x111111FFu);
 		thumbHost->setBorderRadius(SettingTheme::radiusMd);
 		thumbHost->setPositionType(Ling::Position::Relative);
 

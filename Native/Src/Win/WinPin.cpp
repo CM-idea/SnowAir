@@ -731,6 +731,8 @@ void WinPin::onMinMaxInfo(MINMAXINFO* mmi)
 
 void WinPin::onDown(POINT pos, BOOL isRight)
 {
+	// 另存为对话框关闭后的一小段内吞掉鼠标按下：取消点击可能被系统回放到贴图上
+	if (GetTickCount64() < suppressMouseUntil) return;
 	// 识别浮层开着时，任何一次点击（可能把本窗抬到最前）之后都要把它抬回来
 	raiseOcrPanel();
 	const auto hit = hitHoverBtn(pos);
@@ -795,6 +797,14 @@ void WinPin::onDown(POINT pos, BOOL isRight)
 
 void WinPin::onMove(POINT pos)
 {
+	// 兜底：鼠标已松开却没收到 up（系统对话框 / 捕获丢失）时，别让贴图继续跟着鼠标跑
+	const bool lbtnDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+	if ((annotMouseDown || edgeResize) && pos.x != INT_MAX && !lbtnDown) {
+		annotMouseDown = false;
+		hasDragged = false;
+		edgeResize = 0;
+		if (GetCapture() == hwnd) ReleaseCapture();
+	}
 	if (pos.x == INT_MAX) {
 		// 识别浮层开着：悬停态由浮层的轮询统一维护（光标移到浮层上会先收到这里的 MOUSELEAVE）
 		if (toolOcr && toolOcr->hwnd && !thumbnail) return;
@@ -942,6 +952,8 @@ void WinPin::forwardKey(UINT key)
 
 void WinPin::onKey(UINT key)
 {
+	// 另存为对话框刚关闭：取消 / 确认用的 Esc、回车会漏到贴图上，这一小段直接吞掉
+	if ((key == VK_ESCAPE || key == VK_RETURN) && GetTickCount64() < suppressKeysUntil) return;
 	if (editingText) {
 		annotKey(key);
 		return;
@@ -989,34 +1001,43 @@ void WinPin::copyToClipboard()
 void WinPin::saveToFile()
 {
 	auto foregroundBeforeDialog = GetForegroundWindow();
+	// 保存前后把窗口摆回原处：系统对话框可能带来 DPI / 焦点变化，避免贴图"移位"
+	const RECT before{ x, y, x + (LONG)std::lround(w), y + (LONG)std::lround(h) };
 	// 「保存格式」决定扩展名；文件名默认给「手动保存文件名格式」的末段；起始目录固定「桌面」
 	const std::wstring saveExt = Util::extensionFromSaveFormat(Setting::get()->getSaveFormat());
 	std::wstring defName = Util::previewFileName(
 		Setting::get()->getManualSaveFormat(), Setting::defaultManualSaveFormat(), L"");
 	if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos) defName = defName.substr(slash + 1);
+	suppressKeysUntil = GetTickCount64() + 600;
+	// 系统对话框会抢走鼠标捕获：先把拖拽 / 缩放状态复位，避免关闭后贴图跟着鼠标跑
+	annotMouseDown = false;
+	hasDragged = false;
+	edgeResize = 0;
+	if (GetCapture() == hwnd) ReleaseCapture();
 	auto path = Util::getSaveFilePath(hwnd, saveExt, defName, Util::desktopDir().wstring());
+	// 取消对话框的 Esc 有时会随后落到贴图上：收尾这一小段吞掉 Esc / 回车与鼠标按下
+	suppressKeysUntil = GetTickCount64() + 400;
+	suppressMouseUntil = GetTickCount64() + 300;
 	if (path.empty()) {
-		restoreWindowState(foregroundBeforeDialog);
+		restoreWindowState(foregroundBeforeDialog, before);
 		return;
 	}
 	std::vector<BYTE> pixels;
 	D2D1_SIZE_U size{};
 	if (!getAnnotPixels(pixels, size)) {
-		restoreWindowState(foregroundBeforeDialog);
+		restoreWindowState(foregroundBeforeDialog, before);
 		return;
 	}
-	if (Util::saveToFile(path, (int)size.width, (int)size.height, pixels.data())) {
-		close();
-	}
-	else {
-		restoreWindowState(foregroundBeforeDialog);
-	}
+	Util::saveToFile(path, (int)size.width, (int)size.height, pixels.data());
+	// 另存为不关闭贴图（与复制一致）：保存完把窗口状态与属性栏复位，留在原位
+	restoreWindowState(foregroundBeforeDialog, before);
 }
 
-void WinPin::restoreWindowState(HWND foregroundBeforeDialog)
+void WinPin::restoreWindowState(HWND foregroundBeforeDialog, const RECT& before)
 {
 	if (hwnd) {
-		SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+		SetWindowPos(hwnd, HWND_TOPMOST, before.left, before.top,
+			before.right - before.left, before.bottom - before.top, SWP_NOACTIVATE);
 	}
 	bindToolChrome();
 	if (editing) raiseToolChrome();

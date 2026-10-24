@@ -52,7 +52,7 @@ private:
 	Kind contentKind() const;
 	std::wstring copyLabel() const;
 	void copyToClipboard() const;
-	void saveAs() const;
+	void saveAs();
 	void showContextMenu(POINT screenPt);
 	void setTopMost(bool on);
 	void setBorderVisible(bool on);
@@ -109,4 +109,8 @@ private:
 	// 链接打开去抖：双击不要连开两次
 	ULONGLONG lastLinkOpenTick_{ 0 };
 	POINT lastLinkOpenPos_{};
+	// 另存为对话框收尾期间吞掉 Esc：取消对话框的按键会落到贴屏上，导致贴屏被误关
+	ULONGLONG suppressEscUntil_{ 0 };
+	// 对话框关闭后的短暂窗口：系统可能把取消点击回放到贴屏上，这段内的按下直接忽略
+	ULONGLONG suppressMouseUntil_{ 0 };
 };

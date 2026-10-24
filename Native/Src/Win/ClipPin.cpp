@@ -316,6 +316,8 @@ void ClipPin::onCreated()
 	clampToWorkArea();
 
 	onMouseDown.add([this](POINT pos, bool isRight) {
+		// 另存为对话框关闭后的一小段内吞掉鼠标按下：取消点击可能被系统回放到贴屏上
+		if (GetTickCount64() < suppressMouseUntil_) return;
 		pressOnText_ = false;
 		pressFileIndex_ = -1;
 		if (isRight) {
@@ -376,6 +378,14 @@ void ClipPin::onCreated()
 		SetCapture(hwnd);
 		});
 	onMouseMove.add([this](POINT pos) {
+		// 兜底：鼠标已松开却没收到 up（系统对话框 / 捕获丢失）时，别让贴屏继续跟着鼠标跑
+		const bool lbtnDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+		if ((dragging_ || resizing_) && pos.x != INT_MAX && !lbtnDown) {
+			dragging_ = false;
+			resizing_ = false;
+			resizeEdges_ = 0;
+			if (GetCapture() == hwnd) ReleaseCapture();
+		}
 		const bool inside = pos.x != INT_MAX && pos.y != INT_MAX;
 		this->updateHoverChrome(inside && !resizing_);
 		this->updateLinkHover((resizing_ || dragging_) ? POINT{ INT_MAX, INT_MAX } : pos);
@@ -425,6 +435,8 @@ void ClipPin::onCreated()
 		pressFileIndex_ = -1;
 		});
 	onKeyDown.add([this](UINT key) {
+		// 另存为对话框刚关闭：取消用的 Esc 会漏到贴屏上，这一小段直接吞掉
+		if (key == VK_ESCAPE && GetTickCount64() < suppressEscUntil_) return;
 		if (key == VK_ESCAPE) this->closeSelf();
 		});
 	// 打开文件后：等一小会儿看是哪个窗口接住了它（见 onOpenWatchTimer）
@@ -718,11 +730,23 @@ void ClipPin::copyToClipboard() const
 	Setting::get()->markOwnClipboardWrite();
 }
 
-void ClipPin::saveAs() const
+void ClipPin::saveAs()
 {
+	// 系统对话框会抢走鼠标捕获、吞掉松开消息：先把拖拽 / 缩放状态复位，
+	// 否则对话框关掉后贴屏会跟着鼠标跑（看起来就是"移位后不见了"）
+	dragging_ = false;
+	resizing_ = false;
+	resizeEdges_ = 0;
+	pressOnText_ = false;
+	pressFileIndex_ = -1;
+	if (GetCapture() == hwnd) ReleaseCapture();
+	suppressEscUntil_ = GetTickCount64() + 600;
 	if (!isFiles_) {
 		// 文字 / 链接 / 色值：存成 UTF-8（带 BOM）的 txt
 		const std::wstring path = Util::getSaveFilePath(hwnd, L"txt");
+		// 取消对话框的 Esc 有时会随后落到贴屏上：收尾这一小段吞掉 Esc 与鼠标按下
+		suppressEscUntil_ = GetTickCount64() + 400;
+		suppressMouseUntil_ = GetTickCount64() + 300;
 		if (path.empty()) return;
 		std::ofstream f(std::filesystem::path(path), std::ios::binary);
 		if (!f) return;
@@ -745,6 +769,8 @@ void ClipPin::saveAs() const
 	const auto dot = name.find_last_of(L'.');
 	const std::wstring ext = dot == std::wstring::npos ? L"dat" : name.substr(dot + 1);
 	const std::wstring path = Util::getSaveFilePath(hwnd, ext, name);
+	suppressEscUntil_ = GetTickCount64() + 400;
+	suppressMouseUntil_ = GetTickCount64() + 300;
 	if (path.empty()) return;
 	std::error_code ec;
 	std::filesystem::copy_file(src, path, std::filesystem::copy_options::overwrite_existing, ec);

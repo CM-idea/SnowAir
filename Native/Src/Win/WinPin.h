@@ -53,7 +53,7 @@ private:
 	void onClosed();
 	BOOL setCursor() override;
 	void applyEmptyToolCursor() override;
-	void restoreWindowState(HWND foregroundBeforeDialog);
+	void restoreWindowState(HWND foregroundBeforeDialog, const RECT& before);
 	void applyWinSize();
 	D2D1_SIZE_U getImgSize() const;
 	void applyScale(float newScale, POINT anchor);
@@ -110,6 +110,10 @@ private:
 	bool locked{ false };
 	bool borderVisible{ true }; // 对齐当前始终画绿边；可用工具栏开关关闭
 	bool hoverChromeVisible{ false };
+	// 另存为对话框收尾期间吞掉 Esc / 回车：取消对话框的按键会落到贴图上，导致贴图被误关
+	ULONGLONG suppressKeysUntil{ 0 };
+	// 对话框关闭后的短暂窗口：系统可能把取消点击回放到贴图上，这段内的按下直接忽略
+	ULONGLONG suppressMouseUntil{ 0 };
 	HoverBtn hoverBtn{ HoverBtn::None };
 	std::wstring pendingTool;
 	// 进入编辑时的标注快照，取消时回滚
