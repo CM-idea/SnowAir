@@ -618,7 +618,9 @@ void WinPin::layout()
 	if (sz.width == 0 || sz.height == 0) { canvas->finishPaint(); return; }
 
 	const int bw = Setting::get()->getPinBorderWidth();
-	const float sw = (bw > 0 ? bw : 1) * dpi;
+	// 粗细 0 = 不画边框（连圆角裁剪也不做，否则会切出圆角但看不到边框）
+	const bool drawBorder = borderVisible && bw > 0;
+	const float sw = (bw > 0 ? (float)bw : 0.f) * dpi;
 	const float hw = sw * 0.5f;
 	const float borderRad = (float)Setting::get()->getPinBorderRadius() * dpi;
 
@@ -645,7 +647,7 @@ void WinPin::layout()
 	// 圆角裁剪：边框开启且圆角 > 0 时，把画面裁进与边框外缘一致的圆角形状。
 	// 裁剪层在「单位变换」下推入 —— 蒙版按窗口坐标（不受随后的取景/缩放变换影响），
 	// 再把取景变换设回去、在层内绘制，于是画面四角随边框一起变圆而不是方角。
-	const bool clipRound = borderVisible && borderRad > 0.f;
+	const bool clipRound = drawBorder && borderRad > 0.f;
 	if (clipRound) {
 		ctx->SetTransform(D2D1::Matrix3x2F::Identity());
 		if (!clipLayer) ctx->CreateLayer(nullptr, clipLayer.GetAddressOf());
@@ -673,7 +675,7 @@ void WinPin::layout()
 
 	// 边框：不参与圆角裁剪（画在圆角形状的外缘），但在透明度层内 → 随画面一起变淡。
 	ctx->SetTransform(D2D1::Matrix3x2F::Identity());
-	if (borderVisible) {
+	if (drawBorder) {
 		ctx->DrawRoundedRectangle(
 			D2D1::RoundedRect(D2D1::RectF(hw, hw, w - hw, h - hw), borderRad, borderRad), borderBrush.Get(), sw);
 	}

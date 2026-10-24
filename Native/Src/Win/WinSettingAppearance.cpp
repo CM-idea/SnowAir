@@ -732,8 +732,8 @@ void WinSettingAppearance::refreshPinPreview()
     const int r = Setting::get()->getPinBorderRadius();
     pinPreview->setBorderRadius((float)r);
     pinPreview->setBg(SettingTheme::card);   // 白底：靠描边区分边界
-    if (w > 0) pinPreview->setBorder((float)w, col);
-    else pinPreview->setBorder(1.f, SettingTheme::border);   // 0 粗细：画 1px 通用描边，示意边框位置
+    // 粗细 0 = 不显示边框，预览也跟着去掉（不再画 1px 示意线）
+    pinPreview->setBorder(w > 0 ? (float)w : 0.f, w > 0 ? col : 0u);
 }
 
 void WinSettingAppearance::pickPinColor()
