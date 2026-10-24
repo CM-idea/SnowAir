@@ -469,6 +469,12 @@ std::vector<BYTE> Util::scaleBGRA(const BYTE* src, int sw, int sh, int dw, int d
 
 void Util::addFileToClipboard(const std::wstring& filePath)
 {
+	addFilesToClipboard({ filePath });
+}
+
+void Util::addFilesToClipboard(const std::vector<std::wstring>& paths)
+{
+	if (paths.empty()) return;
 	// 同「复制图片」：OpenClipboard 可能被别的进程短暂占用，有限次重试
 	bool opened = false;
 	for (int attempt = 0; attempt < 10; ++attempt) {
@@ -477,8 +483,10 @@ void Util::addFileToClipboard(const std::wstring& filePath)
 	}
 	if (!opened) return;
 	EmptyClipboard();
-	// DROPFILES 之后紧跟双 \0 结尾的路径列表，这里只放一条
-	auto totalSize = sizeof(DROPFILES) + (filePath.length() + 2) * sizeof(wchar_t);
+	// DROPFILES 之后紧跟「路径\0路径\0…\0」：最后再补一个 \0 结束整个列表
+	size_t chars = 0;
+	for (const auto& p : paths) chars += p.length() + 1;
+	auto totalSize = sizeof(DROPFILES) + (chars + 1) * sizeof(wchar_t);
 	auto hGlobal = GlobalAlloc(GMEM_MOVEABLE, totalSize);
 	if (!hGlobal) {
 		CloseClipboard();
@@ -493,8 +501,11 @@ void Util::addFileToClipboard(const std::wstring& filePath)
 	pDropFiles->pFiles = sizeof(DROPFILES);
 	pDropFiles->fWide = TRUE;
 	auto dest = reinterpret_cast<wchar_t*>(pDropFiles + 1);
-	wcscpy_s(dest, filePath.length() + 1, filePath.c_str());
-	dest[filePath.length() + 1] = L'\0';
+	for (const auto& p : paths) {
+		wcscpy_s(dest, p.length() + 1, p.c_str());
+		dest += p.length() + 1;
+	}
+	*dest = L'\0';
 	GlobalUnlock(hGlobal);
 	// 成功后 HGLOBAL 归剪切板所有，只在失败时自己释放
 	if (!SetClipboardData(CF_HDROP, hGlobal)) {
@@ -698,7 +709,7 @@ static std::wstring findHistoryFilePath(const std::wstring& id)
 }
 
 // WIC 从文件解码成 BGRA、top-down、行紧凑 (步长 = w*4) 向量；失败返回 {0,0,空}
-static std::tuple<int, int, std::vector<BYTE>> loadImagePixels(const std::wstring& path)
+std::tuple<int, int, std::vector<BYTE>> Util::loadImagePixels(const std::wstring& path)
 {
 	std::tuple<int, int, std::vector<BYTE>> empty{ 0, 0, {} };
 	if (path.empty() || !std::filesystem::exists(path)) return empty;
@@ -724,6 +735,22 @@ static std::tuple<int, int, std::vector<BYTE>> loadImagePixels(const std::wstrin
 	return { (int)w, (int)h, std::move(data) };
 }
 
+std::pair<int, int> Util::imageSize(const std::wstring& path)
+{
+	if (path.empty() || !std::filesystem::exists(path)) return { 0, 0 };
+	ComPtr<IWICImagingFactory> factory;
+	if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.GetAddressOf()))))
+		return { 0, 0 };
+	ComPtr<IWICBitmapDecoder> decoder;
+	if (FAILED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+		WICDecodeMetadataCacheOnDemand, decoder.GetAddressOf()))) return { 0, 0 };
+	ComPtr<IWICBitmapFrameDecode> frame;
+	if (FAILED(decoder->GetFrame(0, frame.GetAddressOf()))) return { 0, 0 };
+	UINT w = 0, h = 0;
+	if (FAILED(frame->GetSize(&w, &h)) || w == 0 || h == 0) return { 0, 0 };
+	return { (int)w, (int)h };
+}
+
 void Util::copyHistoryFileToClipboard(const std::wstring& historyId)
 {
 	auto path = findHistoryFilePath(historyId);
@@ -735,7 +762,7 @@ void Util::pinHistoryFile(const std::wstring& historyId)
 {
 	auto path = findHistoryFilePath(historyId);
 	if (path.empty()) return;
-	auto [w, h, data] = loadImagePixels(path);
+	auto [w, h, data] = Util::loadImagePixels(path);
 	if (w <= 0 || h <= 0 || data.empty()) return;
 	// 位置：屏幕工作区中央
 	RECT rc{};

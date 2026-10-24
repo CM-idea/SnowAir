@@ -1,6 +1,7 @@
 #pragma once
 #include <include/Ling.h>
 #include <filesystem>
+#include <functional>
 #include <winrt/Windows.Data.Json.h>
 #include "Ocr/CloudOcr.h"
 using namespace winrt::Windows::Data::Json;
@@ -109,6 +110,9 @@ public:
 	// 记忆工具样式：记住上次选中的标注工具样式（如箭头样式），不记忆滑动条
 	bool getRememberToolStyle();
 	void setRememberToolStyle(bool on);
+	// 悬停预览：历史记录 / 剪切板卡片停悬时弹出预览（默认关闭）
+	bool getHoverPreview();
+	void setHoverPreview(bool on);
 	int getLastArrowHead();
 	void setLastArrowHead(int v);
 	bool getAutoSaveAfterCapture();
@@ -228,11 +232,14 @@ public:
 		std::wstring id;
 		// 真实文件路径（截图/长图/静默截图在截图目录，录屏在用户保存的位置）
 		std::wstring filePath;
-		// "fullscreen" / "focused" / "capture" / "long" / "record"
+		// "fullscreen" / "focused" / "capture" / "long" / "record" / "clipboard"
 		std::wstring source;
 		int width{ 0 };
 		int height{ 0 };
 		long long createdAt{ 0 };  // ms epoch
+		// 仅剪切板条目的界面数据（不落盘）
+		std::wstring text;
+		std::vector<std::wstring> files;
 	};
 	// 录屏封面缩略图缓存目录（只存小图，不是历史副本）
 	std::filesystem::path getHistoryThumbDir();
@@ -252,11 +259,48 @@ public:
 	// 所有可用标签（去重 + 字典序，只保留文件仍存在的条目）
 	std::vector<std::wstring> getAllHistoryTags();
 	void pruneExpiredHistory();
-	void removeHistoryItem(const std::wstring& id);
+	// deleteFile=false：只删历史记录/索引，不动磁盘上的文件（设置页单条删除用）；
+	// 目录扫描出来的用户文件没有索引，改为记入隐藏列表（同样不删文件）。
+	void removeHistoryItem(const std::wstring& id, bool deleteFile = true);
 	// sourceTab：0 全部 / 1 只清截图 / 2 只清录屏（与历史页导航一致）
 	void clearAllHistory(int sourceTab = 0);
+	// 「其他」：只清目录里用户自己放进去的图片/视频（移入回收站），不碰索引里的软件产物
+	void clearOtherFiles();
+
+	// —— 剪切板历史 ——
+	// 只记录文本与图片；图片落盘到 dataPath\Clipboard，文本直接存索引（不限条数）
+	struct ClipboardItem {
+		std::wstring id;
+		std::wstring type;      // "text" / "image" / "files"
+		std::wstring text;      // 文本内容（type=text）
+		std::wstring filePath;  // 位图落盘文件（type=image）
+		std::vector<std::wstring> files;   // 文件列表（type=files，可能多个；只记路径）
+		int width{ 0 };
+		int height{ 0 };
+		long long createdAt{ 0 };
+		unsigned hash{ 0 };     // 去重用（图片像素 / 文件路径串的 FNV-1a）
+		std::vector<std::wstring> tags;   // 自定义标签（筛选「全部」时可把剪切板条目筛出来）
+	};
+	std::filesystem::path getClipboardDir();
+	std::vector<ClipboardItem> getClipboardItems();
+	std::vector<std::wstring> getClipboardTags(const std::wstring& id);
+	void setClipboardTags(const std::wstring& id, const std::vector<std::wstring>& tags);
+	void addClipboardText(const std::wstring& text);
+	void addClipboardImage(int w, int h, const std::vector<BYTE>& bgra);
+	// 文件列表（资源管理器 / Word / PPT 等复制的文件）：只记路径，可以一次多个
+	void addClipboardFiles(const std::vector<std::wstring>& files);
+	void removeClipboardItem(const std::wstring& id);
+	// 复制历史里的剪切板条目：把该条挪到最前面（更新时间），不生成重复条目。返回是否真的挪动了
+	bool touchClipboardItem(const std::wstring& id);
+	void clearClipboardHistory();
+	// 本软件自己往剪切板写入内容后调用：记住当前序列号，监听端不再把这次写入记成新条目
+	void markOwnClipboardWrite();
+	// 剪切板历史变化通知：设置页停在「剪切板」页时据此即时刷新列表
+	std::function<void()> clipboardChanged;
 private:
 	Setting();
+	// 剪切板索引写回（含上限裁剪）：新条目在前
+	void writeClipboardItems(std::vector<ClipboardItem>& items);
 	// 历史页目录扫描缓存：鼠标移动/滚动会频繁取列表，不能每次都遍历目录
 	std::vector<HistoryItem> historyUiCache_;
 	unsigned long long historyUiCacheAt_{ 0 };

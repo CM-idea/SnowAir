@@ -55,7 +55,7 @@ namespace Icon
 	inline constexpr const wchar_t* Fill = L"\ue629";           // 填充
 	inline constexpr const wchar_t* Bold = L"\ue62e";           // 加粗
 	inline constexpr const wchar_t* Italic = L"\ue625";         // 斜体
-	inline constexpr const wchar_t* Pierce = L"\ue62f";         // 穿透模式（半透明）
+	inline constexpr const wchar_t* Pierce = L"\ue634";         // 穿透模式：沿用「显示光标」的光标图标
 	inline constexpr const wchar_t* Opacity = L"\ue66b";        // 透明度
 	inline constexpr const wchar_t* MicOn = L"\ue63b";          // 打开麦克风
 	inline constexpr const wchar_t* MicOff = L"\ue62a";         // 关闭麦克风
@@ -72,7 +72,7 @@ namespace Icon
 	inline constexpr const wchar_t* Right = L"\ue620";          // 右
 	inline constexpr const wchar_t* AnnotBoth = L"\ue621";      // 双向标注
 	inline constexpr const wchar_t* TranslateGoogle = L"\ue623";// 谷歌翻译
-	inline constexpr const wchar_t* Angle = L"\ue626";          // 角度
+	inline constexpr const wchar_t* Angle = L"\ue683";          // 角度（新字库 e683）
 	inline constexpr const wchar_t* Blur = L"\ue627";           // 模糊（模糊1）
 	inline constexpr const wchar_t* Blur2 = L"\ue633";          // 模糊2（与 Blur 叠加成复合图标）
 	inline constexpr const wchar_t* PatinaWatermark = L"\ue62b";// 包浆水印
@@ -150,4 +150,12 @@ namespace Icon
 	inline constexpr const wchar_t* RotateSW = L"\ue66a";           // 左下旋转
 	inline constexpr const wchar_t* UserActive = L"\ue665";         // 用户已激活
 	inline constexpr const wchar_t* User = L"\ue666";               // 用户
+
+	// —— 新字库 5228143 增补（e67a、e680-e685）——
+	inline constexpr const wchar_t* Polygon = L"\ue680";            // 多边形
+	inline constexpr const wchar_t* Star = L"\ue681";               // 星形
+	inline constexpr const wchar_t* Bubble = L"\ue682";             // 气泡
+	inline constexpr const wchar_t* Bubble2 = L"\ue67a";            // 气泡（另一款）
+	inline constexpr const wchar_t* WaveLine = L"\ue684";           // 波浪线
+	inline constexpr const wchar_t* Marker = L"\ue685";             // 马克笔
 }

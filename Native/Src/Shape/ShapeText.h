@@ -5,7 +5,9 @@
 class ShapeText : public ShapeBase
 {
 public:
-	ShapeText(AnnotHost* win);
+	// bubble=true：标注里的「对话气泡」——圆角矩形+尾巴，中间默认放一句「请输入文字」
+	explicit ShapeText(AnnotHost* win, bool bubble = false);
+	bool isBubble() const { return bubble_; }
 	~ShapeText();
 	void paint(ID2D1DeviceContext* ctx) override;
 	void paintDragger(ID2D1DeviceContext* ctx) override;
@@ -14,11 +16,15 @@ public:
 	void mouseUp(const float x, const float y) override;
 	void mouseMove(const float x, const float y) override;
 	void setCursor() override;
-	bool isValidWithoutDrag() override { return true; };
+	bool isValidWithoutDrag() override { return !bubble_; };   // 气泡和矩形一样：必须拖出框
 	bool hitErase(const float x, const float y) override;
 	void finishEdit();
 	void applyStyle();
 	void startEdit();
+	// 「尺寸」：挂到线段上时初始化一段默认文字（固定字号，随后 setAttachPose 摆到中点）
+	void initAttachedText(const std::wstring& t, float px);
+	// 自动文字（角度测量）：用户手动编辑过之后就不再自动改写
+	void setAutoText(const std::wstring& t);
 	// 按当前 rect 把输入框摆好（附着文字时 rect 是以线段锚点为中心的）。
 	// 编辑已经开着的时候调它，就能把插入符从"落笔的鼠标位置"挪回锚点
 	void syncEditorGeometry();
@@ -43,11 +49,30 @@ private:
 	void setAttr();
 	void syncRectFromLayout();
 	void updateDraggers();
+	// 气泡外框：圆角矩形 + 尾巴（一条闭合路径：走到尾巴根部跳过一小段再连到尾巴尖）
+	Microsoft::WRL::ComPtr<ID2D1PathGeometry> buildBubbleGeometry() const;
+	// 气泡命中：只有描边附近 / 文字上算命中（中间空白不抢点击）
+	bool hitBubbleStroke(float x, float y, float band) const;
+	bool hitBubbleText(float x, float y) const;    // 按文字实际排版尺寸判，不是整个框
+	// 气泡尾巴尖：默认跟着矩形走；用户拖过之后保留手动位置
+	void updateBubbleTail();
 private:
 	std::wstring text;
+	// 最近一次自动生成的文字（尺寸/角度）。用户把内容改成别的值之后就停止自动覆盖；
+	// 只是双击进编辑、内容没改，仍然继续跟着测量刷新
+	std::wstring autoText_{};
 	float fontSize{ 20.f };
 	float angle{ 0.f }; // 弧度
 	bool isBold{ false }, isItalic{ false };
+	bool bubble_{ false };
+	float bubbleStroke_{ 2.f };              // 气泡描边粗细（取标注滑条值）
+	D2D1_POINT_2F bubbleTail_{ 0.f, 0.f };   // 尾巴尖（标注坐标）
+	bool tailCustom_{ false };               // 用户拖过尾巴尖后不再跟随默认位置
+	// 气泡圆角（四角统一）：选中后拖四角内侧的圆角点调整
+	float bubbleRadius_{ 14.f };
+	float dotStartRadius_{ 0.f };
+	float dotPressX_{ 0.f }, dotPressY_{ 0.f };
+	int dotPressIndex_{ -1 };
 	UINT32 colorValue{ 0 };
 	D2D1_COLOR_F color{};
 	D2D1_RECT_F rect{};

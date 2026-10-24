@@ -292,9 +292,13 @@ void ToolVideo::makeSlot(const std::wstring& id)
 		applyToggleStyle(btnPierce, pierceOn);
 	}
 	else if (id == L"play") {
-		btnPlay = makeIconBtn(Icon::Play, L"play");
+		// 录制中这颗按钮显示"暂停"，并保持选中态（绿）—— 让用户一眼看出还在录
+		btnPlay = makeIconBtn(isRecording ? (isPaused ? Icon::Play : Icon::Pause) : Icon::Play, L"play");
 		btnPlay->onClick.add([this](Ling::Button*) { togglePlayPause(); });
-		tip->bind(btnPlay, Lang::get(isRecording ? L"video.pauseRecord" : L"video.startRecord"));
+		tip->bind(btnPlay, Lang::get(isRecording
+			? (isPaused ? L"video.resumeRecord" : L"video.pauseRecord")
+			: L"video.startRecord"));
+		applyToggleStyle(btnPlay, isRecording);
 	}
 	else if (id == L"record-time") {
 		timerLabel = contentNode->makeChild<Ling::Label>();
@@ -560,6 +564,7 @@ void ToolVideo::startRecord()
 	trimmedAfterStart_ = false;
 	if (btnPlay) {
 		btnPlay->setText(Icon::Pause);
+		applyToggleStyle(btnPlay, true);   // 选中态 = 正在录制
 		tip->bind(btnPlay, Lang::get(L"video.pauseRecord"));
 	}
 	setTimer(1000, tickTimerId);
@@ -687,6 +692,8 @@ void ToolVideo::saveFile()
 	if (!isRecording) return;
 	hide();
 	killTimer(tickTimerId);
+	// 先把屏幕上的选框/遮罩收掉：stopRecord() 要等编码收尾，那几百毫秒不该让用户干等
+	win->hideRecordOverlay();
 	auto srcPath = win->stopRecord();
 	if (srcPath.empty()) {
 		win->close();
@@ -738,6 +745,8 @@ void ToolVideo::finishRecord(bool toClipboard)
 {
 	hide();
 	killTimer(tickTimerId);
+	// 同 saveFile：先收屏幕上的选框/遮罩，再等编码收尾
+	win->hideRecordOverlay();
 	auto srcPath = win->stopRecord();
 	if (toClipboard) {
 		if (!srcPath.empty()) Util::addFileToClipboard(srcPath);

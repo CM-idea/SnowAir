@@ -45,6 +45,23 @@ void ToolNestedPanel::onCreated()
 	contentNode->setAlignItems(Ling::Align::Center);
 	contentNode->setPaddingLeft(ToolbarTheme::propPad);
 	contentNode->setPaddingRight(ToolbarTheme::propPad);
+	// 滑条悬停：显示说明文字；多边形/星形顺便在画布上预览形状
+	onMouseMove.add([this](POINT pos) {
+		if (!open_) return;
+		const bool onSlider = activeSlider_ && (activeSlider_->isPosIn(pos)
+			|| (activeValue_ && activeValue_->isPosIn(pos)));
+		if (onSlider != sliderHover_) {
+			sliderHover_ = onSlider;
+			if (onSlider && !sliderTip_.empty() && activeSlider_)
+				tip->showAbove(activeSlider_, sliderTip_);
+			else
+				tip->hide();
+		}
+		if (kind_ == Kind::ShapeSides && onSlider != sidesHover_) {
+			sidesHover_ = onSlider;
+			owner->setShapePreviewHold(onSlider);
+		}
+	});
 }
 
 void ToolNestedPanel::layout()
@@ -78,6 +95,10 @@ void ToolNestedPanel::applyTipDirection(bool tipDown)
 void ToolNestedPanel::clearContent()
 {
 	if (contentNode) contentNode->removeAllChildren();
+	activeSlider_ = nullptr;
+	activeValue_ = nullptr;
+	sliderTip_.clear();
+	sliderHover_ = false;
 }
 
 void ToolNestedPanel::prepareContentRow()
@@ -114,9 +135,12 @@ Ling::Button* ToolNestedPanel::makeIconBtn(const wchar_t* icon, const std::wstri
 	return btn;
 }
 
-void ToolNestedPanel::addSlider(float minV, float maxV, float val, std::function<void(float)> onChange)
+PropSlider::Pair ToolNestedPanel::addSlider(float minV, float maxV, float val, std::function<void(float)> onChange)
 {
-	PropSlider::mount(contentNode, minV, maxV, val, std::move(onChange));
+	auto pair = PropSlider::mount(contentNode, minV, maxV, val, std::move(onChange));
+	activeSlider_ = pair.slider;
+	activeValue_ = pair.value;
+	return pair;
 }
 
 void ToolNestedPanel::finishOpen(const RECT& workArea, Ling::Button* anchor, float logicW, float logicH)
@@ -144,9 +168,12 @@ void ToolNestedPanel::place(const RECT& workArea, Ling::Button* anchor)
 	const float refTop = (float)owner->y + subPad;
 	const float refBottom = (float)owner->y + owner->h - subPad;
 	const bool preferBelow = !owner->tipDown();
+	// 荧光笔透明度 / 多边形边数气泡：与属性栏左对齐（尖仍指向触发按钮）
+	float desiredX = (kind_ == Kind::PenOpacity || kind_ == Kind::ShapeSides)
+		? (float)owner->x : ax - w / 2.f;
 	const auto place = ToolbarChrome::placeBubble(
 		workArea, refTop, refBottom, w, h, gap,
-		ax - w / 2.f, ax, preferBelow, tipDown_, arrowX, x, y);
+		desiredX, ax, preferBelow, tipDown_, arrowX, x, y);
 	if (place.tipFlipped) applyTipDirection(place.tipDown);
 	arrowX = place.arrowX;
 	if (place.moved) setPosition(place.x, place.y);
@@ -167,6 +194,17 @@ void ToolNestedPanel::updatePosition(const RECT& workArea)
 
 void ToolNestedPanel::closePanel()
 {
+	if (sidesHover_) {
+		sidesHover_ = false;
+		owner->setShapePreviewHold(false);
+	}
+	if (sliderHover_) {
+		sliderHover_ = false;
+		tip->hide();
+	}
+	activeSlider_ = nullptr;
+	activeValue_ = nullptr;
+	sliderTip_.clear();
 	open_ = false;
 	kind_ = Kind::None;
 	anchorBtn = nullptr;
@@ -180,11 +218,14 @@ void ToolNestedPanel::openCorner(const RECT& workArea, Ling::Button* anchor)
 	kind_ = Kind::Corner;
 	clearContent();
 	prepareContentRow();
-	addSlider(0.f, 40.f, owner->cornerRadius, [this](float nv) {
+	sliderTip_ = Lang::get(L"tool.roundCorner");
+	addSlider(0.f, 100.f, owner->cornerRadius, [this](float nv) {
 		owner->cornerRadius = nv;
 		if (nv > 0.f) owner->lastCornerRadius = nv;
+		owner->applyCornerRadiusLive();   // 选中的矩形/多边形/星形实时变
 		owner->refreshNestedTrigger();
 		owner->notifyStyleChanged();
+		owner->pulseShapePreview();       // 画布预览跟着刷新（多边形/星形会画出倒圆效果）
 	});
 	finishOpen(workArea, anchor,
 		ToolbarTheme::propPad * 2.f + PropSlider::rowLogicW() + ToolbarTheme::shadowPad * 2.f);
@@ -201,10 +242,40 @@ void ToolNestedPanel::openWmAngle(const RECT& workArea, Ling::Button* anchor)
 	kind_ = Kind::WmAngle;
 	clearContent();
 	prepareContentRow();
+	sliderTip_ = Lang::get(L"tool.wmAngle");
 	addSlider(0.f, 360.f, owner->watermarkAngle, [this](float nv) {
 		owner->watermarkAngle = nv;
 		owner->notifyStyleChanged();
 	});
+	finishOpen(workArea, anchor,
+		ToolbarTheme::propPad * 2.f + PropSlider::rowLogicW() + ToolbarTheme::shadowPad * 2.f);
+	owner->refreshNestedTrigger();
+}
+
+void ToolNestedPanel::openShapeSides(const RECT& workArea, Ling::Button* anchor, bool star)
+{
+	// 点同一个形态按钮 = 收起；切换多边形/星形则直接换内容重开
+	if (open_ && kind_ == Kind::ShapeSides && sidesStar_ == star) {
+		closePanel();
+		owner->refreshNestedTrigger();
+		return;
+	}
+	closePanel();
+	kind_ = Kind::ShapeSides;
+	sidesStar_ = star;
+	clearContent();
+	prepareContentRow();
+	sidesHover_ = false;
+	sliderTip_ = Lang::get(star ? L"tool.starPoints" : L"tool.polygonSides");
+	addSlider(3.f, 20.f, star ? (float)owner->starPoints : (float)owner->polygonSides,
+		[this, star](float nv) {
+			const int v = std::clamp((int)std::lround(nv), 3, 20);
+			if (star) owner->starPoints = v;
+			else owner->polygonSides = v;
+			owner->applyShapeSidesLive(star, v);   // 选中的同形态形状实时变
+			owner->notifyStyleChanged();
+			owner->pulseShapePreview();            // 画布上的形状预览也跟着刷新
+		});
 	finishOpen(workArea, anchor,
 		ToolbarTheme::propPad * 2.f + PropSlider::rowLogicW() + ToolbarTheme::shadowPad * 2.f);
 	owner->refreshNestedTrigger();
@@ -216,11 +287,28 @@ void ToolNestedPanel::openBoardOpacity(const RECT& workArea, Ling::Button* ancho
 	kind_ = Kind::BoardOpacity;
 	clearContent();
 	prepareContentRow();
+	sliderTip_ = Lang::get(L"tool.opacity");
 	addSlider(10.f, 100.f, value, [this](float nv) {
 		owner->setBoardOpacity((int)std::lround(nv));
 	});
 	finishOpen(workArea, anchor,
 		ToolbarTheme::propPad * 2.f + PropSlider::rowLogicW() + ToolbarTheme::shadowPad * 2.f);
+}
+
+void ToolNestedPanel::openPenOpacity(const RECT& workArea, Ling::Button* anchor)
+{
+	closePanel();
+	kind_ = Kind::PenOpacity;
+	clearContent();
+	prepareContentRow();
+	sliderTip_ = Lang::get(L"tool.markerOpacity");
+	addSlider(10.f, 100.f, (float)owner->penMarkerOpacity, [this](float nv) {
+		owner->penMarkerOpacity = (int)std::lround(nv);
+		owner->notifyStyleChanged();
+	});
+	finishOpen(workArea, anchor,
+		ToolbarTheme::propPad * 2.f + PropSlider::rowLogicW() + ToolbarTheme::shadowPad * 2.f);
+	owner->refreshNestedTrigger();
 }
 
 void ToolNestedPanel::rebuildPatinaWmRow()

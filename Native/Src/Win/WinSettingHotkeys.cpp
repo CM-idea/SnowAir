@@ -60,19 +60,30 @@ namespace {
 
     // 录制中的实时预览：按当前按住的修饰键拼前缀（顺序与落盘口径一致，末尾带 "+"）。
     // 只反映修饰键，主键一按下就整条落盘并结束录制，所以预览到这里为止。
-    std::wstring liveModifierPrefix()
+    std::wstring modifierPrefix(UINT mods)
     {
         std::wstring out;
         auto add = [&out](const wchar_t* name) {
             if (!out.empty()) out += L"+";
             out += name;
         };
-        if (GetAsyncKeyState(VK_CONTROL) & 0x8000) add(L"Ctrl");
-        if (GetAsyncKeyState(VK_MENU) & 0x8000) add(L"Alt");
-        if (GetAsyncKeyState(VK_SHIFT) & 0x8000) add(L"Shift");
-        if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN)) & 0x8000) add(L"Win");
+        if (mods & MOD_CONTROL) add(L"Ctrl");
+        if (mods & MOD_ALT) add(L"Alt");
+        if (mods & MOD_SHIFT) add(L"Shift");
+        if (mods & MOD_WIN) add(L"Win");
         if (!out.empty()) out += L"+";
         return out;
+    }
+
+    // 非钩子路径（注入按键 / 钩子没装上）仍然看实时键状态：这些按键没被吞，状态是准的
+    UINT asyncMods()
+    {
+        UINT mods = 0;
+        if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mods |= MOD_CONTROL;
+        if (GetAsyncKeyState(VK_MENU) & 0x8000) mods |= MOD_ALT;
+        if (GetAsyncKeyState(VK_SHIFT) & 0x8000) mods |= MOD_SHIFT;
+        if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN)) & 0x8000) mods |= MOD_WIN;
+        return mods;
     }
 
     // 组合键规范化比较：拆成"修饰键位 + 主键"，与键名大小写、修饰键书写顺序无关。
@@ -139,7 +150,14 @@ namespace {
     // 免得出现"能录入、能保存、按下去却不生效"的迷惑行为。
     bool isPendingHotkey(const std::wstring& id)
     {
-        return id == L"quick_translate" || id == L"translate_selection";
+        return id == L"quick_translate" || id == L"translate_selection"
+            || id == L"open_clipboard";
+    }
+
+    // 每一项的「?」说明（目前只有快速贴屏需要；其余行不给问号）
+    std::wstring hotkeyHelpTipOf(const std::wstring& id)
+    {
+        return id == L"quick_pin" ? Lang::get(L"shortcut.quickPinTip") : std::wstring{};
     }
 
     // 快捷键按钮文字与颜色：未绑定时显示「点击设置」占位（muted 色），已绑定显示组合键。
@@ -200,7 +218,7 @@ WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
         restoreBtn->setMarginLeft(SettingTheme::sp3);
     }
 
-    // 3 分组 12 项（AI 对话组已随 AI 功能一并移除）
+    // 4 分组 14 项（AI 对话组已随 AI 功能一并移除）
     // 注：滚动已由外层 WinSetting 的内容 ScrollerBox 统一管理，本页不再自建滚动容器。
     struct Group { std::wstring title; std::vector<std::pair<std::wstring, std::wstring>> items; };
     const Group groups[] = {
@@ -213,12 +231,17 @@ WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
             { L"capture_repeat",        Lang::get(L"shortcut.capture_repeat") },
             { L"capture_focused_window",Lang::get(L"shortcut.capture_focused_window") },
         }},
-        // 1 翻译组 2 项
+        // 1 剪切板组 2 项（紧跟在截图下面）：快速贴屏已实现（Beta），「打开剪切板」暂缓
+        {Lang::get(L"setting.hotkeyGrpClipboard"),{
+            { L"quick_pin",             Lang::get(L"shortcut.quick_pin") + L" Beta" },
+            { L"open_clipboard",        Lang::get(L"shortcut.open_clipboard") },
+        }},
+        // 2 翻译组 2 项
         {Lang::get(L"setting.hotkeyGrpTranslate"),{
             { L"quick_translate",       Lang::get(L"shortcut.quick_translate") },
             { L"translate_selection",   Lang::get(L"shortcut.translate_selection") },
         }},
-        // 2 其他组 4 项
+        // 3 其他组 4 项
         {Lang::get(L"setting.hotkeyGrpOther"),{
             { L"show_main",             Lang::get(L"shortcut.show_main") },
             { L"open_screenshot_dir",   Lang::get(L"shortcut.open_screenshot_dir") },
@@ -245,13 +268,13 @@ WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
     onKeyDownToken = win->onKeyDown.add([this, weakThis](UINT key) {
         if (!weakThis.lock()) return;
         if (this->curKey.empty()) return;
-        this->onKeyDown(key);
+        this->onKeyDown(key, asyncMods());
         });
     // 松开修饰键：录制还没结束，把按钮里的预览退回（或退到剩余仍按住的修饰键）
     onKeyUpToken = win->onKeyUp.add([this, weakThis](UINT) {
         if (!weakThis.lock()) return;
         if (this->curKey.empty()) return;
-        this->refreshCapturePreview();
+        this->refreshCapturePreview(asyncMods());
         });
     onMouseDownToken = win->onMouseDown.add([this, weakThis](POINT pos, bool) {
         if (!weakThis.lock()) return;
@@ -296,7 +319,9 @@ void WinSettingHotkeys::buildGroup(const std::wstring& grpTitle,
     // 每个选项为独立的浅灰圆角卡片行，行间由 optionGap 自然留出间距
     for (size_t i = 0; i < items.size(); i++) {
         const auto& it = items[i];
-        auto r = SettingUi::optionRow(p, it.second, L"", true);
+        // 行标题后的「?」说明：只有快速贴屏给了文案，其余行为空 → 不显示问号
+        auto r = SettingUi::optionRow(p, it.second, L"", true,
+            SettingTheme::ctrlH, hotkeyHelpTipOf(it.first));
         // 样式与其余设置页统一：白底 + 描边（去掉旧的浅灰底覆盖）；卡片高 50
         r.row->setHeight(SettingTheme::hotkeyRowH);
         // 行高改过之后，右侧内边距要跟着重算：与按钮的上下留白 (50-32)/2 取齐
@@ -372,7 +397,7 @@ void WinSettingHotkeys::beginCapture(Ling::Button* btn)
     curLabel->setText(Lang::get(L"shortcut.pressKey"));
     curLabel->setFontSize(SettingTheme::fontBase);
     curLabel->setColor(kHotkeyCaptureFg);   // 绿底上白字
-    refreshCapturePreview();                // 点按钮时若已按住修饰键，立刻显示出来
+    refreshCapturePreview(0);               // 点按钮时若已按住修饰键，预览由首个事件带出
 
     // 录制期间挂起全局热键：否则按下的组合键会先被全局热键（RegisterHotKey / 低级钩子）
     // 消费，传不到设置窗口，导致无法录制。
@@ -382,10 +407,10 @@ void WinSettingHotkeys::beginCapture(Ling::Button* btn)
     // 按键会在系统热键分发阶段被消费，设置窗口收不到 WM_KEYDOWN。录制期间由这里
     // 先行消费所有按键（含系统快捷键），再转回本页。
     auto weakThis = getWeakThis();
-    HotkeyHook::beginCapture([this, weakThis](UINT vk, bool up) {
+    HotkeyHook::beginCapture([this, weakThis](UINT vk, bool up, UINT mods) {
         if (!weakThis.lock() || curKey.empty()) return;
-        if (up) { refreshCapturePreview(); return; }   // 松开修饰键：预览退回
-        onKeyDown(vk);
+        if (up) { refreshCapturePreview(mods); return; }   // 松开修饰键：预览退回
+        onKeyDown(vk, mods);
     });
 
     spinIdx = 0;
@@ -420,14 +445,14 @@ void WinSettingHotkeys::onSpinnerTick(UINT id)
     curSpinner->setText(kSpinnerFrames[spinIdx]);
 }
 
-void WinSettingHotkeys::refreshCapturePreview()
+void WinSettingHotkeys::refreshCapturePreview(UINT mods)
 {
     if (!curLabel) return;
-    const std::wstring prefix = liveModifierPrefix();
+    const std::wstring prefix = modifierPrefix(mods);
     curLabel->setText(prefix.empty() ? Lang::get(L"shortcut.pressKey") : prefix);
 }
 
-void WinSettingHotkeys::onKeyDown(UINT key)
+void WinSettingHotkeys::onKeyDown(UINT key, UINT mods)
 {
     // Esc = 取消这次录制（页面提示里的承诺）：不落盘、保持原键位
     if (key == VK_ESCAPE) { endCapture(); return; }
@@ -436,16 +461,15 @@ void WinSettingHotkeys::onKeyDown(UINT key)
     auto keyStr = keyToStr(key);
     if (keyStr.empty()) return;
     // 只按修饰键：立即把已按住的修饰键显示出来，继续等主键（纯修饰键不落盘）
-    if (isShortcutModifierKey(keyStr)) { refreshCapturePreview(); return; }
+    if (isShortcutModifierKey(keyStr)) { refreshCapturePreview(mods); return; }
 
-    const bool ctrl  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-    const bool alt   = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
-    const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-    const bool lwin  = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0;
-    const bool rwin  = (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+    const bool ctrl   = (mods & MOD_CONTROL) != 0;
+    const bool alt    = (mods & MOD_ALT) != 0;
+    const bool shift  = (mods & MOD_SHIFT) != 0;
+    const bool winMod = (mods & MOD_WIN) != 0;
 
     // 裸 Backspace / Delete = 清空这一行（带修饰键时仍按普通组合录制）
-    if ((key == VK_BACK || key == VK_DELETE) && !ctrl && !alt && !shift && !lwin && !rwin) {
+    if ((key == VK_BACK || key == VK_DELETE) && mods == 0) {
         Setting::get()->setShortcutKey(curKey, {});
         endCapture();
         return;
@@ -456,8 +480,7 @@ void WinSettingHotkeys::onKeyDown(UINT key)
     if (ctrl) keys.push_back(L"Ctrl");
     if (alt) keys.push_back(L"Alt");
     if (shift) keys.push_back(L"Shift");
-    if (lwin) keys.push_back(L"LWin");
-    else if (rwin) keys.push_back(L"RWin");
+    if (winMod) keys.push_back(L"LWin");
     keys.push_back(keyStr);
 
     // 最多三键（两个修饰键 + 一个主键）；不合法就丢弃，保持原键位

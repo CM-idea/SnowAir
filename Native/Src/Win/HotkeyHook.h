@@ -33,7 +33,9 @@ namespace HotkeyHook
 	// 录制期间使用一个临时低级键盘钩子接管键盘输入：按键在进入系统热键分发之前即被消费，
 	// 再异步转交给 UI 线程。这样即使目标组合已被其他进程注册，也能被正常录制。
 	// 回调在 UI 线程执行；vk 已把左右修饰键归一成 VK_CONTROL / VK_SHIFT / VK_MENU。
-	using CaptureCallback = std::function<void(UINT vk, bool up)>;
+	// mods 是**钩子线程在按键发生那一刻**记下的修饰键状态（MOD_CONTROL/MOD_ALT/MOD_SHIFT/MOD_WIN）：
+	// 钩子会把这些物理按键吞掉，GetAsyncKeyState 事后已经查不到它们，只能随事件一起带过来。
+	using CaptureCallback = std::function<void(UINT vk, bool up, UINT mods)>;
 	void beginCapture(CaptureCallback cb);
 	void endCapture();
 	bool capturing();

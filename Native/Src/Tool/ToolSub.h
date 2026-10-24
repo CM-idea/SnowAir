@@ -14,6 +14,23 @@ public:
 	~ToolSub();
 	void showRectTools();
 	void showArrowTools();
+	// 「标注」（原线段）：从箭头属性栏独立出来，只有虚线/圆头/颜色/粗细
+	void showLineTools();
+	// 标注的形态：直线 / 波浪线 / 气泡 / 角度 / 尺寸
+	enum LineKind : int { LineStraight = 0, LineWave = 1, LineBubble = 2, LineAngle = 3, LineDimension = 4 };
+	int lineKind{ LineStraight };
+	// 矩形工具形态：矩形 / 多边形 / 星形（椭圆是单独的 isEllipse 开关）
+	enum RectKind : int { RectShape = 0, PolygonShape = 1, StarShape = 2 };
+	int rectKind{ RectShape };
+	int polygonSides{ 3 };   // 多边形边数（3–20）
+	int starPoints{ 5 };     // 星形角数（3–20）
+	// 多边形/星形滑条：拖动时让当前选中的同形态标注实时跟着变
+	void applyShapeSidesLive(bool star, int sides);
+	// 圆角滑条：拖动时让当前选中的矩形/多边形/星形实时跟着变
+	void applyCornerRadiusLive();
+	// 多边形/星形二级滑条：悬停/拖动时在画布上显示形状预览
+	void setShapePreviewHold(bool hold);
+	void pulseShapePreview();
 	void showPenTools();
 	void showNumberTools();
 	void showTextTools();
@@ -63,6 +80,11 @@ public:
 	void notifyStyleChanged();
 	void refreshNestedTrigger();
 	void updateEmojiTriggerGlyph();
+	// 序号工具的「当前序号」：落笔时取值。autoVal = 按已有形状推算的下一个值；
+	// label 非空表示这一次直接用这段文字（支持中文）
+	int takeNumberValue(int style, int autoVal, std::wstring& label);
+	// 属性栏里的序号输入框当前应显示的文字（供外部刷新）
+	std::wstring numberInputDisplay() const;
 	RECT workAreaRect() const;
 	// 视窗内滚轮：按工具量程微调主滑条
 	bool adjustPrimarySize(int dir);
@@ -83,6 +105,9 @@ public:
 	bool isLine{ false }; // 箭头属性栏内切换直线（无独立主栏按钮）
 	bool isArrowDash{ false }, isArrowRound{ false };
 	bool isPenDash{ false }, isPenSoft{ false }, isPenFade{ false };
+	// 荧光笔：与普通画笔共用同一个粗细滑条（显示 4 时实际 20）、半透明
+	bool isPenMarker{ false };
+	int penMarkerOpacity{ 35 };   // 荧光笔不透明度（10–100）
 	bool isLineTransparent{ false }, isTextBold{ false }, isTextItalic{ false };
 	bool isMosaicBlur{ false };
 	bool isPatinaGreen{ true }, isPatinaWatermark{ true };
@@ -94,9 +119,8 @@ public:
 	float watermarkAngle{ 45.f };
 	std::wstring watermarkText;
 	std::wstring serialEmoji; // Emoji 序号当前表情
-	float cornerRadius{ 0.f }; // 逻辑像素；0 = 直角
+	float cornerRadius{ 0.f }; // 0–100：0 = 直角，100 = 该形状能到的最大圆角
 	float lastCornerRadius{ 10.f }; // 关圆角后再开时恢复
-	float getCornerRadiusPx() const { return cornerRadius * dpi; }
 private:
 	void onCreated() override;
 	void layout() override;
@@ -119,10 +143,25 @@ private:
 	void applyOverlayToggleStyle(bool selected);
 	void makeNumberStyleBtns();
 	void refreshNumberStyleBtns();
+	// 切换荧光笔（与画笔共用粗细滑条，只是画出来按倍数加宽）
+	void applyPenMarkerState(bool on);
+	// 序号输入框：日常显示下一个序号，点进去可改成数字或任意文字（含中文）
+	void buildNumberInput();
+	void syncNumberInput();
+	void applyNumberInputEdited();
+	float measureNumberInputW(const std::wstring& text) const;
+	int autoNextNumber(int style) const;
+	static std::wstring formatNumberLabel(int style, int val);
 	void makeArrowHeadBtn(const wchar_t* icon, int style, const wchar_t* tipKey);
 	void makeArrowHeadBtns();
 	void refreshArrowHeadBtns();
 	void makeRectStyleBtns();
+	// 矩形/多边形/星形三个形态按钮的选中态（椭圆走 makeToggleBtn 自己的 flag）
+	void refreshRectKindBtns();
+	// 圆角按钮：椭圆没有圆角 → 置灰
+	void refreshRoundBtnStyle();
+	// —— 标注属性栏形态按钮的选中态 ——
+	void refreshLineKindBtns();
 	void beginTool(const std::wstring& id);
 	void initSize(int btnCount, bool withColors, bool centerOnBtn = false, float extraLogicW = 0.f);
 	void refreshSize();
@@ -141,6 +180,11 @@ private:
 	Ling::Slider* slider{ nullptr };
 	Ling::Label* sliderValue{ nullptr };
 	Ling::TextBox* wmTextBox{ nullptr };
+	// —— 序号工具：属性栏输入框与「下一次落笔」的取值 ——
+	Ling::TextBox* numberInput{ nullptr };
+	int numberStartVal{ 0 };              // >0 = 手动指定的起始序号（落笔后自增）
+	std::wstring numberCustomLabel;       // 非空 = 下一次落笔直接使用这段文字
+	bool numberInputSyncing{ false };     // 程序回写输入框时屏蔽 onTextChanged
 	std::unique_ptr<Tip> tip;
 	static constexpr float btnSize{ ToolbarTheme::propBtnSize };
 	static constexpr float hoverRadius{ ToolbarTheme::hoverRadius };
@@ -172,11 +216,20 @@ private:
 	std::vector<UINT32> colors = { 0xFF272CFF, 0x00FF40FF, 0x1677FFFF, 0xFFCC00FF, 0x000000FF, 0xFFFFFFFF, 0xFF272CFF };
 	std::vector<Ling::Button*> numberStyleBtns;
 	std::vector<Ling::Button*> arrowHeadBtns;
+	std::vector<std::pair<Ling::Button*, int>> lineKindBtns;   // 标注形态按钮（气泡/角度/波浪线/尺寸）
+	Ling::Button* bubbleKindBtn{ nullptr };
+	Ling::Button* angleKindBtn{ nullptr };
+	Ling::Button* waveKindBtn{ nullptr };
+	Ling::Button* dimKindBtn{ nullptr };
 	Ling::Button* fillBtn{ nullptr };
 	Ling::Button* dashBtn{ nullptr };
 	Ling::Button* softBtn{ nullptr };
+	Ling::Button* markerBtn{ nullptr };
 	Ling::Button* roundBtn{ nullptr };
-	Ling::Button* lineBtn{ nullptr };
+	// 矩形工具的形态按钮（椭圆 / 多边形 / 星形；矩形是默认态）
+	Ling::Button* ellipseBtn{ nullptr };
+	Ling::Button* polyBtn{ nullptr };
+	Ling::Button* starBtn{ nullptr };
 	Ling::Button* angleBtn{ nullptr };
 	Ling::Button* patinaWmBtn{ nullptr };
 	Ling::Button* emojiTrigger{ nullptr };

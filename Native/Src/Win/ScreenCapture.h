@@ -3,8 +3,8 @@
 #include <Windows.h>
 
 // 屏幕抓取（HDR 感知）。
-// 优先走 DXGI 桌面复制，并向系统索要 BGRA8：HDR 显示器由系统做 HDR→SDR 色调映射，
-// 所以 HDR 屏和普通屏拿到的是同一种 8 位图像，后续剪贴板/PNG/历史记录都不用改。
+// 优先走 DXGI 桌面复制：HDR 屏向系统要原始 FP16(scRGB)，在软件里做 HDR→SDR 色调映射；
+// 普通屏仍要 BGRA8。两者最终都输出 8 位 BGRA，剪贴板/PNG/历史记录都不用改。
 // 任一路失败（旧系统、被其他进程占用、受保护内容…）返回空，由调用方回退 GDI。
 namespace ScreenCapture
 {

@@ -118,7 +118,7 @@ ToolCap::~ToolCap()
 
 bool ToolCap::isAnnotationTool(const std::wstring& id)
 {
-	return id == L"rect" || id == L"arrow" || id == L"pen" || id == L"number"
+	return id == L"rect" || id == L"arrow" || id == L"line" || id == L"pen" || id == L"number"
 		|| id == L"text" || id == L"mosaic" || id == L"patina"
 		|| id == L"watermark" || id == L"highlight" || id == L"eraser";
 }
@@ -391,11 +391,16 @@ void ToolCap::updateUndoEnabled()
 bool ToolCap::hasSubTools(const std::wstring& slotId)
 {
 	// extra（屏幕录制）不再有子工具气泡 —— 直接是普通按钮（只剩自己一项的气泡没有意义）
-	return slotId == L"mosaic" || slotId == L"ocr";
+	return slotId == L"mosaic" || slotId == L"ocr" || slotId == L"arrow";
 }
 
 const std::vector<ToolPickItem>* ToolCap::getSubTools(const std::wstring& slotId)
 {
+	// 箭头槽位的停悬气泡：箭头 / 标注（原来的「线段」，从箭头属性栏里独立出来）
+	static const std::vector<ToolPickItem> arrowSubs = {
+		{ L"arrow", Icon::Arrow, L"tool.arrow" },
+		{ L"line", Icon::Line, L"tool.line" },
+	};
 	static const std::vector<ToolPickItem> mosaicSubs = {
 		{ L"mosaic", Icon::Mosaic, L"tool.mosaic" },
 		{ L"patina", Icon::Patina, L"tool.patina" },
@@ -408,6 +413,7 @@ const std::vector<ToolPickItem>* ToolCap::getSubTools(const std::wstring& slotId
 		{ L"ocr", Icon::Ocr, L"cap.ocr" },
 		{ L"qrcode", Icon::Qrcode, L"cap.qrcode" },
 	};
+	if (slotId == L"arrow") return &arrowSubs;
 	if (slotId == L"mosaic") return &mosaicSubs;
 	if (slotId == L"ocr") return &ocrSubs;
 	return nullptr;
@@ -471,7 +477,13 @@ void ToolCap::showToolSubForEffective(const std::wstring& eff)
 		// 记忆工具样式：还原上次用的箭头样式（大箭头 / 双箭头 …）
 		if (Setting::get()->getRememberToolStyle())
 			host->toolSub->arrowHead = Setting::get()->getLastArrowHead();
+		host->toolSub->isLine = false;
 		host->toolSub->showArrowTools();
+	}
+	else if (eff == L"line") {
+		// 标注 = 只有轴线的线段：虚线 / 圆头 / 颜色 / 粗细
+		host->toolSub->isLine = true;
+		host->toolSub->showLineTools();
 	}
 	else if (eff == L"pen") host->toolSub->showPenTools();
 	else if (eff == L"number") host->toolSub->showNumberTools();
@@ -521,6 +533,16 @@ void ToolCap::selectAnnotTool(const std::wstring& id)
 		pickedSub[L"mosaic"] = id;
 		updateSlotButton(slot);
 	}
+	else if (id == L"line") {
+		// 标注 = 箭头槽位里的线段子工具
+		slot = L"arrow";
+		pickedSub[L"arrow"] = id;
+		updateSlotButton(slot);
+	}
+	else if (id == L"arrow") {
+		pickedSub[L"arrow"] = id;
+		updateSlotButton(slot);
+	}
 	Ling::Button* target = nullptr;
 	for (auto b : btns) {
 		if (b->id == slot) { target = b; break; }
@@ -566,6 +588,9 @@ void ToolCap::onHoverMove(POINT pos)
 					}
 				}
 				else if (winCap && slot == L"mosaic" && isAnnotationTool(subId)) {
+					winCap->startAnnotate(subId);
+				}
+				else if (winCap && slot == L"arrow" && isAnnotationTool(subId)) {
 					winCap->startAnnotate(subId);
 				}
 				else if (winCap && slot == L"ocr") {
@@ -690,6 +715,7 @@ void ToolCap::onCreated()
 	pickedSub[L"mosaic"] = L"mosaic";
 	pickedSub[L"extra"] = L"video";
 	pickedSub[L"ocr"] = L"ocr";
+	pickedSub[L"arrow"] = L"arrow";
 	// 「渐隐画笔」是独立一级槽位，但底层工具仍是画笔（laser = pen + isPenFade）：
 	// 槽位 id → 工具 id 显式映射，curId 可以是 laser（排他选中 / 取消选中 / 属性栏锚点按它算），
 	// 而标注引擎通过 getCurToolId() 仍然拿到 pen。
@@ -1181,7 +1207,8 @@ void ToolCap::onClickCap(Ling::Button* btn)
 		return;
 	}
 	if (hasSubTools(btn->id)) {
-		if (btn->id == L"mosaic") {
+		if (btn->id == L"mosaic" || btn->id == L"arrow") {
+			// 箭头槽位的有效工具是「箭头 / 标注」，两者都是标准标注工具
 			if (isAnnotationTool(eff)) winCap->startAnnotate(eff);
 			else showComingSoon();
 		}

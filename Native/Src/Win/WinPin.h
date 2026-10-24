@@ -64,6 +64,12 @@ private:
 	D2D1_RECT_F closeBtnRect() const;
 	D2D1_RECT_F editBtnRect() const;
 	HoverBtn hitHoverBtn(POINT pos) const;
+	HoverBtn hitHoverBtnAt(POINT pos) const;   // 不含"鼠标是否在窗口内"的判断（浮层转发用）
+	// 识别浮层在贴图之上：控件改画在浮层里，悬停/点击由浮层转发回来
+	void pinChromeHover(POINT pos);
+	bool pinChromeDown(POINT pos);
+	// 点击贴图会把贴图抬到置顶组最前，识别浮层会被压住 —— 每次激活后重新把浮层抬回来
+	void raiseOcrPanel();
 	Microsoft::WRL::ComPtr<IDWriteTextLayout> makeHoverIcon(const wchar_t* code);
 	bool sizePreviewOrigin(float& cx, float& cy, float& halfSpan) const override;
 	bool annotRightClick() override;

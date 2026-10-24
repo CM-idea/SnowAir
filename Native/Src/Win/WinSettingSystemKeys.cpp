@@ -29,19 +29,30 @@ namespace {
 
 	// 录制中的实时预览：按当前按住的修饰键拼前缀（顺序与落盘口径一致，末尾带 "+"）。
 	// 只反映修饰键，主键一按下就整条落盘并结束录制，所以预览到这里为止。
-	std::wstring liveModifierPrefix()
+	std::wstring modifierPrefix(UINT mods)
 	{
 		std::wstring out;
 		auto add = [&out](const wchar_t* name) {
 			if (!out.empty()) out += L"+";
 			out += name;
-		};
-		if (GetAsyncKeyState(VK_CONTROL) & 0x8000) add(L"Ctrl");
-		if (GetAsyncKeyState(VK_MENU) & 0x8000) add(L"Alt");
-		if (GetAsyncKeyState(VK_SHIFT) & 0x8000) add(L"Shift");
-		if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN)) & 0x8000) add(L"Win");
+			};
+		if (mods & MOD_CONTROL) add(L"Ctrl");
+		if (mods & MOD_ALT) add(L"Alt");
+		if (mods & MOD_SHIFT) add(L"Shift");
+		if (mods & MOD_WIN) add(L"Win");
 		if (!out.empty()) out += L"+";
 		return out;
+	}
+
+	// 非钩子路径（注入按键 / 钩子没装上）仍然看实时键状态：这些按键没被吞，状态是准的
+	UINT asyncMods()
+	{
+		UINT mods = 0;
+		if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mods |= MOD_CONTROL;
+		if (GetAsyncKeyState(VK_MENU) & 0x8000) mods |= MOD_ALT;
+		if (GetAsyncKeyState(VK_SHIFT) & 0x8000) mods |= MOD_SHIFT;
+		if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN)) & 0x8000) mods |= MOD_WIN;
+		return mods;
 	}
 
 	std::wstring joinKeys(const std::vector<std::wstring>& keys)
@@ -184,13 +195,13 @@ WinSettingSystemKeys::WinSettingSystemKeys(Ling::WinBase* parent) : Ling::Node(p
 	onKeyDownToken = win->onKeyDown.add([this, weakThis](UINT key) {
 		if (!weakThis.lock()) return;
 		if (this->curId.empty()) return;
-		this->onKeyDown(key);
+		this->onKeyDown(key, asyncMods());
 		});
 	// 松开修饰键：录制还没结束，把按钮里的预览退回（或退到剩余仍按住的修饰键）
 	onKeyUpToken = win->onKeyUp.add([this, weakThis](UINT) {
 		if (!weakThis.lock()) return;
 		if (this->curId.empty()) return;
-		this->refreshCapturePreview();
+		this->refreshCapturePreview(asyncMods());
 		});
 	onMouseDownToken = win->onMouseDown.add([this, weakThis](POINT pos, bool) {
 		if (!weakThis.lock()) return;
@@ -282,7 +293,7 @@ void WinSettingSystemKeys::beginCapture(Ling::Button* btn)
 	curLabel->setText(Lang::get(L"shortcut.pressKey"));
 	curLabel->setFontSize(SettingTheme::fontBase);
 	curLabel->setColor(kCaptureFg);   // 绿底上白字
-	refreshCapturePreview();          // 点按钮时若已按住修饰键，立刻显示出来
+	refreshCapturePreview(0);          // 点按钮时若已按住修饰键，预览由首个事件带出
 
 	// 录制期间挂起全局热键：否则按下的组合键会先被全局热键（RegisterHotKey / 低级钩子）
 	// 消费，传不到设置窗口，导致无法录制。
@@ -291,10 +302,10 @@ void WinSettingSystemKeys::beginCapture(Ling::Button* btn)
 	// 再挂一个临时低级键盘钩子接管键盘输入：已被其他进程注册的全局热键（如 F3）
 	// 会在系统热键分发阶段被消费；录制期间由这里先行消费所有按键再转回本页
 	auto weakThis = getWeakThis();
-	HotkeyHook::beginCapture([this, weakThis](UINT vk, bool up) {
+	HotkeyHook::beginCapture([this, weakThis](UINT vk, bool up, UINT mods) {
 		if (!weakThis.lock() || curId.empty()) return;
-		if (up) { refreshCapturePreview(); return; }   // 松开修饰键：预览退回
-		onKeyDown(vk);
+		if (up) { refreshCapturePreview(mods); return; }   // 松开修饰键：预览退回
+		onKeyDown(vk, mods);
 	});
 
 	spinIdx = 0;
@@ -327,14 +338,14 @@ void WinSettingSystemKeys::onSpinnerTick(UINT id)
 	curSpinner->setText(kSpinnerFrames[spinIdx]);
 }
 
-void WinSettingSystemKeys::refreshCapturePreview()
+void WinSettingSystemKeys::refreshCapturePreview(UINT mods)
 {
 	if (!curLabel) return;
-	const std::wstring prefix = liveModifierPrefix();
+	const std::wstring prefix = modifierPrefix(mods);
 	curLabel->setText(prefix.empty() ? Lang::get(L"shortcut.pressKey") : prefix);
 }
 
-void WinSettingSystemKeys::onKeyDown(UINT key)
+void WinSettingSystemKeys::onKeyDown(UINT key, UINT mods)
 {
 	// Esc = 退出这次录制：不落盘、保持原键位（Esc 本身也不参与录制）
 	if (key == VK_ESCAPE) {
@@ -347,18 +358,17 @@ void WinSettingSystemKeys::onKeyDown(UINT key)
 	if (keyStr.empty()) return;
 	// 只按修饰键：立即把已按住的修饰键显示出来，继续等主键（纯修饰键不落盘）
 	if (isModifierKey(keyStr)) {
-		refreshCapturePreview();
+		refreshCapturePreview(mods);
 		return;
 	}
 
-	const bool ctrl  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-	const bool alt   = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
-	const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-	const bool lwin  = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0;
-	const bool rwin  = (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+	const bool ctrl   = (mods & MOD_CONTROL) != 0;
+	const bool alt    = (mods & MOD_ALT) != 0;
+	const bool shift  = (mods & MOD_SHIFT) != 0;
+	const bool winMod = (mods & MOD_WIN) != 0;
 
 	// 裸 Backspace / Delete = 清空这一行（带修饰键时仍按普通组合录制）
-	if ((key == VK_BACK || key == VK_DELETE) && !ctrl && !alt && !shift && !lwin && !rwin) {
+	if ((key == VK_BACK || key == VK_DELETE) && mods == 0) {
 		const std::wstring id = curId;
 		CommandKeys::setBinding(id, L"");
 		endCapture();            // 内部 refreshRow 会显示清空后的「点击设置」占位
@@ -370,8 +380,7 @@ void WinSettingSystemKeys::onKeyDown(UINT key)
 	if (ctrl) keys.push_back(L"Ctrl");
 	if (alt) keys.push_back(L"Alt");
 	if (shift) keys.push_back(L"Shift");
-	if (lwin) keys.push_back(L"LWin");
-	else if (rwin) keys.push_back(L"RWin");
+	if (winMod) keys.push_back(L"LWin");
 	keys.push_back(keyStr);
 
 	const std::wstring chord = joinKeys(keys);

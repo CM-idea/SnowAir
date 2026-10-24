@@ -69,16 +69,40 @@ ShapeBase* History::createShape(const std::wstring& state, const int& x, const i
             shapes.push_back(std::move(shape));
         }
         else {
-            auto shape = std::make_unique<ShapeRect>(win);
+            // 矩形 / 多边形 / 星形共用一套框选交互，形态由属性栏决定
+            const int rk = win->toolSub->rectKind;
+            const int sides = rk == ToolSub::PolygonShape ? win->toolSub->polygonSides
+                : rk == ToolSub::StarShape ? win->toolSub->starPoints : 0;
+            auto shape = std::make_unique<ShapeRect>(win, rk, sides);
             result = shape.get();
             shapes.push_back(std::move(shape));
         }
     }
     else if (curId == L"arrow") {
         if (win->toolSub->isLine) {
-            auto shape = std::make_unique<ShapeLine>(win);
-            result = shape.get();
-            shapes.push_back(std::move(shape));
+            // 标注的形态：气泡 = 带默认文字的对话气泡；
+            // 尺寸 = 标记箭头的外观 + 中间自带文字（唯一区别是带不带文字）；
+            // 波浪线/角度走线段（角度是三点折线）
+            const int lk = win->toolSub->lineKind;
+            if (lk == ToolSub::LineBubble) {
+                auto shape = std::make_unique<ShapeText>(win, true);
+                result = shape.get();
+                shapes.push_back(std::move(shape));
+            }
+            else if (lk == ToolSub::LineDimension) {
+                // 尺寸 = 标记箭头（标注箭头样式：两端是竖线）+ 中间自带文字，只有两个端点
+                auto shape = std::make_unique<ShapeArrow>(win, ToolSub::ArrowAnnot, true);
+                result = shape.get();
+                shapes.push_back(std::move(shape));
+            }
+            else {
+                const int kind = (lk == ToolSub::LineWave) ? ShapeLine::Wave
+                    : (lk == ToolSub::LineAngle) ? ShapeLine::Angle
+                    : ShapeLine::Straight;
+                auto shape = std::make_unique<ShapeLine>(win, false, kind);
+                result = shape.get();
+                shapes.push_back(std::move(shape));
+            }
         }
         else {
             auto shape = std::make_unique<ShapeArrow>(win);
@@ -87,9 +111,17 @@ ShapeBase* History::createShape(const std::wstring& state, const int& x, const i
         }
     }
     else if (curId == L"pen") {
-        auto shape = std::make_unique<ShapePen>(win);
-        result = shape.get();
-        shapes.push_back(std::move(shape));
+        if (win->toolSub->isPenMarker) {
+            // 荧光笔：和线段同一套交互（首尾两端点），只是更宽、半透明、平头
+            auto shape = std::make_unique<ShapeLine>(win, true);
+            result = shape.get();
+            shapes.push_back(std::move(shape));
+        }
+        else {
+            auto shape = std::make_unique<ShapePen>(win);
+            result = shape.get();
+            shapes.push_back(std::move(shape));
+        }
     }
     else if (curId == L"number") {
         auto shape = std::make_unique<ShapeNumber>(win);

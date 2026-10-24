@@ -1834,6 +1834,8 @@ void ConfirmDialog::ask(Ling::WinBase* host, const std::wstring& message,
     dlg->show();
     dlg->refresh();
     if (dlg->hwnd) {
+        // 确认框永远不该出现在截图/录屏画面里（录屏中按 Esc 会弹它）
+        App::excludeFromCapture(dlg->hwnd);
         SetForegroundWindow(dlg->hwnd);
         SetFocus(dlg->hwnd);      // 拿到键盘焦点，Esc 才生效
     }

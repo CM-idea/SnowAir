@@ -5,6 +5,7 @@ class ToolCap;
 class ToolSub;
 class ShapeBase;
 class ShapeText;
+class ShapeLine;
 class History;
 
 // 截图窗 / 桌面钉图共用的标注宿主（全屏纸或钉图纸）。Shape/History 只认这个，不再分两套。
@@ -88,6 +89,8 @@ public:
 	std::unique_ptr<ToolSub> toolSub;
 	ShapeBase* shapeHover{ nullptr };
 	ShapeBase* newShape{ nullptr };
+	// 角度三点式：基线画完后等第三点的形状（下一次点击/拖拽继续给它）
+	ShapeLine* pendingAngle{ nullptr };
 	// 按下后锁定的控点索引；拖动全程强制使用，避免重探命中把旋转/缩放打断成移动
 	int annotDragIndex{ -1 };
 	// 结束文字编辑后短暂吞掉下一次点选/落笔（失焦可能先于 annotDown）
@@ -111,6 +114,10 @@ protected:
 	virtual POINT toImgPos(const POINT& pos) const;
 	// 按下时命中（优先当前选中的控点）
 	ShapeBase* hitShapeAt(float x, float y);
+	// 尺寸/角度：在线上挂一句自动文字（已存在则直接返回）；拖拽过程中就调用 → 文字实时出现
+	ShapeText* ensureShaftText(ShapeBase* host, const std::wstring& text, float px);
+	// 尺寸自带文字：按屏幕 DPI 把线长换算成物理尺寸（cm）；用户双击改过之后不再自动改写
+	std::wstring dimensionTextFor(ShapeBase* host) const;
 	void clearAnnotSelection();
 	// 清空全部标注：**必须先断开 shapeHover / newShape / editingText 这些裸指针再释放**
 	// （否则它们悬垂，下一次 hasSelectedAnnot()/paint 就会在已释放对象上做虚调用 → 闪退）

@@ -122,6 +122,9 @@ WinPin::WinPin(int x, int y, int w, int h, const std::vector<BYTE>* data, const 
 	});
 	onTimer.add([this](UINT id) { this->onTimerCB(id); });
 	onKeyDown.add([this](UINT key) { this->onKey(key); });
+	// 点击/激活会把贴图抬到置顶组最前，识别浮层就被压住了（看起来像"点了空白就只剩原图"）：
+	// 激活后立刻把浮层抬回来。
+	onFocus.add([this]() { this->raiseOcrPanel(); });
 	onDestroy.add([this]() { this->onClosed(); });
 }
 
@@ -494,9 +497,11 @@ void WinPin::onCreated()
 			}
 		}
 	}
-	// 功能设置 · 贴图：自动文本识别 —— 钉好后直接出识别结果（不抢剪贴板）
-	if (Setting::get()->getPinAutoOcr()) toggleOcrPanel(false);
+	// 功能设置 · 贴图：自动文本识别 —— 钉好后直接出识别结果（不抢剪贴板）。
+	// 必须放在 show() 之后：识别结果浮层是独立置顶窗，若先建它再显示贴图，贴图会压到它上面，
+	// 表现为"自动识别看不出结果，双击缩略图往返一次才出现"。
 	show();
+	if (Setting::get()->getPinAutoOcr()) toggleOcrPanel(false);
 	if (!WinCap::get()) CaptureEsc::claim(hwnd);
 }
 
@@ -525,12 +530,56 @@ D2D1_RECT_F WinPin::editBtnRect() const
 WinPin::HoverBtn WinPin::hitHoverBtn(POINT pos) const
 {
 	if (editing || thumbnail || !isMouseIn) return HoverBtn::None;
+	return hitHoverBtnAt(pos);
+}
+
+WinPin::HoverBtn WinPin::hitHoverBtnAt(POINT pos) const
+{
 	if (ptInRect(lockBtnRect(), pos)) return HoverBtn::Lock;
 	if (!locked) {
 		if (ptInRect(editBtnRect(), pos)) return HoverBtn::Edit;
 		if (ptInRect(closeBtnRect(), pos)) return HoverBtn::Close;
 	}
 	return HoverBtn::None;
+}
+
+void WinPin::pinChromeHover(POINT pos)
+{
+	if (editing || thumbnail || !toolOcr || !toolOcr->hwnd) return;
+	const bool inside = pos.x >= 0 && pos.x < (int)std::lround(w)
+		&& pos.y >= 0 && pos.y < (int)std::lround(h);
+	const auto hit = inside ? hitHoverBtnAt(pos) : HoverBtn::None;
+	if (hit == hoverBtn && inside == hoverChromeVisible) return;
+	hoverBtn = hit;
+	hoverChromeVisible = inside;
+	toolOcr->repaintChrome();
+}
+
+bool WinPin::pinChromeDown(POINT pos)
+{
+	if (editing || thumbnail || !toolOcr || !toolOcr->hwnd) return false;
+	const auto hit = hitHoverBtnAt(pos);
+	if (hit == HoverBtn::None) return false;
+	if (hit == HoverBtn::Lock) {
+		locked = !locked;
+		refresh();
+		toolOcr->repaintChrome();
+	}
+	else if (hit == HoverBtn::Edit) {
+		setEditing(true);
+	}
+	else if (hit == HoverBtn::Close) {
+		close();
+	}
+	return true;
+}
+
+void WinPin::raiseOcrPanel()
+{
+	if (toolOcr && toolOcr->hwnd && !thumbnail) {
+		SetWindowPos(toolOcr->hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+			SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+	}
 }
 
 void WinPin::paintHoverBtn(ID2D1DeviceContext* ctx, const D2D1_RECT_F& r, IDWriteTextLayout* icon, uint32_t iconColor, bool hovered)
@@ -630,7 +679,8 @@ void WinPin::layout()
 	}
 	if (useLayer) ctx->PopLayer();
 	if (!editing && !thumbnail) paintScaleTip(ctx);
-	if (!thumbnail) paintHoverChrome(ctx);
+	// 识别浮层开着时，控件改由浮层镜像绘制（它压在贴图之上），这里不再重复画
+	if (!thumbnail && !(toolOcr && toolOcr->hwnd)) paintHoverChrome(ctx);
 	canvas->finishPaint();
 }
 
@@ -681,6 +731,8 @@ void WinPin::onMinMaxInfo(MINMAXINFO* mmi)
 
 void WinPin::onDown(POINT pos, BOOL isRight)
 {
+	// 识别浮层开着时，任何一次点击（可能把本窗抬到最前）之后都要把它抬回来
+	raiseOcrPanel();
 	const auto hit = hitHoverBtn(pos);
 	if (hit != HoverBtn::None) {
 		if (hit == HoverBtn::Lock) {
@@ -705,6 +757,8 @@ void WinPin::onDown(POINT pos, BOOL isRight)
 			showContextMenu(screenPt);
 			return;
 		}
+		// 识别结果开着：文字区域归文字（编辑/拖选），只有空白区域才拖窗、双击缩略图
+		if (!thumbnail && toolOcr && toolOcr->hwnd && toolOcr->hitText(pos)) return;
 		// 双击：按设置 → 缩略图 / 关闭
 		POINT screenPos = pos;
 		ClientToScreen(hwnd, &screenPos);
@@ -742,6 +796,8 @@ void WinPin::onDown(POINT pos, BOOL isRight)
 void WinPin::onMove(POINT pos)
 {
 	if (pos.x == INT_MAX) {
+		// 识别浮层开着：悬停态由浮层的轮询统一维护（光标移到浮层上会先收到这里的 MOUSELEAVE）
+		if (toolOcr && toolOcr->hwnd && !thumbnail) return;
 		if (hoverBtn != HoverBtn::None || hoverChromeVisible) {
 			hoverBtn = HoverBtn::None;
 			hoverChromeVisible = false;
@@ -779,6 +835,9 @@ void WinPin::onMove(POINT pos)
 			hoverBtn = hit;
 			hoverChromeVisible = show;
 			refresh();
+			// 识别浮层开着时控件画在浮层里，这里必须显式让浮层重画，
+			// 否则悬停状态变了、贴图自己又不画控件，看起来就是"三个控件没了"。
+			if (toolOcr && toolOcr->hwnd) toolOcr->repaintChrome();
 		}
 		if (annotMouseDown && !locked) {
 			hasDragged = true;
@@ -889,7 +948,20 @@ void WinPin::onKey(UINT key)
 	}
 	if (editing) annotKey(key);
 	bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+	// 识别结果浮层开着且鼠标在贴图上：Ctrl+C 复制识别文字（拖选过只复制选区，没拖选复制整段）。
+	// 鼠标不在贴图上时一律不拦 Ctrl+C，留给系统/其他程序。
+	const bool ocrOpen = toolOcr && toolOcr->hwnd && !thumbnail;
+	auto cursorInPin = [this]() {
+		POINT pt{};
+		GetCursorPos(&pt);
+		const int r = x + (int)std::lround(w), b = y + (int)std::lround(h);
+		return pt.x >= x && pt.x < r && pt.y >= y && pt.y < b;
+		};
 	if (ctrl && key == 'C') {
+		if (ocrOpen) {
+			if (cursorInPin()) toolOcr->copyText();
+			return;
+		}
 		copyToClipboard();
 	}
 	else if (ctrl && key == 'S') {
@@ -897,7 +969,7 @@ void WinPin::onKey(UINT key)
 	}
 	else if (key == VK_RETURN) {
 		if (editing) finishEditing(true);
-		else { copyToClipboard(); close(); }
+		else if (!ocrOpen) { copyToClipboard(); close(); }
 	}
 	else if (key == VK_ESCAPE) {
 		if (editing) finishEditing(false);
@@ -1181,9 +1253,21 @@ void WinPin::toggleOcrPanel(bool copyText)
 	// 贴图叠加：不显示右上角复制按钮；只有识别文本框吃鼠标（可选中/复制），其余穿透。
 	// 必须在建窗之前设置。
 	toolOcr->setPinOverlay(true);
+	// 浮层压在贴图之上：锁定/编辑/关闭改由浮层镜像绘制并转发点击，
+	// 否则识别文字会压住贴图控件（控件本来该在最顶部）。
+	toolOcr->setChromePainter([this](ID2D1DeviceContext* ctx) { paintHoverChrome(ctx); });
+	toolOcr->setChromeHover([this](POINT pos) { pinChromeHover(pos); });
+	toolOcr->setChromeHitTest(
+		[this](POINT pos) { return !thumbnail && hitHoverBtnAt(pos) != HoverBtn::None; },
+		[this](POINT pos) { return pinChromeDown(pos); });
 	toolOcr->createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP);
 	const D2D1_RECT_F r = D2D1::RectF(0, 0, w, h);
 	toolOcr->syncToMask(r, x, y, dpi);
+	// 贴图与浮层同为置顶窗：显式抬到置顶组最前，避免浮层被贴图压住（文字看不见也点不到）
+	SetWindowPos(toolOcr->hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+		SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+	// 首次布局时把当前悬停态下的控件一起画出来（鼠标本来就停在贴图上时不用再等一次移动）
+	toolOcr->repaintChrome();
 	// 自动识别（钉图即识别）不抢剪贴板，避免把用户剪贴板里的东西冲掉
 	if (copyText && result.ok && !result.text.empty()) Ling::Util::setTextToClipboard(result.text);
 	// 贴图识别的是同一张图，结果出来之后就不会再需要引擎了 —— 立刻还回去（常驻约 100MB），

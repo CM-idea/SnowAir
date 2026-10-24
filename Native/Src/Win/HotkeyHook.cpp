@@ -94,7 +94,11 @@ namespace
 			if (const UINT bit = modBit(kb->vkCode)) {
 				if (up) g_liveMods &= ~bit; else g_liveMods |= bit;
 			}
-			if (g_wnd) PostMessageW(g_wnd, kMsgCapture, (WPARAM)normMod(kb->vkCode), up ? 1 : 0);
+			// 修饰键状态必须随消息一起带过去：这些键被钩子吞掉后，UI 线程再查
+			// GetAsyncKeyState 已经查不到（物理按键的状态更新在钩子返回之后）。
+			// vk 放低 16 位，mods 放高 16 位。
+			if (g_wnd) PostMessageW(g_wnd, kMsgCapture,
+				(WPARAM)(normMod(kb->vkCode) | (g_liveMods << 16)), up ? 1 : 0);
 			return 1;
 		}
 		if (const UINT bit = modBit(kb->vkCode)) {
@@ -155,19 +159,20 @@ namespace
 		if (msg == kMsgCapture) {
 			const unsigned gen = g_captureGen.load(std::memory_order_relaxed);
 			auto cb = g_captureCb;
-			const UINT vk = (UINT)wp;
+			const UINT vk = (UINT)wp & 0xFFFF;
+			const UINT mods = (UINT)wp >> 16;
 			const bool up = lp != 0;
 			// 延后一拍再回调：回调里会 endCapture()（可能拆掉本窗口和钩子线程），
 			// 不能在窗口过程里同步拆自己。
 			if (auto* app = Ling::App::get()) {
-				app->dq.TryEnqueue([cb, vk, up, gen]() {
+				app->dq.TryEnqueue([cb, vk, up, mods, gen]() {
 					if (!g_capturing.load(std::memory_order_relaxed)) return;
 					if (gen != g_captureGen.load(std::memory_order_relaxed)) return;
-					if (cb) cb(vk, up);
+					if (cb) cb(vk, up, mods);
 				});
 			}
 			else if (cb) {
-				cb(vk, up);
+				cb(vk, up, mods);
 			}
 			return 0;
 		}
@@ -304,7 +309,8 @@ namespace HotkeyHook
 		g_captureGen.fetch_add(1, std::memory_order_relaxed);
 		g_capturing.store(true, std::memory_order_relaxed);
 		// 录制开始时全局热键刚被 suspendShortcutKeys() 摘掉，钩子线程通常停着，这里重新拉起；
-		// 如果已有常驻绑定在兜底，直接复用同一条钩子。
+		// 如果已有常驻绑定在兜底，直接复用同一条钩子（它一直在跟踪键状态，不能清零）。
+		if (!g_thread) g_liveMods = 0;
 		if (!startHookThread()) {
 			g_capturing.store(false, std::memory_order_relaxed);
 			g_captureCb = nullptr;

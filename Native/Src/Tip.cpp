@@ -64,9 +64,16 @@ void Tip::bind(Ling::Button* btn, const std::wstring& text)
 
 void Tip::showAbove(Ling::Node* owner, const std::wstring& text)
 {
-	// Node 的 x/y/w/h 是布局算完的窗口内绝对坐标（物理像素），加上窗口位置就是屏幕坐标
+	// Node 的 x/y/w/h 是布局算完的窗口内绝对坐标（物理像素），加上窗口位置就是屏幕坐标。
+	// 但滚动区只平移内容视觉、不改子节点的布局坐标，所以要把祖先 ScrollerBox 的 scrollY 扣回来，
+	// 否则滚动后提示会留在原来的（未滚动）位置。
+	float scrolled = 0.f;
+	for (Ling::Node* p = owner->parent; p; p = p->parent) {
+		if (auto* sb = dynamic_cast<Ling::ScrollerBox*>(p))
+			scrolled += sb->getScrollY();
+	}
 	auto sx = win->x + owner->x + owner->w / 2.f;
-	auto sy = win->y + owner->y + anchorInset * win->dpi;
+	auto sy = win->y + owner->y - scrolled + anchorInset * win->dpi;
 	showAt(owner, sx, sy, text);
 }
 

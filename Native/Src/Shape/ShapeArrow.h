@@ -6,7 +6,9 @@
 class ShapeArrow : public ShapeBase
 {
 public:
-	ShapeArrow(AnnotHost* win);
+	// headOverride：强制指定箭头头部样式（-1 = 跟随属性栏）。
+	// dimension=true：「尺寸」——固定标注箭头样式 + 只有两个端点（不提供中间加折点的控点）
+	explicit ShapeArrow(AnnotHost* win, int headOverride = -1, bool dimension = false);
 	~ShapeArrow();
 	void paint(ID2D1DeviceContext* ctx) override;
 	void paintDragger(ID2D1DeviceContext* ctx) override;
@@ -28,8 +30,10 @@ public:
 	// 「线段中间打字」：大箭头不参与；折线长度中点（图像坐标）
 	bool bigHead() const;
 	bool shaftMidPoint(float& mx, float& my) const;
+	float shaftLength() const;   // 折线总长（图像像素）——「尺寸」用它换算物理尺寸
 	float shaftAngle() const;   // 起点→终点方向（弧度）。线上文字一律横排，现在没人用它
 	float stylePrimarySize() const override { return strokeWidth; }
+	bool isDimension() const { return isDimension_; }
 private:
 	void rebuild();
 	void makeBigPath();
@@ -57,4 +61,5 @@ private:
 	bool isDash{ false };
 	bool isRound{ false };
 	bool creating{ false };
+	bool isDimension_{ false };   // 尺寸：两点控件（不加折点）
 };

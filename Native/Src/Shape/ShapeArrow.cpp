@@ -9,13 +9,14 @@
 
 using Microsoft::WRL::ComPtr;
 
-ShapeArrow::ShapeArrow(AnnotHost* win) : ShapeBase(win)
+ShapeArrow::ShapeArrow(AnnotHost* win, int headOverride, bool dimension) : ShapeBase(win)
 {
 	auto toolSub = win->toolSub.get();
 	auto d2d = Ling::D2D::get();
 	d2d->deviceContext->CreateSolidColorBrush(toolSub->getSelectedColor(), brush.GetAddressOf());
 	strokeWidth = toolSub->getSliderVal();
-	headStyle = toolSub->arrowHead;
+	headStyle = headOverride >= 0 ? headOverride : toolSub->arrowHead;
+	isDimension_ = dimension;
 	isDash = toolSub->isArrowDash;
 	isRound = toolSub->isArrowRound;
 	if (headStyle == ToolSub::ArrowFun) {
@@ -101,6 +102,16 @@ bool ShapeArrow::shaftMidPoint(float& mx, float& my) const
 	mx = pts.back().x;
 	my = pts.back().y;
 	return true;
+}
+
+float ShapeArrow::shaftLength() const
+{
+	const auto& pts = poly.pts;
+	if (pts.size() < 2) return 0.f;
+	float total = 0.f;
+	for (size_t i = 1; i < pts.size(); i++)
+		total += std::hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+	return total;
 }
 
 float ShapeArrow::shaftAngle() const
@@ -235,10 +246,10 @@ void ShapeArrow::paintDragger(ID2D1DeviceContext* ctx)
 {
 	const bool dragging = poly.drag != ArrowPolyState::DragKind::None;
 	// 大箭头与普通箭头同一套控点（端点/断点/虚中点）；
-	// 趣味箭头只给两个端点，不显示中间那个"加断点"的虚点
+	// 趣味箭头、尺寸只给两个端点，不显示中间那个"加断点"的虚点
 	paintArrowPolyHandles(ctx, poly, win->dpi,
 		brushHandleFill.Get(), brushHandleBorder.Get(), brushHandleShadow.Get(),
-		dragging, !isFun());
+		dragging, !isFun() && !isDimension_);
 }
 
 int ShapeArrow::hoverFromHit(const ArrowHitInfo& h) const
@@ -327,8 +338,8 @@ void ShapeArrow::mouseMove(const float x, const float y)
 {
 	ShapeLink::sync(win, poly);   // 命中/悬停都按"贴回边缘之后"的端点算
 	const bool dragging = poly.drag != ArrowPolyState::DragKind::None;
-	// 大箭头与普通箭头同一套命中/断点逻辑；趣味箭头保持两点式，不响应"加点"
-	const bool allowVirtual = isSelected() && !isFun();
+	// 大箭头与普通箭头同一套命中/断点逻辑；趣味箭头、尺寸保持两点式，不响应"加点"
+	const bool allowVirtual = isSelected() && !isFun() && !isDimension_;
 	lastHit = poly.hit(x, y, win->dpi, dragging, allowVirtual);
 	if (lastHit.kind == ArrowHitInfo::Break && lastHit.insertAfter >= 0)
 		poly.breakHoverKey = lastHit.insertAfter + 1000;

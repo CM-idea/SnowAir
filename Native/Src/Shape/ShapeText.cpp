@@ -5,11 +5,15 @@
 #include "Win/AnnotHost.h"
 #include "Tool/ToolSub.h"
 #include "ShapeText.h"
+#include "RoundBox.h"
+#include "LinkGeom.h"
+#include "../Lang.h"
 
 using Microsoft::WRL::ComPtr;
 
-ShapeText::ShapeText(AnnotHost* win) : ShapeBase(win),
+ShapeText::ShapeText(AnnotHost* win, bool bubble) : ShapeBase(win),
 	borderPadding{ 6.f * win->dpi },
+	bubble_{ bubble },
 	draggers(4, D2D1::RectF(0, 0, 0, 0))
 {
 	setAttr();
@@ -19,6 +23,17 @@ ShapeText::ShapeText(AnnotHost* win) : ShapeBase(win),
 			D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_ROUND,
 			D2D1_LINE_JOIN_MITER, 10.f, D2D1_DASH_STYLE_CUSTOM, 0.f),
 		dashes, ARRAYSIZE(dashes), dashedStrokeStyle.GetAddressOf());
+	if (bubble_) {
+		// 气泡默认带一句提示文字；字号与文字工具的默认字号一致（标注滑条是线宽，不是字号），描边用标注的线宽
+		fontSize = 24.f * win->dpi;
+		bubbleRadius_ = 14.f * win->dpi;
+		bubbleStroke_ = std::max(1.f, win->toolSub->getSliderVal());
+		text = Lang::get(L"tool.bubbleText");
+		if (text.empty()) text = L"请输入文字";
+		makeTextLayout();
+		syncRectFromLayout();
+		updateBubbleTail();
+	}
 }
 
 ShapeText::~ShapeText() {}
@@ -37,10 +52,134 @@ void ShapeText::syncRectFromLayout()
 	if (!textLayout) return;
 	DWRITE_TEXT_METRICS m{};
 	textLayout->GetMetrics(&m);
+	if (bubble_) {
+		// 气泡：只保证装得下文字（四周留白 + 最小尺寸），不把用户拖大的框缩回去
+		const float pad = 16.f * win->dpi;
+		const float minW = std::max(m.widthIncludingTrailingWhitespace + pad * 2.f, 120.f * win->dpi);
+		const float minH = std::max(m.height + pad * 2.f, 52.f * win->dpi);
+		if (rect.right - rect.left < minW) rect.right = rect.left + minW;
+		if (rect.bottom - rect.top < minH) rect.bottom = rect.top + minH;
+		updateBubbleTail();
+		updateDraggers();
+		return;
+	}
 	rect.right = rect.left + m.widthIncludingTrailingWhitespace + borderPadding * 2.f;
 	// 线上文字（行距被压过）要把最后一行下伸的那点余量补进高度，否则洞/编辑框比字矮
 	rect.bottom = rect.top + m.height + (attachTo ? attachLineSlack : 0.f) + borderPadding * 2.f;
 	updateDraggers();
+}
+
+// 气泡外框：圆角矩形 + 尾巴，**一条闭合路径**画出。
+// 不用"圆角矩形 ∪ 三角形"：并集在圆角处会留接缝（底边落在直边上就悬空、落在弧上就露弦）。
+// 现在沿圆角轮廓按角度走一圈，走到"嘴"（尾巴根部）时跳过那一小段，直接连到尾巴尖 ——
+// 轮廓与尾巴天然是同一条线，任何圆角大小、任何尾巴位置都接得上。
+ComPtr<ID2D1PathGeometry> ShapeText::buildBubbleGeometry() const
+{
+	constexpr float kPi = 3.14159265358979323846f;
+	auto factory = Ling::D2D::get()->d2dFactory.Get();
+	const float w = rect.right - rect.left;
+	const float h = rect.bottom - rect.top;
+	if (!factory || w < 1.f || h < 1.f) return nullptr;
+	const float rr = std::min(bubbleRadius_, std::min(w, h) * 0.5f);
+	const float radii[4]{ rr, rr, rr, rr };
+	const float hw = w * 0.5f, hh = h * 0.5f;
+	const float cx = (rect.left + rect.right) * 0.5f;
+	const float cy = (rect.top + rect.bottom) * 0.5f;
+	// 尾巴尖在框内：不画尾巴
+	const bool tailInside = bubbleTail_.x > rect.left && bubbleTail_.x < rect.right
+		&& bubbleTail_.y > rect.top && bubbleTail_.y < rect.bottom;
+	if (tailInside) return RoundBox::build(factory, rect, radii);
+
+	const float hb = std::min(std::max(8.f * win->dpi, std::min(w, h) * 0.09f), std::min(w, h) * 0.3f);
+	float dx = bubbleTail_.x - cx, dy = bubbleTail_.y - cy;
+	if (std::fabs(dx) < 1e-4f && std::fabs(dy) < 1e-4f) dy = 1.f;
+	const float th = std::atan2(dy, dx);
+	const float radiiO[4]{ rr, rr, rr, rr };
+	// 轮廓上按方向角取点（直边/圆角统一由 LinkGeom 算，和采样用同一套数学）
+	auto edgeAt = [&](float a, D2D1_POINT_2F& out) {
+		D2D1_POINT_2F p{};
+		if (!LinkGeom::edgeOnRect(hw, hh, radiiO, a, p)) return false;
+		out = D2D1_POINT_2F{ cx + p.x, cy + p.y };
+		return true;
+	};
+	D2D1_POINT_2F pMid{};
+	if (!edgeAt(th, pMid)) return RoundBox::build(factory, rect, radii);
+	// 嘴的半角宽：轮廓上的弦长 ≈ 2R·sin(delta)
+	const float R = std::max(1.f, std::hypot(pMid.x - cx, pMid.y - cy));
+	const float delta = std::atan2(hb, R);
+	const float mouthA = th + delta;              // 嘴的一侧
+	const float span = 2.f * kPi - 2.f * delta;   // 绕轮廓一圈（跳过嘴）
+
+	ComPtr<ID2D1PathGeometry> path;
+	if (FAILED(factory->CreatePathGeometry(path.GetAddressOf())) || !path) return nullptr;
+	ComPtr<ID2D1GeometrySink> sink;
+	if (FAILED(path->Open(sink.GetAddressOf())) || !sink) return nullptr;
+	sink->SetFillMode(D2D1_FILL_MODE_WINDING);
+	D2D1_POINT_2F start{};
+	if (!edgeAt(mouthA, start)) return RoundBox::build(factory, rect, radii);
+	sink->BeginFigure(start, D2D1_FIGURE_BEGIN_FILLED);
+	const int steps = 480;   // 约 0.75° 一段：圆弧看不出棱角
+	for (int i = 1; i <= steps; i++) {
+		D2D1_POINT_2F p{};
+		if (!edgeAt(mouthA + span * (float)i / (float)steps, p)) continue;
+		sink->AddLine(p);
+	}
+	sink->AddLine(bubbleTail_);   // 嘴的另一侧直接连到尾巴尖
+	sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+	sink->Close();
+	return path;
+}
+
+// 气泡命中（描边）：点到圆角轮廓附近才算。用"从中心沿该方向到轮廓的距离"比较，
+// 圆角和直边都统一由 LinkGeom 算，不会因为圆角大就把命中区算到框内空白里。
+bool ShapeText::hitBubbleStroke(float x, float y, float band) const
+{
+	const float w = rect.right - rect.left;
+	const float h = rect.bottom - rect.top;
+	if (w < 1.f || h < 1.f) return false;
+	const float hw = w * 0.5f, hh = h * 0.5f;
+	const float cx = (rect.left + rect.right) * 0.5f;
+	const float cy = (rect.top + rect.bottom) * 0.5f;
+	const float rr = std::min(bubbleRadius_, std::min(hw, hh));
+	const float radii[4]{ rr, rr, rr, rr };
+	const float dx = x - cx, dy = y - cy;
+	const float len = std::hypot(dx, dy);
+	if (len < 1e-3f) return false;
+	D2D1_POINT_2F p{};
+	if (!LinkGeom::edgeOnRect(hw, hh, radii, std::atan2(dy, dx), p)) return false;
+	return std::fabs(len - std::hypot(p.x, p.y)) <= band;
+}
+
+// 气泡命中（文字）：按文字**实际排版尺寸**判（不是整个气泡框），四周留一点余量
+bool ShapeText::hitBubbleText(float x, float y) const
+{
+	if (!textLayout) return false;
+	DWRITE_TEXT_METRICS m{};
+	textLayout->GetMetrics(&m);
+	if (m.widthIncludingTrailingWhitespace < 1.f || m.height < 1.f) return false;
+	const float cx = (rect.left + rect.right) * 0.5f;
+	const float cy = (rect.top + rect.bottom) * 0.5f;
+	const float hw = m.widthIncludingTrailingWhitespace * 0.5f + 4.f * win->dpi;
+	const float hh = m.height * 0.5f + 4.f * win->dpi;
+	return std::fabs(x - cx) <= hw && std::fabs(y - cy) <= hh;
+}
+
+// 默认尾巴尖：底边偏右、朝下；用户拖过之后保持手动位置
+void ShapeText::updateBubbleTail()
+{
+	if (!bubble_ || tailCustom_) return;
+	const float w = rect.right - rect.left;
+	const float h = rect.bottom - rect.top;
+	const float hw = w * 0.5f, hh = h * 0.5f;
+	const float rr = std::min(bubbleRadius_, std::min(hw, hh));
+	const float cx = (rect.left + rect.right) * 0.5f;
+	// 默认**朝下**：嘴落在底边的直段上（按"直段半长 hw-rr"取位，圆角再大也不会滑到右下角），
+	// 尖端就在嘴的下方偏右一点点 —— 方向是往下，不是往右下角
+	const float flat = std::max(0.f, hw - rr);
+	bubbleTail_ = {
+		cx + flat * 0.55f + 4.f * win->dpi,
+		rect.bottom + 50.f * win->dpi
+	};
 }
 
 void ShapeText::paint(ID2D1DeviceContext* ctx)
@@ -49,7 +188,9 @@ void ShapeText::paint(ID2D1DeviceContext* ctx)
 		// 附着在线上时不镜像输入框：洞要用"提交后那套几何"（= setAttachPose 算出的
 		// 以锚点为中心、实测文字尺寸 + 两侧间距），这样编辑中和提交后看起来是同一个洞，
 		// 不会出现"编辑时窄高、退出后正常"的跳变。非附着文字保持原来的镜像行为。
-		if (!attachTo) {
+		// 气泡例外：输入框是 autoSize 的，镜像回来会把整个气泡缩成文字大小 ——
+		// 气泡始终保持自己拖出来的框，输入框只负责在里面居中显示文字。
+		if (!attachTo && !bubble_) {
 			auto tb = win->getTextBox();
 			auto tl = win->clientToAnnotPt(tb->x, tb->y);
 			auto br = win->clientToAnnotPt(tb->x + tb->w, tb->y + tb->h);
@@ -57,6 +198,11 @@ void ShapeText::paint(ID2D1DeviceContext* ctx)
 		}
 		updateDraggers();
 		paintPunch(ctx);   // 编辑中也要开洞，不然文字框里还压着线
+		if (bubble_) {
+			// 编辑中保持气泡外框可见（文字由输入框显示）
+			auto geo = buildBubbleGeometry();
+			if (geo) ctx->DrawGeometry(geo.Get(), textBrush.Get(), bubbleStroke_);
+		}
 		return;
 	}
 	if (!textLayout) return;
@@ -68,6 +214,18 @@ void ShapeText::paint(ID2D1DeviceContext* ctx)
 		const float cx = (rect.left + rect.right) * 0.5f;
 		const float cy = (rect.top + rect.bottom) * 0.5f;
 		ctx->SetTransform(D2D1::Matrix3x2F::Rotation(angle * 180.f / 3.14159265f, { cx, cy }) * old);
+	}
+	if (bubble_) {
+		// 气泡外框 + 文字居中
+		auto geo = buildBubbleGeometry();
+		if (geo) ctx->DrawGeometry(geo.Get(), textBrush.Get(), bubbleStroke_);
+		DWRITE_TEXT_METRICS m{};
+		textLayout->GetMetrics(&m);
+		const float tx = rect.left + ((rect.right - rect.left) - m.widthIncludingTrailingWhitespace) * 0.5f;
+		const float ty = rect.top + ((rect.bottom - rect.top) - m.height) * 0.5f;
+		ctx->DrawTextLayout({ tx, ty }, textLayout.Get(), textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+		ctx->SetTransform(old);
+		return;
 	}
 	ctx->DrawTextLayout({ rect.left + borderPadding, rect.top + borderPadding },
 		textLayout.Get(), textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
@@ -138,16 +296,88 @@ void ShapeText::paintDragger(ID2D1DeviceContext* ctx)
 	}
 	ctx->DrawRectangle(rect, brushHandleBorder.Get(), win->dpi, dashedStrokeStyle.Get());
 	for (int i = 0; i < 4; i++) paintHandle(ctx, draggers[i]);
+	if (bubble_) {
+		// 气泡：和矩形一样 —— 只有四角 4 个控点 + 尾巴尖控点 + 四角内侧的圆角点；
+		// 不再画四条边中点的控点（尺寸直接用角拖）
+		const float hs = draggerSize * 0.5f;
+		paintHandle(ctx, D2D1::RectF(bubbleTail_.x - hs, bubbleTail_.y - hs,
+			bubbleTail_.x + hs, bubbleTail_.y + hs));
+		// 圆角点：四角内侧各一个（拖动 = 统一调整四角圆角）
+		const float inset = 14.f * win->dpi;
+		for (int i = 10; i <= 13; i++)
+			paintCornerDot(ctx, cornerDotPos(i, rect, inset), false);
+	}
 	ctx->SetTransform(old);
 }
 
 void ShapeText::mouseDrag(const float x, const float y)
 {
+	if (bubble_ && hoverDraggerIndex >= 10 && hoverDraggerIndex <= 13) {
+		// 圆角点：向内拖 = 加大圆角（四角统一）。位移先转回局部坐标，再投影到对角线方向
+		float dx = x - dotPressX_, dy = y - dotPressY_;
+		if (std::fabs(angle) > 1e-6f) {
+			const float ca = std::cos(-angle), sa = std::sin(-angle);
+			const float nx = dx * ca - dy * sa, ny = dx * sa + dy * ca;
+			dx = nx;
+			dy = ny;
+		}
+		const int slot = dotSlot(hoverDraggerIndex);
+		const float sx = (slot == 0 || slot == 3) ? 1.f : -1.f;
+		const float sy = (slot == 0 || slot == 1) ? 1.f : -1.f;
+		const float inward = (dx * sx + dy * sy) * 0.70710678f;
+		bubbleRadius_ = std::clamp(dotStartRadius_ + inward, 0.f, RoundBox::maxRadius(rect));
+		win->refresh();
+		return;
+	}
+	if (bubble_ && hoverDraggerIndex == 9) {
+		// 生成中：拖出气泡框
+		rect = D2D1::RectF(
+			std::min(pressX, x), std::min(pressY, y),
+			std::max(pressX, x), std::max(pressY, y));
+		updateBubbleTail();
+		updateDraggers();
+		return;
+	}
+	if (bubble_ && hoverDraggerIndex == 5) {
+		// 尾巴尖：拖到哪尖就到哪，自动贴最近的一条边
+		bubbleTail_ = D2D1::Point2F(x, y);
+		tailCustom_ = true;
+		updateDraggers();
+		return;
+	}
+	if (bubble_ && hoverDraggerIndex >= 0 && hoverDraggerIndex <= 3) {
+		// 气泡四周：和矩形一样直接改框（字号保持 16）
+		const float minW = 60.f * win->dpi;
+		const float minH = 36.f * win->dpi;
+		D2D1_RECT_F r = resizeStartRect;
+		if (hoverDraggerIndex == 0) { r.left = x; r.top = y; }
+		else if (hoverDraggerIndex == 1) { r.right = x; r.top = y; }
+		else if (hoverDraggerIndex == 2) { r.left = x; r.bottom = y; }
+		else { r.right = x; r.bottom = y; }
+		if (r.right < r.left) std::swap(r.left, r.right);
+		if (r.bottom < r.top) std::swap(r.top, r.bottom);
+		if (r.right - r.left < minW) {
+			if (hoverDraggerIndex == 1 || hoverDraggerIndex == 3) r.right = r.left + minW;
+			else r.left = r.right - minW;
+		}
+		if (r.bottom - r.top < minH) {
+			if (hoverDraggerIndex == 2 || hoverDraggerIndex == 3) r.bottom = r.top + minH;
+			else r.top = r.bottom - minH;
+		}
+		rect = r;
+		syncRectFromLayout();   // 文字装不下时再撑大
+		updateBubbleTail();
+		updateDraggers();
+		return;
+	}
 	if (hoverDraggerIndex == 8) {
-		rect.left += x - pressX;
-		rect.right += x - pressX;
-		rect.top += y - pressY;
-		rect.bottom += y - pressY;
+		const float dx = x - pressX, dy = y - pressY;
+		rect.left += dx;
+		rect.right += dx;
+		rect.top += dy;
+		rect.bottom += dy;
+		bubbleTail_.x += dx;
+		bubbleTail_.y += dy;
 		pressX = x;
 		pressY = y;
 		updateDraggers();
@@ -184,7 +414,35 @@ void ShapeText::mouseDrag(const float x, const float y)
 
 void ShapeText::mouseDown(const float x, const float y)
 {
+	if (bubble_ && hoverDraggerIndex == 5) {
+		// 尾巴尖控点
+		pressX = x;
+		pressY = y;
+		return;
+	}
+	if (bubble_ && hoverDraggerIndex >= 10 && hoverDraggerIndex <= 13) {
+		// 圆角点：记下起始半径/按下点，拖动时按增量算（按下不改变选中态）
+		dotPressIndex_ = hoverDraggerIndex;
+		dotStartRadius_ = bubbleRadius_;
+		dotPressX_ = x;
+		dotPressY_ = y;
+		return;
+	}
 	if (hoverDraggerIndex == -1) {
+		if (attachTo) {
+			// 线上文字：点一下就是编辑（文字已经存在），不能按"落笔新文字"重置 rect
+			startEdit();
+			return;
+		}
+		if (bubble_) {
+			// 气泡：和矩形一样拖拽生成（按下到松开就是框）
+			pressX = x;
+			pressY = y;
+			rect = D2D1::RectF(x, y, x, y);
+			updateDraggers();
+			hoverDraggerIndex = 9;
+			return;
+		}
 		rect = D2D1::RectF(x - borderPadding, y - borderPadding, x + borderPadding, y + borderPadding);
 		hoverDraggerIndex = 9;
 		startEdit();
@@ -221,6 +479,13 @@ void ShapeText::mouseDown(const float x, const float y)
 void ShapeText::mouseUp(const float x, const float y)
 {
 	(void)x; (void)y;
+	if (bubble_ && hoverDraggerIndex == 9) {
+		// 生成结束：装不下文字就撑到最小尺寸
+		hoverDraggerIndex = -1;
+		syncRectFromLayout();
+		updateBubbleTail();
+	}
+	dotPressIndex_ = -1;
 	updateDraggers();
 }
 
@@ -228,6 +493,11 @@ void ShapeText::mouseMove(const float x, const float y)
 {
 	hoverDraggerIndex = -1;
 	updateDraggers();
+	// 气泡尾巴尖：选中时优先命中（它在框外，比角控点更远）
+	if (bubble_ && isSelected() && std::hypot(x - bubbleTail_.x, y - bubbleTail_.y) <= 8.f * win->dpi) {
+		hoverDraggerIndex = 5;
+		return;
+	}
 	// 四角外侧一圈 = 旋转（角上仍是缩放）；不再有单独旋转柄
 	float lx = x, ly = y;
 	if (std::fabs(angle) > 1e-6f) {
@@ -238,21 +508,40 @@ void ShapeText::mouseMove(const float x, const float y)
 		lx = cx + dx * ca - dy * sa;
 		ly = cy + dx * sa + dy * ca;
 	}
+	// 气泡的圆角点最优先（在四角内侧，不能被动角缩放/框内移动抢走）
+	if (bubble_ && isSelected()) {
+		const int dot = hitCornerDot(lx, ly, rect);
+		if (dot >= 0) {
+			hoverDraggerIndex = dot;
+			return;
+		}
+	}
 	const int rotCorner = isSelected() ? hitRotateRing(lx, ly, rect) : -1;
 	if (rotCorner >= 0) {
 		hoverDraggerIndex = 4;
 		rotateCorner = rotCorner;
 		return;
 	}
-	// 四角优先；四边也可调（映射到对应角，缩放逻辑相同）
+	// 四角优先；四边也可调（映射到对应角，缩放逻辑相同）。
+	// 气泡只保留四角 4 个控点：边中点不缩放，落到下面的"框内移动"
 	const float band = std::max(8.f * win->dpi, borderPadding);
 	const int z = hitBoxEdgeOrCorner(lx, ly, rect, band);
-	if (z >= 0) {
+	if (z >= 0 && !(bubble_ && (z & 1))) {
 		// Area 索引 → Text 四角：0=TL 2=TR 4=BR 6=BL → 0,1,3,2
 		if (z == 0 || z == 1 || z == 7) hoverDraggerIndex = 0;
 		else if (z == 2 || z == 3) hoverDraggerIndex = 1;
 		else if (z == 4 || z == 5) hoverDraggerIndex = 3;
 		else hoverDraggerIndex = 2;
+		return;
+	}
+	// 气泡：只有描边和文字算命中 —— 中间空白不抢点击（能点到气泡下面的东西）
+	if (bubble_) {
+		const float strokeBand = std::max(6.f * win->dpi, bubbleStroke_ * 0.5f + 4.f * win->dpi);
+		if (hitBubbleText(lx, ly) || hitBubbleStroke(lx, ly, strokeBand)) {
+			hoverDraggerIndex = isEditing ? 9 : 8;
+			return;
+		}
+		if (isEditing) hoverDraggerIndex = 0;
 		return;
 	}
 	const float half = borderPadding / 2.f + win->dpi;
@@ -277,6 +566,10 @@ void ShapeText::setCursor()
 		SetCursor(LoadCursor(nullptr, IDC_SIZENWSE));
 	else if (hoverDraggerIndex == 1 || hoverDraggerIndex == 2)
 		SetCursor(LoadCursor(nullptr, IDC_SIZENESW));
+	else if (hoverDraggerIndex >= 10 && hoverDraggerIndex <= 13) {
+		const int slot = dotSlot(hoverDraggerIndex);
+		SetCursor(LoadCursor(nullptr, (slot == 0 || slot == 2) ? IDC_SIZENWSE : IDC_SIZENESW));
+	}
 	else if (hoverDraggerIndex == 4)
 		setRotateCursor(rotateCorner, angle);
 	else if (hoverDraggerIndex == 8)
@@ -289,6 +582,20 @@ void ShapeText::setCursor()
 
 bool ShapeText::hitErase(const float x, const float y)
 {
+	if (bubble_) {
+		// 只有描边和文字会被擦掉；点气泡中间空白不算命中
+		float lx = x, ly = y;
+		if (std::fabs(angle) > 1e-6f) {
+			const float cx = (rect.left + rect.right) * 0.5f;
+			const float cy = (rect.top + rect.bottom) * 0.5f;
+			const float dx = x - cx, dy = y - cy;
+			const float c = std::cos(-angle), s = std::sin(-angle);
+			lx = cx + dx * c - dy * s;
+			ly = cy + dx * s + dy * c;
+		}
+		const float band = std::max(6.f * win->dpi, bubbleStroke_ * 0.5f + 4.f * win->dpi);
+		return hitBubbleText(lx, ly) || hitBubbleStroke(lx, ly, band);
+	}
 	return hitLabelBox(x, y);
 }
 
@@ -321,6 +628,30 @@ void ShapeText::syncEditorGeometry()
 	if (!isEditing || !win) return;
 	auto tb = win->getTextBox();
 	auto d = win->dpi;
+	if (bubble_) {
+		// 气泡：输入框铺在气泡内框里（让开描边留白），文字水平+垂直居中；
+		// 背景透明、关掉 autoSize —— 框是固定的，不会出现"双击文字气泡缩成一团"
+		const float pad = borderPadding;
+		auto btl = win->annotToClientPt(rect.left + pad, rect.top + pad);
+		auto bbr = win->annotToClientPt(rect.right - pad, rect.bottom - pad);
+		const float bw = std::max(1.f, bbr.x - btl.x);
+		const float bh = std::max(1.f, bbr.y - btl.y);
+		tb->setPosition(Ling::Edge::Left, btl.x / d);
+		tb->setPosition(Ling::Edge::Top, btl.y / d);
+		// 尺寸必须写进 Yoga（setSize）：只改 tb->w/h 的话，下一次布局会被上一次
+		// autoSize 存下来的"文字宽度"覆盖，编辑框缩到左上角 → 文字看起来被挪走了
+		tb->setSize(bw / d, bh / d);
+		tb->x = btl.x;
+		tb->y = btl.y;
+		tb->w = bw;
+		tb->h = bh;
+		tb->setPadding(0.f);
+		tb->setBg(0);
+		tb->setVerticalCenter(true);
+		tb->setTextAlignCenter(true);
+		tb->setLineSpacing(0.f);
+		return;
+	}
 	auto tl = win->annotToClientPt(rect.left, rect.top);
 	auto br = win->annotToClientPt(rect.right, rect.bottom);
 	tb->setPosition(Ling::Edge::Left, tl.x / d);
@@ -370,9 +701,32 @@ void ShapeText::syncEditorGeometry()
 		tb->setPosition(Ling::Edge::Top, tlp.y / d);
 	}
 	tb->setVerticalCenter(false);
+	tb->setTextAlignCenter(false);   // 上一轮可能编辑过气泡（居中），普通文字恢复左对齐
 	// 行距跟着 commit 后的排版走（线上文字一行一个字，见 makeTextLayout）：
 	// 输入框里也得是同一个行距，不然打字时和落下后高度不一样
 	tb->setLineSpacing(attachTo ? attachLineStep * visScale / d : 0.f);
+}
+
+void ShapeText::initAttachedText(const std::wstring& t, float px)
+{
+	text = t.empty() ? L"请输入文字" : t;
+	autoText_ = text;   // 初始内容就是自动值：没被用户改过时应继续跟随测量
+	fontSize = px;
+	makeTextLayout();
+	syncRectFromLayout();
+}
+
+void ShapeText::setAutoText(const std::wstring& t)
+{
+	if (isEditing || t.empty()) return;
+	// 只有"内容已经不是自动值"时才算用户改过：双击进编辑但没改字，仍然继续跟着测量刷新
+	if (!autoText_.empty() && text != autoText_) return;
+	autoText_ = t;
+	if (t == text) return;
+	text = t;
+	makeTextLayout();
+	syncRectFromLayout();
+	win->refresh();
 }
 
 void ShapeText::startEdit()
@@ -411,6 +765,14 @@ void ShapeText::startEdit()
 	// 就被挤到框的下半部分（= 截图里插入符沉在线段下方）。附着文字是"中心锚点 + 用同一个排版
 	// 量出的尺寸"，没有第二份留白可叠。
 	tb->setPadding(attachTo ? 0.f : borderPadding * visScale / d);
+	if (bubble_) {
+		// 气泡：框固定（不 autoSize）、文字居中、底透明 —— 双击中间文字只改内容，
+		// 气泡本身保持拖出来的大小
+		tb->setAutoSize(false);
+		tb->setBg(0);
+		tb->setTextAlignCenter(true);
+		tb->setVerticalCenter(true);
+	}
 	tb->setFontSize(fontSize * visScale / d);
 	tb->setBold(isBold);
 	tb->setItalic(isItalic);
@@ -458,6 +820,12 @@ void ShapeText::finishEdit()
 	text = tb->getText();
 	tb->blur();
 	tb->hide();
+	if (bubble_) {
+		// 气泡的临时排版设置还原，输入框还给其它文字工具（它们要 autoSize + 左对齐）
+		tb->setAutoSize(true);
+		tb->setTextAlignCenter(false);
+		tb->setVerticalCenter(false);
+	}
 	win->setEditingText(nullptr);
 	makeTextLayout();
 	syncRectFromLayout();
@@ -466,6 +834,15 @@ void ShapeText::finishEdit()
 	win->shapeHover = nullptr;
 	win->refresh();
 	if (text.empty()) {
+		if (bubble_) {
+			// 气泡不允许空文字：恢复默认提示语
+			text = Lang::get(L"tool.bubbleText");
+			if (text.empty()) text = L"请输入文字";
+			makeTextLayout();
+			syncRectFromLayout();
+			win->refresh();
+			return;
+		}
 		Ling::App::get()->dq.TryEnqueue([w = win, self = this]() {
 			w->history->removeShape(self);
 		});
@@ -475,6 +852,12 @@ void ShapeText::finishEdit()
 void ShapeText::applyStyle()
 {
 	setAttr();
+	// 气泡字号固定（与文字工具默认字号一致；标注滑条调的是线宽，不能拿来改字号）；线宽跟着标注滑条
+	if (bubble_) {
+		fontSize = 24.f * win->dpi;
+		if (win->getCurToolId() == L"arrow")
+			bubbleStroke_ = std::max(1.f, win->toolSub->getSliderVal());
+	}
 	if (isEditing) {
 		auto tb = win->getTextBox();
 		tb->setColor(Ling::Color(colorValue));

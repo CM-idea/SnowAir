@@ -2212,14 +2212,14 @@ void CutMask::paint(ID2D1DeviceContext* ctx)
 	paintLabel(ctx);
 }
 
-// 录制期：选框描边/控点/尺寸标签改由独立的"排除捕获"窗口调用本函数绘制。
+// 录制期：选框描边改由独立的"排除捕获"窗口调用本函数绘制。
 // 主窗口仍然画遮罩、标注、鼠标高亮（这些要被录进视频），于是屏幕上选框还在、视频里没有它。
-void CutMask::paintChrome(ID2D1DeviceContext* ctx)
+// 录制中选区已锁定（不能拖边/调角），所以四周控点不再绘制，只留一圈描边。
+void CutMask::paintChrome(ID2D1DeviceContext* ctx, bool borderOutside)
 {
 	if (!hasRect()) return;
 	paintSelShadow(ctx);
-	paintBorder(ctx);
-	paintHandles(ctx);
+	paintBorder(ctx, borderOutside);
 	paintLabel(ctx);
 }
 
@@ -2228,14 +2228,23 @@ void CutMask::paintBorderOverlay(ID2D1DeviceContext* ctx)
 	paintBorder(ctx);
 }
 
-void CutMask::paintBorder(ID2D1DeviceContext* ctx)
+void CutMask::paintBorder(ID2D1DeviceContext* ctx, bool outside)
 {
 	if (!hasRect()) return;
 	// 描边贴着选区内沿画：线的外沿正好落在选区边界上，屏幕看到的框才和实际截到的像素一致。
 	// 之前是沿边界向外扩半线宽再画，整条线落在选区外 1~2px，单击确认时就显得"框和结果差了一点"。
 	const float half = strokeWidth * 0.5f;
-	D2D1_RECT_F box = D2D1::RectF(maskRect.left + half, maskRect.top + half,
-		maskRect.right - half, maskRect.bottom - half);
+	D2D1_RECT_F box{};
+	if (outside) {
+		// 录制中：整条线落在选区外侧（线的内沿刚好贴住边界），桌面复制把这一层也录进去时
+		// 裁剪区域也不会包含描边 —— DXGI 桌面复制不认 WDA_EXCLUDEFROMCAPTURE。
+		box = D2D1::RectF(maskRect.left - half, maskRect.top - half,
+			maskRect.right + half, maskRect.bottom + half);
+	}
+	else {
+		box = D2D1::RectF(maskRect.left + half, maskRect.top + half,
+			maskRect.right - half, maskRect.bottom - half);
+	}
 	// 选区比线宽还小时内缩会画没，退回沿边界画
 	if (box.right - box.left < 1.f || box.bottom - box.top < 1.f) box = maskRect;
 	const float ww = box.right - box.left, hh = box.bottom - box.top;

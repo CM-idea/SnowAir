@@ -15,10 +15,12 @@ private:
 	void onBtnClick(Ling::Button* btn);
 	void beginCapture(Ling::Button* btn);
 	void endCapture();
-	void onKeyDown(UINT key);
+	// mods = 按键发生那一刻的修饰键状态（MOD_CONTROL/MOD_ALT/MOD_SHIFT/MOD_WIN）。
+	// 录制期间物理修饰键会被钩子吞掉，不能事后用 GetAsyncKeyState 补查。
+	void onKeyDown(UINT key, UINT mods);
 	void onSpinnerTick(UINT id);
 	// 录制中的实时预览：按当前按住的修饰键刷新按钮里的文案（如 "Ctrl+Shift+"）
-	void refreshCapturePreview();
+	void refreshCapturePreview(UINT mods);
 	std::wstring keyToStr(UINT vkCode);
 	// 冲突判定：chord 已被同页另一行占用时返回那一行的 id（空 = 没冲突）
 	std::wstring conflictOwner(const std::wstring& chord, const std::wstring& selfId) const;

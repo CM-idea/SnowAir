@@ -326,6 +326,8 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 	// 自身的鼠标选区，避免"点到的位置"和"眼睛看到的文字"各算各的。
 	onMouseDown.add([this](POINT pos, bool isRight) {
 		if (isRight) return;
+		// 贴图上方的宿主控件（锁定/编辑/关闭）：压在浮层最上面，点击要先交给它
+		if (pinOverlay_ && chromeDown_ && chromeDown_(pos)) return;
 		// 点在上方悬浮按钮上：交给按钮自己处理，不参与"双击复制结果"，
 		// 否则双击「对比」会直接复制并退出截图，而不是切换原图浮窗。
 		// 必须放在最前面：文本重排分支里也有双击判定，会把它盖掉。
@@ -397,9 +399,19 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 			return;
 		}
 		if (ctrl && key == 'C') {
+			// 贴图宿主：鼠标在贴图范围内才接管 —— 拖选过只复制选区，没拖选复制整段；
+			// 鼠标不在贴图上时不拦 Ctrl+C，留给系统。
+			if (pinOverlay_) {
+				POINT pt{};
+				GetCursorPos(&pt);
+				const int r = x + (int)std::lround(w), b = y + (int)std::lround(h);
+				if (pt.x < x || pt.x >= r || pt.y < y || pt.y >= b) return;
+				copyAll();
+				return;
+			}
 			// 截图宿主：拖选后 Ctrl+C = 复制选中片段并退出截图（等同「完成」，但只复制这段）。
 			// 没有选区时保持原行为：复制整段、留在原地面板里。
-			const std::wstring sel = (!pinOverlay_ && onConfirm_) ? selectedText() : std::wstring{};
+			const std::wstring sel = onConfirm_ ? selectedText() : std::wstring{};
 			if (!sel.empty()) { onConfirm_(sel); return; }
 			copyAll();
 			return;
@@ -478,9 +490,10 @@ void ToolOcr::onCreated()
 		tip = std::make_unique<Tip>(this);
 		tip->bind(copyBtn, Lang::get(L"ocr.copy"));
 		tip->bind(compareBtn, Lang::get(L"ocr.compare"));
-
-		setTimer(kHoverPollMs, kHoverTimerId);
 	}
+	// 两种宿主都用同一个轮询：贴图模式在浮层里收不到贴图的鼠标事件，
+	// 靠它把光标位置转给宿主更新控件悬停态（见 updateButtonsHover）。
+	setTimer(kHoverPollMs, kHoverTimerId);
 
 	bannerNode = body->makeChild<Ling::Node>();
 	bannerNode->setPositionType(Ling::Position::Absolute);
@@ -508,7 +521,16 @@ void ToolOcr::onCreated()
 
 void ToolOcr::updateButtonsHover()
 {
-	if (pinOverlay_ || !hwnd || !copyBtn) return;
+	if (pinOverlay_) {
+		// 贴图模式：把光标（换算成宿主客户区坐标）交给宿主，由宿主决定控件显隐与高亮
+		if (!hwnd || !chromeHover_) return;
+		POINT pt{};
+		GetCursorPos(&pt);
+		ScreenToClient(hwnd, &pt);
+		chromeHover_(pt);
+		return;
+	}
+	if (!hwnd || !copyBtn) return;
 	POINT pt{};
 	GetCursorPos(&pt);
 	// 面板窗口 == 选区矩形：光标落在窗口内就算"悬停在框选范围内"
@@ -729,6 +751,7 @@ void ToolOcr::rebuildEditors()
 		box->setColor(fg);
 		// 拖选文字的背景色统一 #1890FF（原位覆盖 / 文本重排一致）
 		box->setSelectionBgColor(0x1890FFFF);
+		box->setSelectionTextColor(0xFFFFFFFF);   // 拖选反白
 		box->setAutoSize(true);
 		box->setText(text);
 		box->setMouseSelectionEnabled(false);   // 选区由 ToolOcr 统一接管
@@ -764,6 +787,7 @@ void ToolOcr::rebuildEditors()
 		box->setBg(palBg_);
 		box->setColor(palFg_);
 		box->setSelectionBgColor(0x1890FFFF);   // 拖选文字背景色统一 #1890FF
+		box->setSelectionTextColor(0xFFFFFFFF);   // 拖选反白
 		box->setText(fullText);
 		editors.push_back(box);
 	}
@@ -963,15 +987,23 @@ std::wstring ToolOcr::selectedText() const
 void ToolOcr::layout()
 {
 	Ling::WinBase::layout();
-	// 标注镜像：把宿主画在它自己窗口里的标注，按与选区一致的平移画到本窗口顶层 ——
-	// 两个窗口无法互相穿插，这样"后画的标注"看起来就盖在识别文字上面。
-	if (!annotCanvas_ || !annotPainter_ || !hasMask_) return;
-	auto* ctx = annotCanvas_->startPaint();
-	if (!ctx) return;
-	ctx->Clear(0);
-	ctx->SetTransform(D2D1::Matrix3x2F::Translation(-maskRect_.left, -maskRect_.top));
-	annotPainter_(ctx);
-	annotCanvas_->finishPaint();
+	// 标注/控件镜像层：两个窗口无法互相穿插，把宿主的内容镜像到本窗口顶层。
+	// 控件画在标注之后（同一层里最后画），保证锁定/编辑/关闭永远在文字与标注之上。
+	if (annotCanvas_ && hasMask_ && (annotPainter_ || chromePainter_)) {
+		auto* ctx = annotCanvas_->startPaint();
+		if (ctx) {
+			ctx->Clear(0);
+			if (annotPainter_) {
+				ctx->SetTransform(D2D1::Matrix3x2F::Translation(-maskRect_.left, -maskRect_.top));
+				annotPainter_(ctx);
+			}
+			if (chromePainter_) {
+				ctx->SetTransform(D2D1::Matrix3x2F::Identity());
+				chromePainter_(ctx);
+			}
+			annotCanvas_->finishPaint();
+		}
+	}
 }
 
 void ToolOcr::syncToMask(const D2D1_RECT_F& maskRect, int hostX, int hostY, float hostDpi)
@@ -998,6 +1030,22 @@ void ToolOcr::syncToMask(const D2D1_RECT_F& maskRect, int hostX, int hostY, floa
 	if (sizeChanged) rebuildEditors();
 }
 
+bool ToolOcr::hitText(POINT client)
+{
+	if (!hwnd || !IsWindowVisible(hwnd)) return false;
+	for (auto* e : editors) {
+		if (e && e->isPosIn(client)) return true;
+	}
+	// 背景块也归"文字区域"：框内留白同样是文字的地盘，只有框间空档才让给窗口拖动。
+	// 文本重排的背景块铺满整块，不能算（否则整张贴图都没法拖了）。
+	if (!reflow_) {
+		for (auto* bg : bgs_) {
+			if (bg && bg->isPosIn(client)) return true;
+		}
+	}
+	return false;
+}
+
 LRESULT ToolOcr::onHitTest(const POINT screenPos)
 {
 	// 只有识别文本框（及右上角复制按钮）吃鼠标：可选中/复制文字；其余区域一律穿透。
@@ -1008,6 +1056,15 @@ LRESULT ToolOcr::onHitTest(const POINT screenPos)
 	for (auto* e : editors) {
 		if (e && e->isPosIn(client)) return HTCLIENT;
 	}
+	// 贴图：识别框自身的留白也算文字区域，避免"点在字边上却把贴图拖走了"。
+	// 截图模式不加这一段 —— 那边要让点在框间的鼠标继续落到画布上画标注。
+	if (pinOverlay_ && !reflow_) {
+		for (auto* bg : bgs_) {
+			if (bg && bg->isPosIn(client)) return HTCLIENT;
+		}
+	}
+	// 贴图宿主控件在浮层最上层：命中就吃鼠标（点击由 chromeDown_ 转给宿主）
+	if (pinOverlay_ && chromeHit_ && chromeHit_(client)) return HTCLIENT;
 	// 右上角按钮平时隐藏，只有悬停在选区内才吃鼠标（隐藏时点击继续落到宿主画布上）
 	if (buttonsShown_) {
 		if (copyBtn && copyBtn->isPosIn(client)) return HTCLIENT;

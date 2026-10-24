@@ -4,6 +4,7 @@
 #include <array>
 #include <filesystem>
 #include <string>
+#include <utility>
 
 // 图像输出相关的工具函数。data 一律要求 BGRA、top-down、行紧凑（步长 = w*4），
 // 这也是 WinPin::getImagePixels 交出来的格式。
@@ -26,6 +27,12 @@ public:
 	static std::vector<BYTE> scaleBGRA(const BYTE* src, int sw, int sh, int dw, int dh);
 	// 把文件路径以 CF_HDROP 写进剪切板，粘贴到资源管理器/聊天窗口就是一个文件
 	static void addFileToClipboard(const std::wstring& filePath);
+	// 多文件版本（剪切板历史里的「N 个文件」条目复制回剪切板）
+	static void addFilesToClipboard(const std::vector<std::wstring>& paths);
+	// WIC 从文件解码成 BGRA、top-down、行紧凑（步长 = w*4）；失败返回 {0,0,空}
+	static std::tuple<int, int, std::vector<BYTE>> loadImagePixels(const std::wstring& path);
+	// 只读图片头拿像素尺寸（不解码像素；失败返回 {0,0}）—— 停悬大图预览按宽高比定窗口用
+	static std::pair<int, int> imageSize(const std::wstring& path);
 	// —— History 操作 —— 根据条目 id 找到 Setting 的历史条目，然后执行对应动作
 	static void copyHistoryFileToClipboard(const std::wstring& historyId);
 	static void pinHistoryFile(const std::wstring& historyId);

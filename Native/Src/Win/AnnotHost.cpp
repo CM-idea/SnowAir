@@ -114,7 +114,9 @@ std::wstring AnnotHost::getCurToolId() const
 {
 	if (!forcedToolId.empty()) return forcedToolId;
 	if (!toolCap || toolCap->curId.empty()) return L"";
-	return toolCap->resolveToolId(toolCap->curId);
+	const auto eff = toolCap->resolveToolId(toolCap->curId);
+	// 「标注」是箭头槽位里的线段子工具：底层仍按 arrow 路由，画箭头还是线段由 toolSub->isLine 决定
+	return eff == L"line" ? L"arrow" : eff;
 }
 
 void AnnotHost::forwardKey(UINT key)
@@ -137,6 +139,46 @@ D2D1_POINT_2F AnnotHost::clientToAnnotPt(float cx, float cy) const
 {
 	if (scale == 1.f) return D2D1::Point2F(cx, cy);
 	return D2D1::Point2F(cx / scale, cy / scale);
+}
+
+// 尺寸/角度：给线挂一句自动文字。拖拽过程中就调用，文字会跟着线实时出现；
+// 已经挂过（含用户手动改过内容）的直接返回，不重复创建。
+// 尺寸挂的是标记箭头（ShapeArrow），角度挂的是 ShapeLine，这里两种都认。
+ShapeText* AnnotHost::ensureShaftText(ShapeBase* host, const std::wstring& text, float px)
+{
+	if (!host || !history) return nullptr;
+	for (auto& s : history->shapes) {
+		auto* t = dynamic_cast<ShapeText*>(s.get());
+		if (t && t->attachTo == host && !s->isUndo) return t;
+	}
+	auto txt = std::make_unique<ShapeText>(this);
+	// 尺寸的文字压在线上，需要挖洞把线断开；角度的数字在角的外侧，不挖洞
+	//（否则会把底下的线/标注剪出缺口）
+	auto* ln = dynamic_cast<ShapeLine*>(host);
+	txt->punchBg = !(ln && ln->isAngle());
+	txt->attachTo = host;
+	txt->initAttachedText(text, px);
+	float mx = 0.f, my = 0.f;
+	bool ok = false;
+	if (auto* a = dynamic_cast<ShapeArrow*>(host)) ok = a->shaftMidPoint(mx, my);
+	else if (auto* l = dynamic_cast<ShapeLine*>(host)) ok = l->shaftMidPoint(mx, my);
+	if (ok) txt->setAttachPose(mx, my);
+	auto* raw = txt.get();
+	history->shapes.push_back(std::move(txt));
+	return raw;
+}
+
+// 尺寸自带文字 = 线长的物理尺寸。图像像素就是屏幕物理像素，
+// Windows 以 96 逻辑 DPI 为 1 英寸，所以 cm = px * 2.54 / (96 * dpi)。
+std::wstring AnnotHost::dimensionTextFor(ShapeBase* host) const
+{
+	float px = 0.f;
+	if (auto* a = dynamic_cast<ShapeArrow*>(host)) px = a->shaftLength();
+	const float d = dpi > 0.f ? dpi : 1.f;
+	const float cm = px * 2.54f / (96.f * d);
+	wchar_t buf[32]{};
+	swprintf_s(buf, L"%.1f cm", cm);
+	return buf;
 }
 
 ShapeBase* AnnotHost::hitShapeAt(float x, float y)
@@ -187,6 +229,7 @@ void AnnotHost::clearAllShapes(bool keepBackground)
 	annotDragIndex = -1;
 	hasDragged = false;
 	newShape = nullptr;
+	pendingAngle = nullptr;
 	shapeHover = nullptr;
 	linkBtn = nullptr;        // 连线叉指向的 shape 也要先归零，别留悬垂指针
 	linkHoverTarget = nullptr;
@@ -216,7 +259,9 @@ std::wstring AnnotHost::toolIdOfShape(ShapeBase* s)
 {
 	if (!s || s->isUndo || s->isViewportFilter()) return {};
 	if (dynamic_cast<ShapeRect*>(s) || dynamic_cast<ShapeEllipse*>(s)) return L"rect";
-	if (dynamic_cast<ShapeArrow*>(s) || dynamic_cast<ShapeLine*>(s)) return L"arrow";
+	if (auto* line = dynamic_cast<ShapeLine*>(s))
+		return line->isHighlighter() ? std::wstring{} : L"arrow";   // 荧光笔不回填滑条，避免宽度按倍数叠加
+	if (dynamic_cast<ShapeArrow*>(s)) return L"arrow";
 	if (dynamic_cast<ShapePen*>(s)) return L"pen";
 	if (dynamic_cast<ShapeText*>(s)) return L"text";
 	if (dynamic_cast<ShapeNumber*>(s)) return L"number";
@@ -867,6 +912,15 @@ void AnnotHost::paintSizePreview(ID2D1DeviceContext* ctx)
 			pop();
 			return;
 		}
+		if (toolSub->isPenMarker) {
+			// 荧光笔：和线段一样是直线，平头；粗细 = 画笔滑条 × 倍数
+			const float hs = stroke * ShapeLine::HighlighterWidthScale;
+			auto style = ArrowParts::makeShaftStyle(
+				Ling::D2D::get()->d2dFactory.Get(), hs, false, false);
+			ctx->DrawLine({ x1, cy }, { x2, cy }, brush.Get(), hs, style.Get());
+			pop();
+			return;
+		}
 		const float amp = std::min(22.f, half * 0.28f);
 		std::vector<D2D1_POINT_2F> pts;
 		std::vector<int64_t> times;
@@ -973,6 +1027,27 @@ void AnnotHost::paintSizePreview(ID2D1DeviceContext* ctx)
 		return;
 	}
 
+	// 多边形/星形：画一个当前"边数 + 圆角"的样例 —— 滑条悬停/拖动时就靠它预览
+	if (id == L"rect" && toolSub->rectKind != ToolSub::RectShape) {
+		const bool star = toolSub->rectKind == ToolSub::StarShape;
+		const int sides = star ? toolSub->starPoints : toolSub->polygonSides;
+		const D2D1_RECT_F pr{ cx - half * 0.85f, cy - half, cx + half * 0.85f, cy + half };
+		auto geo = ShapeRect::buildPolyGeometry(pr,
+			star ? ShapeRect::Star : ShapeRect::Polygon, sides, toolSub->cornerRadius);
+		if (geo) {
+			const float stroke = toolSub->getSliderVal();
+			if (toolSub->isRectFill) {
+				ctx->FillGeometry(geo.Get(), brush.Get());
+			}
+			else {
+				auto dash = toolSub->isRectDash ? ShapeRect::makeDashStroke(stroke) : nullptr;
+				ctx->DrawGeometry(geo.Get(), brush.Get(), stroke, dash.Get());
+			}
+		}
+		pop();
+		return;
+	}
+
 	// rect 等：半透明线段示意粗细
 	const float stroke = toolSub->getSliderVal();
 	ctx->DrawLine({ x1, cy }, { x2, cy }, brush.Get(), stroke);
@@ -1026,44 +1101,35 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 		// 先判断"这一下双击是不是落在线上文字上"再决定撤不撤上一次落笔 ——
 		// 顺序反了的话，双击箭头里的文字会先把箭头（或文字）undo 掉，表现就是
 		// "重复编辑箭头里的文字，箭头整个不见了，只剩文字"
-		bool dblLabel = false;
-		if (shapeHover && history) {
-			const auto ip = toImgPos(pos);
-			const bool isLine = dynamic_cast<ShapeArrow*>(shapeHover) != nullptr
-				|| dynamic_cast<ShapeLine*>(shapeHover) != nullptr;
-			if (isLine) {
-				for (auto& s : history->shapes) {
-					auto* t = dynamic_cast<ShapeText*>(s.get());
-					if (!t || t->attachTo != shapeHover) continue;
-					// 文字框是转过角度的（竖排/斜排），命中要按文字自己的朝向判
-					dblLabel = t->hitLabelBox((float)ip.x, (float)ip.y);
-					break;
-				}
-			}
-		}
-		if (prevPressCreatedShape && history && !dblLabel) history->undo();
-		auto imgDbl = toImgPos(pos);
+		const auto imgDbl = toImgPos(pos);
 		const float dx = (float)imgDbl.x, dy = (float)imgDbl.y;
-		// 双击线段上的文字（文字是线段的一部分，命中的是线段本身）：直接进文字编辑，
-		// 不用先单独选中文字
-		if (shapeHover && history) {
-			bool isLine = dynamic_cast<ShapeArrow*>(shapeHover) != nullptr
-				|| dynamic_cast<ShapeLine*>(shapeHover) != nullptr;
-			if (isLine) {
-				for (auto& s : history->shapes) {
-					auto* t = dynamic_cast<ShapeText*>(s.get());
-					if (!t || t->attachTo != shapeHover) continue;
-					// 双击点落在文字框（= 洞）里才进编辑，双击线的别处仍然按原来的端点逻辑走
-					if (t->hitLabelBox(dx, dy)) {
-						shapeHover = t;
-						setEditingText(t);
-						t->startEdit();
-						annotMouseDown = false;
-						return true;
-					}
-					break;
-				}
+		// 找"双击点所在的线上文字"：命中线的（文字是整体的一部分）和正好选中文字的
+		// 两种都要认 —— 尺寸/角度自带的文字都靠这条路进编辑，绝不能被 undo 吃掉
+		auto labelUnder = [&](ShapeBase* host) -> ShapeText* {
+			if (!host || !history) return nullptr;
+			// 命中的直接就是文字/气泡：双击就是进编辑（不能先被 undo 掉）
+			if (auto* t = dynamic_cast<ShapeText*>(host))
+				return t->hitLabelBox(dx, dy) ? t : nullptr;
+			for (auto& s : history->shapes) {
+				auto* t = dynamic_cast<ShapeText*>(s.get());
+				if (!t || s->isUndo || t->attachTo != host) continue;
+				// 文字框是转过角度的（竖排/斜排），命中要按文字自己的朝向判
+				if (t->hitLabelBox(dx, dy)) return t;
 			}
+			return nullptr;
+		};
+		ShapeText* dblText = labelUnder(shapeHover);
+		if (!dblText) dblText = labelUnder(hitShapeAt(dx, dy));
+		const bool dblLabel = (dblText != nullptr);
+		if (prevPressCreatedShape && history && !dblLabel) history->undo();
+		// 双击线段上的文字（文字是线段的一部分）：直接进文字编辑，
+		// 不用先单独选中文字；线（以及尺寸/角度）必须原样留着
+		if (dblText) {
+			shapeHover = dblText;
+			setEditingText(dblText);
+			dblText->startEdit();
+			annotMouseDown = false;
+			return true;
 		}
 		// 双击箭头/线段端点切换 free（绕对端旋转 ↔ 自由拖点）
 		if (shapeHover) {
@@ -1101,6 +1167,33 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 
 	const auto tool = getCurToolId();
 	auto imgPos = toImgPos(pos);
+
+	// 角度三点式：上一笔没画完时，下一次点击/拖拽继续给这条角度（点、拖都行）
+	if (pendingAngle) {
+		bool alive = false;
+		if (history) {
+			for (auto& s : history->shapes)
+				if (s.get() == pendingAngle && !s->isUndo) { alive = true; break; }
+		}
+		if (!alive) pendingAngle = nullptr;
+		else if (tool != L"arrow" || !toolSub || !toolSub->isLine
+			|| toolSub->lineKind != ToolSub::LineAngle) {
+			// 换工具了：放弃衔接；只落了一个点的退化形状直接删掉
+			if (pendingAngle->anglePointCount() < 2) history->removeShape(pendingAngle);
+			pendingAngle = nullptr;
+		}
+		else {
+			newShape = pendingAngle;
+			shapeHover = pendingAngle;
+			shapeHover->mouseDown((float)imgPos.x, (float)imgPos.y);
+			// 第三点一落就显示角度：文字先挂上，拖动中由 updateAngleLabel 实时改写
+			if (pendingAngle->angleComplete())
+				ensureShaftText(pendingAngle, pendingAngle->angleLabelText(), pendingAngle->angleLabelFontPx());
+			lockAnnotDragFromHover();
+			refresh();
+			return true;
+		}
+	}
 
 	if (tool == L"eraser") {
 		clearAnnotSelection();
@@ -1272,6 +1365,14 @@ void AnnotHost::annotMove(POINT pos)
 			if (pos.x != annotPressPos.x || pos.y != annotPressPos.y) hasDragged = true;
 			applyLockedAnnotDrag();
 			shapeHover->mouseDrag((float)imgPos.x, (float)imgPos.y);
+			// 尺寸：自带文字跟着线长实时刷新 —— 创建中和之后的二次编辑拖动都要刷新。
+			// 以形状自身是否为尺寸为准（不依赖当前工具），用户改过的文字由 setAutoText 拦住。
+			if (auto* ar = dynamic_cast<ShapeArrow*>(shapeHover); ar && ar->isDimension()) {
+				const std::wstring label = dimensionTextFor(ar);
+				if (auto* t = ensureShaftText(ar, label, 24.f * dpi))
+					t->setAutoText(label);
+			}
+			// 角度：ShapeLine::mouseDrag 里已经调 updateAngleLabel()
 			// 拖动中也要刷起点提示点（连线时它跟着箭头起点沿边缘滑）
 			updateLinkHints(imgPos, tool);
 			// 拖的若是下层标注，上层盖着的模糊/马赛克要跟着重新取样（实时，限流）
@@ -1320,7 +1421,8 @@ void AnnotHost::annotUp(POINT pos, BOOL isRight)
 	const bool tinyMove = std::abs((float)(pos.x - annotPressPos.x)) <= jitter
 		&& std::abs((float)(pos.y - annotPressPos.y)) <= jitter;
 	if (shapeHover == justCreated && (tinyMove || !hasDragged) && !shapeHover->isValidWithoutDrag()) {
-		history->removeShape(shapeHover);
+		// 整体删：拖拽中可能已经挂了自带文字（尺寸），空线不能把文字孤零零留下
+		history->removeShapeGroup(shapeHover);
 		// 这一下本来是"从形状里起笔连线"但没拖（就是单击）：那条空线删掉，改成**选中那个形状**。
 		// 于是箭头工具下"点一下=选中、按住拖=连线"，选中之后再按住拖就是移动它
 		if (linkPressTarget && history) {
@@ -1337,6 +1439,29 @@ void AnnotHost::annotUp(POINT pos, BOOL isRight)
 	shapeHover->mouseUp((float)imgPos.x, (float)imgPos.y);
 	// 抬手后按最终几何再采样一次（拖拽中已经跟手重算，这里收个尾更稳）
 	refreshFiltersAbove(shapeHover);
+
+	// 尺寸：自带文字（拖拽中已经挂上，这里只兜底刷新；用户改过的文字不会被覆盖）
+	if (justCreated) {
+		if (auto* ar = dynamic_cast<ShapeArrow*>(shapeHover); ar && ar->isDimension()) {
+			const std::wstring label = dimensionTextFor(ar);
+			if (auto* t = ensureShaftText(ar, label, 24.f * dpi))
+				t->setAutoText(label);
+		}
+	}
+
+	// 角度三点式：没画完就挂起等第三点；画完则确保自动测量的角度文字已挂上
+	if (justCreated) {
+		if (auto* ln = dynamic_cast<ShapeLine*>(shapeHover); ln && ln->isAngle()) {
+			if (!ln->angleComplete()) {
+				pendingAngle = ln;
+			}
+			else {
+				pendingAngle = nullptr;
+				ensureShaftText(ln, ln->angleLabelText(), ln->angleLabelFontPx());
+				ln->updateAngleLabel();
+			}
+		}
+	}
 
 	// 共用：画完一律不立刻出控点；再次点击才选中（文字编辑靠 editingText，不靠选中态）
 	if (justCreated)

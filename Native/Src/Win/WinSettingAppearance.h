@@ -112,6 +112,7 @@ private:
 	Ling::Button* otherFeatureTipsBtn{ nullptr };
 	Ling::Button* otherHotkeyTipBtn{ nullptr };
 	Ling::Button* otherRememberStyleBtn{ nullptr };
+	Ling::Button* otherHoverPreviewBtn{ nullptr };
 	Ling::Button* otherToolWidthBtn{ nullptr };
 	Ling::Label* otherToolWidthLabel{ nullptr };   // 下拉按钮里显示当前值的 Label
 	int tbKind{ 0 };

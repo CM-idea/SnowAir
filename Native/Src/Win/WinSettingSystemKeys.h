@@ -20,10 +20,10 @@ private:
 	void onBtnClick(Ling::Button* btn);
 	void beginCapture(Ling::Button* btn);
 	void endCapture();
-	void onKeyDown(UINT key);
+	void onKeyDown(UINT key, UINT mods);
 	void onSpinnerTick(UINT id);
 	// 录制中的实时预览：按当前按住的修饰键刷新按钮里的文案（如 "Ctrl+Shift+"）
-	void refreshCapturePreview();
+	void refreshCapturePreview(UINT mods);
 	std::wstring keyToStr(UINT vkCode);
 	// 把某条命令的当前键位刷到它的键位框上（空 = 「点击设置」占位、muted 色）
 	void refreshRow(const std::wstring& id);

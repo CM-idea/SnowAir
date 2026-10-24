@@ -1,11 +1,20 @@
 #include "pch.h"
 #include <include/Ling.h>
+#include <wincodec.h>
 #include <chrono>
+// 快速贴屏要读「资源管理器当前选中项」（Shell COM）与「前台窗口里拖选的文字」（UIA）
+#include <servprov.h>
+#include <shlguid.h>
+#include <exdisp.h>
+// 顺序有讲究：oleacc.h 必须在 UIAutomation*.h 之前，否则 ITextProvider 会重复定义
+#include <oleacc.h>
+#include <UIAutomationClient.h>
 #include "Setting.h"
 #include "Util.h"
 #include "Lang.h"
 #include "Win/WinCap.h"
 #include "Win/WinPin.h"
+#include "Win/ClipPin.h"
 #include "Win/HotkeyHook.h"
 #include "Win/WinSetting.h"
 #include "App.h"
@@ -30,6 +39,7 @@ namespace {
         { L"open_screenshot_dir",    107 },
         { L"open_history",           108 },
         { L"capture_repeat",         109 },
+        { L"quick_pin",              110 },
     };
     bool isGlobalHotkeyId(const std::wstring& id)
     {
@@ -96,6 +106,242 @@ Setting::~Setting()
 
 }
 
+// —— 剪切板监听：记录文本与位图（剪切板历史数据的来源）——
+namespace {
+    HWND g_clipWnd{ nullptr };
+    constexpr const wchar_t* kClipWndClass{ L"SnowAirClipboardWatch" };
+
+    // CF_DIB → BGRA（只处理最常见的 BI_RGB 24/32 位，其余格式不记录）
+    bool dibToBgra(HGLOBAL handle, int& outW, int& outH, std::vector<BYTE>& out)
+    {
+        if (!handle) return false;
+        const auto* bi = static_cast<const BITMAPINFOHEADER*>(GlobalLock(handle));
+        if (!bi) return false;
+        bool ok = false;
+        const int bpp = (int)bi->biBitCount;
+        if (bi->biCompression == BI_RGB && (bpp == 24 || bpp == 32)
+            && bi->biWidth > 0 && bi->biHeight != 0) {
+            const int w = (int)bi->biWidth;
+            const int h = std::abs((int)bi->biHeight);
+            const bool topDown = bi->biHeight < 0;
+            const size_t srcStride = ((size_t)w * bpp + 31) / 32 * 4;
+            const BYTE* bits = reinterpret_cast<const BYTE*>(bi) + bi->biSize;
+            out.assign((size_t)w * 4u * h, 0xFF);
+            for (int y = 0; y < h; ++y) {
+                const BYTE* src = bits + (size_t)(topDown ? y : h - 1 - y) * srcStride;
+                BYTE* dst = out.data() + (size_t)y * w * 4;
+                if (bpp == 32) {
+                    for (int x = 0; x < w; ++x, src += 4, dst += 4) {
+                        dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = 0xFF;
+                    }
+                }
+                else {
+                    for (int x = 0; x < w; ++x, src += 3, dst += 4) {
+                        dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = 0xFF;
+                    }
+                }
+            }
+            outW = w;
+            outH = h;
+            ok = true;
+        }
+        GlobalUnlock(handle);
+        return ok;
+    }
+
+    // 剪切板里的 PNG（浏览器 / Electron / 本软件自己）→ BGRA
+    bool pngToBgra(HGLOBAL handle, int& outW, int& outH, std::vector<BYTE>& out)
+    {
+        if (!handle) return false;
+        void* data = GlobalLock(handle);
+        if (!data) return false;
+        const SIZE_T size = GlobalSize(handle);
+        bool ok = false;
+        Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
+        if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(factory.GetAddressOf())))) {
+            Microsoft::WRL::ComPtr<IWICStream> stream;
+            Microsoft::WRL::ComPtr<IWICBitmapDecoder> dec;
+            Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
+            Microsoft::WRL::ComPtr<IWICFormatConverter> conv;
+            if (SUCCEEDED(factory->CreateStream(stream.GetAddressOf()))
+                && SUCCEEDED(stream->InitializeFromMemory(reinterpret_cast<BYTE*>(data), (DWORD)size))
+                && SUCCEEDED(factory->CreateDecoderFromStream(stream.Get(), nullptr,
+                    WICDecodeMetadataCacheOnDemand, dec.GetAddressOf()))
+                && SUCCEEDED(dec->GetFrame(0, frame.GetAddressOf()))) {
+                UINT w = 0, h = 0;
+                if (SUCCEEDED(frame->GetSize(&w, &h)) && w > 0 && h > 0
+                    && SUCCEEDED(factory->CreateFormatConverter(conv.GetAddressOf()))
+                    && SUCCEEDED(conv->Initialize(frame.Get(), GUID_WICPixelFormat32bppBGRA,
+                        WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))) {
+                    out.resize((size_t)w * 4u * h);
+                    if (SUCCEEDED(conv->CopyPixels(nullptr, w * 4, (UINT)out.size(), out.data()))) {
+                        outW = (int)w;
+                        outH = (int)h;
+                        ok = true;
+                    }
+                }
+            }
+        }
+        GlobalUnlock(handle);
+        return ok;
+    }
+
+    // CF_BITMAP（.NET / 部分 Office 程序）→ BGRA
+    bool hbitmapToBgra(HBITMAP hbm, int& outW, int& outH, std::vector<BYTE>& out)
+    {
+        if (!hbm) return false;
+        BITMAP bm{};
+        if (!GetObjectW(hbm, sizeof(bm), &bm) || bm.bmWidth <= 0 || bm.bmHeight <= 0) return false;
+        const int w = (int)bm.bmWidth, h = (int)bm.bmHeight;
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = w;
+        bmi.bmiHeader.biHeight = h;   // 正数 = 自下而上
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        std::vector<BYTE> tmp((size_t)w * 4u * h);
+        HDC hdc = GetDC(nullptr);
+        if (!hdc) return false;
+        const int got = GetDIBits(hdc, hbm, 0, (UINT)h, tmp.data(), &bmi, DIB_RGB_COLORS);
+        ReleaseDC(nullptr, hdc);
+        if (got <= 0) return false;
+        out.assign(tmp.size(), 0xFF);
+        for (int y = 0; y < h; ++y) {
+            const BYTE* src = tmp.data() + (size_t)(h - 1 - y) * w * 4;
+            BYTE* dst = out.data() + (size_t)y * w * 4;
+            for (int x = 0; x < w; ++x, src += 4, dst += 4) {
+                dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = 0xFF;
+            }
+        }
+        outW = w;
+        outH = h;
+        return true;
+    }
+
+    DWORD g_lastClipSeq{ 0 };
+    constexpr UINT_PTR kClipPollTimer{ 1 };
+    constexpr UINT kClipPollMs{ 800 };
+
+    void captureClipboardNow(bool force = false)
+    {
+        auto* s = Setting::get();
+        if (!s || !g_clipWnd) return;
+        // 事件与轮询可能撞在同一处：序列号没变就不再重复读一遍
+        const DWORD seq = GetClipboardSequenceNumber();
+        if (!force && seq == g_lastClipSeq) return;
+        // 剪贴板可能仍被写入方占用：短重试，避免"刚好这一下没读到"就永远漏掉
+        bool opened = false;
+        for (int attempt = 0; attempt < 10; ++attempt) {
+            if (OpenClipboard(g_clipWnd)) { opened = true; break; }
+            Sleep(5);
+        }
+        if (!opened) return;
+        g_lastClipSeq = seq;
+        if (HANDLE hf = GetClipboardData(CF_HDROP)) {
+            // 文件列表（资源管理器 / Word / PPT 等）：只记路径，不复制内容
+            HDROP drop = static_cast<HDROP>(hf);
+            const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+            std::vector<std::wstring> files;
+            for (UINT i = 0; i < count; ++i) {
+                const UINT len = DragQueryFileW(drop, i, nullptr, 0);
+                if (len == 0) continue;
+                std::wstring path(len, L'\0');
+                if (DragQueryFileW(drop, i, path.data(), len + 1) == 0) continue;
+                files.push_back(std::move(path));
+            }
+            if (!files.empty()) {
+                s->addClipboardFiles(files);
+                CloseClipboard();
+                return;
+            }
+        }
+        if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
+            if (const auto* p = static_cast<const wchar_t*>(GlobalLock(h))) {
+                s->addClipboardText(p);
+                GlobalUnlock(h);
+            }
+        }
+        else if (HANDLE ha = GetClipboardData(CF_TEXT)) {
+            // 老程序只给 ANSI 文本：按本地代码页转一次
+            if (const auto* p = static_cast<const char*>(GlobalLock(ha))) {
+                const int len = MultiByteToWideChar(CP_ACP, 0, p, -1, nullptr, 0);
+                if (len > 1) {
+                    std::wstring w((size_t)len - 1, L'\0');
+                    MultiByteToWideChar(CP_ACP, 0, p, -1, w.data(), len);
+                    s->addClipboardText(w);
+                }
+                GlobalUnlock(ha);
+            }
+        }
+        else {
+            int w = 0, hh = 0;
+            std::vector<BYTE> px;
+            bool ok = false;
+            // 优先级：PNG（浏览器/Electron，体积小且带 alpha）→ DIBV5/DIB → CF_BITMAP
+            static const UINT pngFmt = RegisterClipboardFormatW(L"PNG");
+            if (HANDLE hp = GetClipboardData(pngFmt)) ok = pngToBgra(hp, w, hh, px);
+            if (!ok) {
+                HANDLE hb = GetClipboardData(CF_DIBV5);
+                if (!hb) hb = GetClipboardData(CF_DIB);
+                if (hb) ok = dibToBgra(hb, w, hh, px);
+            }
+            if (!ok) {
+                if (HBITMAP hbm = (HBITMAP)GetClipboardData(CF_BITMAP))
+                    ok = hbitmapToBgra(hbm, w, hh, px);
+            }
+            if (ok) s->addClipboardImage(w, hh, px);
+        }
+        CloseClipboard();
+    }
+
+    LRESULT CALLBACK clipboardWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+    {
+        if (msg == WM_CLIPBOARDUPDATE) {
+            // 直接读（内部带重试）；不依赖 DispatcherQueue，避免队列没跑起来时事件被吞
+            captureClipboardNow();
+            return 0;
+        }
+        if (msg == WM_TIMER && wp == kClipPollTimer) {
+            // 兜底轮询：个别环境下收不到 WM_CLIPBOARDUPDATE，用序列号变化补上
+            if (GetClipboardSequenceNumber() != g_lastClipSeq) captureClipboardNow();
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+
+    void installClipboardWatch()
+    {
+        if (g_clipWnd) return;
+        WNDCLASSEXW wc{ sizeof(WNDCLASSEXW) };
+        wc.lpfnWndProc = clipboardWndProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = kClipWndClass;
+        if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
+        // 普通隐藏窗（不显示）：只有顶层窗才稳定收到 WM_CLIPBOARDUPDATE
+        g_clipWnd = CreateWindowExW(0, kClipWndClass, L"", WS_OVERLAPPED,
+            0, 0, 0, 0, nullptr, nullptr, wc.hInstance, nullptr);
+        if (g_clipWnd) {
+            AddClipboardFormatListener(g_clipWnd);
+            // 兜底轮询（800ms）：WM_CLIPBOARDUPDATE 偶发收不到时也能接住
+            SetTimer(g_clipWnd, kClipPollTimer, kClipPollMs, nullptr);
+            // 启动时先把当前剪贴板里的内容记一条，用户打开「剪切板」页不至于空空如也
+            captureClipboardNow(true);
+        }
+    }
+
+    void uninstallClipboardWatch()
+    {
+        if (!g_clipWnd) return;
+        KillTimer(g_clipWnd, kClipPollTimer);
+        RemoveClipboardFormatListener(g_clipWnd);
+        DestroyWindow(g_clipWnd);
+        g_clipWnd = nullptr;
+        UnregisterClassW(kClipWndClass, GetModuleHandleW(nullptr));
+    }
+}
+
 void Setting::init()
 {
     auto ptr = new Setting();
@@ -104,10 +350,12 @@ void Setting::init()
     setting->purgeRemovedAiSettings();
     // 启动时清理旧程序（ScreenCapture）留下的历史键位
     setting->purgeLegacyShortcutKeys();
+    installClipboardWatch();
 }
 
 void Setting::dispose()
 {
+    uninstallClipboardWatch();
     setting.reset();
 }
 
@@ -152,7 +400,13 @@ void Setting::setShortcutKey(const std::wstring& type, const std::vector<std::ws
         str += L"+" + keys[i];
     }
     str.erase(0,1);
-    auto shortcutKey = configObj.GetNamedObject(L"shortcutKey");
+    // 配置里还没有 shortcutKey 对象时（首次设置热键）要先建出来：GetNamedObject 的单参
+    // 重载在缺键时会抛 hresult_error，异常会穿透 DispatcherQueue 回调导致进程被杀。
+    auto shortcutKey = configObj.GetNamedObject(L"shortcutKey", nullptr);
+    if (!shortcutKey) {
+        shortcutKey = JsonObject();
+        configObj.SetNamedValue(L"shortcutKey", shortcutKey);
+    }
     shortcutKey.SetNamedValue(type, JsonValue::CreateStringValue(str));
     save();
     // 改的是哪一行就整体重注册 —— 现在设置页里已实现的行全都真注册了
@@ -694,6 +948,9 @@ void Setting::setToolDefaultWidth(int v)
 }
 bool Setting::getRememberToolStyle() { return featBool(L"rememberToolStyle", false); }
 void Setting::setRememberToolStyle(bool on) { setFeatBool(L"rememberToolStyle", on); }
+// 悬停预览：历史记录 / 剪切板卡片停悬时弹出大图或文字卡（默认关闭）
+bool Setting::getHoverPreview() { return featBool(L"hoverPreview", false); }
+void Setting::setHoverPreview(bool on) { setFeatBool(L"hoverPreview", on); }
 int Setting::getLastArrowHead() { return featInt(L"lastArrowHead", 0); }
 void Setting::setLastArrowHead(int v) { setFeatInt(L"lastArrowHead", v); }
 bool Setting::getAutoSaveAfterCapture() { return featBool(L"autoSaveAfterCapture", false); }
@@ -913,9 +1170,257 @@ void Setting::applyHotkeys()
     else stopHotkeyRetry();
 }
 
+// —— 快速贴屏：优先贴「当前上下文」，没有上下文时贴剪贴板 ——
+//   ① 资源管理器里单击选中的文件 / 文件夹 / 图片 / 视频（不需要先复制）
+//   ② 前台窗口里拖选的一段文字（UIA 选区，不需要先复制）
+//   ③ 否则贴当前剪贴板内容（文字 / 图片 / 文件）
+namespace {
+    bool quickPinIsImagePath(const std::wstring& path)
+    {
+        const auto dot = path.find_last_of(L'.');
+        if (dot == std::wstring::npos) return false;
+        std::wstring e = path.substr(dot + 1);
+        for (auto& c : e) c = (wchar_t)towlower(c);
+        return e == L"png" || e == L"jpg" || e == L"jpeg" || e == L"webp"
+            || e == L"bmp" || e == L"gif" || e == L"avif" || e == L"jxl";
+    }
+
+    // 图片贴到工作区中央（与历史页「贴图」按钮同一套落点）
+    void quickPinImage(int w, int h, std::vector<BYTE>& px)
+    {
+        if (w <= 0 || h <= 0 || px.empty()) return;
+        RECT rc{};
+        SystemParametersInfo(SPI_GETWORKAREA, 0, &rc, 0);
+        const int areaW = (int)rc.right - (int)rc.left;
+        const int areaH = (int)rc.bottom - (int)rc.top;
+        WinPin::initFromData(rc.left + (std::max)(0, (areaW - w) / 2),
+            rc.top + (std::max)(0, (areaH - h) / 2), w, h, px);
+    }
+
+    // 贴一组文件：单张图片按图片贴图，其余（文件夹 / 视频 / 其它文件）贴成文件贴屏
+    void quickPinPaths(const std::vector<std::wstring>& paths)
+    {
+        if (paths.empty()) return;
+        if (paths.size() == 1 && quickPinIsImagePath(paths.front())) {
+            auto [w, h, px] = Util::loadImagePixels(paths.front());
+            if (w > 0 && h > 0 && !px.empty()) { quickPinImage(w, h, px); return; }
+        }
+        ClipPin::showFiles(paths);
+    }
+
+    // 资源管理器当前窗口里选中的项目
+    std::vector<std::wstring> explorerSelection()
+    {
+        std::vector<std::wstring> out;
+        HWND fg = GetForegroundWindow();
+        if (!fg) return out;
+        wchar_t cls[64]{};
+        if (!GetClassNameW(fg, cls, 64)) return out;
+        if (_wcsicmp(cls, L"CabinetWClass") != 0 && _wcsicmp(cls, L"ExploreWClass") != 0)
+            return out;
+
+        Microsoft::WRL::ComPtr<IShellWindows> windows;
+        if (FAILED(CoCreateInstance(CLSID_ShellWindows, nullptr, CLSCTX_ALL,
+            IID_PPV_ARGS(windows.GetAddressOf()))) || !windows) return out;
+        long count = 0;
+        windows->get_Count(&count);
+        const HWND target = GetAncestor(fg, GA_ROOT);
+        for (long i = 0; i < count; ++i) {
+            VARIANT index{};
+            index.vt = VT_I4;
+            index.lVal = i;
+            Microsoft::WRL::ComPtr<IDispatch> disp;
+            if (FAILED(windows->Item(index, disp.GetAddressOf())) || !disp) continue;
+            Microsoft::WRL::ComPtr<IServiceProvider> provider;
+            if (FAILED(disp.As(&provider)) || !provider) continue;
+            Microsoft::WRL::ComPtr<IShellBrowser> browser;
+            if (FAILED(provider->QueryService(SID_STopLevelBrowser,
+                IID_PPV_ARGS(browser.GetAddressOf()))) || !browser) continue;
+            // 只认前台那一个浏览窗口：多开资源管理器时不能贴错窗口的选中项。
+            // 两边都归一到顶层窗再比，兼容不同系统版本里浏览器窗口挂在不同层级的情况。
+            Microsoft::WRL::ComPtr<IOleWindow> oleWindow;
+            HWND viewHwnd{};
+            if (FAILED(browser.As(&oleWindow)) || !oleWindow
+                || FAILED(oleWindow->GetWindow(&viewHwnd)) || !viewHwnd)
+                continue;
+            if (GetAncestor(viewHwnd, GA_ROOT) != target) continue;
+            Microsoft::WRL::ComPtr<IShellView> view;
+            if (FAILED(browser->QueryActiveShellView(view.GetAddressOf())) || !view) continue;
+            Microsoft::WRL::ComPtr<IFolderView> folderView;
+            if (FAILED(view.As(&folderView)) || !folderView) continue;
+            Microsoft::WRL::ComPtr<IShellItemArray> items;
+            if (FAILED(folderView->Items(SVGIO_SELECTION,
+                IID_PPV_ARGS(items.GetAddressOf()))) || !items) continue;
+            DWORD n = 0;
+            items->GetCount(&n);
+            for (DWORD k = 0; k < n; ++k) {
+                Microsoft::WRL::ComPtr<IShellItem> item;
+                if (FAILED(items->GetItemAt(k, item.GetAddressOf())) || !item) continue;
+                PWSTR path = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                    out.emplace_back(path);
+                    CoTaskMemFree(path);
+                }
+            }
+            break;
+        }
+        return out;
+    }
+
+    // 前台窗口里拖选的文字：UIA TextPattern 的当前选区（不改动剪贴板）
+    std::wstring foregroundSelectedText()
+    {
+        HWND fg = GetForegroundWindow();
+        if (!fg) return {};
+        DWORD pid = 0;
+        GetWindowThreadProcessId(fg, &pid);
+        if (pid == 0 || pid == GetCurrentProcessId()) return {};   // 自己的窗口不算
+        Microsoft::WRL::ComPtr<IUIAutomation> automation;
+        if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(automation.GetAddressOf()))) || !automation) return {};
+        // 个别程序的 UIA 提供者很慢：给跨进程调用设上限，别把热键回调卡住
+        Microsoft::WRL::ComPtr<IUIAutomation2> automation2;
+        if (SUCCEEDED(automation.As(&automation2)) && automation2) {
+            automation2->put_ConnectionTimeout(200);
+            automation2->put_TransactionTimeout(400);
+        }
+
+        // 从某个元素上读 TextPattern 选区；不支持就返回空
+        auto selectionOf = [](IUIAutomationElement* element) -> std::wstring {
+            if (!element) return {};
+            Microsoft::WRL::ComPtr<IUnknown> patternUnknown;
+            if (FAILED(element->GetCurrentPattern(UIA_TextPatternId,
+                patternUnknown.GetAddressOf())) || !patternUnknown) return {};
+            Microsoft::WRL::ComPtr<IUIAutomationTextPattern> pattern;
+            if (FAILED(patternUnknown.As(&pattern)) || !pattern) return {};
+            Microsoft::WRL::ComPtr<IUIAutomationTextRangeArray> ranges;
+            if (FAILED(pattern->GetSelection(ranges.GetAddressOf())) || !ranges) return {};
+            int n = 0;
+            ranges->get_Length(&n);
+            std::wstring text;
+            for (int i = 0; i < n; ++i) {
+                Microsoft::WRL::ComPtr<IUIAutomationTextRange> range;
+                if (FAILED(ranges->GetElement(i, range.GetAddressOf())) || !range) continue;
+                BSTR part = nullptr;
+                if (SUCCEEDED(range->GetText(-1, &part)) && part) {
+                    text += part;
+                    SysFreeString(part);
+                }
+            }
+            return text;
+        };
+
+        std::wstring text;
+        // 先看焦点元素：文本控件 / 浏览器文档通常把 TextPattern 挂在焦点元素上
+        Microsoft::WRL::ComPtr<IUIAutomationElement> focused;
+        if (SUCCEEDED(automation->GetFocusedElement(focused.GetAddressOf())) && focused) {
+            int elPid = 0;
+            if (SUCCEEDED(focused->get_CurrentProcessId(&elPid)) && elPid == pid)
+                text = selectionOf(focused.Get());
+        }
+        // 焦点元素不提供 TextPattern（比如焦点在整窗上）时退回窗口元素
+        if (text.empty()) {
+            Microsoft::WRL::ComPtr<IUIAutomationElement> windowElement;
+            if (SUCCEEDED(automation->ElementFromHandle(fg, windowElement.GetAddressOf())) && windowElement)
+                text = selectionOf(windowElement.Get());
+        }
+        while (!text.empty() && iswspace(text.front())) text.erase(text.begin());
+        while (!text.empty() && iswspace(text.back())) text.pop_back();
+        return text;
+    }
+
+    // 当前剪贴板内容（只读，不写历史索引）
+    struct QuickPinPayload {
+        std::wstring text;
+        std::vector<std::wstring> files;
+        int w{ 0 }, h{ 0 };
+        std::vector<BYTE> pixels;
+    };
+
+    QuickPinPayload readClipboardForPin()
+    {
+        QuickPinPayload out;
+        bool opened = false;
+        for (int attempt = 0; attempt < 10 && !opened; ++attempt) {
+            if (OpenClipboard(g_clipWnd)) opened = true;
+            else Sleep(5);
+        }
+        if (!opened) return out;
+        if (HANDLE hf = GetClipboardData(CF_HDROP)) {
+            HDROP drop = static_cast<HDROP>(hf);
+            const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+            for (UINT i = 0; i < count; ++i) {
+                const UINT len = DragQueryFileW(drop, i, nullptr, 0);
+                if (len == 0) continue;
+                std::wstring path(len, L'\0');
+                if (DragQueryFileW(drop, i, path.data(), len + 1) == 0) continue;
+                out.files.push_back(std::move(path));
+            }
+        }
+        else if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
+            if (const auto* p = static_cast<const wchar_t*>(GlobalLock(h))) {
+                out.text = p;
+                GlobalUnlock(h);
+            }
+        }
+        else if (HANDLE ha = GetClipboardData(CF_TEXT)) {
+            if (const auto* p = static_cast<const char*>(GlobalLock(ha))) {
+                const int len = MultiByteToWideChar(CP_ACP, 0, p, -1, nullptr, 0);
+                if (len > 1) {
+                    std::wstring w((size_t)len - 1, L'\0');
+                    MultiByteToWideChar(CP_ACP, 0, p, -1, w.data(), len);
+                    out.text = std::move(w);
+                }
+                GlobalUnlock(ha);
+            }
+        }
+        else {
+            // 优先级与监听端一致：PNG → DIBV5/DIB → CF_BITMAP
+            static const UINT pngFmt = RegisterClipboardFormatW(L"PNG");
+            bool ok = false;
+            if (HANDLE hp = GetClipboardData(pngFmt))
+                ok = pngToBgra(hp, out.w, out.h, out.pixels);
+            if (!ok) {
+                HANDLE hb = GetClipboardData(CF_DIBV5);
+                if (!hb) hb = GetClipboardData(CF_DIB);
+                if (hb) ok = dibToBgra(hb, out.w, out.h, out.pixels);
+            }
+            if (!ok) {
+                if (HBITMAP hbm = (HBITMAP)GetClipboardData(CF_BITMAP))
+                    ok = hbitmapToBgra(hbm, out.w, out.h, out.pixels);
+            }
+            if (!ok) out.pixels.clear();
+        }
+        CloseClipboard();
+        return out;
+    }
+
+    void quickPinFromContext()
+    {
+        // ① 资源管理器选中项（单击选中，不需要复制）
+        auto files = explorerSelection();
+        if (!files.empty()) { quickPinPaths(files); return; }
+        // ② 前台窗口里拖选的文字
+        const std::wstring selected = foregroundSelectedText();
+        if (!selected.empty()) { ClipPin::showText(selected); return; }
+        // ③ 默认：剪贴板内容
+        auto payload = readClipboardForPin();
+        if (!payload.files.empty()) { quickPinPaths(payload.files); return; }
+        if (!payload.text.empty()) { ClipPin::showText(payload.text); return; }
+        if (payload.w > 0 && payload.h > 0) quickPinImage(payload.w, payload.h, payload.pixels);
+    }
+}
+
 // 一条全局热键要执行的动作。id 取自 kHotkeys。
 void Setting::runHotkeyAction(const std::wstring& id)
 {
+    // 会话开着时，这条热键的键位若是会话里的「系统按键」，先交给会话执行。
+    // 例：截图热键 F1 + 系统按键「贴图」F1 —— 第二次 F1 应该贴图；否则热键被 RegisterHotKey
+    // 吃掉，窗口收不到按键，init() 又因为会话已开直接返回，表现就是"设了没用"。
+    if (auto* cap = WinCap::get()) {
+        const std::wstring chord = getShortcutKey(id);
+        if (cap->commandFromChord(chord)) return;
+    }
     if (id == L"capture") { WinCap::init(); return; }
     if (id == L"capture_repeat") { if (auto* app = App::get()) app->captureLastRegionSilent(); return; }
     if (id == L"capture_fullscreen") { if (auto* app = App::get()) app->captureFullScreenSilent(); return; }
@@ -923,6 +1428,7 @@ void Setting::runHotkeyAction(const std::wstring& id)
     if (id == L"fullscreen_canvas") { WinCap::beginDemoCanvas(); return; }
     if (id == L"record") { WinCap::beginRecordPick(); return; }
     if (id == L"show_main") { WinSetting::init(0); return; }
+    if (id == L"quick_pin") { quickPinFromContext(); return; }
     if (id == L"toggle_pins") { WinPin::toggleAllHidden(); return; }
     if (id == L"open_history") { if (!getDisableCaptureHistory()) WinSetting::init(5); return; }
     if (id == L"open_screenshot_dir") {
@@ -1182,6 +1688,13 @@ std::vector<Setting::HistoryItem> Setting::getHistoryItemsForUi(bool forceRescan
     std::set<std::wstring> seen;
     for (const auto& it : list) seen.insert(historyPathKey(it.filePath));
 
+    // 「删除只记录」隐藏起来的文件：仍在磁盘上，但不再出现在历史里
+    std::set<std::wstring> hidden;
+    for (auto const& v : featArray(L"hiddenHistory")) {
+        if (v.ValueType() == JsonValueType::String)
+            hidden.insert(historyPathKey(v.GetString().c_str()));
+    }
+
     auto scanDir = [&](const std::filesystem::path& dir) {
         std::error_code ec;
         if (dir.empty() || !std::filesystem::is_directory(dir, ec)) return;
@@ -1193,7 +1706,9 @@ std::vector<Setting::HistoryItem> Setting::getHistoryItemsForUi(bool forceRescan
             const bool video = historyExtMatch(ws, { L"mp4", L"gif", L"apng" });
             const bool image = historyExtMatch(ws, { L"png", L"jpg", L"jpeg", L"webp", L"bmp", L"avif", L"jxl" });
             if (!video && !image) continue;
-            if (!seen.insert(historyPathKey(ws)).second) continue;
+            const auto pathKey = historyPathKey(ws);
+            if (hidden.count(pathKey)) continue;
+            if (!seen.insert(pathKey).second) continue;
             HistoryItem item;
             item.id = ws;              // 目录里已有的文件没有索引 id，直接用路径
             item.filePath = ws;
@@ -1430,27 +1945,43 @@ void Setting::pruneExpiredHistory()
     save();
 }
 
-void Setting::removeHistoryItem(const std::wstring& id)
+void Setting::removeHistoryItem(const std::wstring& id, bool deleteFile)
 {
     historyUiCacheDirty_ = true;
     auto list = getHistoryItems();
     std::vector<HistoryItem> keep;
     bool found = false;
+    std::wstring targetPath = id;
     for (auto& it : list) {
         if (it.id == id) {
             found = true;
-            // 历史即真实文件：删条目就删文件（走回收站，避免误删）
+            targetPath = it.filePath;
+            // 历史即真实文件：deleteFile=true 时删条目就删文件（走回收站，避免误删）
             std::error_code ec;
-            if (!it.filePath.empty()) Util::moveToRecycleBin(it.filePath);
+            if (deleteFile && !it.filePath.empty()) Util::moveToRecycleBin(it.filePath);
             std::filesystem::remove(getHistoryThumbDir() / (it.id + L".png"), ec);
         } else {
             keep.push_back(it);
         }
     }
-    // 目录扫描出来的条目没有索引 id（id 就是文件路径）：直接删文件
-    if (!found) {
+    // 目录扫描出来的条目没有索引 id（id 就是文件路径）：deleteFile=true 时直接删文件
+    if (!found && deleteFile) {
         std::error_code ec;
         if (std::filesystem::exists(id, ec)) Util::moveToRecycleBin(id);
+    }
+    // 只删记录：文件原地保留，但目录扫描会再次把它扫出来，所以路径要记进隐藏列表
+    if (!deleteFile && !targetPath.empty()) {
+        auto hiddenArr = featArray(L"hiddenHistory");
+        const auto key = historyPathKey(targetPath);
+        bool exists = false;
+        for (auto const& v : hiddenArr) {
+            if (v.ValueType() != JsonValueType::String) continue;
+            if (historyPathKey(v.GetString().c_str()) == key) { exists = true; break; }
+        }
+        if (!exists) {
+            hiddenArr.Append(JsonValue::CreateStringValue(targetPath));
+            setFeatArray(L"hiddenHistory", hiddenArr);
+        }
     }
     JsonArray arr;
     for (auto& it : keep) arr.Append(historyItemToJson(it));
@@ -1464,9 +1995,11 @@ void Setting::removeHistoryItem(const std::wstring& id)
 void Setting::clearAllHistory(int sourceTab)
 {
     historyUiCacheDirty_ = true;
-    // 历史页上看得见的都要删（含目录里已有的文件）；按当前导航分类限定范围
+    // 只清「本软件登记过」的历史文件：索引条目的 id 是 h<时间>-<序号>，
+    // 目录扫描出来的外部文件 id 就是路径本身，这类文件不删除、也不影响登记表。
     auto list = getHistoryItemsForUi(true);
     for (auto& it : list) {
+        if (it.id == it.filePath) continue;   // 目录里用户自己放的文件，跳过
         const bool isRecord = (it.source == L"record");
         if (sourceTab == 1 && isRecord) continue;   // 只清截图
         if (sourceTab == 2 && !isRecord) continue;  // 只清录屏
@@ -1487,3 +2020,281 @@ void Setting::clearAllHistory(int sourceTab)
     features.SetNamedValue(L"history", store);
     save();
 }
+
+// 「其他」：目录扫描出来的条目（id 就是文件路径）是用户自己放进来的文件。
+// 这里只清这些文件（走回收站），软件登记过的截图/录屏不动。
+void Setting::clearOtherFiles()
+{
+    historyUiCacheDirty_ = true;
+    auto list = getHistoryItemsForUi(true);
+    for (auto& it : list) {
+        if (it.id != it.filePath) continue;
+        Util::moveToRecycleBin(it.filePath);
+    }
+    historyUiCacheDirty_ = true;
+}
+
+// ================= 剪切板历史 =================
+// 不限条数：文本直接进索引，图片落盘到 dataPath\Clipboard（历史页用缩略图展示）。
+namespace {
+    JsonObject clipboardStore(JsonObject& features)
+    {
+        if (!features.HasKey(L"clipboard") || features.GetNamedValue(L"clipboard").ValueType() != JsonValueType::Object)
+            features.SetNamedValue(L"clipboard", JsonObject{});
+        return features.GetNamedObject(L"clipboard");
+    }
+    JsonArray clipboardArr(JsonObject& store)
+    {
+        if (store.HasKey(L"items") && store.GetNamedValue(L"items").ValueType() == JsonValueType::Array)
+            return store.GetNamedArray(L"items");
+        return JsonArray{};
+    }
+    unsigned clipboardHash(const std::vector<BYTE>& data)
+    {
+        unsigned h = 2166136261u;
+        for (BYTE b : data) { h ^= b; h *= 16777619u; }
+        return h;
+    }
+}
+
+std::filesystem::path Setting::getClipboardDir()
+{
+    auto dir = dataPath;
+    dir.append(L"Clipboard");
+    std::error_code ec;
+    if (!std::filesystem::exists(dir, ec)) std::filesystem::create_directories(dir, ec);
+    return dir;
+}
+
+std::vector<Setting::ClipboardItem> Setting::getClipboardItems()
+{
+    std::vector<ClipboardItem> out;
+    auto features = featuresObj();
+    auto store = clipboardStore(features);
+    const auto arr = clipboardArr(store);
+    if (!arr) return out;
+    for (auto const& v : arr) {
+        if (v.ValueType() != JsonValueType::Object) continue;
+        auto o = v.GetObjectW();
+        ClipboardItem it;
+        it.id = o.GetNamedString(L"id", L"").c_str();
+        it.type = o.GetNamedString(L"type", L"text").c_str();
+        it.text = o.GetNamedString(L"text", L"").c_str();
+        it.filePath = o.GetNamedString(L"filePath", L"").c_str();
+        it.width = (int)o.GetNamedNumber(L"width", 0);
+        it.height = (int)o.GetNamedNumber(L"height", 0);
+        it.createdAt = (long long)o.GetNamedNumber(L"createdAt", 0);
+        it.hash = (unsigned)o.GetNamedNumber(L"hash", 0);
+        if (o.HasKey(L"tags") && o.GetNamedValue(L"tags").ValueType() == JsonValueType::Array) {
+            for (auto const& t : o.GetNamedArray(L"tags")) {
+                if (t.ValueType() == JsonValueType::String) {
+                    std::wstring s = t.GetString().c_str();
+                    if (!s.empty()) it.tags.push_back(std::move(s));
+                }
+            }
+        }
+        if (o.HasKey(L"files") && o.GetNamedValue(L"files").ValueType() == JsonValueType::Array) {
+            for (auto const& f : o.GetNamedArray(L"files")) {
+                if (f.ValueType() == JsonValueType::String) {
+                    std::wstring s = f.GetString().c_str();
+                    if (!s.empty()) it.files.push_back(std::move(s));
+                }
+            }
+        }
+        if (it.type == L"image") {
+            std::error_code ec;
+            if (it.filePath.empty() || !std::filesystem::exists(it.filePath, ec)) continue;
+        }
+        if (it.type == L"files" && it.files.empty()) continue;
+        if (it.type == L"text" && it.text.empty()) continue;
+        out.push_back(std::move(it));
+    }
+    std::sort(out.begin(), out.end(), [](const ClipboardItem& a, const ClipboardItem& b) {
+        return a.createdAt > b.createdAt;
+    });
+    return out;
+}
+
+std::vector<std::wstring> Setting::getClipboardTags(const std::wstring& id)
+{
+    if (id.empty()) return {};
+    for (const auto& it : getClipboardItems()) {
+        if (it.id == id) return it.tags;
+    }
+    return {};
+}
+
+void Setting::setClipboardTags(const std::wstring& id, const std::vector<std::wstring>& tags)
+{
+    if (id.empty()) return;
+    auto items = getClipboardItems();
+    for (auto& it : items) {
+        if (it.id != id) continue;
+        it.tags = tags;
+        writeClipboardItems(items);
+        return;
+    }
+}
+
+// 写回索引：新条目在前（不做条数截断，历史由用户手动清理）
+void Setting::writeClipboardItems(std::vector<ClipboardItem>& items)
+{
+    JsonArray arr;
+    for (const auto& it : items) {
+        JsonObject o;
+        o.SetNamedValue(L"id", JsonValue::CreateStringValue(it.id));
+        o.SetNamedValue(L"type", JsonValue::CreateStringValue(it.type));
+        o.SetNamedValue(L"text", JsonValue::CreateStringValue(it.text));
+        o.SetNamedValue(L"filePath", JsonValue::CreateStringValue(it.filePath));
+        o.SetNamedValue(L"width", JsonValue::CreateNumberValue((double)it.width));
+        o.SetNamedValue(L"height", JsonValue::CreateNumberValue((double)it.height));
+        o.SetNamedValue(L"createdAt", JsonValue::CreateNumberValue((double)it.createdAt));
+        o.SetNamedValue(L"hash", JsonValue::CreateNumberValue((double)it.hash));
+        JsonArray ts;
+        for (const auto& t : it.tags) ts.Append(JsonValue::CreateStringValue(t));
+        o.SetNamedValue(L"tags", ts);
+        JsonArray fs;
+        for (const auto& f : it.files) fs.Append(JsonValue::CreateStringValue(f));
+        o.SetNamedValue(L"files", fs);
+        arr.Append(o);
+    }
+    auto features = featuresObj();
+    auto store = clipboardStore(features);
+    store.SetNamedValue(L"items", arr);
+    features.SetNamedValue(L"clipboard", store);
+    save();
+    if (clipboardChanged) clipboardChanged();
+}
+
+void Setting::addClipboardText(const std::wstring& text)
+{
+    std::wstring s = text;
+    // 去掉末尾的 \0 / 空白换行，避免把同一个内容记成不同条目
+    while (!s.empty() && (s.back() == L'\0' || s.back() == L'\r' || s.back() == L'\n')) s.pop_back();
+    if (s.empty()) return;
+    auto items = getClipboardItems();
+    // 与最新一条相同就不重复记录（复制历史里的文字回来也会走到这里）
+    if (!items.empty() && items.front().type == L"text" && items.front().text == s) return;
+
+    static unsigned long long seq = 0;
+    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    ClipboardItem it;
+    it.id = std::format(L"c{}-{}", nowMs, ++seq);
+    it.type = L"text";
+    it.text = std::move(s);
+    it.createdAt = (long long)nowMs;
+    items.insert(items.begin(), std::move(it));
+    writeClipboardItems(items);
+}
+
+void Setting::addClipboardImage(int w, int h, const std::vector<BYTE>& bgra)
+{
+    if (w <= 0 || h <= 0 || bgra.size() < (size_t)w * 4u * h) return;
+    const unsigned hash = clipboardHash(bgra);
+    auto items = getClipboardItems();
+    if (!items.empty() && items.front().type == L"image" && items.front().hash == hash
+        && items.front().width == w && items.front().height == h) return;
+
+    static unsigned long long seq = 0;
+    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    ClipboardItem it;
+    it.id = std::format(L"c{}-{}", nowMs, ++seq);
+    it.type = L"image";
+    it.filePath = (getClipboardDir() / (it.id + L".png")).wstring();
+    it.width = w;
+    it.height = h;
+    it.createdAt = (long long)nowMs;
+    it.hash = hash;
+    if (it.filePath.empty()) return;
+    std::vector<BYTE> copy = bgra;   // saveToFile 要非 const 指针
+    if (!Util::saveToFile(it.filePath, w, h, copy.data())) return;
+    items.insert(items.begin(), std::move(it));
+    writeClipboardItems(items);
+}
+
+void Setting::addClipboardFiles(const std::vector<std::wstring>& files)
+{
+    if (files.empty()) return;
+    // 去重用的签名：路径按小写拼接 + FNV-1a
+    std::wstring sig;
+    for (const auto& f : files) {
+        for (wchar_t c : f) sig.push_back((wchar_t)towlower(c));
+        sig.push_back(L'\n');
+    }
+    unsigned hash = 2166136261u;
+    for (wchar_t c : sig) {
+        hash ^= (unsigned)c;
+        hash *= 16777619u;
+    }
+    auto items = getClipboardItems();
+    if (!items.empty() && items.front().type == L"files" && items.front().hash == hash) return;
+
+    static unsigned long long seq = 0;
+    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    ClipboardItem it;
+    it.id = std::format(L"c{}-{}", nowMs, ++seq);
+    it.type = L"files";
+    it.files = files;
+    it.createdAt = (long long)nowMs;
+    it.hash = hash;
+    items.insert(items.begin(), std::move(it));
+    writeClipboardItems(items);
+}
+
+void Setting::removeClipboardItem(const std::wstring& id)
+{
+    auto items = getClipboardItems();
+    std::vector<ClipboardItem> keep;
+    for (auto& it : items) {
+        if (it.id == id) {
+            if (it.type == L"image") {
+                std::error_code ec;
+                std::filesystem::remove(it.filePath, ec);
+            }
+            continue;
+        }
+        keep.push_back(std::move(it));
+    }
+    writeClipboardItems(keep);
+}
+
+bool Setting::touchClipboardItem(const std::wstring& id)
+{
+    auto items = getClipboardItems();
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (items[i].id != id) continue;
+        if (i == 0) return false;   // 已经在最前面
+        ClipboardItem hit = std::move(items[i]);
+        items.erase(items.begin() + (std::ptrdiff_t)i);
+        hit.createdAt = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        items.insert(items.begin(), std::move(hit));
+        writeClipboardItems(items);
+        return true;
+    }
+    return false;
+}
+
+void Setting::clearClipboardHistory()
+{
+    auto items = getClipboardItems();
+    for (auto& it : items) {
+        if (it.type != L"image") continue;
+        std::error_code ec;
+        std::filesystem::remove(it.filePath, ec);
+    }
+    std::vector<ClipboardItem> empty;
+    writeClipboardItems(empty);
+}
+
+void Setting::markOwnClipboardWrite()
+{
+    // 监听端靠序列号判断「有没有新内容」：自己的写入直接把序列号记下，
+    // 随后的 WM_CLIPBOARDUPDATE / 定时轮询就会跳过，不会在剪切板历史里再生一条
+    g_lastClipSeq = GetClipboardSequenceNumber();
+}
+
+

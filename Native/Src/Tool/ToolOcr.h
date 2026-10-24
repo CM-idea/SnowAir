@@ -17,6 +17,22 @@ public:
 	// 宿主是贴图时置 true（须在建窗之前设）：不显示右上角复制按钮；
 	// 且只有识别文本框吃鼠标（可选中/复制文本），其余区域穿透 —— 贴图仍能右键弹菜单 / 滚轮缩放。
 	void setPinOverlay(bool on) { pinOverlay_ = on; }
+	// 贴图宿主用：复制当前选中（无选区则整段）文字，不关闭任何窗口
+	void copyText() { copyAll(); }
+	// 贴图宿主用：客户端坐标是否落在识别文字（含背景块）上 —— 落上则鼠标归文字，不拖窗口
+	bool hitText(POINT client);
+	// 贴图宿主注入：宿主的悬停控件（锁定/编辑/关闭）画在本浮层最上层。
+	// 浮层在贴图之上，两个独立窗口没法互相穿插，只能把控件镜像过来画。
+	void setChromePainter(std::function<void(ID2D1DeviceContext*)> fn) { chromePainter_ = std::move(fn); }
+	// 悬停轮询（浮层客户区坐标；不在贴图上时由宿主自己隐藏控件）
+	void setChromeHover(std::function<void(POINT)> fn) { chromeHover_ = std::move(fn); }
+	// 控件命中 / 按下：返回 true 表示这次按下归控件，由宿主执行动作
+	void setChromeHitTest(std::function<bool(POINT)> hit, std::function<bool(POINT)> down)
+	{
+		chromeHit_ = std::move(hit);
+		chromeDown_ = std::move(down);
+	}
+	void repaintChrome() { if (hwnd) refresh(); }
 	void applyTranslate(const std::vector<std::wstring>& lines);
 	// 翻译模式专用：把"识别出的区域 + 译文"一次性装上并重绘一次 —— 中间不显示识别出来的原文，
 	// 避免"先闪一下原文、再被译文替换"。
@@ -101,6 +117,11 @@ private:
 	// —— 标注镜像层：盖在识别文字之上的画布 ——
 	Ling::Canvas* annotCanvas_{ nullptr };
 	std::function<void(ID2D1DeviceContext*)> annotPainter_;
+	// —— 贴图控件镜像：压在文字与标注之上（复用标注镜像层，保证新建文字块后仍在最上层）——
+	std::function<void(ID2D1DeviceContext*)> chromePainter_;
+	std::function<void(POINT)> chromeHover_;
+	std::function<bool(POINT)> chromeHit_;
+	std::function<bool(POINT)> chromeDown_;
 	std::function<void(const std::wstring&)> onConfirm_;
 	// 双击判定自己做：Ling 的窗口类没带 CS_DBLCLKS，WM_LBUTTONDBLCLK 不会来
 	ULONGLONG lastDownTick_{ 0 };

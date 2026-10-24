@@ -19,6 +19,8 @@ public:
 	bool isValidWithoutDrag() override { return true; };
 	bool hitErase(const float x, const float y) override;
 	int style() const { return styleKind; }
+	// 序号值 / 序号样式（属性栏「当前序号」推算下一个值时要看已有形状）
+	int numberVal() const { return val; }
 	float stylePrimarySize() const override { return r; }
 public:
 private:
@@ -50,4 +52,5 @@ private:
 	int val{ 1 };
 	int styleKind{ 0 }; // 0 数字 / 1 字母 / 2 Emoji
 	std::wstring emoji; // Emoji 模式落笔时固定的表情
+	std::wstring labelText; // 属性栏手动输入的序号文字（优先于 val / emoji，可含中文）
 };

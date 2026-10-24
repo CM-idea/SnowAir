@@ -473,8 +473,10 @@ void WinSettingAppearance::buildOtherTab(Ling::Node* host)
     auto mkStateToggle = [&](const std::wstring& labelKey,
                              std::function<bool()> get,
                              std::function<void(bool)> set,
-                             std::function<void(bool)> after) -> Ling::Button* {
-        auto r = SettingUi::optionRow(grid, Lang::get(labelKey), L"", true, SettingUi::kToggleH);
+                             std::function<void(bool)> after,
+                             const std::wstring& helpKey = L"") -> Ling::Button* {
+        auto r = SettingUi::optionRow(grid, Lang::get(labelKey), L"", true, SettingUi::kToggleH,
+            helpKey.empty() ? L"" : Lang::get(helpKey));
         auto* sw = r.ctrlBox->makeChild<Ling::Button>();
         SettingUi::styleToggle(sw, get());
         sw->onClick.add([this, sw, get, set, after](Ling::Button*) {
@@ -497,6 +499,11 @@ void WinSettingAppearance::buildOtherTab(Ling::Node* host)
     otherHotkeyTipBtn = mkStateToggle(L"setting.hotkeyTip",
         [] { return Setting::get()->getHotkeyTip(); },
         [](bool on) { Setting::get()->setHotkeyTip(on); }, {});
+    // 悬停预览：历史记录 / 剪切板卡片停悬时弹出大图或文字卡（默认关闭，避免误触打扰）
+    otherHoverPreviewBtn = mkStateToggle(L"setting.hoverPreview",
+        [] { return Setting::get()->getHoverPreview(); },
+        [](bool on) { Setting::get()->setHoverPreview(on); }, {},
+        L"setting.hoverPreviewTip");
     // 记忆工具样式：记住上次标注工具样式（如大箭头），下次截图自动复用；默认关闭
     otherRememberStyleBtn = mkStateToggle(L"setting.rememberToolStyle",
         [] { return Setting::get()->getRememberToolStyle(); },
@@ -1137,7 +1144,8 @@ bool WinSettingAppearance::appearanceAtDefaults() const
     }
     if (tabIndex == 2) {
         return s->getFeatureTips() && !s->getHotkeyTip()
-            && !s->getRememberToolStyle() && s->getToolDefaultWidth() == 4;
+            && !s->getRememberToolStyle() && !s->getHoverPreview()
+            && s->getToolDefaultWidth() == 4;
     }
     auto def = ToolbarStore::defaultLayout(tbKind);
     return tbActive == def.active && tbInactive == def.inactive;
@@ -1186,17 +1194,19 @@ void WinSettingAppearance::tbRestoreDefaults()
         return;
     }
     // 「其他外观」页：恢复本页开关/选项到默认值（功能提示开、快捷键提示关、
-    // 记忆工具样式关、标注默认值 4），直接回写控件显示，不重建整页
+    // 记忆工具样式关、悬停预览关、标注默认值 4），直接回写控件显示，不重建整页
     if (tabIndex == 2) {
         auto* s = Setting::get();
         s->setFeatureTips(true);
         SettingUi::applyFeatureTipsVisibility();
         s->setHotkeyTip(false);
         s->setRememberToolStyle(false);
+        s->setHoverPreview(false);
         s->setToolDefaultWidth(4);
         if (otherFeatureTipsBtn) SettingUi::styleToggle(otherFeatureTipsBtn, true);
         if (otherHotkeyTipBtn) SettingUi::styleToggle(otherHotkeyTipBtn, false);
         if (otherRememberStyleBtn) SettingUi::styleToggle(otherRememberStyleBtn, false);
+        if (otherHoverPreviewBtn) SettingUi::styleToggle(otherHoverPreviewBtn, false);
         if (otherToolWidthLabel) otherToolWidthLabel->setText(std::to_wstring(4));
         tbRefreshRestore();
         win->refresh();

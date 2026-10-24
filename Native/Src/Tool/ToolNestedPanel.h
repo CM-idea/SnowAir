@@ -1,6 +1,7 @@
 #pragma once
 #include <include/Ling.h>
 #include "ToolbarTheme.h"
+#include "PropSlider.h"
 #include <functional>
 
 class ToolSub;
@@ -9,7 +10,7 @@ class ToolSub;
 class ToolNestedPanel : public Ling::WinBase
 {
 public:
-	enum class Kind { None, Corner, WmAngle, PatinaWm, Emoji, BoardOpacity };
+	enum class Kind { None, Corner, WmAngle, PatinaWm, Emoji, BoardOpacity, PenOpacity, ShapeSides };
 	explicit ToolNestedPanel(ToolSub* owner);
 	~ToolNestedPanel();
 	void openCorner(const RECT& workArea, Ling::Button* anchor);
@@ -17,6 +18,10 @@ public:
 	void openPatinaWm(const RECT& workArea, Ling::Button* anchor);
 	void openEmoji(const RECT& workArea, Ling::Button* anchor);
 	void openBoardOpacity(const RECT& workArea, Ling::Button* anchor, float value);
+	// 荧光笔透明度：与水印角度同款单滑条气泡
+	void openPenOpacity(const RECT& workArea, Ling::Button* anchor);
+	// 多边形边数 / 星形角数（3–20）：与水印角度同款单滑条气泡
+	void openShapeSides(const RECT& workArea, Ling::Button* anchor, bool star);
 	void closePanel();
 	bool isOpen() const { return open_; }
 	Kind kind() const { return kind_; }
@@ -35,7 +40,7 @@ private:
 	void rebuildPatinaWmRow();
 	void rebuildEmojiGrid();
 	Ling::Button* makeIconBtn(const wchar_t* icon, const std::wstring& tip, bool active, std::function<void()> onClick);
-	void addSlider(float minV, float maxV, float val, std::function<void(float)> onChange);
+	PropSlider::Pair addSlider(float minV, float maxV, float val, std::function<void(float)> onChange);
 private:
 	ToolSub* owner;
 	Kind kind_{ Kind::None };
@@ -49,6 +54,13 @@ private:
 	bool tipDown_{ false };
 	bool open_{ false };
 	bool needPaint_{ false };
+	bool sidesStar_{ false };   // ShapeSides 当前调的是星形（否则多边形）
+	// 当前内容的滑条（悬停时在滑条上方显示说明；多边形/星形还会在画布上预览形状）
+	Ling::Slider* activeSlider_{ nullptr };
+	Ling::Label* activeValue_{ nullptr };
+	std::wstring sliderTip_;
+	bool sliderHover_{ false };
+	bool sidesHover_{ false };
 	static constexpr float btnSize{ ToolbarTheme::propBtnSize };
 	static constexpr float iconInner{ ToolbarTheme::propIconInner };
 	static constexpr float marginTop{ ToolbarTheme::caretSize };

@@ -13,6 +13,321 @@
 #include "WinSettingHistory.h"
 #include "SettingTheme.h"
 #include "SettingWidgets.h"
+#include "WinPin.h"
+#include "ClipPin.h"
+
+// 停悬预览：独立置顶小窗（不抢焦点）。
+//   · 图片：只显示图片本身（无底色 / 边框 / 内边距），按宽高比定尺寸贴在卡片旁边；
+//   · 文字：用设置页「文字气泡」的底色，按内容长度长高，最低 350×100、最高 350×650，
+//     且不超过工作区；不显示贴屏卡片的锁 / 另存为 / 关闭三个停悬控件。
+class ShotPreviewWindow : public Ling::WinBase
+{
+public:
+	explicit ShotPreviewWindow(float ownerDpi)
+	{
+		dpi = ownerDpi > 0.f ? ownerDpi : 1.f;
+	}
+	~ShotPreviewWindow()
+	{
+		// WinBase 析构不销毁 HWND：不关就留一个"内容已拆、窗口还在"的幽灵窗
+		if (hwnd) { close(); hwnd = nullptr; }
+	}
+
+	void showImage(const std::wstring& path, int imgW, int imgH, const RECT& cellScreen)
+	{
+		if (path.empty() || imgW <= 0 || imgH <= 0) return;
+		MONITORINFO mi{};
+		if (!workAreaAt(cellScreen, mi)) return;
+		// 1:1 显示（1 图片像素 = 1 物理像素）；长图允许超出屏幕，只在摆放时把左上角夹进工作区
+		const int pxW = imgW;
+		const int pxH = imgH;
+		if (!ensureWindow(pxW, pxH)) return;
+		applyImageChrome();
+		setSize((float)pxW / dpi, (float)pxH / dpi);
+		if (img_ && text_ && filesBox_) { text_->hide(); filesBox_->hide(); img_->show(); }
+		if (img_ && path_ != path) {
+			img_->loadImg(path, (float)pxW, (float)pxH);
+			path_ = path;
+		}
+		place(pxW, pxH, cellScreen, mi);
+		showNoActivate();
+		refresh();
+	}
+
+	void showText(const std::wstring& text, const RECT& cellScreen)
+	{
+		if (text.empty()) return;
+		MONITORINFO mi{};
+		if (!workAreaAt(cellScreen, mi)) return;
+		constexpr float kWidth = 350.f;    // 文字卡宽度
+		constexpr float kPadX = 12.f;      // 与设置页文字气泡一致的内边距
+		constexpr float kPadY = 8.f;
+		// 先按内容量算高度（与卡片同一套字体 / 宽度）
+		float contentH = 0.f;
+		if (auto* d2d = Ling::D2D::get()) {
+			Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
+			if (SUCCEEDED(d2d->dwriteFactory->CreateTextLayout(text.c_str(), (UINT32)text.size(),
+				d2d->getTextFormat(L""), (kWidth - kPadX * 2.f) * dpi, 20000.f * dpi,
+				layout.GetAddressOf())) && layout) {
+				layout->SetFontSize(SettingTheme::fontBase * dpi, { 0, UINT32_MAX });
+				layout->SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
+				DWRITE_TEXT_METRICS m{};
+				if (SUCCEEDED(layout->GetMetrics(&m))) contentH = m.height;
+			}
+		}
+		const float areaHLogical = (float)(mi.rcWork.bottom - mi.rcWork.top) / dpi;
+		const float maxHLogical = (std::min)(650.f, areaHLogical - 16.f);
+		float hLogical = contentH / dpi + kPadY * 2.f;
+		hLogical = std::clamp(hLogical, 100.f, (std::max)(100.f, maxHLogical));
+		const int pxW = (int)std::lround(kWidth * dpi);
+		const int pxH = (int)std::lround(hLogical * dpi);
+		if (!ensureWindow(pxW, pxH)) return;
+		applyTextChrome();
+		setSize(kWidth, hLogical);
+		if (img_ && text_ && filesBox_) { img_->hide(); filesBox_->hide(); text_->show(); }
+		if (text_) text_->setText(text);
+		place(pxW, pxH, cellScreen, mi);
+		showNoActivate();
+		refresh();
+	}
+
+	// 文件 / 文件夹：和「贴屏」的文件卡片一致——图标 + 文件名 + 来源目录（多条时逐行列出）
+	void showFiles(const std::vector<std::wstring>& files, const RECT& cellScreen)
+	{
+		if (files.empty()) return;
+		MONITORINFO mi{};
+		if (!workAreaAt(cellScreen, mi)) return;
+		constexpr float kWidth = 350.f;
+		constexpr float kPadY = 8.f;
+		const bool single = files.size() == 1;
+		// 单条：图标 + 名字 / 来源两行（约 46 高）；多条：每行 26 + 4 间距
+		const float rowsH = single ? 46.f : (float)files.size() * 30.f - 4.f;
+		const float areaHLogical = (float)(mi.rcWork.bottom - mi.rcWork.top) / dpi;
+		const float maxHLogical = (std::min)(650.f, areaHLogical - 16.f);
+		float hLogical = rowsH + kPadY * 2.f;
+		hLogical = std::clamp(hLogical, 100.f, (std::max)(100.f, maxHLogical));
+		const int pxW = (int)std::lround(kWidth * dpi);
+		const int pxH = (int)std::lround(hLogical * dpi);
+		if (!ensureWindow(pxW, pxH)) return;
+		applyTextChrome();
+		applyFiles(files);
+		setSize(kWidth, hLogical);
+		if (img_ && text_ && filesBox_) { img_->hide(); text_->hide(); filesBox_->show(); }
+		place(pxW, pxH, cellScreen, mi);
+		showNoActivate();
+		refresh();
+	}
+
+	void hideNow()
+	{
+		if (hwnd && IsWindowVisible(hwnd)) hide();
+	}
+
+protected:
+	// 预览窗对鼠标完全透明：光标"穿过"它仍算停悬在原卡片上。
+	// 否则预览一旦盖住光标，主窗就会收到 MOUSELEAVE → 收起大图 → 又停悬 → 反复闪烁。
+	LRESULT onHitTest(const POINT) override { return HTTRANSPARENT; }
+	void onCreated() override
+	{
+		body->setBg(0);
+		card_ = body->makeChild<Ling::Node>();
+		card_->setWidthPercent(100.f);
+		card_->setHeightPercent(100.f);
+
+		img_ = card_->makeChild<Ling::ImageBox>();
+		img_->setWidthPercent(100.f);
+		img_->setHeightPercent(100.f);
+
+		text_ = card_->makeChild<Ling::TextBox>();
+		text_->setWidthPercent(100.f);
+		text_->setHeightPercent(100.f);
+		text_->setBg(0);
+		text_->setBorder(0.f, 0);
+		text_->setFontSize(SettingTheme::fontBase);
+		text_->setReadOnly(true);
+		text_->setMouseSelectionEnabled(false);
+		text_->setTextHoverCursor(false);
+		text_->setScrollBarVisible(false);   // 超出 650 上限时用滚轮看剩余内容
+		text_->hide();
+
+		// 文件列表：图标 + 名字（+ 来源），和贴屏的文件卡片同款
+		filesBox_ = card_->makeChild<Ling::Node>();
+		filesBox_->setWidthPercent(100.f);
+		filesBox_->setHeightPercent(100.f);
+		filesBox_->setFlexDirection(Ling::FlexDirection::Column);
+		filesBox_->hide();
+	}
+
+private:
+	// 文字气泡的配色：与设置页「?」悬停气泡一致（浅色模式深底白字，深色模式浅底深字）
+	static uint32_t bubbleBg() { return SettingTheme::isDark() ? 0xE5E5E5FF : 0x262626FF; }
+	static uint32_t bubbleFg() { return SettingTheme::isDark() ? 0x262626FF : 0xFFFFFFFF; }
+	// 气泡内的次要文字（来源目录）：必须跟着气泡底色走，不能用主题的 textTertiary，
+	// 否则深色模式下浅底配浅灰字几乎看不清
+	static uint32_t bubbleFgDim() { return SettingTheme::isDark() ? 0x6B6B6BFF : 0xA3A3A3FF; }
+
+	// 图片：只显示图片本身
+	void applyImageChrome()
+	{
+		if (!card_) return;
+		card_->setBg(0);
+		card_->setBorder(0.f, 0);
+		card_->setBorderRadius(0.f);
+		card_->setPadding(0.f);
+	}
+
+	// 文字：铺文字气泡底色
+	void applyTextChrome()
+	{
+		if (!card_) return;
+		card_->setBg(bubbleBg());
+		card_->setBorder(0.f, 0);
+		card_->setBorderRadius(SettingTheme::radiusLg);
+		card_->setPadding(12.f, 8.f, 12.f, 8.f);
+		if (text_) text_->setColor(bubbleFg());
+	}
+
+	// 按文件类型给图标与颜色（与贴屏文件卡片一致：单文件统一用文件夹图标，视频用蓝色图标）
+	static const wchar_t* fileGlyph(const std::wstring& f, uint32_t* color, bool single = false)
+	{
+		std::error_code ec;
+		if (std::filesystem::is_directory(f, ec)) { *color = 0xFFB020FFu; return Icon::Folder; }
+		if (hasExt(f, { L"mp4", L"mov", L"mkv", L"avi", L"wmv", L"webm", L"flv", L"m4v" })) {
+			*color = 0x1890FFFFu;
+			return Icon::Video;
+		}
+		// 单个文件与贴屏保持一致：除视频外都显示文件夹图标
+		if (single) { *color = 0xFFB020FFu; return Icon::Folder; }
+		if (hasExt(f, { L"png", L"jpg", L"jpeg", L"webp", L"bmp", L"gif", L"avif", L"jxl" })) {
+			*color = SettingTheme::textMuted;
+			return Icon::ImageBackground;
+		}
+		*color = SettingTheme::textMuted;
+		return Icon::Plugin;
+	}
+
+	static bool hasExt(const std::wstring& path, std::initializer_list<const wchar_t*> exts)
+	{
+		const auto dot = path.find_last_of(L'.');
+		if (dot == std::wstring::npos) return false;
+		std::wstring e = path.substr(dot + 1);
+		for (auto& c : e) c = (wchar_t)towlower(c);
+		for (auto x : exts) if (e == x) return true;
+		return false;
+	}
+
+	void applyFiles(const std::vector<std::wstring>& files)
+	{
+		if (!filesBox_) return;
+		filesBox_->removeAllChildren();
+		const bool single = files.size() == 1;
+		filesBox_->setJustifyContent(single ? Ling::Justify::Center : Ling::Justify::Start);
+
+		if (single) {
+			// 单条：大图标 + 名字 + 来源目录（同贴屏的单文件卡片）
+			const auto& f = files.front();
+			uint32_t iconColor{};
+			const wchar_t* glyph = fileGlyph(f, &iconColor, true);
+			auto* row = filesBox_->makeChild<Ling::Node>();
+			row->setWidthPercent(100.f);
+			row->setFlexDirection(Ling::FlexDirection::Row);
+			row->setAlignItems(Ling::Align::Center);
+
+			auto* icon = row->makeChild<Ling::Label>();
+			icon->setText(glyph);
+			icon->setFontFamily(Icon::Family);
+			icon->setFontSize(24.f);
+			icon->setColor(iconColor);
+			icon->setMarginRight(10.f);
+			icon->setFlexShrink(0.f);
+
+			auto* info = row->makeChild<Ling::Node>();
+			info->setFlexDirection(Ling::FlexDirection::Column);
+			info->setFlexGrow(1.f);
+			info->setFlexShrink(1.f);
+
+			auto* title = info->makeChild<Ling::Label>();
+			title->setText(std::filesystem::path(f).filename().wstring());
+			title->setFontSize(SettingTheme::fontBase);
+			title->setColor(bubbleFg());   // 跟着气泡底色，深色模式下是黑字
+			title->setFlexShrink(1.f);
+
+			auto* dir = info->makeChild<Ling::Label>();
+			dir->setText(std::filesystem::path(f).parent_path().wstring());
+			dir->setFontSize(SettingTheme::fontXs);
+			dir->setColor(bubbleFgDim());
+			dir->setFlexShrink(1.f);
+			return;
+		}
+
+		// 多条：逐行「图标 + 文件名」
+		for (const auto& f : files) {
+			uint32_t iconColor{};
+			const wchar_t* glyph = fileGlyph(f, &iconColor);
+			auto* row = filesBox_->makeChild<Ling::Node>();
+			row->setWidthPercent(100.f);
+			row->setHeight(26.f);
+			row->setFlexShrink(0.f);
+			row->setMarginBottom(4.f);
+			row->setFlexDirection(Ling::FlexDirection::Row);
+			row->setAlignItems(Ling::Align::Center);
+
+			auto* icon = row->makeChild<Ling::Label>();
+			icon->setText(glyph);
+			icon->setFontFamily(Icon::Family);
+			icon->setFontSize(14.f);
+			icon->setColor(iconColor);
+			icon->setMarginRight(6.f);
+			icon->setFlexShrink(0.f);
+
+			auto* name = row->makeChild<Ling::Label>();
+			name->setText(std::filesystem::path(f).filename().wstring());
+			name->setFontSize(SettingTheme::fontBase);
+			name->setColor(bubbleFg());   // 跟着气泡底色，深色模式下是黑字
+			name->setFlexShrink(1.f);
+		}
+	}
+
+	bool workAreaAt(const RECT& cellScreen, MONITORINFO& mi) const
+	{
+		mi = MONITORINFO{ sizeof(MONITORINFO) };
+		return GetMonitorInfoW(MonitorFromRect(&cellScreen, MONITOR_DEFAULTTONEAREST), &mi) != FALSE;
+	}
+
+	// 必须「不激活」地显示：激活会抢走设置窗焦点，触发 onBlur / onFocus（重扫重建网格），看起来就是闪
+	void showNoActivate()
+	{
+		if (hwnd) ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+	}
+
+	bool ensureWindow(int pxW, int pxH)
+	{
+		if (hwnd) return true;
+		setSize((float)pxW / dpi, (float)pxH / dpi);
+		createNativeWindow(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, WS_POPUP);
+		return hwnd != nullptr;
+	}
+
+	void place(int pxW, int pxH, const RECT& cellScreen, const MONITORINFO& mi)
+	{
+		// 卡片右侧；放不下翻到左侧；纵向与卡片居中对齐，最后夹进工作区
+		const int gap = (int)std::lround(8 * dpi);
+		int x = cellScreen.right + gap;
+		if (x + pxW > mi.rcWork.right) x = cellScreen.left - gap - pxW;
+		const int maxX = (std::max)((int)mi.rcWork.left, (int)mi.rcWork.right - pxW);
+		const int maxY = (std::max)((int)mi.rcWork.top, (int)mi.rcWork.bottom - pxH);
+		x = std::clamp(x, (int)mi.rcWork.left, maxX);
+		int y = (cellScreen.top + cellScreen.bottom) / 2 - pxH / 2;
+		y = std::clamp(y, (int)mi.rcWork.top, maxY);
+		setPosition(x, y);
+	}
+
+	Ling::Node* card_{ nullptr };
+	Ling::ImageBox* img_{ nullptr };
+	Ling::TextBox* text_{ nullptr };
+	Ling::Node* filesBox_{ nullptr };
+	std::wstring path_;
+};
 
 namespace {
 	// 网格布局常量（3 列、每批 3 行 = 9 个）
@@ -22,9 +337,15 @@ namespace {
 	constexpr float kPad = 8.f;
 	constexpr float kThumbH = 104.f;
 	constexpr float kCaptionH = 24.f;
+	// 卡片顶部一行：左图标 / 右「复制」
+	constexpr float kHeaderH = 24.f;
+	constexpr float kHeaderGap = 6.f;
 	// 「复制成功」提示：用窗口定时器收起
 	constexpr UINT kToastTimerId = 0x5A1A;
 	constexpr UINT kToastMs = 1200;
+	// 复制后延迟置顶：先让提示亮一会儿，再挪到最前面
+	constexpr UINT kReorderTimerId = 0x5A1B;
+	constexpr UINT kReorderDelayMs = 700;
 
 	std::wstring replaceOnce(std::wstring s, const std::wstring& from, const std::wstring& to)
 	{
@@ -125,6 +446,7 @@ namespace {
 		if (src == L"long")       return Lang::get(L"setting.srcLong");
 		if (src == L"record")     return Lang::get(L"setting.srcRecord");
 		if (src == L"autosave")   return Lang::get(L"setting.srcAutoSave");
+		if (src == L"clipboard")  return Lang::get(L"setting.historyTabClipboard");
 		return Lang::get(L"setting.srcCapture");
 	}
 	// 生成一个 26×26 的圆形浮层图标按钮（叠在缩略图右下角）
@@ -159,6 +481,181 @@ namespace {
 		const std::wstring args = L"/select,\"" + path + L"\"";
 		ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
 	}
+	// 底部「清空…」文案的语言键：随导航切换
+	const wchar_t* clearLabelKeyFor(int tab)
+	{
+		switch (tab) {
+		case 1: return L"setting.clearShots";
+		case 2: return L"setting.clearRecords";
+		case 3: return L"setting.clearOther";
+		case 4: return L"setting.clearClipboard";
+		default: return L"setting.clearAll";
+		}
+	}
+	// —— 剪切板类型标签 ——
+	bool clipExtIs(const std::wstring& path, std::initializer_list<const wchar_t*> exts)
+	{
+		const auto dot = path.find_last_of(L'.');
+		if (dot == std::wstring::npos) return false;
+		std::wstring e = path.substr(dot + 1);
+		for (auto& c : e) c = (wchar_t)towlower(c);
+		for (auto x : exts) if (e == x) return true;
+		return false;
+	}
+	bool clipIsImageExt(const std::wstring& p)
+	{
+		return clipExtIs(p, { L"png", L"jpg", L"jpeg", L"webp", L"bmp", L"gif", L"avif", L"jxl" });
+	}
+	bool clipIsVideoExt(const std::wstring& p)
+	{
+		return clipExtIs(p, { L"mp4", L"mov", L"mkv", L"avi", L"wmv", L"webm", L"flv", L"m4v", L"gif", L"apng" });
+	}
+	bool clipAllFiles(const std::vector<std::wstring>& files, bool image)
+	{
+		if (files.empty()) return false;
+		for (const auto& f : files) {
+			if (image ? !clipIsImageExt(f) : !clipIsVideoExt(f)) return false;
+		}
+		return true;
+	}
+	// 复制的是文件夹（可能多个）：标签显示「文件夹」
+	bool clipAllDirs(const std::vector<std::wstring>& files)
+	{
+		if (files.empty()) return false;
+		for (const auto& f : files) {
+			std::error_code ec;
+			if (!std::filesystem::is_directory(f, ec)) return false;
+		}
+		return true;
+	}
+	// —— 文字型剪切板内容的细分：纯文字 / 链接 / 色值 ——
+	enum class ClipTextKind { Plain, Link, Color };
+	std::wstring trimCopy(std::wstring s)
+	{
+		while (!s.empty() && iswspace(s.front())) s.erase(s.begin());
+		while (!s.empty() && iswspace(s.back())) s.pop_back();
+		return s;
+	}
+	bool looksLikeLink(const std::wstring& s)
+	{
+		if (s.empty() || s.find_first_of(L" \t\r\n") != std::wstring::npos) return false;
+		std::wstring l = s;
+		for (auto& c : l) c = (wchar_t)towlower(c);
+		return l.rfind(L"http://", 0) == 0 || l.rfind(L"https://", 0) == 0
+			|| l.rfind(L"ftp://", 0) == 0 || l.rfind(L"file://", 0) == 0;
+	}
+	bool hexNibble(wchar_t c, int& v)
+	{
+		if (c >= L'0' && c <= L'9') { v = c - L'0'; return true; }
+		if (c >= L'a' && c <= L'f') { v = c - L'a' + 10; return true; }
+		if (c >= L'A' && c <= L'F') { v = c - L'A' + 10; return true; }
+		return false;
+	}
+	// 解析常见色值：#RGB / #RRGGBB / #RRGGBBAA / rgb(r,g,b) / rgba(r,g,b,a)
+	bool parseColorText(const std::wstring& raw, uint32_t& rgb)
+	{
+		const std::wstring s = trimCopy(raw);
+		if (s.empty()) return false;
+		if (s[0] == L'#') {
+			const size_t n = s.size() - 1;
+			if (n == 3 || n == 6 || n == 8) {
+				std::vector<int> d(n);
+				for (size_t i = 0; i < n; ++i)
+					if (!hexNibble(s[i + 1], d[i])) return false;
+				int r = 0, g = 0, b = 0;
+				if (n == 3) {
+					r = d[0] * 17; g = d[1] * 17; b = d[2] * 17;
+				}
+				else {
+					r = d[0] * 16 + d[1];
+					g = d[2] * 16 + d[3];
+					b = d[4] * 16 + d[5];
+				}
+				rgb = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+				return true;
+			}
+			return false;
+		}
+		std::wstring l = s;
+		for (auto& c : l) c = (wchar_t)towlower(c);
+		const bool isRgb = l.rfind(L"rgb(", 0) == 0;
+		const bool isRgba = l.rfind(L"rgba(", 0) == 0;
+		if (!isRgb && !isRgba) return false;
+		if (s.back() != L')') return false;
+		const size_t open = s.find(L'(');
+		std::wstring inside = s.substr(open + 1, s.size() - open - 2);
+		std::vector<int> parts;
+		size_t start = 0;
+		while (start <= inside.size()) {
+			const size_t comma = inside.find(L',', start);
+			const std::wstring piece = trimCopy(inside.substr(start,
+				comma == std::wstring::npos ? std::wstring::npos : comma - start));
+			if (piece.empty()) break;
+			wchar_t* end = nullptr;
+			const long v = wcstol(piece.c_str(), &end, 10);
+			if (!end || *end != L'\0' || v < 0 || v > 255) return false;
+			parts.push_back((int)v);
+			if (comma == std::wstring::npos) break;
+			start = comma + 1;
+		}
+		if ((isRgb && parts.size() != 3) || (isRgba && parts.size() != 4)) return false;
+		rgb = ((uint32_t)parts[0] << 16) | ((uint32_t)parts[1] << 8) | (uint32_t)parts[2];
+		return true;
+	}
+	ClipTextKind clipTextKind(const std::wstring& text, uint32_t* rgb = nullptr)
+	{
+		const std::wstring s = trimCopy(text);
+		uint32_t c = 0;
+		if (parseColorText(s, c)) {
+			if (rgb) *rgb = c;
+			return ClipTextKind::Color;
+		}
+		if (looksLikeLink(s)) return ClipTextKind::Link;
+		return ClipTextKind::Plain;
+	}
+	// 剪切板条目的类型标签：图片 / 视频 / 文字 / 文件
+	std::wstring clipTypeTag(const Setting::HistoryItem& it)
+	{
+		if (!it.files.empty()) {
+			if (clipAllDirs(it.files)) return Lang::get(L"setting.tagFolder");
+			if (clipAllFiles(it.files, true)) return Lang::get(L"setting.tagImage");
+			if (clipAllFiles(it.files, false)) return Lang::get(L"setting.tagVideo");
+			return Lang::get(L"setting.tagFile");
+		}
+		if (!it.filePath.empty()) return Lang::get(L"setting.tagImage");
+		const auto kind = clipTextKind(it.text);
+		if (kind == ClipTextKind::Link) return Lang::get(L"setting.tagLink");
+		if (kind == ClipTextKind::Color) return Lang::get(L"setting.tagColor");
+		return Lang::get(L"setting.tagText");
+	}
+	// 文件大小 → "12.3 MB" 这类显示文本
+	std::wstring formatFileSize(uintmax_t bytes)
+	{
+		if (bytes < 1024) return std::to_wstring(bytes) + L" B";
+		const wchar_t* units[] = { L"KB", L"MB", L"GB", L"TB" };
+		double v = (double)bytes;
+		int unit = -1;
+		do {
+			v /= 1024.0;
+			++unit;
+		} while (v >= 1024.0 && unit < 3);
+		wchar_t buf[32]{};
+		swprintf_s(buf, L"%.1f %s", v, units[unit]);
+		return buf;
+	}
+	// 把图片文件贴到屏幕中央（普通贴图）
+	void pinImageFile(const std::wstring& path)
+	{
+		auto [w, h, px] = Util::loadImagePixels(path);
+		if (w <= 0 || h <= 0 || px.empty()) return;
+		RECT rc{};
+		SystemParametersInfo(SPI_GETWORKAREA, 0, &rc, 0);
+		const int areaW = (int)rc.right - (int)rc.left;
+		const int areaH = (int)rc.bottom - (int)rc.top;
+		const int x = (int)rc.left + (std::max)(0, (areaW - w) / 2);
+		const int y = (int)rc.top + (std::max)(0, (areaH - h) / 2);
+		WinPin::initFromData(x, y, w, h, px);
+	}
 }
 
 WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
@@ -176,13 +673,19 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 
 	navPills = SettingUi::segmentedPills(topRow,
 		{ Lang::get(L"setting.historyTabAll"), Lang::get(L"setting.historyTabShots"),
-		  Lang::get(L"setting.historyTabRecord") },
+		  Lang::get(L"setting.historyTabRecord"), Lang::get(L"setting.historyTabOther"),
+		  Lang::get(L"setting.historyTabClipboard") },
 		sourceTab,
 		[this](int idx) {
 			sourceTab = idx;
 			shownCount = kBatch;
 			this->closeFilterPanel();
 			this->closeModal();
+			// 筛选对所有分类通用（剪切板也按时间 / 关键词 / 标签筛）
+			if (filterHost) filterHost->show();
+			if (clearBtn) clearBtn->setText(Lang::get(clearLabelKeyFor(idx)));
+			// 剪切板只记录路径，没有本地历史目录，不显示「打开历史目录」
+			if (openDirBtn) idx == 4 ? openDirBtn->hide() : openDirBtn->show();
 			this->refreshGrid();
 		});
 	if (navPills.row) navPills.row->setFlexShrink(0.f);
@@ -267,23 +770,57 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 	footer->setAlignItems(Ling::Align::Center);
 	footer->setMarginTop(SettingTheme::blockGap);
 
-	auto* openDir = SettingUi::btnOutline(footer, Lang::get(L"setting.openHistoryDir"), []() {
-		auto dir = Util::outputDir();
+	// 剪切板变动时，如果正停在「剪切板」页（或「全部」正用标签筛剪切板），即时刷新列表
+	{
+		auto weak = getWeakThis();
+		Setting::get()->clipboardChanged = [this, weak]() {
+			auto run = [this, weak]() {
+				if (!weak.lock()) return;
+				if (this->sourceTab == 4 || (this->sourceTab == 0 && !this->filter.tag.empty()))
+					this->refreshGrid();
+			};
+			if (auto* app = Ling::App::get()) app->dq.TryEnqueue(run);
+			else run();
+		};
+	}
+
+	openDirBtn = SettingUi::btnOutline(footer, Lang::get(L"setting.openHistoryDir"), [this]() {
+		const auto dir = Util::outputDir();
 		if (dir.empty()) return;
 		std::error_code ec;
 		std::filesystem::create_directories(dir, ec);
 		ShellExecute(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-	});
-	openDir->setMarginRight(SettingTheme::sp2);
+		});
+	openDirBtn->setMarginRight(SettingTheme::sp2);
 
-	SettingUi::btnDestructive(footer, Lang::get(L"setting.clearHistory"), [this]() {
-		// 提示文案跟随当前导航分类
-		const wchar_t* msgKey = sourceTab == 2 ? L"setting.clearHistoryConfirmRecord"
-			: (sourceTab == 1 ? L"setting.clearHistoryConfirmShots" : L"setting.clearHistoryConfirmAll");
+	// 清空按钮：文案随导航切换（全部/截图/录屏/其他/剪切板）
+	clearBtn = SettingUi::btnDestructive(footer, Lang::get(clearLabelKeyFor(sourceTab)), [this]() {
+		// 确认文案与动作都跟随当前导航分类
+		const wchar_t* msgKey = L"setting.clearHistoryConfirmAll";
+		switch (this->sourceTab) {
+		case 1: msgKey = L"setting.clearHistoryConfirmShots"; break;
+		case 2: msgKey = L"setting.clearHistoryConfirmRecord"; break;
+		case 3: msgKey = L"setting.clearHistoryConfirmOther"; break;
+		case 4: msgKey = L"setting.clearHistoryConfirmClipboard"; break;
+		default: break;
+		}
 		SettingUi::ConfirmDialog::ask(win, Lang::get(msgKey),
 			[this](bool ok) {
 				if (!ok) return;
-				Setting::get()->clearAllHistory(sourceTab);
+				switch (this->sourceTab) {
+				case 3:
+					// 「其他」：只清用户自己放进目录的图片/视频（移入回收站）
+					Setting::get()->clearOtherFiles();
+					break;
+				case 4:
+					Setting::get()->clearClipboardHistory();
+					break;
+				default:
+					// 全部 / 截图 / 录屏：只删本软件登记过的文件
+					Setting::get()->clearAllHistory(this->sourceTab);
+					if (this->sourceTab == 0) Setting::get()->clearClipboardHistory();
+					break;
+				}
 				this->refreshGrid();
 			});
 	});
@@ -308,6 +845,7 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 	auto weak = getWeakThis();
 	wheelTok = win->onMouseWheel.add([this, weak](POINT, float) {
 		if (!weak.lock()) return;
+		this->hidePreview();        // 滚动后卡片位置变了，先收起大图
 		this->maybeScrollGrew();
 		});
 	moveTok = win->onMouseMove.add([this, weak](POINT pos) {
@@ -322,6 +860,7 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 	timerTok = win->onTimer.add([this, weak](UINT id) {
 		if (!weak.lock()) return;
 		if (id == kToastTimerId) this->hideCopyToast();
+		else if (id == kReorderTimerId) this->applyReorderToTop();
 		});
 	// 窗口重新获得焦点：重扫目录。用户可能刚在资源管理器里从回收站还原了截图，
 	// 回到设置窗就应该能在历史里看到（历史以目录里的真实文件为准）。
@@ -341,6 +880,28 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 		if (!weak.lock()) return;
 		if (key == VK_ESCAPE) this->closeTransientUi({ INT_MAX, INT_MAX });
 		});
+	// 停在可预览的卡片上显示"点按"光标（提示可以点开 / 双击）；功能关闭时不接管光标
+	cursorTok = win->onCursor.add([this, weak](bool* handled) {
+		if (!weak.lock() || !handled || !win) return;
+		if (!Setting::get()->getHoverPreview()) return;
+		POINT pt{};
+		GetCursorPos(&pt);
+		ScreenToClient(win->hwnd, &pt);
+		for (const auto& c : cells) {
+			if (!c.thumb || (c.previewPath.empty() && c.previewText.empty() && c.previewFiles.empty()))
+				continue;
+			if (c.thumb->isPosIn(pt)) {
+				SetCursor(LoadCursor(nullptr, IDC_HAND));
+				*handled = true;
+				return;
+			}
+		}
+		});
+	// 窗口失焦（切到别的程序）：大图跟着收起，别一直悬在桌面上
+	blurTok = win->onBlur.add([this, weak]() {
+		if (!weak.lock()) return;
+		this->hidePreview();
+		});
 
 	refreshGrid();
 	// 内容区只有外层 content 提供底部留白：清掉末尾元素的 marginBottom，使底部与左右一致。
@@ -349,6 +910,8 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 
 WinSettingHistory::~WinSettingHistory()
 {
+	if (auto* s = Setting::get()) s->clipboardChanged = nullptr;
+	if (preview_) preview_->hideNow();
 	win->onMouseWheel.remove(wheelTok);
 	win->onMouseMove.remove(moveTok);
 	win->onSizeChanged.remove(sizeTok);
@@ -356,15 +919,36 @@ WinSettingHistory::~WinSettingHistory()
 	win->onFocus.remove(focusTok);
 	win->onMouseDown.remove(mouseDownTok);
 	win->onKeyDown.remove(keyTok);
+	win->onCursor.remove(cursorTok);
+	win->onBlur.remove(blurTok);
 	win->killTimer(kToastTimerId);
+	win->killTimer(kReorderTimerId);
 }
 
-// 当前导航分类（0 全部 / 1 截图 / 2 录屏）是否包含该条目
-bool WinSettingHistory::matchSourceTab(const Setting::HistoryItem& it) const
+// 分类归属（不看标签筛选）。
+// 「全部」默认只列本软件登记过的截图/录屏；用户文件（其他）与剪切板只在用自定义标签筛选时
+// 才被带进「全部」（见 matchSourceTab）。
+bool WinSettingHistory::baseTabMatch(const Setting::HistoryItem& it) const
 {
+	const bool userFile = (it.id == it.filePath);
+	const bool clip = (it.source == L"clipboard");
+	if (sourceTab == 4) return clip;
+	if (clip) return sourceTab == 0;
+	if (sourceTab == 3) return userFile;
 	if (sourceTab == 0) return true;
+	if (userFile) return false;
 	const bool isRecord = (it.source == L"record");
 	return sourceTab == 2 ? isRecord : !isRecord;
+}
+
+// 叠加标签筛选后的实际归属
+bool WinSettingHistory::matchSourceTab(const Setting::HistoryItem& it) const
+{
+	if (!baseTabMatch(it)) return false;
+	if (sourceTab != 0) return true;
+	// 「全部」：剪切板 / 其他 里的用户文件只在自定义标签筛选下出现
+	const bool extra = (it.source == L"clipboard") || (it.id == it.filePath);
+	return extra ? !filter.tag.empty() : true;
 }
 
 // 导航分类 + 时间范围 + 标签 + 关键词，全部叠加生效
@@ -390,16 +974,33 @@ bool WinSettingHistory::matchFilters(const Setting::HistoryItem& it) const
 		if (filter.rangeEnd > 0 && it.createdAt > filter.rangeEnd) return false;
 	}
 	if (!filter.tag.empty()) {
+		const bool clip = (it.source == L"clipboard");
 		bool hit = false;
-		for (auto& t : Setting::get()->getHistoryTags(it.filePath))
+		const auto tags = clip ? Setting::get()->getClipboardTags(it.id)
+			: Setting::get()->getHistoryTags(it.filePath);
+		for (auto& t : tags)
 			if (_wcsicmp(t.c_str(), filter.tag.c_str()) == 0) { hit = true; break; }
 		if (!hit) return false;
 	}
 	if (!filter.keyword.empty()) {
 		const std::wstring kw = lowerCopy(filter.keyword);
-		bool hit = lowerCopy(std::filesystem::path(it.filePath).filename().wstring()).find(kw) != std::wstring::npos;
+		const bool clip = (it.source == L"clipboard");
+		std::wstring hay;
+		if (clip) {
+			hay = it.text;
+			for (const auto& f : it.files) {
+				hay += L'\n';
+				hay += std::filesystem::path(f).filename().wstring();
+			}
+		}
+		else {
+			hay = std::filesystem::path(it.filePath).filename().wstring();
+		}
+		bool hit = lowerCopy(hay).find(kw) != std::wstring::npos;
 		if (!hit) {
-			for (auto& t : Setting::get()->getHistoryTags(it.filePath))
+			const auto tags = clip ? Setting::get()->getClipboardTags(it.id)
+				: Setting::get()->getHistoryTags(it.filePath);
+			for (auto& t : tags)
 				if (lowerCopy(t).find(kw) != std::wstring::npos) { hit = true; break; }
 		}
 		if (!hit) return false;
@@ -425,6 +1026,7 @@ void WinSettingHistory::setFilterBtnActive(bool on)
 
 void WinSettingHistory::closeFilterPanel(bool keepMode)
 {
+	const bool hadOverlay = (filterPanel != nullptr) || (filterDim != nullptr);
 	setFilterBtnActive(false);
 	if (topRowDim) topRowDim->hide();
 	if (!keepMode) panelMode = 0;
@@ -432,9 +1034,16 @@ void WinSettingHistory::closeFilterPanel(bool keepMode)
 		if (filterDim->parent) filterDim->parent->removeChild(filterDim);
 		filterDim = nullptr;
 	}
-	if (!filterPanel) return;
+	if (!filterPanel) {
+		if (hadOverlay && win) win->layout();
+		return;
+	}
 	if (filterPanel->parent) filterPanel->parent->removeChild(filterPanel);
 	filterPanel = nullptr;
+	// 收面板后同步跑一遍布局：把「覆盖层移除 + 各滚动区偏移重算 + 画布重绘」
+	// 收敛到同一帧提交。展开时 applyMode() 也是这么做的 —— 否则下一帧才重排，
+	// 合成器会先采到只移除了覆盖层、内容还没重排的中间态，看起来就是内容区闪一下。
+	if (hadOverlay && win) win->layout();
 }
 
 // 在筛选按钮正下方（放不下就翻到上方）挂一个页内气泡面板
@@ -1165,15 +1774,21 @@ void WinSettingHistory::rebuildFilterPanel()
 		this->refreshGrid();
 	});
 
-	// 自定义标签：只列当前导航分类（全部 / 截图 / 录屏）下的条目标签
+	// 自定义标签：按分类归属列出（「全部」包含「其他」与剪切板的标签，
+	// 这样选中一个只存在于剪切板/其他里的标签时，才能把它们筛到「全部」里）
 	std::vector<std::wstring> tags;
+	auto addTag = [&tags](const std::wstring& t) {
+		if (t.empty()) return;
+		for (auto& x : tags) if (_wcsicmp(x.c_str(), t.c_str()) == 0) return;
+		tags.push_back(t);
+		};
 	for (auto& it : Setting::get()->getHistoryItemsForUi()) {
-		if (!matchSourceTab(it)) continue;
-		for (auto& t : Setting::get()->getHistoryTags(it.filePath)) {
-			bool dup = false;
-			for (auto& x : tags) if (_wcsicmp(x.c_str(), t.c_str()) == 0) { dup = true; break; }
-			if (!dup) tags.push_back(t);
-		}
+		if (!baseTabMatch(it)) continue;
+		for (auto& t : Setting::get()->getHistoryTags(it.filePath)) addTag(t);
+	}
+	if (sourceTab == 0 || sourceTab == 4) {
+		for (auto& c : Setting::get()->getClipboardItems())
+			for (auto& t : c.tags) addTag(t);
 	}
 	std::sort(tags.begin(), tags.end());
 	// 选中的标签已不存在（文件被删/标签被清空）→ 退回不筛选
@@ -1313,8 +1928,18 @@ Ling::Node* WinSettingHistory::makeModalCard(float width, const std::wstring& ti
 void WinSettingHistory::showTagDialog(const Setting::HistoryItem& it)
 {
 	const std::wstring path = it.filePath;
+	showTagDialogFor(path, Setting::get()->getHistoryTags(path),
+		[path](const std::vector<std::wstring>& tags) {
+			Setting::get()->setHistoryTags(path, tags);
+		});
+}
+
+void WinSettingHistory::showTagDialogFor(const std::wstring& key, std::vector<std::wstring> initial,
+	std::function<void(const std::vector<std::wstring>&)> save)
+{
+	(void)key;
 	if (tip) tip->hide();     // 弹窗盖住卡片，先收掉卡片上的停悬提示
-	auto tags = std::make_shared<std::vector<std::wstring>>(Setting::get()->getHistoryTags(path));
+	auto tags = std::make_shared<std::vector<std::wstring>>(std::move(initial));
 
 	auto* card = makeModalCard(320.f, Lang::get(L"setting.filterTags"));
 
@@ -1443,7 +2068,7 @@ void WinSettingHistory::showTagDialog(const Setting::HistoryItem& it)
 	SettingUi::btnOutline(row, Lang::get(L"setting.cancel"), deferClose, 72.f)
 		->setMarginRight(8.f);
 	SettingUi::btnPrimary(row, Lang::get(L"setting.confirm"),
-		[boxPtr, path, tags, deferCloseAndRefresh]() {
+		[boxPtr, tags, save = std::move(save), deferCloseAndRefresh]() {
 			// 还没按空格的那段文字也算一个标签
 			std::wstring pending = boxPtr && *boxPtr ? (*boxPtr)->getText() : L"";
 			while (!pending.empty() && iswspace(pending.back())) pending.pop_back();
@@ -1454,15 +2079,39 @@ void WinSettingHistory::showTagDialog(const Setting::HistoryItem& it)
 				for (auto& e : out) if (_wcsicmp(e.c_str(), pending.c_str()) == 0) { dup = true; break; }
 				if (!dup) out.push_back(pending);
 			}
-			Setting::get()->setHistoryTags(path, out);
+			if (save) save(out);
 			deferCloseAndRefresh();
 		}, 72.f);
+}
+
+std::vector<Setting::HistoryItem> WinSettingHistory::collectItems(bool forceRescan)
+{
+	auto list = Setting::get()->getHistoryItemsForUi(forceRescan);
+	// 「全部」和「剪切板」页要把剪切板条目并进来（「全部」里是否显示由 matchSourceTab 决定）
+	if (sourceTab == 0 || sourceTab == 4) {
+		for (auto& c : Setting::get()->getClipboardItems()) {
+			Setting::HistoryItem it;
+			it.id = c.id;
+			it.source = L"clipboard";
+			it.filePath = (c.type == L"image") ? c.filePath : L"";
+			it.width = c.width;
+			it.height = c.height;
+			it.createdAt = c.createdAt;
+			it.text = c.text;
+			it.files = c.files;
+			list.push_back(std::move(it));
+		}
+		std::sort(list.begin(), list.end(), [](const Setting::HistoryItem& a, const Setting::HistoryItem& b) {
+			return a.createdAt > b.createdAt;
+		});
+	}
+	return list;
 }
 
 void WinSettingHistory::refreshGrid()
 {
 	Setting::get()->pruneExpiredHistory();
-	auto all = Setting::get()->getHistoryItemsForUi(true);
+	auto all = collectItems(true);
 
 	// 按当前筛选过滤（导航 + 时间 + 标签 + 关键词）
 	std::vector<Setting::HistoryItem> items;
@@ -1485,7 +2134,9 @@ void WinSettingHistory::refreshGrid()
 	// 导致「暂无截图历史」只在中部上半段居中（视觉上偏上）。
 	if (emptyLabel) {
 		const wchar_t* emptyKey = sourceTab == 0 ? L"setting.noAnyHistory"
-			: (sourceTab == 2 ? L"setting.noRecordHistory" : L"setting.noHistory");
+			: (sourceTab == 2 ? L"setting.noRecordHistory"
+				: (sourceTab == 3 ? L"setting.noOtherHistory"
+					: (sourceTab == 4 ? L"setting.noClipboardHistory" : L"setting.noHistory")));
 		emptyLabel->setText(Lang::get(emptyKey));
 		empty ? emptyLabel->show() : emptyLabel->hide();
 	}
@@ -1545,101 +2196,19 @@ void WinSettingHistory::refreshGrid()
 		const bool lastCol = (lastRowCells == kCols - 1);
 		const auto& it = items[i];
 
-		auto* cell = lastRow->makeChild<Ling::Node>();
-		cell->setWidthPercent(0.f);
-		cell->setFlexGrow(1.f);
-		cell->setFlexShrink(1.f);
-		if (!lastCol) cell->setMarginRight(kGap);
-		cell->setHeight(kThumbH + kPad * 2.f + kCaptionH);
-		cell->setFlexDirection(Ling::FlexDirection::Column);
-		cell->setBg(SettingTheme::card);
-		cell->setBorder(1.f, SettingTheme::border);
-		cell->setBorderRadius(SettingTheme::radiusLg);
-		cell->setPadding(kPad, kPad, kPad, kPad);
-
-		// 缩略图容器：右下角叠 复制/贴图/删除 图标按钮
-		auto* thumbHost = cell->makeChild<Ling::Node>();
-		thumbHost->setWidthPercent(100.f);
-		thumbHost->setHeight(kThumbH);
-		thumbHost->setFlexShrink(0.f);
-		thumbHost->setBg(0x00000028);
-		thumbHost->setBorderRadius(SettingTheme::radiusMd);
-		thumbHost->setPositionType(Ling::Position::Relative);
-
 		// 录屏条目（source=record）：视频文件不能直接当缩略图解码，用缓存里的封面小图；
 		// 中间那颗按钮也从「贴图」换成「在资源管理器里定位」——贴图对视频没有意义。
+		// 剪切板条目：位图/图片文件用图片缩略图，文字铺文字，视频/其它文件显示图标+文件名。
 		const bool isMedia = (it.source == L"record");
+		const bool clip = (it.source == L"clipboard");
+		const bool clipFiles = clip && !it.files.empty();
+		const bool clipImageBitmap = clip && !clipFiles && !it.filePath.empty();
+		const bool clipText = clip && !clipFiles && !clipImageBitmap;
+		const bool clipImageKind = clip && (clipImageBitmap || (clipFiles && clipAllFiles(it.files, true)));
+		// 文字里识别为链接的条目：额外提供「打开」（默认浏览器）
+		const bool clipLink = clipText && clipTextKind(it.text) == ClipTextKind::Link;
 
-		// 缩略图按缩略图级分辨率解码：历史页会随滚动不断累积格子，若每格都持有整张 4K 原图
-		// （约 33MB）解码位图，内存会很快堆起来。上限取显示尺寸的 2 倍（物理像素）足够清晰。
-		std::wstring thumbPath;
-		if (isMedia) {
-			const auto cached = (Setting::get()->getHistoryThumbDir() / (it.id + L".png")).wstring();
-			std::error_code ec;
-			if (std::filesystem::exists(cached, ec)) thumbPath = cached;
-		}
-		else {
-			thumbPath = it.filePath;
-		}
-		if (!thumbPath.empty()) {
-			auto* img = thumbHost->makeChild<Ling::ImageBox>();
-			img->setWidthPercent(100.f);
-			img->setHeightPercent(100.f);
-			const float thumbCap = (kThumbH + kPad * 2.f + kCaptionH) * 2.f * win->dpi;
-			img->loadImg(thumbPath, thumbCap * 2.f, thumbCap);
-		}
-		else {
-			// 目录里扫出来的录屏没有封面：用视频图标占位
-			auto* ph = thumbHost->makeChild<Ling::Label>();
-			ph->setWidthPercent(100.f);
-			ph->setHeightPercent(100.f);
-			ph->setText(Icon::Video);
-			ph->setFontFamily(Icon::Family);
-			ph->setFontSize(34.f);
-			ph->setColor(0xFFFFFF66);
-			ph->setJustifyContent(Ling::Justify::Center);
-			ph->setAlignItems(Ling::Align::Center);
-		}
-
-		const std::wstring id = it.id;
-		const std::wstring filePath = it.filePath;
-		auto* copyBtn = mkIconBtn(thumbHost, Icon::Copy, 70.f, false,
-			[this, id, thumbHost]() {
-				if (this->overlayOpen()) return;
-				Util::copyHistoryFileToClipboard(id);
-				this->showCopyToast(thumbHost);   // 在当前这张缩略图上提示「复制成功」
-			});
-		auto* pinBtn = isMedia
-			? mkIconBtn(thumbHost, Icon::Folder, 38.f, false, [this, filePath]() {
-				if (this->overlayOpen()) return;
-				revealInExplorer(filePath);
-			})
-			: mkIconBtn(thumbHost, Icon::Pin, 38.f, false, [this, id]() {
-				if (this->overlayOpen()) return;
-				Util::pinHistoryFile(id);
-			});
-		auto* delBtn = mkIconBtn(thumbHost, Icon::Remove, 6.f, true,
-			[this, id]() {
-				if (this->overlayOpen()) return;
-				// 单条删除不弹确认；删的是这条历史对应的真实文件
-				Setting::get()->removeHistoryItem(id);
-				// 延后一拍重建：这个按钮自己就在要被拆掉的格子里，同步重建会在它自己的
-				// 点击回调里把它销毁；
-				auto weak = getWeakThis();
-				auto reload = [this, weak]() { if (weak.lock()) this->refreshGrid(); };
-				if (auto* app = Ling::App::get()) app->dq.TryEnqueue(reload);
-				else reload();
-			});
-		// 三个按钮默认收起，停悬到这张缩略图上才浮出
-		copyBtn->hide(); pinBtn->hide(); delBtn->hide();
-		cells.push_back({ thumbHost, { copyBtn, pinBtn, delBtn } });
-		if (tip) {
-			tip->bind(copyBtn, Lang::get(L"setting.copy"));
-			tip->bind(pinBtn, Lang::get(isMedia ? L"setting.revealFile" : L"setting.pin"));
-			tip->bind(delBtn, Lang::get(L"setting.delete"));
-		}
-
-		// 元信息：时间/日期 · W×H ｜ 来源徽标（点它可编辑自定义标签）｜ 已设标签
+		// 元信息（顶部行显示）：时间/日期 · 尺寸 · 大小
 		wchar_t whenBuf[32]{};
 		struct tm t {};
 		time_t tt = (time_t)(it.createdAt / 1000);
@@ -1656,7 +2225,314 @@ void WinSettingHistory::refreshGrid()
 		std::wstring metaText = std::wstring(whenBuf);
 		if (it.width > 0 && it.height > 0)
 			metaText += L" · " + std::to_wstring(it.width) + L"×" + std::to_wstring(it.height);
+		// 单个视频/其它文件：额外显示文件大小；图片、文件夹、多文件不显示
+		if (clip && it.files.size() == 1 && !clipIsImageExt(it.files.front())) {
+			std::error_code ec;
+			if (!std::filesystem::is_directory(it.files.front(), ec)) {
+				const auto bytes = std::filesystem::file_size(it.files.front(), ec);
+				if (!ec) metaText += L" · " + formatFileSize(bytes);
+			}
+		}
 
+		auto* cell = lastRow->makeChild<Ling::Node>();
+		cell->setWidthPercent(0.f);
+		cell->setFlexGrow(1.f);
+		cell->setFlexShrink(1.f);
+		if (!lastCol) cell->setMarginRight(kGap);
+		cell->setHeight(kThumbH + kPad * 2.f + kCaptionH);
+		cell->setFlexDirection(Ling::FlexDirection::Column);
+		cell->setBg(SettingTheme::card);
+		cell->setBorder(1.f, SettingTheme::border);
+		cell->setBorderRadius(SettingTheme::radiusLg);
+		cell->setPadding(kPad, kPad, kPad, kPad);
+
+		// 顶部行：左边类型图标 + 元信息（时间/日期 · 尺寸 · 大小）；剪切板条目右侧再放「复制」
+		Ling::Node* headerRow = cell->makeChild<Ling::Node>();
+		headerRow->setWidthPercent(100.f);
+		headerRow->setHeight(kHeaderH);
+		headerRow->setFlexShrink(0.f);
+		headerRow->setMarginBottom(kHeaderGap);
+		headerRow->setFlexDirection(Ling::FlexDirection::Row);
+		headerRow->setAlignItems(Ling::Align::Center);
+
+		// 图标只给剪切板卡片；截图/录屏/其他只显示元信息。
+		// 类型图标：链接 =「解锁长宽比 1」、色值 =「外观设置」、单个文件夹 =「文件夹」，
+		// 多个文件夹与其余未分类（视频 / 普通文件 / 混合多选）=「插件集成」。
+		if (clip) {
+			const wchar_t* headGlyph = Icon::Plugin;
+			if (clipText) {
+				const auto kind = clipTextKind(it.text);
+				if (kind == ClipTextKind::Link) headGlyph = Icon::UnlockAspect;
+				else if (kind == ClipTextKind::Color) headGlyph = Icon::Appearance;
+				else headGlyph = Icon::Ocr;   // 纯文字
+			}
+			else if (clipImageKind) headGlyph = Icon::ImageBackground;
+			else if (clipFiles) {
+				headGlyph = (it.files.size() == 1 && clipAllDirs(it.files))
+					? Icon::Folder : Icon::Plugin;
+			}
+			auto* headIcon = headerRow->makeChild<Ling::Label>();
+			headIcon->setText(headGlyph);
+			headIcon->setFontFamily(Icon::Family);
+			headIcon->setFontSize(16.f);
+			headIcon->setColor(SettingTheme::textMuted);   // 与「复制」按钮文字同色，避免过亮
+			headIcon->setFlexShrink(0.f);
+		}
+
+		auto* headMeta = headerRow->makeChild<Ling::Label>();
+		headMeta->setText(metaText);
+		headMeta->setFontSize(SettingTheme::fontXs);
+		headMeta->setColor(SettingTheme::textTertiary);
+		headMeta->setMarginLeft(clip ? 6.f : 0.f);
+		headMeta->setFlexShrink(1.f);
+		headMeta->setJustifyContent(Ling::Justify::Start);
+		headMeta->setAlignItems(Ling::Align::Center);
+
+		auto* headSpacer = headerRow->makeChild<Ling::Node>();
+		headSpacer->setFlexGrow(1.f);
+		headSpacer->setFlexShrink(1.f);
+
+		// 缩略图容器：右下角叠 贴图/打开/删除 图标按钮
+		auto* thumbHost = cell->makeChild<Ling::Node>();
+		thumbHost->setWidthPercent(100.f);
+		// 顶部多一行，内容区相应减高：整张卡高度保持一致
+		thumbHost->setHeight(kThumbH - kHeaderH - kHeaderGap);
+		thumbHost->setFlexShrink(0.f);
+		thumbHost->setBg(0x111111FFu);
+		thumbHost->setBorderRadius(SettingTheme::radiusMd);
+		thumbHost->setPositionType(Ling::Position::Relative);
+
+		// 缩略图按缩略图级分辨率解码：历史页会随滚动不断累积格子，若每格都持有整张 4K 原图
+		// （约 33MB）解码位图，内存会很快堆起来。上限取显示尺寸的 2 倍（物理像素）足够清晰。
+		std::wstring thumbPath;
+		if (isMedia) {
+			const auto cached = (Setting::get()->getHistoryThumbDir() / (it.id + L".png")).wstring();
+			std::error_code ec;
+			if (std::filesystem::exists(cached, ec)) thumbPath = cached;
+		}
+		else if (clipFiles) {
+			if (clipImageKind) thumbPath = it.files.front();
+		}
+		else if (!clipText) {
+			thumbPath = it.filePath;
+		}
+		Ling::ScrollerBox* imgScroll = nullptr;   // 剪切板图片的滚动容器（无滑条）
+		Ling::TextBox* textScroll = nullptr;      // 剪切板文字预览（省略显示，不滚动）
+		if (clipText) {
+			// 换行 / 制表都压成空格，交给 TextBox 按卡片实际高度裁剪并加省略号
+			std::wstring preview = it.text;
+			for (auto& ch : preview)
+				if (ch == L'\r' || ch == L'\n' || ch == L'\t') ch = L' ';
+			auto* tb = thumbHost->makeChild<Ling::TextBox>();
+			tb->setWidthPercent(100.f);
+			tb->setHeightPercent(100.f);
+			tb->setPadding(8.f, 6.f, 8.f, 6.f);
+			tb->setBg(0);
+			tb->setBorder(0.f, 0);
+			tb->setText(preview);
+			tb->setColor(SettingTheme::textPrimary);
+			tb->setFontSize(SettingTheme::fontSm);
+			tb->setReadOnly(true);
+			tb->setMouseSelectionEnabled(false);
+			tb->setTextHoverCursor(false);     // 卡片上停悬保持普通箭头（不是可编辑的暗示）
+			tb->setTextEllipsis(true);         // 装不下就截断加省略号，卡片内不再滚动
+			tb->setScrollBarVisible(false);   // 预览区不出现内部滑动条
+			// 色值条目：缩略图区直接铺这个颜色，并按亮度换文字色
+			uint32_t rgb{};
+			if (clipTextKind(it.text, &rgb) == ClipTextKind::Color) {
+				tb->setBg((rgb << 8) | 0xFFu);
+				const int lum = (((rgb >> 16) & 0xFF) * 299 + ((rgb >> 8) & 0xFF) * 587 + (rgb & 0xFF) * 114) / 1000;
+				tb->setColor(lum > 150 ? 0x14181CFFu : 0xFFFFFFFFu);
+			}
+		}
+		else if (!thumbPath.empty()) {
+			if (clip) {
+				// 剪切板图片：整块铺满卡片（与截图卡片一致），不做内部滚动
+				auto* img = thumbHost->makeChild<Ling::ImageBox>();
+				img->setWidthPercent(100.f);
+				img->setHeightPercent(100.f);
+				img->loadImg(thumbPath, 800.f * win->dpi, 3200.f * win->dpi);
+			}
+			else {
+				auto* img = thumbHost->makeChild<Ling::ImageBox>();
+				img->setWidthPercent(100.f);
+				img->setHeightPercent(100.f);
+				const float thumbCap = (kThumbH + kPad * 2.f + kCaptionH) * 2.f * win->dpi;
+				img->loadImg(thumbPath, thumbCap * 2.f, thumbCap);
+			}
+		}
+		else if (clipFiles) {
+			// 视频/其它文件/文件夹：只显示文件名（多个文件 → 「XXX.exe 等多个文件」）
+			std::wstring name = std::filesystem::path(it.files.front()).filename().wstring();
+			if (it.files.size() > 1) {
+				std::wstring fmt = Lang::get(L"clip.multiFiles");
+				const auto pos = fmt.find(L"%1");
+				if (pos != std::wstring::npos) fmt.replace(pos, 2, name);
+				name = fmt;
+			}
+			// 文件/文件夹只显示名字，不再叠一个大图标（类型已由左上角图标说明）。
+			// 文字按卡片实际高度省略（末尾加省略号），不做卡片内滚动
+			auto* nameBox = thumbHost->makeChild<Ling::TextBox>();
+			nameBox->setWidthPercent(100.f);
+			nameBox->setHeightPercent(100.f);
+			nameBox->setPadding(8.f, 6.f, 8.f, 6.f);
+			nameBox->setBg(0);
+			nameBox->setBorder(0.f, 0);
+			nameBox->setText(name);
+			nameBox->setColor(SettingTheme::textPrimary);
+			nameBox->setFontSize(SettingTheme::fontSm);
+			nameBox->setReadOnly(true);
+			nameBox->setMouseSelectionEnabled(false);
+			nameBox->setTextHoverCursor(false);   // 卡片上停悬保持普通箭头
+			nameBox->setTextEllipsis(true);
+			nameBox->setScrollBarVisible(false);
+		}
+		else {
+			// 目录里扫出来的录屏没有封面：用视频图标占位
+			auto* ph = thumbHost->makeChild<Ling::Label>();
+			ph->setWidthPercent(100.f);
+			ph->setHeightPercent(100.f);
+			ph->setText(Icon::Video);
+			ph->setFontFamily(Icon::Family);
+			ph->setFontSize(34.f);
+			ph->setColor(0xFFFFFF66);
+			ph->setJustifyContent(Ling::Justify::Center);
+			ph->setAlignItems(Ling::Align::Center);
+		}
+
+		const std::wstring id = it.id;
+		const std::wstring filePath = it.filePath;
+		const std::wstring clipTextData = it.text;
+		const std::vector<std::wstring> clipFileList = it.files;
+		auto* delBtn = mkIconBtn(thumbHost, Icon::Remove, 6.f, true,
+			[this, id, clip]() {
+				if (this->overlayOpen()) return;
+				// 单条删除只删记录，不动磁盘上的文件；剪切板条目删索引（位图缓存一起删）
+				if (clip) Setting::get()->removeClipboardItem(id);
+				else Setting::get()->removeHistoryItem(id, false);
+				// 延后一拍重建：这个按钮自己就在要被拆掉的格子里，同步重建会在它自己的
+				// 点击回调里把它销毁；
+				auto weak = getWeakThis();
+				auto reload = [this, weak]() { if (weak.lock()) this->refreshGrid(); };
+				if (auto* app = Ling::App::get()) app->dq.TryEnqueue(reload);
+				else reload();
+			});
+		auto* pinBtn = clip
+			? mkIconBtn(thumbHost, Icon::Pin, 38.f, false,
+				[clipText, clipImageBitmap, clipImageKind, clipTextData, filePath, clipFileList]() {
+					if (clipText) {
+						ClipPin::showText(clipTextData);
+					}
+					else if (clipImageBitmap) {
+						pinImageFile(filePath);
+					}
+					else if (clipImageKind && !clipFileList.empty()) {
+						pinImageFile(clipFileList.front());
+					}
+					else if (!clipFileList.empty()) {
+						ClipPin::showFiles(clipFileList);
+					}
+				})
+			: (isMedia
+				? mkIconBtn(thumbHost, Icon::Folder, 38.f, false, [this, filePath]() {
+					if (this->overlayOpen()) return;
+					revealInExplorer(filePath);
+					})
+				: mkIconBtn(thumbHost, Icon::Pin, 38.f, false, [this, id]() {
+					if (this->overlayOpen()) return;
+					Util::pinHistoryFile(id);
+					}));
+		// 「打开」：文字没有可打开的内容（链接除外）；图片用系统看图工具，文件用默认程序
+		auto* openBtn = (clip && (!clipText || clipLink))
+			? mkIconBtn(thumbHost, Icon::Folder, 70.f, false,
+				[clipLink, clipTextData, filePath, clipFileList]() {
+					if (clipLink) {
+						// 链接：交给系统默认浏览器
+						if (!clipTextData.empty())
+							ShellExecuteW(nullptr, L"open", clipTextData.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+						return;
+					}
+					const std::wstring target = !clipFileList.empty() ? clipFileList.front() : filePath;
+					if (!target.empty())
+						ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+				})
+			: nullptr;
+		// 复制动作：剪切板条目用顶部常驻胶囊，其余分类沿用停悬显示的图标按钮
+		auto copyAction = [this, clip, clipText, clipImageBitmap, clipTextData, filePath, clipFileList, id, thumbHost]() {
+			if (this->overlayOpen()) return;
+			if (!clip) Util::copyHistoryFileToClipboard(id);
+			else {
+				if (clipText) Ling::Util::setTextToClipboard(clipTextData);
+				else if (clipImageBitmap) {
+					auto [w, h, px] = Util::loadImagePixels(filePath);
+					if (w > 0 && h > 0 && !px.empty()) Util::saveToClipboard(w, h, px.data());
+				}
+				else if (!clipFileList.empty()) Util::addFilesToClipboard(clipFileList);
+				// 这次写入是我们自己触发的：不记新条目
+				Setting::get()->markOwnClipboardWrite();
+			}
+			this->showCopyToast(thumbHost);
+			// 先亮「复制成功」，过一会儿再把该条动画式地提到最前面
+			if (clip) this->scheduleReorderToTop(id);
+		};
+		Ling::Button* copyBtn = nullptr;
+		if (clip) {
+			copyBtn = headerRow->makeChild<Ling::Button>();
+			// 与顶部「筛选」按钮同一套外观：描边 + 同色文字 + 同样的停悬底色
+			copyBtn->setText(Lang::get(L"setting.copy"));
+			copyBtn->setFontSize(SettingTheme::fontXs);
+			copyBtn->setColor(SettingTheme::textMuted);
+			copyBtn->setHoverColor(SettingTheme::textPrimary);
+			copyBtn->setBg(SettingTheme::card);
+			copyBtn->setHoverBg(SettingTheme::accent);
+			copyBtn->setHeight(22.f);
+			copyBtn->setPadding(8.f, 0.f, 8.f, 0.f);
+			copyBtn->setBorderRadius(SettingTheme::radiusCtl);
+			copyBtn->setBorder(1.f, SettingTheme::border);
+			copyBtn->setFlexShrink(0.f);
+			copyBtn->setJustifyContent(Ling::Justify::Center);
+			copyBtn->setAlignItems(Ling::Align::Center);
+			copyBtn->onClick.add([copyAction](Ling::Button*) { copyAction(); });
+		}
+		else {
+			copyBtn = mkIconBtn(thumbHost, Icon::Copy, 70.f, false, copyAction);
+		}
+		// 其余按钮默认收起，停悬到这张缩略图上才浮出
+		pinBtn->hide(); delBtn->hide();
+		if (openBtn) openBtn->hide();
+		std::vector<Ling::Button*> btnList{ pinBtn, delBtn };
+		if (openBtn) btnList.push_back(openBtn);
+		if (!clip) { copyBtn->hide(); btnList.push_back(copyBtn); }
+		CellSlot slot;
+		slot.thumb = thumbHost;
+		slot.btns = std::move(btnList);
+		slot.imgScroll = imgScroll;
+		slot.textScroll = textScroll;
+		// 有静态小图的卡片提供停悬大图（录屏用的是缓存封面，不做预览）
+		if (!thumbPath.empty() && !isMedia) {
+			slot.previewPath = thumbPath;
+			slot.previewW = it.width;
+			slot.previewH = it.height;
+		}
+		// 剪切板文字卡：停悬显示全文；剪切板里的文件 / 文件夹停悬显示「图标 + 名字 + 来源」
+		if (clipText) {
+			slot.previewText = it.text;
+		}
+		else if (clip && clipFiles && !clipImageKind) {
+			slot.previewFiles = it.files;
+		}
+		cells.push_back(std::move(slot));
+		if (tip) {
+			// 剪切板条目可能贴出文字 / 图片 / 文件等多种格式，统一叫「贴屏」
+			const wchar_t* pinTipKey = (!clip && isMedia) ? L"setting.revealFile"
+				: (clip ? L"setting.pinScreen" : L"setting.pin");
+			tip->bind(copyBtn, Lang::get(L"setting.copy"));
+			tip->bind(pinBtn, Lang::get(pinTipKey));
+			tip->bind(delBtn, Lang::get(L"setting.delete"));
+			if (openBtn) tip->bind(openBtn, Lang::get(L"setting.open"));
+		}
+
+		// 底部一行只放标签（点它可编辑自定义标签）
 		auto* metaRow = cell->makeChild<Ling::Node>();
 		metaRow->setFlexDirection(Ling::FlexDirection::Row);
 		metaRow->setAlignItems(Ling::Align::Center);
@@ -1664,21 +2540,23 @@ void WinSettingHistory::refreshGrid()
 		metaRow->setHeight(kCaptionH - 8.f);
 		metaRow->setMarginTop(6.f);
 
-		auto* meta = metaRow->makeChild<Ling::Label>();
-		meta->setText(metaText);
-		meta->setFontSize(SettingTheme::fontXs);
-		meta->setColor(SettingTheme::textTertiary);
-		meta->setFlexShrink(1.f);
-		meta->setJustifyContent(Ling::Justify::Start);
-		meta->setAlignItems(Ling::Align::FlexStart);
-
-		// 标签位：有自定义标签就逐个显示（替换原来的来源标签）；没有则显示来源标签
-		const auto tags = Setting::get()->getHistoryTags(it.filePath);
-		std::vector<std::wstring> shown = tags;
-		if (shown.empty()) shown.push_back(sourceLabel(it.source));
-		for (auto& label : shown) {
+		// 标签位：剪切板固定先显示类型标签（图片/视频/文字/文件）+ 自定义标签；
+		// 文件历史有自定义标签就显示标签，否则显示来源标签。
+		struct TagChip { std::wstring text; bool editable; };
+		const auto tags = clip ? Setting::get()->getClipboardTags(it.id)
+			: Setting::get()->getHistoryTags(it.filePath);
+		std::vector<TagChip> chips;
+		if (clip) chips.push_back({ clipTypeTag(it), false });
+		for (auto& t : tags) chips.push_back({ t, true });
+		if (chips.empty()) {
+			chips.push_back({ it.id == it.filePath
+				? Lang::get(isMedia ? L"setting.tagVideo" : L"setting.tagImage")
+				: sourceLabel(it.source), false });
+		}
+		for (auto& chipDef : chips) {
+			// 所有分类的标签都可点击：类型标签 / 来源标签点开就是该条目的自定义标签编辑
 			auto* chip = metaRow->makeChild<Ling::Button>();
-			chip->setText(label);
+			chip->setText(chipDef.text);
 			chip->setFontSize(SettingTheme::fontXs);
 			chip->setColor(SettingTheme::textTertiary);
 			chip->setHoverColor(SettingTheme::textPrimary);
@@ -1692,10 +2570,21 @@ void WinSettingHistory::refreshGrid()
 			chip->setFlexShrink(0.f);
 			chip->setJustifyContent(Ling::Justify::Center);
 			chip->setAlignItems(Ling::Align::Center);
-			chip->onClick.add([this, item = it](Ling::Button*) {
-				if (this->overlayOpen()) return;   // 气泡/弹窗盖住卡片时不再响应
-				this->showTagDialog(item);
-			});
+			if (clip) {
+				chip->onClick.add([this, id = it.id](Ling::Button*) {
+					if (this->overlayOpen()) return;
+					this->showTagDialogFor(id, Setting::get()->getClipboardTags(id),
+						[id](const std::vector<std::wstring>& tags) {
+							Setting::get()->setClipboardTags(id, tags);
+						});
+					});
+			}
+			else {
+				chip->onClick.add([this, item = it](Ling::Button*) {
+					if (this->overlayOpen()) return;   // 气泡/弹窗盖住卡片时不再响应
+					this->showTagDialog(item);
+				});
+			}
 			if (tip) tip->bind(chip, Lang::get(L"setting.filterTagEdit"));
 		}
 
@@ -1718,6 +2607,7 @@ void WinSettingHistory::refreshGrid()
 	scheduleFillCheck();
 }
 
+
 void WinSettingHistory::scheduleFillCheck()
 {
 	if (fillScheduled) return;
@@ -1737,7 +2627,7 @@ void WinSettingHistory::fillCheck()
 {
 	if (!gridScroll || !gridHost) return;
 
-	auto all = Setting::get()->getHistoryItemsForUi();
+	auto all = collectItems(false);
 	int total = 0;
 	for (const auto& it : all)
 		if (matchFilters(it)) ++total;
@@ -1771,7 +2661,13 @@ void WinSettingHistory::updateHover(POINT pos)
 {
 	// 气泡 / 弹窗盖住卡片时，卡片不再响应停悬（隐藏浮出的图标按钮）
 	const bool blocked = overlayOpen();
-	for (auto& c : cells) {
+	// 停悬预览是可选功能（外观设置 > 其他外观 > 悬停预览），关掉时完全不参与
+	const bool previewOn = Setting::get()->getHoverPreview();
+	// 指针在可滚动的剪切板图片上时，让图片自己滚：外层网格暂时不响应滚轮
+	bool overScrollableImage = false;
+	int hoverPreview = -1;
+	for (size_t i = 0; i < cells.size(); ++i) {
+		auto& c = cells[i];
 		if (!c.thumb) continue;
 		const bool inside = !blocked && c.thumb->isPosIn(pos);
 		for (auto* b : c.btns) {
@@ -1779,7 +2675,59 @@ void WinSettingHistory::updateHover(POINT pos)
 			if (inside) b->show();
 			else b->hide();
 		}
+		if (!blocked && c.imgScroll && c.imgScroll->isPosInContent(pos)
+			&& c.imgScroll->getMaxScrollY() > 0.f)
+			overScrollableImage = true;
+		// 剪切板文字预览超出可视高度时，滚轮归文字自己，外层不再跟着滚
+		if (!blocked && c.textScroll && c.textScroll->isPosIn(pos) && c.textScroll->canScroll())
+			overScrollableImage = true;
+		if (previewOn && inside
+			&& (!c.previewPath.empty() || !c.previewText.empty() || !c.previewFiles.empty())
+			&& hoverPreview < 0)
+			hoverPreview = (int)i;
 	}
+	if (gridScroll) gridScroll->setWheelEnabled(!overScrollableImage);
+	// 停悬大图：换到另一张（或移出所有卡片）时更新
+	if (hoverPreview != previewIndex_) {
+		previewIndex_ = hoverPreview;
+		if (hoverPreview >= 0) showPreview(cells[hoverPreview]);
+		else hidePreview();
+	}
+}
+
+void WinSettingHistory::showPreview(const CellSlot& slot)
+{
+	if (!slot.thumb || !win) { hidePreview(); return; }
+	POINT tl{ (LONG)slot.thumb->x, (LONG)slot.thumb->y };
+	ClientToScreen(win->hwnd, &tl);
+	const RECT cellRect{ tl.x, tl.y, tl.x + (LONG)slot.thumb->w, tl.y + (LONG)slot.thumb->h };
+	if (!preview_) preview_ = std::make_unique<ShotPreviewWindow>(win->dpi);
+	// 文件 / 文件夹：图标 + 名字 + 来源（与贴屏文件卡片一致）
+	if (!slot.previewFiles.empty()) {
+		preview_->showFiles(slot.previewFiles, cellRect);
+		return;
+	}
+	// 文字卡：复用文字气泡样式显示全文
+	if (!slot.previewText.empty()) {
+		preview_->showText(slot.previewText, cellRect);
+		return;
+	}
+	if (slot.previewPath.empty()) { hidePreview(); return; }
+	// 优先用条目记录的尺寸；没有就只读图片头拿宽高（不解码像素）
+	int w = slot.previewW, h = slot.previewH;
+	if (w <= 0 || h <= 0) {
+		const auto size = Util::imageSize(slot.previewPath);
+		w = size.first;
+		h = size.second;
+	}
+	if (w <= 0 || h <= 0) { hidePreview(); return; }
+	preview_->showImage(slot.previewPath, w, h, cellRect);
+}
+
+void WinSettingHistory::hidePreview()
+{
+	if (preview_) preview_->hideNow();
+	previewIndex_ = -1;
 }
 
 // 「复制成功」提示：在当前被复制的那张缩略图**正中**放一个小胶囊徽章（#0FDC78 底），
@@ -1822,4 +2770,40 @@ void WinSettingHistory::hideCopyToast()
 	if (copyToast && copyToast->parent)
 		copyToast->parent->removeChild(copyToast);
 	copyToast = nullptr;
+}
+
+void WinSettingHistory::scheduleReorderToTop(const std::wstring& id)
+{
+	pendingReorderId_ = id;
+	win->killTimer(kReorderTimerId);
+	win->setTimer(kReorderDelayMs, kReorderTimerId);
+}
+
+void WinSettingHistory::applyReorderToTop()
+{
+	win->killTimer(kReorderTimerId);
+	const std::wstring id = pendingReorderId_;
+	pendingReorderId_.clear();
+	if (id.empty()) return;
+	// 只有当前页面真的会显示剪切板条目时才有必要播动画
+	const bool visible = (sourceTab == 4 || (sourceTab == 0 && !filter.tag.empty()));
+	if (!Setting::get()->touchClipboardItem(id)) return;   // 已在最前：让提示自然收起
+	if (!visible) return;
+	hideCopyToast();
+	// clipboardChanged 已经把网格重建排进队列；我们再排一拍，等新网格建好后再淡入
+	auto weak = getWeakThis();
+	auto run = [this, weak]() { if (weak.lock()) this->fadeInGrid(); };
+	if (auto* app = Ling::App::get()) app->dq.TryEnqueue(run);
+	else run();
+}
+
+void WinSettingHistory::fadeInGrid()
+{
+	if (!gridHost || !gridHost->visual) return;
+	auto anim = gridHost->visual.Compositor().CreateScalarKeyFrameAnimation();
+	anim.InsertKeyFrame(0.f, 0.f);
+	anim.InsertKeyFrame(1.f, 1.f);
+	anim.Duration(std::chrono::milliseconds{ 200 });
+	gridHost->visual.Opacity(0.f);
+	gridHost->visual.StartAnimation(L"Opacity", anim);
 }

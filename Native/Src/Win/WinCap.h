@@ -91,6 +91,8 @@ public:
 	void toggleShowCursor();
 	// 「系统按键」派发：按键 → 命令表 → 与工具栏点击**同一批**入口。true = 已处理
 	bool commandKey(UINT key);
+	// 已拼好的 chord 版本：全局热键在会话进行中被按下时，先问会话里有没有命令接这个键位
+	bool commandFromChord(const std::wstring& chord);
 	// 执行一条命令（窗口内按键与全局钩子**共用**这一段）；查表在 commandKey
 	bool runCommand(const std::wstring& id);
 	// 当前界面掩码（截图 / 录屏 / 全屏画布）
@@ -131,6 +133,9 @@ public:
 	void startMp4(bool useSpeaker, bool useMic);
 	void startGif();
 	std::wstring stopRecord();
+	// 录屏收工（点 ✓ / 保存）时先隐藏屏幕上的那层：编码收尾要 join 采集线程，
+	// 别让用户看着选框和遮罩多停留几百毫秒
+	void hideRecordOverlay();
 	void layoutLongTool();
 	void longToggle();
 	void longPreviewPanChanged();
@@ -167,7 +172,13 @@ private:
 	bool magnifierVisible() const;
 	void paintPix(ID2D1DeviceContext* ctx);
 	void samplePixColor();
+	// 放大镜里的色值文本：Hex 模式是 #RRGGBB，RGB 模式只显示分量（255,0,0）
+	std::wstring pixColorText() const;
+	// Ctrl+C 复制用的色值文本：RGB 模式下补全成 rgb(255,0,0)
+	std::wstring pixColorCopyText() const;
 	void onKey(UINT key);
+	// 录屏中（未穿透）按 Esc：先弹确认框，确认才结束并放弃本次录制
+	void confirmExitRecording();
 	void onWheel(POINT pos, float space);
 	void copyCurrentStage();
 	void onDown(POINT pos, bool isRight);
@@ -345,6 +356,7 @@ private:
 	// 标注中拖选区边/角（与落笔分离，视窗可调）
 	bool maskDragging{ false };
 	COLORREF pixColor_{ 0 };
+	bool pixColorRgb_{ false };   // 色值显示口径：false = #RRGGBB（默认），true = rgb(r, g, b)
 	int pixSampleX_{ -1 }, pixSampleY_{ -1 };
 	Microsoft::WRL::ComPtr<ID2D1Bitmap1> pixSampleBmp_;
 	ULONGLONG pixCopiedUntil_{ 0 };   // 色值复制成功提示的截止时间（放大镜提示行变绿）

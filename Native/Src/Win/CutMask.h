@@ -63,8 +63,10 @@ public:
 	// 换失败（混合显卡常见），随后即可把该屏排除，避免选区先移过去再被回退。未注入时一律按可跨屏处理。
 	std::function<bool(const RECT&)> canSwitchToMonitor;
 	void paint(ID2D1DeviceContext* ctx);
-	// 录制期用：只画选框描边/控点/尺寸标签（不画压暗），由"排除捕获"的选框层窗口调用
-	void paintChrome(ID2D1DeviceContext* ctx);
+	// 录制期用：只画选框描边/尺寸标签（不画压暗），由"排除捕获"的选框层窗口调用。
+	// borderOutside=true 时描边整条画在选区外侧：桌面复制不认 WDA_EXCLUDEFROMCAPTURE，
+	// 画在里侧的描边会被录进视频。
+	void paintChrome(ID2D1DeviceContext* ctx, bool borderOutside = false);
 	// 长图阶段：预览图/长图在 cutMask 之后绘制，会把先画的描边盖住。
 	// 内容层画完后再调它把绿框补画一遍，「滚动中 / 暂停 / 编辑」全程都能看到选区边界。
 	void paintBorderOverlay(ID2D1DeviceContext* ctx);
@@ -117,7 +119,7 @@ private:
 	void rebuildRadiusValueLayout();
 	void paintSelShadow(ID2D1DeviceContext* ctx) const;
 	// 描边 / 控点 / 尺寸标签：主窗口与录制期选框层共用
-	void paintBorder(ID2D1DeviceContext* ctx);
+	void paintBorder(ID2D1DeviceContext* ctx, bool outside = false);
 	void paintHandles(ID2D1DeviceContext* ctx);
 	void paintLabel(ID2D1DeviceContext* ctx);
 	void paintDim(ID2D1DeviceContext* ctx) const;

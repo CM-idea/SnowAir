@@ -30,6 +30,12 @@ ShapeNumber::ShapeNumber(AnnotHost* win) :ShapeBase(win),
 	d2d->deviceContext->CreateSolidColorBrush(toolSub->getSelectedColor(), brush.GetAddressOf());
 	d2d->deviceContext->CreateSolidColorBrush(D2D1::ColorF(0XFFFFFF), brushText.GetAddressOf());
 	if (emoji.empty()) emoji = SerialEmoji::Default;
+	// 属性栏「当前序号」输入框：手动指定的数字或文字优先于自动递增
+	{
+		std::wstring label;
+		val = win->toolSub->takeNumberValue(styleKind, val, label);
+		if (!label.empty()) labelText = label;
+	}
 	isFill = true;
 }
 
@@ -52,6 +58,8 @@ int ShapeNumber::getNextVal(AnnotHost* win, int style)
 
 std::wstring ShapeNumber::formatLabel() const
 {
+	// 属性栏手动输入的序号（例如中文）直接显示
+	if (!labelText.empty()) return labelText;
 	if (styleKind == ToolSub::NumberLetter) {
 		std::wstring s;
 		int n = val;

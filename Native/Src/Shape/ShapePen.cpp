@@ -32,12 +32,12 @@ ShapePen::ShapePen(AnnotHost* win) : ShapeBase(win),
 	draggers(8, D2D1::RectF(0, 0, 0, 0))
 {
 	auto toolSub = win->toolSub.get();
-	auto d2d = Ling::D2D::get();
-	d2d->deviceContext->CreateSolidColorBrush(toolSub->getSelectedColor(), brush.GetAddressOf());
 	strokeWidth = toolSub->getSliderVal();
 	isDash = toolSub->isPenDash;
 	isSoft = toolSub->isPenSoft;
 	isFade = toolSub->isPenFade;
+	auto d2d = Ling::D2D::get();
+	d2d->deviceContext->CreateSolidColorBrush(toolSub->getSelectedColor(), brush.GetAddressOf());
 	if (isFade) {
 		// 渐隐画笔：自带平滑/补点与逐点寿命，不走软笔/虚线
 		isSoft = false;

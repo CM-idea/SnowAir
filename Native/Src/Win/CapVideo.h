@@ -24,6 +24,8 @@ public:
 	void layoutTool();
 	// 宿主窗口要销毁了：停掉录制、收掉工具条
 	void dispose();
+	// 放弃本次录制（ESC / 关闭）：停止编码并删掉临时文件，不落盘
+	void discard();
 	bool isRecording() const;
 	bool isPaused() const { return paused; }
 	void setPaused(bool on);

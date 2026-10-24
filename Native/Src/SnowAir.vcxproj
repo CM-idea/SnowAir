@@ -286,6 +286,7 @@
     <ClCompile Include="Win\ScreenCapture.cpp" />
     <ClCompile Include="Win\SettingWidgets.cpp" />
     <ClCompile Include="Win\WinCap.cpp" />
+    <ClCompile Include="Win\ClipPin.cpp" />
     <ClCompile Include="Win\WinPin.cpp" />
     <ClCompile Include="Win\PinMenu.cpp" />
     <ClCompile Include="Win\WinSetting.cpp" />
@@ -420,6 +421,7 @@
     <ClInclude Include="Win\SettingTheme.h" />
     <ClInclude Include="Win\SettingWidgets.h" />
     <ClInclude Include="Win\WinCap.h" />
+    <ClInclude Include="Win\ClipPin.h" />
     <ClInclude Include="Win\WinPin.h" />
     <ClInclude Include="Win\PinMenu.h" />
     <ClInclude Include="Win\MenuTheme.h" />

@@ -34,7 +34,13 @@ namespace {
         }
         while (!name.empty() && (name.back() == L' ' || name.back() == L'.')) name.pop_back();
         if (name.empty()) name = L"SnowAir";
-        return (st->getDataPath() / (name + L"." + ext)).wstring();
+        // 录制中的半成品放系统临时目录：它不该出现在用户的配置/数据目录里，
+        // 只有按 ✓ 存文件或复制时才复制到「录屏文件路径」
+        std::filesystem::path dir;
+        wchar_t tmp[MAX_PATH]{};
+        if (GetTempPathW(MAX_PATH, tmp) > 0) dir = tmp;
+        else dir = st->getDataPath();
+        return (dir / (name + L"." + ext)).wstring();
     }
 
     // MP4 录制失败以前是静默 return，用户那边就是"录完什么都没有"，连缓存文件都不生成。
@@ -137,8 +143,15 @@ void CapVideo::setToolVisible(bool visible)
 
 void CapVideo::dispose()
 {
-    stop();
+    discard();
     if (tool) tool->close();
+}
+
+void CapVideo::discard()
+{
+    // stop() 会把参数置空，重复调用返回空串（dispose 再进来也安全）
+    const std::wstring path = stop();
+    if (!path.empty()) DeleteFileW(path.c_str());
 }
 
 bool CapVideo::isRecording() const

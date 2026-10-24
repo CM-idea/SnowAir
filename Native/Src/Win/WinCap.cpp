@@ -25,6 +25,7 @@
 #include "../Shape/ShapeText.h"
 #include "../Tool/ToolbarTheme.h"
 #include "../Tool/ToolbarChrome.h"
+#include "SettingWidgets.h"
 #include "CaptureEsc.h"
 #include "CaptureShield.h"
 #include "ScreenCapture.h"
@@ -107,7 +108,7 @@ protected:
 		auto ctx = canvas_->startPaint();
 		if (!ctx) return;
 		ctx->Clear(0);
-		owner_->cutMask->paintChrome(ctx);
+		owner_->cutMask->paintChrome(ctx, true);   // 描边画在选区外侧，避免被录进视频
 		canvas_->finishPaint();
 	}
 private:
@@ -1847,6 +1848,21 @@ void WinCap::samplePixColor()
 	pixSampleY_ = py;
 }
 
+std::wstring WinCap::pixColorText() const
+{
+    const int r = GetRValue(pixColor_), g = GetGValue(pixColor_), b = GetBValue(pixColor_);
+    // RGB 模式不写前缀：行的标签已经变成「RGB」，信息区也窄，只留分量
+    return pixColorRgb_ ? std::format(L"{},{},{}", r, g, b)
+                        : std::format(L"#{:02X}{:02X}{:02X}", r, g, b);
+}
+
+std::wstring WinCap::pixColorCopyText() const
+{
+    if (!pixColorRgb_) return pixColorText();
+    return std::format(L"rgb({},{},{})",
+        GetRValue(pixColor_), GetGValue(pixColor_), GetBValue(pixColor_));
+}
+
 bool WinCap::magnifierVisible() const
 {
 	// 与 paintPix 完全同一套判据：
@@ -1899,7 +1915,7 @@ void WinCap::paintPix(ID2D1DeviceContext* ctx)
 
 	// 色值从底图取样（避免 GetPixel 同步读屏拖垮帧率）
 	samplePixColor();
-	const auto hex = std::format(L"#{:02X}{:02X}{:02X}", GetRValue(pixColor_), GetGValue(pixColor_), GetBValue(pixColor_));
+	const auto colorText = pixColorText();
 	const auto posText = std::format(L"{}, {}", pixFocus.x, pixFocus.y);
 
 	const float metaLeft = x0 + pad + 2.f * dpi;
@@ -1928,7 +1944,8 @@ void WinCap::paintPix(ID2D1DeviceContext* ctx)
 	};
 	drawRow(metaY, L"坐标", posText, brushText.Get());
 	metaY += rowH + 2.f * dpi;
-	drawRow(metaY, L"色值", hex, brushText.Get());
+	// 行的标签就是色值口径：Hex 模式写「色值」，RGB 模式写「RGB」，值里不再带前缀
+	drawRow(metaY, pixColorRgb_ ? L"RGB" : L"色值", colorText, brushText.Get());
 	metaY += rowH + 2.f * dpi;
 
 	// 复制成功后提示行临时变绿显示「色值复制成功！」，1.5s 后自动恢复
@@ -1957,6 +1974,15 @@ bool WinCap::commandKey(UINT key)
 	// 正在编辑标注文字：键盘归输入框，任何命令键都不许抢
 	if (editingText) return false;
 	const std::wstring id = CommandKeys::actionForKey(key, currentSurface());
+	return id.empty() ? false : runCommand(id);
+}
+
+// 会话开着时，全局热键的按键会被 RegisterHotKey / 钩子吃掉，窗口里根本收不到。
+// 例如「全局热键 F1」+「系统按键 贴图 F1」：第二次 F1 应该贴图，而不是落到热键上变成空转。
+bool WinCap::commandFromChord(const std::wstring& chord)
+{
+	if (editingText || chord.empty()) return false;
+	const std::wstring id = CommandKeys::actionForChord(chord, currentSurface());
 	return id.empty() ? false : runCommand(id);
 }
 
@@ -2119,6 +2145,28 @@ void WinCap::onKey(UINT key)
         demoBoardStepPage(key == VK_NEXT ? 1 : -1);
         return;
     }
+    // 鼠标穿透态：键盘也归下层应用 —— ESC 等不应关掉本会话。
+    // 演示画布例外：它的「Esc 先退穿透」是既有交互（见 cmd_close 分支）。
+    if (isMouseTransparent && !demoMode && key == VK_ESCAPE) return;
+    // 录制中（未穿透）按 Esc：先弹确认，避免误触直接丢掉整段录制。
+    // 暂停态不弹：用户是主动停下来的，Esc 直接按"放弃本次录制"退出。
+    // 标注文字编辑时例外 —— 那一层的 Esc 是"结束编辑"，不能拿去弹框。
+    if (key == VK_ESCAPE && !editingText && !isMouseTransparent
+        && capVideo && capVideo->isRecording() && !capVideo->isPaused()) {
+        confirmExitRecording();
+        return;
+    }
+    // 查找元素阶段：Tab 切换放大镜的色值口径（#RRGGBB ⇄ rgb(r, g, b)）。
+    // 只拦"纯 Tab"：带修饰键的组合仍走命令表，不抢用户自定义的键位。
+    const bool elementLookup = stage == CapStage::Select && !isPress && !demoMode
+        && Setting::get()->getFindWindowElements();
+    if (elementLookup && key == VK_TAB
+        && !(GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000)
+        && !(GetKeyState(VK_SHIFT) & 0x8000)) {
+        pixColorRgb_ = !pixColorRgb_;
+        refresh();
+        return;
+    }
     // 方向键：挪选区 / 挪光标（没有对应的命令，所以不走命令表）
     if (key == VK_UP || key == VK_DOWN || key == VK_LEFT || key == VK_RIGHT) {
         const int step = (GetKeyState(VK_SHIFT) & 0x8000) ? 10 : 1;
@@ -2150,8 +2198,7 @@ void WinCap::onKey(UINT key)
             setPixPos(cur);   // 让放大镜壳体出现在光标旁，显示"复制成功"
         }
         samplePixColor();
-        Ling::Util::setTextToClipboard(std::format(L"#{:02X}{:02X}{:02X}",
-            GetRValue(pixColor_), GetGValue(pixColor_), GetBValue(pixColor_)));
+        Ling::Util::setTextToClipboard(pixColorCopyText());
         pixCopiedUntil_ = GetTickCount64() + (preSelectPick ? 100ull : 1500ull);
         refresh();
         // 只取色：几乎同时就退出，只留够看清「复制成功」的一瞬
@@ -2805,8 +2852,9 @@ void WinCap::onClosed()
 void WinCap::stopIfRecording()
 {
     if (!winCap || !winCap->capVideo) return;
-    // 正在录制：先停止编码线程，避免退出时线程与设备卡死
-    winCap->capVideo->stop();
+    // 正在录制：先停止编码线程，避免退出时线程与设备卡死。
+    // 退出时没有人会再点 ✓，这份半成品不保留（不落盘、不留临时文件）
+    winCap->capVideo->discard();
 }
 
 void WinCap::makeToolCap()
@@ -3355,7 +3403,10 @@ void WinCap::startVideoAnnotate(const std::wstring& toolId)
 	setForcedToolId(toolId);
 	if (!toolSub) return;
 	if (toolId == L"rect") toolSub->showRectTools();
-	else if (toolId == L"arrow") toolSub->showArrowTools();
+	else if (toolId == L"arrow") {
+		if (toolSub->isLine) toolSub->showLineTools();
+		else toolSub->showArrowTools();
+	}
 	else if (toolId == L"pen") toolSub->showPenTools();
 	else if (toolId == L"text") toolSub->showTextTools();
 	else if (toolId == L"number") toolSub->showNumberTools();
@@ -3407,7 +3458,10 @@ void WinCap::startLongAnnotate(const std::wstring& toolId)
 	setForcedToolId(toolId);
 	if (!toolSub) return;
 	if (toolId == L"rect") toolSub->showRectTools();
-	else if (toolId == L"arrow") toolSub->showArrowTools();
+	else if (toolId == L"arrow") {
+		if (toolSub->isLine) toolSub->showLineTools();
+		else toolSub->showArrowTools();
+	}
 	else if (toolId == L"pen") toolSub->showPenTools();
 	else if (toolId == L"text") toolSub->showTextTools();
 	else if (toolId == L"number") toolSub->showNumberTools();
@@ -3425,6 +3479,14 @@ void WinCap::clearLongAnnotTool()
 	if (toolSub) toolSub->hideTools();
 	// 取消工具后仍保留选中，方便继续改属性（点空白再清）
 	refresh();
+}
+
+// 录屏收工（✓ / 保存）时先隐藏屏幕上的选框层和覆盖窗：编码收尾要 join 采集线程，
+// 那几百毫秒里不该让用户还看着边框和遮罩。明确的会话销毁仍由 close() 完成。
+void WinCap::hideRecordOverlay()
+{
+    if (chrome_ && chrome_->hwnd) chrome_->hide();
+    hide();
 }
 
 void WinCap::setRecordPaused(bool on)
@@ -3617,6 +3679,11 @@ void WinCap::setMouseTransparent(bool transparent)
 {
     isMouseTransparent = transparent;
     if (!hwnd) return;
+    // 穿透 = 把键盘也交还给下层应用：ESC 不再由本软件全局持有，否则用户在别的
+    // 程序里按 Esc（关对话框/取消输入）会把正在进行的录屏关掉。
+    // 「开始/暂停录制」「鼠标穿透」这些临时全局键走低级钩子，不受这里影响。
+    if (transparent) CaptureEsc::release(hwnd);
+    else CaptureEsc::claim(hwnd);
     // 白板：按点穿透。WS_EX_TRANSPARENT 一旦加上，本窗口就收不到鼠标消息了，
     // 所以不能靠 onHitTest 实时判断（HTTRANSPARENT 也过不到别的进程），
     // 改成定时器轮询光标位置，只在"未覆盖处"临时给窗口加穿透样式。
@@ -4110,10 +4177,30 @@ void WinCap::copyToClipboard(bool keepOpen)
     if (!keepOpen) close();
 }
 
+// 录屏中（未穿透）按 Esc：先弹确认框。确认后走 closeByUser()（放弃本次录制），
+// 取消则继续录制。确认框本身已从屏幕捕获里排除（见 SettingUi::ConfirmDialog::ask）。
+void WinCap::confirmExitRecording()
+{
+    if (SettingUi::ConfirmDialog::isOpen()) return;
+    // 弹框期间把全局 ESC 让出来：再按一次 Esc 落到确认框上 = 取消，而不是反复弹框
+    CaptureEsc::release(hwnd);
+    SettingUi::ConfirmDialog::ask(this,
+        Lang::get(L"video.exitRecordingConfirm"),
+        [this](bool yes) {
+            if (yes) closeByUser();
+            else CaptureEsc::claim(hwnd);   // 取消：恢复 Esc 的"弹确认"职责
+        },
+        Lang::get(L"setting.confirm"), Lang::get(L"setting.cancel"));
+}
+
 // 用户主动退出截图（Esc / 关闭按钮）：开启「截图自动保存」时，把当前选区 + 标注静默落盘。
 // 只落盘、不进剪贴板；落盘成功就登记进历史。
+// 录屏阶段则是"放弃本次录制"：停掉编码并删掉临时文件（按 ✓ 存文件/剪贴板另走 ToolVideo）。
 void WinCap::closeByUser()
 {
+    if (stage == CapStage::Video && capVideo && capVideo->isRecording()) {
+        capVideo->discard();
+    }
     auto* s = Setting::get();
     if (s && s->getAutoSaveAfterCapture() && !demoMode && stage == CapStage::Adjust) {
         std::vector<BYTE> pixels;
