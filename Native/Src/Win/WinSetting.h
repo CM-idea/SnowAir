@@ -20,6 +20,9 @@ public:
 	// 打开设置中心并切到指定菜单页（0 全局热键 / 1 快捷翻译 / 2 系统按键 / 3 外观 / 4 功能 / 5 截图历史 / 6 插件 / 7 关于）
 	static void init(int pageIndex);
 	static void dispose();
+	// 全局快捷键用：已在该页且在前台就关掉，否则打开/切到该页并抢前台
+	static void toggle();
+	static void togglePage(int pageIndex);
 	// 按「停用截图历史」开关同步侧栏「截图历史」菜单显隐（设置里切换后立即生效）
 	static void applyHistoryMenuVisibility();
 private:
@@ -28,10 +31,10 @@ private:
 	void onCreated() override;
 	void onMenuItemClick(Ling::Button* menu);
 	void loadPage(int index);   // 按 index 构建对应的子页面 Node 到 content
-	// 导航点击专用：把切页投递到调度队列，等本次鼠标事件派发结束再销毁旧页。
-	// 同步切页会在 win->onMouseUp 派发中途析构外观页，事件订阅列表里仍留着它的回调 → 偶发卡死。
+	// 导航点击专用：投递到调度队列，等本次鼠标事件派发结束再销毁旧页
 	void scheduleLoadPage(int index);
 	void showPage(int index);   // 切到指定页（已打开时也生效）
+	void bringToForeground();   // 打开时切前台并获得焦点（不置顶）
 	LRESULT onHitTest(const POINT pos) override;
 private:
 	std::vector<Ling::Button*> menus;

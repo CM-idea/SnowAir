@@ -1467,10 +1467,10 @@ void Setting::runHotkeyAction(const std::wstring& id)
     if (id == L"capture_focused_window") { if (auto* app = App::get()) app->captureFocusedWindowSilent(); return; }
     if (id == L"fullscreen_canvas") { WinCap::beginDemoCanvas(); return; }
     if (id == L"record") { WinCap::beginRecordPick(); return; }
-    if (id == L"show_main") { WinSetting::init(0); return; }
+    if (id == L"show_main") { WinSetting::toggle(); return; }
     if (id == L"quick_pin") { quickPinFromContext(); return; }
     if (id == L"toggle_pins") { WinPin::toggleAllHidden(); return; }
-    if (id == L"open_history") { if (!getDisableCaptureHistory()) WinSetting::init(5); return; }
+    if (id == L"open_history") { if (!getDisableCaptureHistory()) WinSetting::togglePage(5); return; }
     if (id == L"open_screenshot_dir") {
         const auto dir = Util::outputDir();
         if (!dir.empty()) ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);

@@ -56,7 +56,7 @@ WinSetting::WinSetting() : Ling::WinBase()
 	// ★ 使用 WS_OVERLAPPEDWINDOW：启用系统原生标题栏
 	//   - 自带可拖动标题栏 + 最小/最大化/关闭 3 个系统按钮
 	//   - 关闭按钮悬停自动使用 Windows 默认红色背景，无需自绘
-	// 注意：不能用 WS_EX_LAYERED —— 分层窗口走重定向表面，DirectComposition 的内容不会显示。
+	// 分层窗口走重定向表面，DirectComposition 的内容不会显示，不能用 WS_EX_LAYERED
 	createNativeWindow(
 		NULL,
 		WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN
@@ -76,24 +76,45 @@ void WinSetting::init()
 
 void WinSetting::init(int pageIndex)
 {
-	if (!winSetting) {
+	if (!winSetting || !winSetting->hwnd || !IsWindow(winSetting->hwnd))
 		winSetting.reset(new WinSetting());
-	}
-	else if (winSetting->hwnd) {
-		// 已经开着：最小化就还原，并把它抬到最前、抢回焦点。否则用户点托盘「设置」时，
-		// 窗口可能还缩在任务栏里或压在别的窗口后面，看着像"点了没反应"。
-		HWND hwnd = winSetting->hwnd;
-		ShowWindow(hwnd, IsIconic(hwnd) ? SW_RESTORE : SW_SHOW);
-		SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-		if (!SetForegroundWindow(hwnd)) {
-			// 前台锁可能挡下 SetForegroundWindow：借"临时置顶再取消置顶"把它顶到前台
-			SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-			SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-			SetForegroundWindow(hwnd);
-		}
-		SetFocus(hwnd);
-	}
+	// 新建和已存在都抢一次前台焦点（不置顶）
+	winSetting->bringToForeground();
 	winSetting->showPage(pageIndex);
+}
+
+void WinSetting::toggle()
+{
+	togglePage(0);
+}
+
+void WinSetting::togglePage(int pageIndex)
+{
+	if (winSetting && winSetting->hwnd && IsWindow(winSetting->hwnd)
+		&& IsWindowVisible(winSetting->hwnd)
+		&& !IsIconic(winSetting->hwnd)
+		&& GetForegroundWindow() == winSetting->hwnd) {
+		// 已在前台：就在这一页 → 关闭；在别的页 → 切过去
+		if (winSetting->menuIndex == pageIndex) winSetting->close();
+		else winSetting->showPage(pageIndex);
+		return;
+	}
+	init(pageIndex);
+}
+
+// 打开设置时切到前台并获得焦点：最小化则还原；SetForegroundWindow 被前台锁拒绝时，
+// 借"临时置顶再取消置顶"把它顶到前台（只是拿焦点的兜底，不留置顶状态）。
+void WinSetting::bringToForeground()
+{
+	if (!hwnd) return;
+	ShowWindow(hwnd, IsIconic(hwnd) ? SW_RESTORE : SW_SHOW);
+	SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+	if (!SetForegroundWindow(hwnd)) {
+		SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+		SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+		SetForegroundWindow(hwnd);
+	}
+	SetFocus(hwnd);
 }
 
 // 侧栏「截图历史」菜单（索引 5）按开关显隐：关掉历史后设置里不再出现这一项
@@ -318,23 +339,17 @@ void WinSetting::onCreated()
 	// 加载默认页（热键页 index=0）
 	loadPage(menuIndex);
 
-	// 先算完布局再显示：createNativeWindow 在 onCreated 之后才调 layout()，
-	// 若此时就 show()，首帧所有节点坐标还在 (0,0)，会看到一串白色卡片/描边
-	// 在窗口左上角闪一下再归位。
+	// onCreated 早于 createNativeWindow 的 layout()，先手动排版，避免首帧节点都在 (0,0)
 	layout();
 
-	// 首次显示用 DWM cloak 隐身：窗口就在最终位置、正常参与合成，但屏幕上看不到。
-	// 等首帧内容真正合成上屏后再解除隐身 —— 如果直接显示，DirectComposition 的内容
-	// 会晚一拍，那一拍里只有 DWM 画的边框/投影，看起来就是"打开设置前闪一下"
-	// （进程内第一次建窗最容易出现）。
-	// 不用"先放屏幕外再移进来"：移动那一瞬间窗口只重绘边框，会闪出 1px 细线。
+	// cloak 期间窗口照常合成但不可见；首帧内容上屏后再解除，避免只露出边框/投影
 	BOOL cloak = TRUE;
 	DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &cloak, sizeof(cloak));
 	SetWindowPos(hwnd, nullptr, x, y, (int)w, (int)h,
 		SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
 	show();
-	UpdateWindow(hwnd);   // 触发首帧绘制
-	DwmFlush();           // 等 DWM 把这一帧合成完
+	UpdateWindow(hwnd);
+	DwmFlush();
 	cloak = FALSE;
 	DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &cloak, sizeof(cloak));
 }
@@ -409,15 +424,14 @@ void WinSetting::onMenuItemClick(Ling::Button* menuItem)
 	menuIndex = index;
 	ApplyMenuItemStyle(menuItem, true, gMenuData[menuIndex]);
 
-	// 加载对应子页面（延迟到调度队列：点击回调运行在 win->onMouseUp 派发中，
-	// 同步销毁旧页会把事件订阅列表里属于旧页的回调留成悬空引用）
+	// 点击回调运行在 win->onMouseUp 派发中，同步销毁旧页会留下悬空回调，故延后切页
 	scheduleLoadPage(menuIndex);
 }
 
 void WinSetting::scheduleLoadPage(int index)
 {
 	pendingPage = index;
-	if (pageQueued) return;   // 已排队：只更新目标页，避免连点堆积多次重建
+	if (pageQueued) return;   // 已排队：只更新目标页，避免连点堆积
 	pageQueued = true;
 	if (auto* app = Ling::App::get()) {
 		app->dq.TryEnqueue([]() {

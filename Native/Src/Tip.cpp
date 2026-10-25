@@ -19,10 +19,7 @@ Tip::Tip(Ling::WinBase* win) :win(win)
 		inited = true;
 	}
 	auto hIns = GetModuleHandle(nullptr);
-	// ★ 创建时就带 WS_EX_LAYERED：learnPadding() 要短暂显示一次来量内边距，
-	//   需要"全透明"。分层次样式若在创建后才追加，系统 tooltip 并不总会认这个 alpha，
-	//   结果是在桌面左上角 (0,0) 闪出一两个真实可见的白框（每进程只在首次量的时候发生）。
-	//   创建时就带上，第一帧起透明度就生效，探针永远不可见。
+	// 创建即带 WS_EX_LAYERED：learnPadding() 的测量探针靠 alpha 0 隐身，运行期再加分层样式不生效
 	tipHwnd = CreateWindowEx(WS_EX_TOPMOST | WS_EX_LAYERED, TOOLTIPS_CLASS, nullptr,
 		WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
 		CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, win->hwnd, nullptr, hIns, nullptr);
@@ -148,9 +145,7 @@ SIZE Tip::measureText(const std::wstring& str)
 }
 
 // 提示显示出来之前问不到气泡尺寸（TTM_GETBUBBLESIZE 在那之前会在 comctl32 里空指针崩），
-// 而先显示再校正位置会被系统的淡入动画拘成一次看得见的滑动。
-// 所以这里偷偷显示一次：整窗 alpha 0 全透明，量完内边距立刻收掉，屏上什么也看不见。
-// 分层样式由构造函数在创建时就带上（见 Tip::Tip），这里只改 alpha。
+// 量内边距要短暂显示一次，全程 alpha 0（分层样式见构造函数），量完立刻收掉
 void Tip::learnPadding()
 {
 	if (tipPadding.cx >= 0) return;

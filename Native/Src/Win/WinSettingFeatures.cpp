@@ -755,9 +755,8 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 		if (engines[i] == s->getOcrEngine()) { cur = i; break; }
 	}
 	{
-		// 两栏布局不用 grid2Cells：它按 flex 分配宽度，落单的那一项会被拉宽（看着像单栏）。
-		// 这里用固定 50% 的列容器：每列宽 = 半栏 − 半个列距，与双栏时完全一致；
-		// 只有一项时也保持半宽，且提前一行时（系统 OCR）自动并排。
+		// 固定 50% 列容器：每列 = 半栏 − 半个列距，落单时也保持半宽
+		// （grid2Cells 按 flex 分配，单项会被拉满整行）
 		auto makeRow = [p]() {
 			auto* row = p->makeChild<Ling::Node>();
 			row->setFlexDirection(Ling::FlexDirection::Row);
