@@ -1,5 +1,10 @@
 #include "pch.h"
 #include <dwmapi.h>
+
+// DWM 隐身开关（Win8+）：属性值为 TRUE 时窗口照常合成但不显示到屏幕上。
+#ifndef DWMWA_CLOAK
+#define DWMWA_CLOAK 13
+#endif
 #include <include/D2D.h>
 #include "../App.h"
 #include "../Lang.h"
@@ -51,6 +56,7 @@ WinSetting::WinSetting() : Ling::WinBase()
 	// ★ 使用 WS_OVERLAPPEDWINDOW：启用系统原生标题栏
 	//   - 自带可拖动标题栏 + 最小/最大化/关闭 3 个系统按钮
 	//   - 关闭按钮悬停自动使用 Windows 默认红色背景，无需自绘
+	// 注意：不能用 WS_EX_LAYERED —— 分层窗口走重定向表面，DirectComposition 的内容不会显示。
 	createNativeWindow(
 		NULL,
 		WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN
@@ -312,7 +318,25 @@ void WinSetting::onCreated()
 	// 加载默认页（热键页 index=0）
 	loadPage(menuIndex);
 
+	// 先算完布局再显示：createNativeWindow 在 onCreated 之后才调 layout()，
+	// 若此时就 show()，首帧所有节点坐标还在 (0,0)，会看到一串白色卡片/描边
+	// 在窗口左上角闪一下再归位。
+	layout();
+
+	// 首次显示用 DWM cloak 隐身：窗口就在最终位置、正常参与合成，但屏幕上看不到。
+	// 等首帧内容真正合成上屏后再解除隐身 —— 如果直接显示，DirectComposition 的内容
+	// 会晚一拍，那一拍里只有 DWM 画的边框/投影，看起来就是"打开设置前闪一下"
+	// （进程内第一次建窗最容易出现）。
+	// 不用"先放屏幕外再移进来"：移动那一瞬间窗口只重绘边框，会闪出 1px 细线。
+	BOOL cloak = TRUE;
+	DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &cloak, sizeof(cloak));
+	SetWindowPos(hwnd, nullptr, x, y, (int)w, (int)h,
+		SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
 	show();
+	UpdateWindow(hwnd);   // 触发首帧绘制
+	DwmFlush();           // 等 DWM 把这一帧合成完
+	cloak = FALSE;
+	DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &cloak, sizeof(cloak));
 }
 
 // 8 菜单：按键顺序 Hotkeys → Quick → SystemKeys → Appearance → Features → History → Plugins → About
