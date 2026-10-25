@@ -755,8 +755,34 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 		if (engines[i] == s->getOcrEngine()) { cur = i; break; }
 	}
 	{
-		auto* g = SettingUi::grid2(p);
-		SettingUi::selectRow(g, Lang::get(L"setting.fnOcrModel"), labels, cur,
+		// 两栏布局不用 grid2Cells：它按 flex 分配宽度，落单的那一项会被拉宽（看着像单栏）。
+		// 这里用固定 50% 的列容器：每列宽 = 半栏 − 半个列距，与双栏时完全一致；
+		// 只有一项时也保持半宽，且提前一行时（系统 OCR）自动并排。
+		auto makeRow = [p]() {
+			auto* row = p->makeChild<Ling::Node>();
+			row->setFlexDirection(Ling::FlexDirection::Row);
+			row->setWidthPercent(100.f);
+			return row;
+		};
+		auto makeCol = [](Ling::Node* row, bool right) {
+			auto* col = row->makeChild<Ling::Node>();
+			col->setWidthPercent(50.f);
+			col->setFlexDirection(Ling::FlexDirection::Column);
+			if (right) col->setPaddingLeft(SettingTheme::optionGap * 0.5f);
+			else col->setPaddingRight(SettingTheme::optionGap * 0.5f);
+			return col;
+		};
+		auto addResultRow = [s](Ling::Node* parent) {
+			SettingUi::selectRow(parent, Lang::get(L"setting.fnOcrResultMode"),
+				{ Lang::get(L"setting.fnOcrResultOverlay"), Lang::get(L"setting.fnOcrResultReflow") },
+				std::clamp(s->getOcrResultMode(), 0, 1),
+				[](int i, const std::wstring&) { Setting::get()->setOcrResultMode(i); }, true);
+		};
+
+		const bool tierShown = (s->getOcrEngine() == 0 && !installed.empty());
+
+		auto* row1 = makeRow();
+		SettingUi::selectRow(makeCol(row1, false), Lang::get(L"setting.fnOcrModel"), labels, cur,
 			[this, engines](int i, const std::wstring&) {
 				if (i < 0 || i >= (int)engines.size()) return;
 				const bool changed = Setting::get()->getOcrEngine() != engines[i];
@@ -766,7 +792,7 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 			}, true);
 
 		// 模型规格：只有选中 PP-OCRv6 且装了模型才出现；系统 OCR 不需要模型，不显示这一行
-		if (s->getOcrEngine() == 0 && !installed.empty()) {
+		if (tierShown) {
 			std::vector<std::wstring> tiers;
 			std::vector<int> tierIds;
 			for (auto v : installed) {
@@ -777,7 +803,7 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 			for (int i = 0; i < (int)tierIds.size(); ++i)
 				if (tierIds[i] == s->getOcrPackVariant()) { curTier = i; break; }
 			// 「?」放在标题「模型规格」右侧（optionRow 的 helpText 就是干这个的）
-			auto tierRow = SettingUi::optionRow(g, Lang::get(L"setting.fnOcrTier"), L"", true,
+			auto tierRow = SettingUi::optionRow(makeCol(row1, true), Lang::get(L"setting.fnOcrTier"), L"", true,
 				SettingTheme::ctrlH, Lang::get(L"setting.plugOcrTierTip"));
 			auto* ddl = SettingUi::selectDdl(tierRow.ctrlBox, tiers, curTier,
 				[tierIds](int i, const std::wstring&) {
@@ -787,13 +813,14 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 				});
 			ddl->setWidth(SettingTheme::dropdownWidth);
 			ddl->setFlexShrink(0.f);
+
+			// 识别结果版式：有「模型规格」时它自己占第二行左列（半栏）
+			addResultRow(makeCol(makeRow(), false));
 		}
-		// 识别结果版式：原位覆盖（逐框贴回原位置）/ 文本重排（整段可编辑文本框）
-		SettingUi::selectRow(g, Lang::get(L"setting.fnOcrResultMode"),
-			{ Lang::get(L"setting.fnOcrResultOverlay"), Lang::get(L"setting.fnOcrResultReflow") },
-			std::clamp(s->getOcrResultMode(), 0, 1),
-			[](int i, const std::wstring&) { Setting::get()->setOcrResultMode(i); }, true);
-		SettingUi::grid2Cells(g);
+		else {
+			// 系统 OCR：没有模型规格，识别结果版式直接并到第一行右列
+			addResultRow(makeCol(row1, true));
+		}
 	}
 }
 

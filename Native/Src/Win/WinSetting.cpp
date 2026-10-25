@@ -385,8 +385,28 @@ void WinSetting::onMenuItemClick(Ling::Button* menuItem)
 	menuIndex = index;
 	ApplyMenuItemStyle(menuItem, true, gMenuData[menuIndex]);
 
-	// 加载对应子页面
-	loadPage(menuIndex);
+	// 加载对应子页面（延迟到调度队列：点击回调运行在 win->onMouseUp 派发中，
+	// 同步销毁旧页会把事件订阅列表里属于旧页的回调留成悬空引用）
+	scheduleLoadPage(menuIndex);
+}
+
+void WinSetting::scheduleLoadPage(int index)
+{
+	pendingPage = index;
+	if (pageQueued) return;   // 已排队：只更新目标页，避免连点堆积多次重建
+	pageQueued = true;
+	if (auto* app = Ling::App::get()) {
+		app->dq.TryEnqueue([]() {
+			if (!winSetting) return;
+			winSetting->pageQueued = false;
+			const int idx = winSetting->pendingPage;
+			winSetting->pendingPage = -1;
+			if (idx >= 0) winSetting->loadPage(idx);
+		});
+		return;
+	}
+	pageQueued = false;   // 无调度队列时兜底：同步切页
+	loadPage(index);
 }
 
 // 切到指定菜单页（托盘菜单「快捷翻译 / 截图历史 / 设置」用）。已打开时也生效；

@@ -28,11 +28,16 @@ private:
 	void onCreated() override;
 	void onMenuItemClick(Ling::Button* menu);
 	void loadPage(int index);   // 按 index 构建对应的子页面 Node 到 content
+	// 导航点击专用：把切页投递到调度队列，等本次鼠标事件派发结束再销毁旧页。
+	// 同步切页会在 win->onMouseUp 派发中途析构外观页，事件订阅列表里仍留着它的回调 → 偶发卡死。
+	void scheduleLoadPage(int index);
 	void showPage(int index);   // 切到指定页（已打开时也生效）
 	LRESULT onHitTest(const POINT pos) override;
 private:
 	std::vector<Ling::Button*> menus;
 	int menuIndex{ 0 };
+	int pendingPage{ -1 };       // 待切换的页（scheduleLoadPage 排队用）
+	bool pageQueued{ false };    // 是否已有一次切页在队列中
 	Ling::Node* content{ nullptr };            // 子页挂接点（contentScroll->content 的唯一子节点）
 	Ling::ScrollerBox* contentScroll{ nullptr }; // 卡片内层整页滚动容器（contentScroll->content 负责 padding）
 	Ling::Node* cardNode{ nullptr };           // 白色内容卡片（视口容器）；快捷翻译页直接挂这
