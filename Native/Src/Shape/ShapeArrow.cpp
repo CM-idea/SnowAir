@@ -262,6 +262,31 @@ int ShapeArrow::hoverFromHit(const ArrowHitInfo& h) const
 	return -1;
 }
 
+std::vector<float> ShapeArrow::editSnapshot() const
+{
+	std::vector<float> s{ strokeWidth, (float)poly.pts.size() };
+	s.reserve(2 + poly.pts.size() * 2);
+	for (const auto& p : poly.pts) {
+		s.push_back(p.x);
+		s.push_back(p.y);
+	}
+	return s;
+}
+
+void ShapeArrow::applyEditSnapshot(const std::vector<float>& s)
+{
+	if (s.size() < 2) return;
+	strokeWidth = s[0];
+	const int n = std::max(0, (int)s[1]);
+	poly.pts.clear();
+	for (int i = 0; i < n; ++i) {
+		const size_t base = 2 + (size_t)i * 2;
+		if (base + 1 >= s.size()) break;
+		poly.pts.push_back({ s[base], s[base + 1] });
+	}
+	rebuild();
+}
+
 void ShapeArrow::mouseDrag(const float x, const float y)
 {
 	if (poly.drag == ArrowPolyState::DragKind::None) return;

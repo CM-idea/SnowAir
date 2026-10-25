@@ -23,6 +23,8 @@ public:
 	float linkRotation() const override { return angle; }
 	bool linkEdgePoint(const float localAngle, D2D1_POINT_2F& out) const override;
 	float stylePrimarySize() const override { return strokeWidth; }
+	std::vector<float> editSnapshot() const override;
+	void applyEditSnapshot(const std::vector<float>& state) override;
 private:
 	void updateDraggers();
 	void syncEllipseFromRect();

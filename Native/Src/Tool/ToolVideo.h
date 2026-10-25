@@ -41,6 +41,8 @@ private:
 	void setPaused(bool on);
 	void saveFile();
 	void finishRecord(bool toClipboard);
+	// 录屏入历史：历史只记视频路径，封面取收工这一刻的选区画面
+	void addRecordHistory(const std::wstring& path, int durationSec);
 	void updateTimerText();
 	void applyToggleStyle(Ling::Button* btn, bool selected);
 	void applyAnnotSelect(const std::wstring& id);

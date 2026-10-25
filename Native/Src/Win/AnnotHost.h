@@ -30,7 +30,8 @@ public:
 	void refreshFiltersAboveThrottled(ShapeBase* changed);
 	void syncViewportFilters();
 	void setSizePreviewHold(bool hold);
-	void pulseSizePreview();
+	// shapePreview：预览形状本身（多边形边数、星形角数、圆角），否则预览笔迹粗细
+	void pulseSizePreview(bool shapePreview = false);
 	bool hasSelectedAnnot() const;
 	// 打开标注工具且不取消当前选中（截图 / 钉图 / 长图 / 录屏）
 	virtual void activateAnnotTool(const std::wstring& toolId) {}
@@ -140,6 +141,11 @@ protected:
 	bool prevPressCreatedShape{ false };
 	bool sizePreviewHold{ false };
 	ULONGLONG sizePreviewPulseUntil{ 0 };
+	// 最近一次调整的是形状参数（边数/角数/圆角）还是笔迹粗细
+	bool sizePreviewShape{ false };
+	// 拖动已有标注：记录编辑前的几何，抬手时补一条撤销步骤
+	ShapeBase* editStepTarget{ nullptr };
+	std::vector<float> editStepBefore;
 	bool numberCursorFollow{ false }; // 序号工具跟手预览（系统光标隐藏时）
 	// 文本工具落在线段中间：显示的空白位（图像坐标）
 	bool textMidHintActive{ false };

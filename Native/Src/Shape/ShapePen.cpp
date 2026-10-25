@@ -39,11 +39,10 @@ ShapePen::ShapePen(AnnotHost* win) : ShapeBase(win),
 	auto d2d = Ling::D2D::get();
 	d2d->deviceContext->CreateSolidColorBrush(toolSub->getSelectedColor(), brush.GetAddressOf());
 	if (isFade) {
-		// 渐隐画笔：自带平滑/补点与逐点寿命，不走软笔/虚线
+		// 渐隐画笔：自带平滑与逐点寿命，不走软笔/虚线
 		isSoft = false;
 		isDash = false;
 		laser.width = std::max(1.f, strokeWidth);
-		laser.unit = win->dpi;
 	}
 	ensureStrokeStyle();
 }
@@ -119,19 +118,12 @@ void ShapePen::rebuildPath()
 	pathFilled = (path != nullptr);
 }
 
-void ShapePen::rebuildLaserPath(int64_t now)
-{
-	laserPath = LaserStroke::buildGeometry(Ling::D2D::get()->d2dFactory.Get(), laser, now);
-}
-
 void ShapePen::appendSample(float x, float y, bool force)
 {
-	// 渐隐画笔：点带时间戳按寿命收细，平滑/补点在 LaserStroke 内做
+	// 渐隐画笔：点带时间戳按寿命收细，平滑在 LaserStroke 内做
 	if (isFade) {
 		if (force) return; // 抬笔不再补点
-		const int64_t now = nowMs();
-		LaserStroke::addPoint(laser, x, y, now);
-		rebuildLaserPath(now);
+		LaserStroke::addPoint(laser, x, y, nowMs());
 		return;
 	}
 
@@ -293,12 +285,12 @@ void ShapePen::updateDraggers()
 
 void ShapePen::paint(ID2D1DeviceContext* ctx)
 {
-	// 渐隐画笔：整段轮廓已经按点龄收细，直接填充
+	// 渐隐画笔：每帧按当前时刻整条填充，粗细已经随点龄收细
 	if (isFade) {
 		if (fadeDone) return;
-		const int64_t now = nowMs();
-		if (!laserPath) rebuildLaserPath(now);
-		if (laserPath) withRotation(ctx, [&] { ctx->FillGeometry(laserPath.Get(), brush.Get()); });
+		withRotation(ctx, [&] {
+			LaserStroke::paint(ctx, brush.Get(), laser, nowMs());
+		});
 		return;
 	}
 	if (pts.empty() || fadeDone) return;
@@ -338,10 +330,7 @@ void ShapePen::mouseDown(const float x, const float y)
 			// 渐隐画笔：开一条新轨迹，并让宿主定时器开始按寿命刷新
 			laser = {};
 			laser.width = std::max(1.f, strokeWidth);
-			laser.unit = win->dpi;
-			const int64_t now = nowMs();
-			LaserStroke::addPoint(laser, x, y, now);
-			rebuildLaserPath(now);
+			LaserStroke::addPoint(laser, x, y, nowMs());
 			win->requestFadeTick();
 			hoverDraggerIndex = 0;
 			return;
@@ -374,6 +363,39 @@ void ShapePen::mouseDown(const float x, const float y)
 	else if (hoverDraggerIndex == 2) { pressX = rect.left; pressY = rect.bottom; }
 	else if (hoverDraggerIndex == 4) { pressX = rect.left; pressY = rect.top; }
 	else if (hoverDraggerIndex == 6) { pressX = rect.right; pressY = rect.top; }
+}
+
+std::vector<float> ShapePen::editSnapshot() const
+{
+	if (isFade) return {};   // 渐隐画笔不参与撤销
+	std::vector<float> s{ strokeWidth, boxAngle, rect.left, rect.top, rect.right, rect.bottom,
+		(float)pts.size() };
+	s.reserve(7 + pts.size() * 3);
+	for (size_t i = 0; i < pts.size(); ++i) {
+		s.push_back(pts[i].x);
+		s.push_back(pts[i].y);
+		s.push_back((float)(i < times.size() ? times[i] : 0));
+	}
+	return s;
+}
+
+void ShapePen::applyEditSnapshot(const std::vector<float>& s)
+{
+	if (s.size() < 7) return;
+	strokeWidth = s[0];
+	boxAngle = s[1];
+	rect = D2D1::RectF(s[2], s[3], s[4], s[5]);
+	const int n = std::max(0, (int)s[6]);
+	pts.clear();
+	times.clear();
+	for (int i = 0; i < n; ++i) {
+		const size_t base = 7 + (size_t)i * 3;
+		if (base + 2 >= s.size()) break;
+		pts.push_back({ s[base], s[base + 1] });
+		times.push_back((int64_t)s[base + 2]);
+	}
+	rebuildPath();
+	updateDraggers();
 }
 
 void ShapePen::mouseDrag(const float x, const float y)
@@ -429,11 +451,8 @@ void ShapePen::mouseUp(const float x, const float y)
 {
 	if (!settled) {
 		if (isFade) {
-			// 抬笔：稳定尾部、收起笔头圆，之后交给定时器一路收细到移除
+			// 抬笔后由定时器按寿命收细并移除
 			settled = true;
-			const int64_t now = nowMs();
-			LaserStroke::closeTrail(laser, now);
-			rebuildLaserPath(now);
 			win->requestFadeTick();
 			return;
 		}
@@ -460,18 +479,10 @@ bool ShapePen::needsFadeTick() const
 bool ShapePen::tickFade()
 {
 	if (!isFade) return false;
-	if (!settled) {
-		// 绘制中不移除；只按当前时刻重建轮廓
-		rebuildLaserPath(nowMs());
-		return false;
-	}
+	if (!settled) return false; // 落笔中不移除
 	const int64_t now = nowMs();
-	if (LaserStroke::stillVisible(laser, now)) {
-		rebuildLaserPath(now);
-		return false;
-	}
+	if (LaserStroke::visible(laser, now)) return false;
 	fadeDone = true;
-	laserPath.Reset();
 	return true;
 }
 
@@ -519,7 +530,6 @@ void ShapePen::mouseWheel(const float x, const float y, const short delta)
 	strokeWidth = applied;
 	if (isFade) {
 		laser.width = std::max(1.f, strokeWidth);
-		rebuildLaserPath(nowMs());
 		win->refresh();
 		return;
 	}

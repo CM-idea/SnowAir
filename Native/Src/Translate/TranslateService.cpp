@@ -1,12 +1,26 @@
 #include "pch.h"
 #include "TranslateService.h"
 #include "TranslateLangs.h"
+#include "TranslateModelManager.h"
 #include "FreeWebTranslate.h"
 #include "BergamotEngine.h"
 #include "../Setting.h"
 #include <thread>
 #include <algorithm>
 #include <future>
+
+namespace {
+// 这台机器上离线引擎能不能翻这个方向：所需的语言对（可能是 en 枢轴的两段）都装齐了才算
+bool offlineCanServe(const std::wstring& sourceLang, const std::wstring& targetLang)
+{
+	const auto pairs = TranslateLangs::pairIds(sourceLang, targetLang);
+	if (pairs.empty()) return false;
+	auto& mgr = TranslateModelManager::instance();
+	for (const auto& pid : pairs)
+		if (!mgr.isBranchInstalled(pid)) return false;
+	return true;
+}
+}
 
 TranslateService& TranslateService::instance()
 {
@@ -33,20 +47,23 @@ std::wstring TranslateService::resolveProvider(const std::wstring& preferred)
 // 最后才用离线引擎兜底（装了离线包才有意义）。
 // Google **不参与自动兜底**：国内直连几乎必然超时，一次就要等满 20s，
 // 会把整条链（以及截图翻译的每一行）拖死；想用 Google 就在设置里明确选它。
-std::vector<std::wstring> TranslateService::providerChain(const std::wstring& preferred)
+std::vector<std::wstring> TranslateService::providerChain(const std::wstring& preferred,
+	const std::wstring& sourceLang, const std::wstring& targetLang)
 {
 	std::vector<std::wstring> chain;
 	const std::wstring first = resolveProvider(preferred);
-	// 用户明确选了离线：只走离线，不再用在线服务兜底。
-	// 在线接口不可达时单次就要等满 20s 超时，链上三个都走一遍、再乘上截图里的每一行，
-	// 点一次翻译能卡上几十秒；而且用户选离线本就是为了不走网络（隐私/断网）。
-	if (_wcsicmp(first.c_str(), TranslateProvider::Offline) == 0)
+	const bool offlineFirst = _wcsicmp(first.c_str(), TranslateProvider::Offline) == 0;
+	// 用户明确选了离线：方向装齐了就只走离线（隐私/断网，也不用为每行等在线超时）。
+	// 这个方向的语言包没装时不把离线放在链首 —— 它必然失败（"缺少该方向（ja-en）"），
+	// 直接改走在线，避免"OCR 认出了日文却翻不出结果"；离线仍留在链尾，
+	// 全挂时由它给出"去插件集成下载"的可操作错误。
+	if (offlineFirst && offlineCanServe(sourceLang, targetLang))
 		return { first };
 	auto push = [&chain](const std::wstring& p) {
 		for (auto& c : chain) if (_wcsicmp(c.c_str(), p.c_str()) == 0) return;
 		chain.push_back(p);
 	};
-	push(first);        // 用户设置的翻译服务（选 Google 时只在这一步进链）
+	if (!offlineFirst) push(first);   // 用户设置的翻译服务（选 Google 时只在这一步进链）
 	push(TranslateProvider::Microsoft);
 	push(TranslateProvider::Youdao);
 	push(TranslateProvider::Baidu);
@@ -125,7 +142,7 @@ void TranslateService::translateSegments(const std::vector<std::wstring>& segmen
 		TranslateRequest req = base;
 		TranslateLangs::resolveDirection(req.sourceLang, req.targetLang, joined);
 
-		auto chain = providerChain(base.provider);
+		auto chain = providerChain(base.provider, req.sourceLang, req.targetLang);
 
 		TranslateResult r;
 		r.ok = true;
@@ -177,6 +194,12 @@ void TranslateService::translateSegments(const std::vector<std::wstring>& segmen
 						if (lastErr.empty()) lastErr = tr.error.empty() ? L"未知错误" : tr.error;
 					}
 				}
+			}
+			// 每段译文在结果里只占一行：调用方（截图翻译）按 '\n' 切分后与识别框**一一对应**。
+			// 译文里若自带换行（离线引擎长句回排、服务端按句断行），切出来的行数就会比识别框多，
+			// 后面的译文全被塞进错误的框里 —— 表现为"有些框字很小、位置也不对"。
+			for (auto& c : line) {
+				if (c == L'\r' || c == L'\n') c = L' ';
 			}
 			if (i) r.text += L'\n';
 			r.text += line;

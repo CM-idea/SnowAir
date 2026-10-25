@@ -74,6 +74,7 @@ private:
 	Ling::Node* trBadgeRow{ nullptr };
 	Ling::Label* trProgress{ nullptr };
 	int trPackIdx{ 0 };            // 离线翻译当前选中的语言包下标
+	int ocrVariantIdx{ 0 };        // 离线文字识别当前选中的模型档位（0=轻量 1=标准）
 	std::vector<CardSlot> cards;   // [0]=OCR [1]=翻译 [2]=果核看图
 	winrt::event_token hoverTok{};
 	winrt::event_token timerTok{};

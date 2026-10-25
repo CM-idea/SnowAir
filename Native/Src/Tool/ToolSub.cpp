@@ -48,6 +48,13 @@ namespace {
 		return nullptr;
 	}
 
+	// 初始属性（外观 > 工具栏外观 > 初始属性）里存过的整型项；没存过返回 def
+	int designInt(const wchar_t* tool, const wchar_t* key, int def)
+	{
+		auto* s = Setting::get();
+		return s ? s->getToolDesignInt(tool, key, def) : def;
+	}
+
 	// 线迹标注类工具的默认宽度由「其他外观 → 标注默认值」决定（默认 4）
 	float strokeDefaultWidth(const std::wstring& tool, float fallback)
 	{
@@ -180,6 +187,11 @@ void ToolSub::beginTool(const std::wstring& id)
 	sliderMax = cfg->max;
 	// 会话内记忆；新截图会话 ToolSub 重建后回到默认
 	sliderVal = rememberedSlider(id, strokeDefaultWidth(id, cfg->def), cfg->min, cfg->max);
+	// 初始属性里的默认数值（粗细 / 字号 / 大小）优先于会话记忆
+	{
+		const int dw = designInt(id.c_str(), L"width", -1);
+		if (dw >= 0) sliderVal = std::clamp((float)dw, sliderMin, sliderMax);
+	}
 	auto cit = colorIndexMem.find(id);
 	selectColorIndex = (cit != colorIndexMem.end() && cit->second < colors.size()) ? cit->second : 0;
 	colors[customColorIndex] = sessionCustomColor;
@@ -201,6 +213,18 @@ void ToolSub::showRectTools()
 {
 	if (curToolId == L"rect" && hasTools) return;
 	beginTool(L"rect");
+	// 初始属性：默认形态（0 矩形 / 1 椭圆 / 2 多边形 / 3 星形）+ 边数 / 角数
+	{
+		const int form = designInt(L"rect", L"form", -1);
+		if (form >= 0) {
+			isEllipse = (form == 1);
+			rectKind = (form == 2) ? PolygonShape : (form == 3) ? StarShape : RectShape;
+		}
+		const int sides = designInt(L"rect", L"sides", -1);
+		if (sides >= 0) polygonSides = std::clamp(sides, 3, 20);
+		const int pts = designInt(L"rect", L"points", -1);
+		if (pts >= 0) starPoints = std::clamp(pts, 3, 20);
+	}
 	if (isRectFill && isRectDash) isRectDash = false;
 	initSize(6, true);   // 椭圆 | 多边形 | 星形 | 填充 | 虚线 | 圆角
 	ellipseBtn = makeToggleBtn(Icon::Ellipse, &isEllipse, L"tool.ellipse", L"ellipse");
@@ -294,7 +318,7 @@ void ToolSub::setShapePreviewHold(bool hold)
 
 void ToolSub::pulseShapePreview()
 {
-	if (win) win->pulseSizePreview();
+	if (win) win->pulseSizePreview(true);
 }
 
 void ToolSub::showArrowTools()
@@ -303,8 +327,19 @@ void ToolSub::showArrowTools()
 	isArrowFill = true;
 	isLine = false;   // 箭头属性栏只做箭头；线段独立成「标注」
 	if (arrowHead < ArrowDefault || arrowHead > ArrowFun) arrowHead = ArrowDefault;
+	// 初始属性（外观 > 工具栏外观）：存过默认形态就优先用它
+	auto* designSetting = Setting::get();
+	const bool arrowDesign = designSetting && designSetting->hasToolDesign(L"arrow");
+	if (arrowDesign)
+		arrowHead = std::clamp(designSetting->getToolDesignInt(L"arrow", L"head", arrowHead),
+			(int)ArrowDefault, (int)ArrowFun);
 	// 各种箭头共用 arrow 滑条，不因切子样式改量程
 	loadStrokeSlider(L"arrow");
+	// 初始属性里的默认粗细（没存过就沿用滑条记忆 / 全局默认）
+	if (arrowDesign) {
+		const int dw = designSetting->getToolDesignInt(L"arrow", L"width", -1);
+		if (dw > 0) sliderVal = std::clamp((float)dw, sliderMin, sliderMax);
+	}
 	initSize(6, true); // 4 个箭头样式 + 虚线 + 圆头，再加色块与滑条
 	// 顺序：大箭头 | 趣味箭头 | 双箭头 | 标注箭头 | 虚线 | 圆头
 	makeArrowHeadBtn(Icon::ArrowBig, ArrowBig, L"tool.arrowBig");
@@ -330,6 +365,19 @@ void ToolSub::applyPenMarkerState(bool on)
 		isPenDash = false;
 		if (softBtn) applyToggleStyle(softBtn, false);
 		if (dashBtn) applyToggleStyle(dashBtn, false);
+		// 初始属性：荧光笔自己的默认不透明度 / 默认粗细
+		const int op = designInt(L"marker", L"opacity", -1);
+		if (op >= 0) penMarkerOpacity = std::clamp(op, 10, 100);
+		const int mw = designInt(L"marker", L"width", -1);
+		if (mw >= 0) {
+			sliderVal = std::clamp((float)mw, sliderMin, sliderMax);
+			updateSliderValueLabel();
+			if (slider) {
+				suppressSliderStyleNotify = true;
+				slider->setValue(sliderVal);
+				suppressSliderStyleNotify = false;
+			}
+		}
 	}
 	else {
 		closeNestedPanel();
@@ -343,6 +391,13 @@ void ToolSub::showLineTools()
 	isArrowFill = true;
 	isLine = true;
 	loadStrokeSlider(L"arrow");
+	// 初始属性：标注自己的默认形态（0 直线 / 1 波浪 / 2 气泡 / 3 角度 / 4 尺寸）与默认粗细
+	{
+		const int form = designInt(L"line", L"form", -1);
+		if (form >= LineStraight && form <= LineDimension) lineKind = form;
+		const int lw = designInt(L"line", L"width", -1);
+		if (lw >= 0) sliderVal = std::clamp((float)lw, sliderMin, sliderMax);
+	}
 	initSize(6, true);
 	lineKindBtns.clear();
 	bubbleKindBtn = nullptr;
@@ -400,6 +455,20 @@ void ToolSub::setPenSlotMode(const std::wstring& slotId)
 void ToolSub::showPenTools()
 {
 	beginTool(L"pen");
+	// 初始属性：0 普通 / 1 软笔 / 2 虚线 / 3 荧光笔（渐隐画笔不参与）
+	if (!isPenFade) {
+		const int form = designInt(L"pen", L"form", -1);
+		if (form == 3) {
+			isPenMarker = true;
+			isPenSoft = false;
+			isPenDash = false;
+		}
+		else if (!isPenMarker) {
+			if (form == 0) { isPenSoft = false; isPenDash = false; }
+			else if (form == 1) { isPenSoft = true; isPenDash = false; }
+			else if (form == 2) { isPenSoft = false; isPenDash = true; }
+		}
+	}
 	if (isPenSoft && isPenDash) isPenDash = false;
 	if (isPenFade && (isPenSoft || isPenDash)) {
 		isPenSoft = false;
@@ -472,6 +541,11 @@ void ToolSub::showNumberTools()
 {
 	beginTool(L"number");
 	isNumberFill = true;
+	// 初始属性：默认序号类型（0 数字 / 1 字母 / 2 Emoji）
+	{
+		const int form = designInt(L"number", L"form", -1);
+		if (form >= NumberDigit && form <= NumberEmoji) numberStyle = form;
+	}
 	if (numberStyle < NumberDigit || numberStyle > NumberEmoji) numberStyle = NumberDigit;
 	if (serialEmoji.empty()) serialEmoji = SerialEmoji::Default;
 
@@ -497,6 +571,14 @@ void ToolSub::showNumberTools()
 void ToolSub::showTextTools()
 {
 	beginTool(L"text");
+	// 初始属性：0 常规 / 1 粗体 / 2 斜体 / 3 粗斜体
+	{
+		const int form = designInt(L"text", L"form", -1);
+		if (form >= 0) {
+			isTextBold = (form & 1) != 0;
+			isTextItalic = (form & 2) != 0;
+		}
+	}
 	initSize(2, true);
 	makeToggleBtn(Icon::Bold, &isTextBold, L"tool.bold", L"bold");
 	makeToggleBtn(Icon::Italic, &isTextItalic, L"tool.italic", L"italic");
@@ -507,6 +589,11 @@ void ToolSub::showTextTools()
 void ToolSub::showMosaicTools()
 {
 	beginTool(L"mosaic");
+	// 初始属性：0 马赛克 / 1 模糊
+	{
+		const int form = designInt(L"mosaic", L"form", -1);
+		if (form >= 0) isMosaicBlur = (form == 1);
+	}
 	initSize(1, false, true);
 	// 模糊：复合图标 = 模糊2 全不透明 + 模糊1 @25%
 	overlayBtn = makeOverlayToggleBtn(Icon::Blur2, Icon::Blur, 0.25f, &isMosaicBlur, L"tool.blur");
@@ -516,6 +603,11 @@ void ToolSub::showMosaicTools()
 void ToolSub::showPatinaTools()
 {
 	beginTool(L"patina");
+	// 初始属性：按屏幕放置方案（0 右下 / 1 右下角 / 2 中下）
+	{
+		const int form = designInt(L"patina", L"form", -1);
+		if (form >= 0) patinaPlan = std::clamp(form, 0, 2);
+	}
 	if (patinaPlan < 0 || patinaPlan > 2) patinaPlan = 0;
 	if (patinaWmSize < 8) patinaWmSize = 8;
 	initSize(2, false, true);
@@ -537,6 +629,11 @@ void ToolSub::showPatinaTools()
 void ToolSub::showWatermarkTools()
 {
 	beginTool(L"watermark");
+	// 初始属性：默认倾斜角度
+	{
+		const int angle = designInt(L"watermark", L"angle", -1);
+		if (angle >= 0) watermarkAngle = (float)std::clamp(angle, 0, 360);
+	}
 	constexpr float wmInputMinW{ 96.f };
 	constexpr float wmInputMaxW{ 280.f }; // 约 20 个汉字 + 左右 padding
 	constexpr size_t wmMaxChars{ 20 };
@@ -618,6 +715,13 @@ void ToolSub::showWatermarkTools()
 void ToolSub::showHighlightTools()
 {
 	beginTool(L"highlight");
+	// 初始属性：0 矩形 / 1 椭圆；边框开关单独存
+	{
+		const int form = designInt(L"highlight", L"form", -1);
+		if (form >= 0) isHighlightEllipse = (form == 1);
+		const int border = designInt(L"highlight", L"border", -1);
+		if (border >= 0) isHighlightBorder = (border == 1);
+	}
 	initSize(2, true, true);
 	makeToggleBtn(Icon::Ellipse, &isHighlightEllipse, L"tool.highlightEllipse", L"ellipse");
 	makeToggleBtn(Icon::DashRect, &isHighlightBorder, L"tool.highlightBorder", L"border");
@@ -1247,10 +1351,7 @@ void ToolSub::makeNumberStyleBtns()
 	};
 
 	addStyleBtn(Icon::NumberLetter, NumberLetter, L"tool.numberLetter");
-	// 字母序号右边：当前序号输入框（Emoji 序号的取值是表情，不需要输入框）
-	if (numberStyle != NumberEmoji) buildNumberInput();
-	addStyleBtn(Icon::NumberEmoji, NumberEmoji, L"tool.numberEmoji");
-
+	// 输入框位置：数字 / 字母模式放序号输入框；Emoji 模式换成表情入口（位于 Emoji 按钮左侧）
 	if (numberStyle == NumberEmoji) {
 		emojiTrigger = contentNode->makeChild<Ling::Button>();
 		styleToolbarBtn(emojiTrigger);
@@ -1267,6 +1368,8 @@ void ToolSub::makeNumberStyleBtns()
 			nestedPanel->openEmoji(workAreaRect(), emojiTrigger);
 		});
 	}
+	else buildNumberInput();
+	addStyleBtn(Icon::NumberEmoji, NumberEmoji, L"tool.numberEmoji");
 	refreshNumberStyleBtns();
 }
 

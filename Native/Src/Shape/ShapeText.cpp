@@ -281,7 +281,15 @@ void ShapeText::paintPunch(ID2D1DeviceContext* ctx){
 	// 线上文字一律横排（angle==0），洞就是轴对齐的一块：多行文字（用户自己回车的竖列）
 	// 也整块抠掉，线在整列文字的上下/左右各留 pad 的间距
 	ctx->PushAxisAlignedClip(r, D2D1_ANTIALIAS_MODE_ALIASED);
-	ctx->DrawBitmap(win->screenImg.Get(), D2D1::RectF(0.f, 0.f, win->w, win->h));
+	// 底图按自身像素尺寸铺（贴图缩放时客户区尺寸 ≠ 图像尺寸，用 w/h 会抠错位置）；
+	// 尺寸对不上时仍按窗口尺寸铺，保持白板/演示的原行为
+	const D2D1_SIZE_U srcPx = win->screenImg->GetPixelSize();
+	const float sc = win->scale > 0.001f ? win->scale : 1.f;
+	const bool sameSpace = std::fabs((float)srcPx.width - (float)win->w / sc) <= 2.f
+		&& std::fabs((float)srcPx.height - (float)win->h / sc) <= 2.f;
+	ctx->DrawBitmap(win->screenImg.Get(), sameSpace
+		? D2D1::RectF(0.f, 0.f, (float)srcPx.width, (float)srcPx.height)
+		: D2D1::RectF(0.f, 0.f, (float)win->w, (float)win->h));
 	ctx->PopAxisAlignedClip();
 }
 
@@ -308,6 +316,23 @@ void ShapeText::paintDragger(ID2D1DeviceContext* ctx)
 			paintCornerDot(ctx, cornerDotPos(i, rect, inset), false);
 	}
 	ctx->SetTransform(old);
+}
+
+std::vector<float> ShapeText::editSnapshot() const
+{
+	return { rect.left, rect.top, rect.right, rect.bottom, fontSize, angle,
+		bubbleRadius_, bubbleTail_.x, bubbleTail_.y };
+}
+
+void ShapeText::applyEditSnapshot(const std::vector<float>& s)
+{
+	if (s.size() < 9) return;
+	rect = D2D1::RectF(s[0], s[1], s[2], s[3]);
+	fontSize = s[4];
+	angle = s[5];
+	bubbleRadius_ = s[6];
+	bubbleTail_ = D2D1::Point2F(s[7], s[8]);
+	updateDraggers();
 }
 
 void ShapeText::mouseDrag(const float x, const float y)

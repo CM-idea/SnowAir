@@ -820,92 +820,10 @@ void Setting::setFeatArray(const wchar_t* key, const JsonArray& arr)
 
 int Setting::getOcrEngine() { return featInt(L"ocrEngine", 0); }
 void Setting::setOcrEngine(int v) { setFeatInt(L"ocrEngine", v); }
+int Setting::getOcrPackVariant() { return std::clamp(featInt(L"ocrPackVariant", 0), 0, 1); }
+void Setting::setOcrPackVariant(int v) { setFeatInt(L"ocrPackVariant", std::clamp(v, 0, 1)); }
 int Setting::getOcrResultMode() { return featInt(L"ocrResultMode", 0); }
 void Setting::setOcrResultMode(int v) { setFeatInt(L"ocrResultMode", std::clamp(v, 0, 1)); }
-std::wstring Setting::getOcrCloudConfigId() { return featStr(L"ocrCloudConfigId", L""); }
-void Setting::setOcrCloudConfigId(const std::wstring& id) { setFeatStr(L"ocrCloudConfigId", id); }
-
-static OcrCloudConfig cloudFromJson(const JsonObject& o)
-{
-	OcrCloudConfig c;
-	c.id = o.GetNamedString(L"id", L"").c_str();
-	c.provider = o.GetNamedString(L"provider", L"baidu").c_str();
-	c.name = o.GetNamedString(L"name", L"").c_str();
-	c.appId = o.GetNamedString(L"appId", L"").c_str();
-	c.apiKey = o.GetNamedString(L"apiKey", L"").c_str();
-	c.secret = o.GetNamedString(L"apiSecret", L"").c_str();
-	c.endpoint = o.GetNamedString(L"endpoint", L"").c_str();
-	return c;
-}
-static JsonObject cloudToJson(const OcrCloudConfig& c)
-{
-	JsonObject o;
-	o.SetNamedValue(L"id", JsonValue::CreateStringValue(c.id));
-	o.SetNamedValue(L"provider", JsonValue::CreateStringValue(c.provider));
-	o.SetNamedValue(L"name", JsonValue::CreateStringValue(c.name));
-	o.SetNamedValue(L"appId", JsonValue::CreateStringValue(c.appId));
-	o.SetNamedValue(L"apiKey", JsonValue::CreateStringValue(c.apiKey));
-	o.SetNamedValue(L"apiSecret", JsonValue::CreateStringValue(c.secret));
-	o.SetNamedValue(L"endpoint", JsonValue::CreateStringValue(c.endpoint));
-	return o;
-}
-
-std::vector<OcrCloudConfig> Setting::getOcrCloudConfigs()
-{
-	std::vector<OcrCloudConfig> list;
-	for (auto const& v : featArray(L"ocrCloudConfigs")) {
-		if (v.ValueType() != JsonValueType::Object) continue;
-		auto c = cloudFromJson(v.GetObjectW());
-		if (!c.id.empty()) list.push_back(c);
-	}
-	if (list.empty()) {
-		OcrCloudConfig legacy;
-		auto f = featuresObj();
-		legacy.id = f.GetNamedString(L"ocrCloudId", L"").c_str();
-		legacy.provider = f.GetNamedString(L"ocrCloudProvider", L"baidu").c_str();
-		legacy.apiKey = f.GetNamedString(L"ocrCloudApiKey", L"").c_str();
-		legacy.secret = f.GetNamedString(L"ocrCloudSecret", L"").c_str();
-		legacy.endpoint = f.GetNamedString(L"ocrCloudEndpoint", L"").c_str();
-		if (legacy.isConfigured()) {
-			if (legacy.id.empty()) legacy.id = L"legacy";
-			list.push_back(legacy);
-		}
-	}
-	return list;
-}
-void Setting::setOcrCloudConfigs(const std::vector<OcrCloudConfig>& list)
-{
-	JsonArray arr;
-	for (auto& c : list) arr.Append(cloudToJson(c));
-	setFeatArray(L"ocrCloudConfigs", arr);
-}
-OcrCloudConfig Setting::getOcrCloudConfig()
-{
-	auto id = getOcrCloudConfigId();
-	auto list = getOcrCloudConfigs();
-	for (auto& c : list) if (c.id == id) return c;
-	if (!list.empty()) return list.front();
-	OcrCloudConfig cfg;
-	auto f = featuresObj();
-	cfg.id = f.GetNamedString(L"ocrCloudId", L"default").c_str();
-	cfg.provider = f.GetNamedString(L"ocrCloudProvider", L"baidu").c_str();
-	cfg.apiKey = f.GetNamedString(L"ocrCloudApiKey", L"").c_str();
-	cfg.secret = f.GetNamedString(L"ocrCloudSecret", L"").c_str();
-	cfg.endpoint = f.GetNamedString(L"ocrCloudEndpoint", L"").c_str();
-	return cfg;
-}
-void Setting::setOcrCloudConfig(const OcrCloudConfig& cfg)
-{
-	auto list = getOcrCloudConfigs();
-	bool found = false;
-	for (auto& c : list) {
-		if (c.id == cfg.id) { c = cfg; found = true; break; }
-	}
-	if (!found) list.push_back(cfg);
-	setOcrCloudConfigs(list);
-	setOcrCloudConfigId(cfg.id);
-}
-
 std::wstring Setting::getTranslateProvider() { return featStr(L"translateProvider", L"microsoft"); }
 void Setting::setTranslateProvider(const std::wstring& v) { setFeatStr(L"translateProvider", v); }
 std::wstring Setting::getTranslateSourceLang() { return featStr(L"translateSourceLang", L"auto"); }
@@ -945,6 +863,90 @@ int Setting::getToolDefaultWidth()
 void Setting::setToolDefaultWidth(int v)
 {
 	setFeatInt(L"toolDefaultWidth", std::clamp(v, 1, 10));
+}
+// —— 初始属性 ——
+namespace {
+	JsonObject toolDesignRoot(JsonObject& features)
+	{
+		if (!features.HasKey(L"toolDesign")
+			|| features.GetNamedValue(L"toolDesign").ValueType() != JsonValueType::Object)
+			features.SetNamedValue(L"toolDesign", JsonObject{});
+		return features.GetNamedObject(L"toolDesign");
+	}
+}
+bool Setting::hasToolDesign(const std::wstring& toolId)
+{
+	if (toolId.empty()) return false;
+	auto features = featuresObj();
+	if (!features.HasKey(L"toolDesign")
+		|| features.GetNamedValue(L"toolDesign").ValueType() != JsonValueType::Object)
+		return false;
+	auto design = features.GetNamedObject(L"toolDesign");
+	if (!design.HasKey(toolId)) return false;
+	return design.GetNamedValue(toolId).ValueType() == JsonValueType::Object;
+}
+int Setting::getToolDesignInt(const std::wstring& toolId, const std::wstring& key, int def)
+{
+	if (toolId.empty()) return def;
+	auto features = featuresObj();
+	if (!features.HasKey(L"toolDesign")
+		|| features.GetNamedValue(L"toolDesign").ValueType() != JsonValueType::Object)
+		return def;
+	auto design = features.GetNamedObject(L"toolDesign");
+	if (!design.HasKey(toolId)) return def;
+	auto one = design.GetNamedObject(toolId, nullptr);
+	if (!one || !one.HasKey(key)) return def;
+	return (int)one.GetNamedNumber(key, (double)def);
+}
+void Setting::setToolDesignInt(const std::wstring& toolId, const std::wstring& key, int value)
+{
+	if (toolId.empty() || key.empty()) return;
+	auto features = featuresObj();
+	auto design = toolDesignRoot(features);
+	JsonObject one = design.HasKey(toolId) ? design.GetNamedObject(toolId, JsonObject{}) : JsonObject{};
+	one.SetNamedValue(key, JsonValue::CreateNumberValue((double)value));
+	design.SetNamedValue(toolId, one);
+	features.SetNamedValue(L"toolDesign", design);
+	features.SetNamedValue(L"toolDesignUsed", JsonValue::CreateBooleanValue(true));
+	save();
+}
+std::wstring Setting::getToolDesignStr(const std::wstring& toolId, const std::wstring& key, const std::wstring& def)
+{
+	if (toolId.empty() || key.empty()) return def;
+	auto features = featuresObj();
+	if (!features.HasKey(L"toolDesign")
+		|| features.GetNamedValue(L"toolDesign").ValueType() != JsonValueType::Object)
+		return def;
+	auto design = features.GetNamedObject(L"toolDesign");
+	if (!design.HasKey(toolId)) return def;
+	auto one = design.GetNamedObject(toolId, nullptr);
+	if (!one || !one.HasKey(key)) return def;
+	auto v = one.GetNamedValue(key);
+	if (v.ValueType() != JsonValueType::String) return def;
+	return std::wstring{ one.GetNamedString(key, def.c_str()) };
+}
+void Setting::setToolDesignStr(const std::wstring& toolId, const std::wstring& key, const std::wstring& value)
+{
+	if (toolId.empty() || key.empty()) return;
+	auto features = featuresObj();
+	auto design = toolDesignRoot(features);
+	JsonObject one = design.HasKey(toolId) ? design.GetNamedObject(toolId, JsonObject{}) : JsonObject{};
+	one.SetNamedValue(key, JsonValue::CreateStringValue(value));
+	design.SetNamedValue(toolId, one);
+	features.SetNamedValue(L"toolDesign", design);
+	features.SetNamedValue(L"toolDesignUsed", JsonValue::CreateBooleanValue(true));
+	save();
+}
+bool Setting::hasAnyToolDesign()
+{
+	return featBool(L"toolDesignUsed", false);
+}
+void Setting::clearToolDesign()
+{
+	auto features = featuresObj();
+	if (features.HasKey(L"toolDesign")) features.Remove(L"toolDesign");
+	features.SetNamedValue(L"toolDesignUsed", JsonValue::CreateBooleanValue(false));
+	save();
 }
 bool Setting::getRememberToolStyle() { return featBool(L"rememberToolStyle", false); }
 void Setting::setRememberToolStyle(bool on) { setFeatBool(L"rememberToolStyle", on); }
@@ -1017,12 +1019,10 @@ void Setting::restoreFunctionOutputDefaults()
 	setRecordDir(L"");
 }
 
-// 文本识别：回到默认的离线 PP-OCRv6（未安装时运行时会自动回落系统 OCR）；
-// 云端配置（含 Key）属于用户数据，不在此列，由各自的删除按钮处理
+// 文本识别：回到默认的离线 PP-OCRv6（未安装时运行时会自动回落系统 OCR）
 void Setting::restoreFunctionOcrDefaults()
 {
 	setOcrEngine(0);
-	setOcrCloudConfigId(L"");
 	setOcrResultMode(0);
 }
 
@@ -1069,7 +1069,7 @@ bool Setting::functionOutputAtDefaults()
 
 bool Setting::functionOcrAtDefaults()
 {
-	return getOcrEngine() == 0 && getOcrCloudConfigId().empty() && getOcrResultMode() == 0;
+	return getOcrEngine() == 0 && getOcrResultMode() == 0;
 }
 
 bool Setting::functionTranslateAtDefaults()
@@ -1651,6 +1651,7 @@ static JsonObject historyItemToJson(const Setting::HistoryItem& it)
     o.SetNamedValue(L"source", JsonValue::CreateStringValue(it.source));
     o.SetNamedValue(L"width", JsonValue::CreateNumberValue(it.width));
     o.SetNamedValue(L"height", JsonValue::CreateNumberValue(it.height));
+    if (it.durationSec > 0) o.SetNamedValue(L"dur", JsonValue::CreateNumberValue(it.durationSec));
     o.SetNamedValue(L"createdAt", JsonValue::CreateNumberValue(static_cast<double>(it.createdAt)));
     return o;
 }
@@ -1662,6 +1663,7 @@ static Setting::HistoryItem historyItemFromJson(const JsonObject& o)
     it.source = o.GetNamedString(L"source", L"capture").c_str();
     it.width = static_cast<int>(o.GetNamedNumber(L"width", 0));
     it.height = static_cast<int>(o.GetNamedNumber(L"height", 0));
+    it.durationSec = static_cast<int>(o.GetNamedNumber(L"dur", 0));
     it.createdAt = static_cast<long long>(o.GetNamedNumber(L"createdAt", 0));
     return it;
 }
@@ -1915,7 +1917,7 @@ std::wstring Setting::addHistoryFile(const std::wstring& filePath, int width, in
 }
 
 std::wstring Setting::addHistoryMedia(const std::wstring& mediaPath, int width, int height,
-    const std::wstring& source, const std::vector<BYTE>& coverBgra)
+    const std::wstring& source, int durationSec, const std::vector<BYTE>& coverBgra)
 {
     if (mediaPath.empty()) return L"";
     historyUiCacheDirty_ = true;
@@ -1927,6 +1929,7 @@ std::wstring Setting::addHistoryMedia(const std::wstring& mediaPath, int width, 
     it.source = source.empty() ? L"record" : source;
     it.width = width;
     it.height = height;
+    it.durationSec = durationSec > 0 ? durationSec : 0;
     it.createdAt = (long long)nowMs;
     it.filePath = mediaPath;          // 原视频路径：不复制，历史只记引用
 
@@ -2206,6 +2209,25 @@ void Setting::writeClipboardItems(std::vector<ClipboardItem>& items)
     if (clipboardChanged) clipboardChanged();
 }
 
+namespace {
+    // 剪贴板内容去重：同一内容已经在历史里，就把它挪到最前并刷新时间（保留原 id 与标签），
+    // 而不是再加一条。返回 -1 = 没有同内容；0 = 本来就在最前（不用动）；1 = 已挪到最前（需写回）
+    template <typename Fn>
+    int promoteClipboardItem(std::vector<Setting::ClipboardItem>& items, long long nowMs, Fn match)
+    {
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (!match(items[i])) continue;
+            if (i == 0) return 0;
+            auto hit = std::move(items[i]);
+            items.erase(items.begin() + i);
+            hit.createdAt = nowMs;
+            items.insert(items.begin(), std::move(hit));
+            return 1;
+        }
+        return -1;
+    }
+}
+
 void Setting::addClipboardText(const std::wstring& text)
 {
     std::wstring s = text;
@@ -2213,12 +2235,18 @@ void Setting::addClipboardText(const std::wstring& text)
     while (!s.empty() && (s.back() == L'\0' || s.back() == L'\r' || s.back() == L'\n')) s.pop_back();
     if (s.empty()) return;
     auto items = getClipboardItems();
-    // 与最新一条相同就不重复记录（复制历史里的文字回来也会走到这里）
-    if (!items.empty() && items.front().type == L"text" && items.front().text == s) return;
-
-    static unsigned long long seq = 0;
     const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+    // 同内容只把它移到最前（复制历史里的文字回来也会走到这里）
+    const int dup = promoteClipboardItem(items, (long long)nowMs, [&](const ClipboardItem& it) {
+        return it.type == L"text" && it.text == s;
+    });
+    if (dup >= 0) {
+        if (dup > 0) writeClipboardItems(items);
+        return;
+    }
+
+    static unsigned long long seq = 0;
     ClipboardItem it;
     it.id = std::format(L"c{}-{}", nowMs, ++seq);
     it.type = L"text";
@@ -2233,12 +2261,18 @@ void Setting::addClipboardImage(int w, int h, const std::vector<BYTE>& bgra)
     if (w <= 0 || h <= 0 || bgra.size() < (size_t)w * 4u * h) return;
     const unsigned hash = clipboardHash(bgra);
     auto items = getClipboardItems();
-    if (!items.empty() && items.front().type == L"image" && items.front().hash == hash
-        && items.front().width == w && items.front().height == h) return;
-
-    static unsigned long long seq = 0;
     const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+    // 同一张图只挪到最前，不重复存一份 PNG
+    const int dup = promoteClipboardItem(items, (long long)nowMs, [&](const ClipboardItem& it) {
+        return it.type == L"image" && it.hash == hash && it.width == w && it.height == h;
+    });
+    if (dup >= 0) {
+        if (dup > 0) writeClipboardItems(items);
+        return;
+    }
+
+    static unsigned long long seq = 0;
     ClipboardItem it;
     it.id = std::format(L"c{}-{}", nowMs, ++seq);
     it.type = L"image";
@@ -2269,11 +2303,18 @@ void Setting::addClipboardFiles(const std::vector<std::wstring>& files)
         hash *= 16777619u;
     }
     auto items = getClipboardItems();
-    if (!items.empty() && items.front().type == L"files" && items.front().hash == hash) return;
-
-    static unsigned long long seq = 0;
     const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+    // 同一组文件只挪到最前，不再加一条
+    const int dup = promoteClipboardItem(items, (long long)nowMs, [&](const ClipboardItem& it) {
+        return it.type == L"files" && it.hash == hash && it.files == files;
+    });
+    if (dup >= 0) {
+        if (dup > 0) writeClipboardItems(items);
+        return;
+    }
+
+    static unsigned long long seq = 0;
     ClipboardItem it;
     it.id = std::format(L"c{}-{}", nowMs, ++seq);
     it.type = L"files";

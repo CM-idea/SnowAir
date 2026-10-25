@@ -24,10 +24,8 @@ namespace PluginPaths {
 		return s->getDataPath() / L"plugin";
 	}
 	inline std::filesystem::path ocrModels() { return root() / L"ocr-models"; }
-	inline std::filesystem::path ocrRuntime(OcrPackVariant v)
-	{
-		return root() / L"ocr-runtime" / OcrPack::folderName(v);
-	}
+	// 运行时（lw_ppocr_c.dll + VC 运行库）与模型档位无关，各档共用一份
+	inline std::filesystem::path ocrRuntime(OcrPackVariant) { return root() / L"ocr-runtime" / L"ppocr-v6"; }
 	inline std::filesystem::path ocrBin() { return root() / L"ocr-bin"; }
 	inline std::filesystem::path translateRoot() { return root() / L"translate"; }
 	inline std::filesystem::path bergamotDll() { return translateRoot() / L"bergamot.dll"; }

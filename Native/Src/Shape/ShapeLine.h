@@ -52,6 +52,8 @@ public:
 	bool shaftMidPoint(float& mx, float& my) const;
 	float shaftAngle() const;   // 起点→终点方向（弧度）。线上文字一律横排，现在没人用它
 	float stylePrimarySize() const override { return strokeWidth; }
+	std::vector<float> editSnapshot() const override;
+	void applyEditSnapshot(const std::vector<float>& state) override;
 private:
 	void ensureStrokeStyle();
 	void ensureMinLength();

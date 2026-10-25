@@ -1,5 +1,6 @@
 #pragma once
 #include <include/Ling.h>
+#include <vector>
 class AnnotHost;
 class ShapeBase
 {
@@ -22,6 +23,10 @@ public:
 	virtual bool hitErase(const float x, const float y) { return false; };
 	// 撤销/重做切换后回调（默认无动作）。白板背景尺寸这类"非绘制操作"靠它回滚。
 	virtual void onUndoChanged(bool undone) {}
+	// 几何快照：拖动、缩放、旋转要能单独作为一步撤销。
+	// 返回空表示该形状不支持（视口滤镜等）。
+	virtual std::vector<float> editSnapshot() const { return {}; }
+	virtual void applyEditSnapshot(const std::vector<float>& state) { (void)state; }
 	// —— 连线：能被吸附的一侧（矩形/椭圆） ——
 	// 能不能当连线目标
 	virtual bool isLinkTarget() const { return false; }

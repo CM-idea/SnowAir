@@ -96,8 +96,9 @@ namespace {
 		for (const auto& p : entries) std::filesystem::remove_all(p, ec);
 		std::filesystem::remove(dir, ec);   // 空了才删得掉
 	}
-	// 离线文字识别只提供 PP-OCRv6（v5/v4 的 RapidOCR.dll 方案已下架，见 OcrPackVariant.h）
-	constexpr OcrPackVariant kOcrVariant = OcrPackVariant::Official;
+	// 离线文字识别只提供 PP-OCRv6（v5/v4 的 RapidOCR.dll 方案已下架，见 OcrPackVariant.h），
+	// 档位（轻量/标准）由卡片标题行的下拉选择。
+	constexpr int kOcrVariantMax = 1;
 
 	// 「正在下载」省略号动画的定时器（本页独用；WM_APP + id 交给 onTimer）。
 	// 取 0x3C00：低于 TextBox 的 timerId 基数 0x4200，绝不与其自增 id 撞车。
@@ -116,7 +117,6 @@ namespace {
 		{ L"ko",      L"setting.plugLangKo"     },
 		{ L"ja",      L"setting.plugLangJa"     },
 		{ L"fr",      L"setting.plugLangFr"     },
-		{ L"es",      L"setting.plugLangEs"     },
 		{ L"de",      L"setting.plugLangDe"     },
 	};
 	constexpr int kLangPackCount = (int)(sizeof(kLangPacks) / sizeof(kLangPacks[0]));
@@ -283,11 +283,19 @@ void WinSettingPlugins::setBadges(Ling::Node* row, const std::vector<std::wstrin
 
 void WinSettingPlugins::refreshStatus()
 {
-	// —— 离线文字识别 ——
-	const bool ocrOk = OcrModelManager::instance().isInstalled(kOcrVariant)
-		&& OcrRuntimeManager::instance().isInstalled(kOcrVariant);
-	setBadges(ocrBadgeRow, ocrOk ? std::vector<std::wstring>{ OcrPack::label(kOcrVariant) }
-		: std::vector<std::wstring>{});
+	// —— 离线文字识别：徽章列出**所有已安装档位**（与下拉当前选择无关）——
+	// 用户口径同离线翻译：切到还没下载的档位时，已装好的另一档提示不能消失。
+	const OcrPackVariant ocrVariant = OcrPack::clampVariant(ocrVariantIdx);
+	std::vector<std::wstring> ocrBadges;
+	for (int i = 0; i < OcrPack::kCount; ++i) {
+		const auto v = OcrPack::clampVariant(i);
+		if (OcrModelManager::instance().isInstalled(v)
+			&& OcrRuntimeManager::instance().isInstalled(v))
+			ocrBadges.push_back(OcrPack::label(v));
+	}
+	setBadges(ocrBadgeRow, ocrBadges);
+	const bool ocrOk = OcrModelManager::instance().isInstalled(ocrVariant)
+		&& OcrRuntimeManager::instance().isInstalled(ocrVariant);
 
 	// —— 离线翻译：徽章列出**所有已安装语言包**（与下拉当前选择无关）——
 	// 用户口径：换到别的（未安装）语言时，已装好的语言包提示不能消失。
@@ -338,10 +346,32 @@ void WinSettingPlugins::build()
 	SettingUi::sectionHeader(this, Lang::get(L"setting.plugins"),
 		Lang::get(L"setting.pluginsDesc"), Lang::get(L"setting.pluginsTip"));
 
-	// —— 离线文字识别（固定 PP-OCRv6，无方案下拉）——
+	// —— 离线文字识别（标题行内嵌模型档位下拉，选中项决定下载目标与安装态）——
 	auto ocr = makePack(this, Lang::get(L"setting.plugOcrTitle"), Lang::get(L"setting.plugOcrDesc"));
 	ocrBadgeRow = ocr.badgeRow;
 	ocrProgress = ocr.progress;
+	ocrVariantIdx = Setting::get() ? Setting::get()->getOcrPackVariant() : 0;
+	{
+		auto* sel = SettingUi::selectDdl(ocr.titleRow,
+			{ Lang::get(L"setting.plugOcrTiny"), Lang::get(L"setting.plugOcrSmall") },
+			std::clamp(ocrVariantIdx, 0, 1),
+			[this](int i, const std::wstring&) {
+				this->ocrVariantIdx = i;
+				if (Setting::get()) Setting::get()->setOcrPackVariant(i);
+				LwPpOcrEngine::release();   // 换档要重建引擎
+				this->refreshStatus();
+			});
+		sel->setWidth(120.f);
+		sel->setMarginLeft(6.f);
+		sel->setFlexShrink(0.f);
+		sel->setBorder(0.f, 0);
+		for (auto& c : sel->children) {
+			if (auto* lab = dynamic_cast<Ling::Label*>(c.get())) {
+				lab->setColor(SettingTheme::textSecondary);
+				break;
+			}
+		}
+	}
 	ocr.dlBtn->onClick.add([this](Ling::Button*) { this->startOcrDownload(); });
 	ocr.delBtn->onClick.add([this](Ling::Button*) { this->deleteCard(CardOcr); });
 	cards.push_back({ ocr.card, ocr.dlBtn, ocr.delBtn, false, false, false });
@@ -536,20 +566,21 @@ void WinSettingPlugins::startOcrDownload()
 	startDots(ocrProgress, Lang::get(L"setting.plugDownloading"));
 
 	auto weak = getWeakThis();
+	const OcrPackVariant ocrVariant = OcrPack::clampVariant(ocrVariantIdx);
 	// 两段式（串行）：运行时 0~50% → 模型 50~100%（并行时进度会互相覆盖，进度条没意义）
-	OcrRuntimeManager::instance().download(kOcrVariant,
+	OcrRuntimeManager::instance().download(ocrVariant,
 		[this, weak](float p) {
 			onUi([this, weak, p]() {
 				if (!weak.lock() || cards.size() < 3) return;
 				setCardProgress(cards[CardOcr], 0.5f * p);
 			});
 		},
-		[this, weak](bool ok, std::wstring err) {
-			onUi([this, weak, ok, err]() {
+		[this, weak, ocrVariant](bool ok, std::wstring err) {
+			onUi([this, weak, ok, err, ocrVariant]() {
 				if (!weak.lock() || cards.size() < 3) return;
 				if (!ok) { finishDownload(CardOcr, err); return; }
 				setCardProgress(cards[CardOcr], 0.5f);
-				OcrModelManager::instance().download(kOcrVariant,
+				OcrModelManager::instance().download(ocrVariant,
 					[this, weak](float p) {
 						onUi([this, weak, p]() {
 							if (!weak.lock() || cards.size() < 3) return;
@@ -563,7 +594,6 @@ void WinSettingPlugins::startOcrDownload()
 							// 以后若组件被删掉，运行时会自动回落到系统 OCR，不需要再改配置。
 							if (ok2) {
 								Setting::get()->setOcrEngine(0);
-								Setting::get()->setOcrCloudConfigId(L"");
 							}
 							finishDownload(CardOcr, ok2 ? std::wstring{} : err2);
 						});
@@ -687,8 +717,12 @@ void WinSettingPlugins::deleteCard(int idx)
 	SettingUi::ConfirmDialog::ask(win, msg, [this, weak, idx](bool ok) {
 		if (!ok || !weak.lock()) return;
 		if (idx == CardOcr) {
-			OcrModelManager::instance().uninstall(kOcrVariant);
-			OcrRuntimeManager::instance().uninstall(kOcrVariant);
+			const OcrPackVariant v = OcrPack::clampVariant(ocrVariantIdx);
+			OcrModelManager::instance().uninstall(v);
+			// 运行时是各档共用的：另一档还在就保留，别把还能用的删掉
+			const OcrPackVariant other = v == OcrPackVariant::Small ? OcrPackVariant::Tiny : OcrPackVariant::Small;
+			if (!OcrModelManager::instance().isInstalled(other))
+				OcrRuntimeManager::instance().uninstall(v);
 		}
 		else if (idx == CardTr) {
 			TranslateModelManager::instance().uninstallPack(kLangPacks[trPackIdx].id);

@@ -2,6 +2,8 @@
 #include <include/Ling.h>
 class ShapeBase;
 class AnnotHost;
+// 视口滤镜（水印 / 包浆 / 高光）应覆盖的范围：标注坐标下的整张底图
+D2D1_RECT_F annotImageRect(AnnotHost* win);
 class History
 {
 public:
@@ -24,6 +26,8 @@ public:
 	void eraseAt(const float x, const float y);
 	// 白板：调整背景尺寸也进撤销栈（page<0 = 纯色背景，否则为图片页码）
 	void addBoardResize(int page, const D2D1_RECT_F& before, const D2D1_RECT_F& after);
+	// 拖动/缩放/旋转已有标注：作为独立一步进撤销栈
+	void addEditStep(ShapeBase* target, const std::vector<float>& before, const std::vector<float>& after);
 	// 确认编辑：丢掉已撤销的 shape，释放内存并锁定本轮结果
 	void purgeUndone();
 	std::vector<std::unique_ptr<ShapeBase>> shapes;

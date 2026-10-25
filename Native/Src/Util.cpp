@@ -1078,6 +1078,54 @@ std::wstring Util::buildSavePath(const std::wstring& format, const std::wstring&
 	return (dir / fileName).wstring();
 }
 
+std::wstring Util::commitRecordedFile(const std::wstring& tempPath)
+{
+	if (tempPath.empty()) return {};
+	std::error_code ec;
+	if (!std::filesystem::exists(tempPath, ec)) return {};
+
+	auto* st = Setting::get();
+	std::filesystem::path src{ tempPath };
+	std::wstring ext = src.extension().wstring();
+	if (!ext.empty() && ext[0] == L'.') ext.erase(0, 1);
+
+	// 目标目录：「录屏文件路径」；没设置过就用图片\SnowAir（与设置页显示的默认值一致）
+	std::filesystem::path dir;
+	if (st) {
+		const auto rec = st->getRecordDir();
+		if (!rec.empty()) dir = rec;
+	}
+	if (dir.empty()) dir = defaultOutputDir();
+	if (dir.empty()) return {};
+	std::filesystem::create_directories(dir, ec);
+
+	// 文件名用「视频录制文件名格式」的末段（模板里的 / 只当层级，保存框也这么取默认名）
+	std::wstring stem = previewFileName(st ? st->getVideoRecordFormat() : L"",
+		Setting::defaultVideoRecordFormat(), L"");
+	if (auto slash = stem.find_last_of(L'/'); slash != std::wstring::npos) stem = stem.substr(slash + 1);
+	stem = sanitizeSegment(stem);
+	// 模板里可能自己写了扩展名，实际扩展名以录制文件为准
+	if (auto dot = stem.find_last_of(L'.'); dot != std::wstring::npos) stem.erase(dot);
+	if (stem.empty()) stem = L"SnowAir";
+
+	auto makeName = [&](int n) {
+		std::wstring name = stem;
+		if (n > 1) name += L" (" + std::to_wstring(n) + L")";
+		if (!ext.empty()) name += L"." + ext;
+		return name;
+	};
+	std::filesystem::path tar = dir / makeName(1);
+	for (int n = 2; std::filesystem::exists(tar, ec) && n < 1000; ++n) tar = dir / makeName(n);
+
+	// 同一卷直接改名，跨卷由系统复制+删除；都失败时退回 CopyFile 再删源
+	if (MoveFileExW(src.c_str(), tar.c_str(), MOVEFILE_COPY_ALLOWED)) return tar.wstring();
+	if (CopyFileW(src.c_str(), tar.c_str(), TRUE)) {
+		DeleteFileW(src.c_str());
+		return tar.wstring();
+	}
+	return {};
+}
+
 std::wstring Util::previewFileName(const std::wstring& format, const std::wstring& fallbackFormat,
 	const std::wstring& focusAppName)
 {

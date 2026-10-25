@@ -9,6 +9,8 @@
 #include "SettingWidgets.h"
 #include "../Tool/IconCodes.h"
 #include "../Tool/ToolbarTheme.h"   // 预览条镜像实际工具栏用的同一套常量
+#include "../Tool/ToolInitialDefs.h"  // 初始属性默认形态表（设置页 / 预览条 / 工具栏共用）
+#include "../Tool/ToolIconCompose.h"   // 复合图标（马赛克切模糊时叠两层）
 #include "../Tip.h"                  // chip 悬停文字（系统 tooltip）
 #include "../TrayIcon.h"             // 托盘图标样式（预览上色 / 应用）
 #include <commdlg.h>
@@ -52,7 +54,6 @@ namespace {
 		for (auto& t : tools) out.push_back(t);
 		return out;
 	}
-	uint32_t tbFade(uint32_t c, uint8_t a) { return (uint32_t(a) << 24) | (c & 0xFFFFFF); }
 	uint32_t tbSlotColor(const ToolbarStore::Colors& c, int slot)
 	{
 		// 5 个色槽：背景 / 停悬 / 图标 / 选中 / 框选（原先的"停悬图标"已并入"图标"）
@@ -144,7 +145,7 @@ WinSettingAppearance::WinSettingAppearance(Ling::WinBase* parent) :Ling::Node(pa
         tbDropIndex = (int)tbActive.size();
         tbHideChipClose();
         tbDrop();
-    });
+        });
     // 鼠标挪到叉自己身上时（它有一半在图标外，chip 会先报 onLeave）保持显示
     tbChipClose->onEnter.add([this](Ling::Button*) { if (tbChipClose) tbChipClose->show(); });
     tbChipClose->onLeave.add([this](Ling::Button*) { this->tbHideChipClose(); });
@@ -155,10 +156,18 @@ WinSettingAppearance::WinSettingAppearance(Ling::WinBase* parent) :Ling::Node(pa
         if (!weakThis.lock()) return;
         this->hideSelectBox();
         });
-    // 工具栏编辑器 chip 命中检测（按下即检测，拖拽/点击在 move/up 阶段分流）
-    auto weakTb = getWeakThis();
-    tbDownTok = win->onMouseDown.add([this, weakTb](POINT pos, bool right) {
-        if (!weakTb.lock()) return;
+
+    // 初始属性：形态"拖拽替换"（按住右侧其他形态，拖到左侧选中项上松手）
+    tbInitDownTok = win->onMouseDown.add([this](POINT pos, bool right) {
+        if (!right) tbInitDragDown(pos);
+        });
+    tbInitMoveTok = win->onMouseMove.add([this](POINT pos) { tbInitDragMove(pos); });
+    tbInitUpTok = win->onMouseUp.add([this](POINT pos, bool right) {
+        if (!right) tbInitDragUp(pos);
+        });
+    // 显隐 / 拖拽排序：chip 命中检测（按下即检测，拖拽/点击在 move/up 阶段分流）
+    tbDownTok = win->onMouseDown.add([this, weakThis](POINT pos, bool right) {
+        if (!weakThis.lock()) return;
         this->tbOnDown(pos, right);
         });
 }
@@ -167,6 +176,9 @@ WinSettingAppearance::~WinSettingAppearance()
 {
     selectPopup.reset();
     tbKindPopup.reset();
+    win->onMouseDown.remove(tbInitDownTok);
+    win->onMouseMove.remove(tbInitMoveTok);
+    win->onMouseUp.remove(tbInitUpTok);
     win->onMouseDown.remove(tbDownTok);
     win->onMouseMove.remove(tbMoveTok);
     win->onMouseUp.remove(tbUpTok);
@@ -194,8 +206,30 @@ void WinSettingAppearance::buildTabActions(Ling::Node* row)
         };
     tbRestoreBtn = mkOutline(row, Lang::get(L"setting.tbRestore"));
     tbRestoreBtn->onClick.add([this](Ling::Button*) { this->tbRestoreDefaults(); });
+    tbInitialBtn = mkOutline(row, Lang::get(L"setting.tbInitial"));
+    tbInitialBtn->onClick.add([this](Ling::Button*) { this->tbToggleInitialEditor(); });
+    tbInitialBtn->hide();   // 只在「工具栏外观」子页显示
     tbPreviewBtn = mkOutline(row, Lang::get(L"setting.tbPreview"));
     tbPreviewBtn->onClick.add([this](Ling::Button*) { this->tbTogglePreview(); });
+}
+
+// 「恢复默认 / 初始属性 / 预览效果」三按钮的选中态（停悬背景常驻）
+void WinSettingAppearance::tbRefreshActionState()
+{
+    const uint32_t selBg = 0xE5E5E5FFu;   // #E5E5E5
+    auto apply = [selBg](Ling::Button* b, bool on) {
+        if (!b) return;
+        if (on) {
+            b->setBg(selBg);
+            b->setHoverBg(selBg);
+        }
+        else {
+            b->setBg(SettingTheme::cardBg);
+            b->setHoverBg(SettingTheme::accent);
+        }
+        };
+    apply(tbInitialBtn, tbInitialOpen);
+    apply(tbPreviewBtn, tbPreviewShown);
 }
 
 
@@ -209,12 +243,26 @@ void WinSettingAppearance::showTab(int index)
     if (tbPreviewBtn) {
         if (index == 0) tbPreviewBtn->show(); else tbPreviewBtn->hide();
     }
+    if (tbInitialBtn) {
+        if (index == 0) tbInitialBtn->show();
+        else {
+            tbInitialBtn->hide();
+            // 离开工具栏页时收起编辑器，回来保持收起状态
+            if (tbInitialOpen) {
+                tbInitialOpen = false;
+                if (tbInitialWrap) tbInitialWrap->hide();
+                if (tbActiveCard) tbActiveCard->show();
+                if (tbInactiveCard) tbInactiveCard->show();
+            }
+        }
+    }
     for (int i = 0; i < 3; ++i) {
         if (!tabs[i]) continue;
         if (i == index) tabs[i]->show(); else tabs[i]->hide();
     }
     // 「恢复默认」的可用态跟随当前子页
     tbRefreshRestore();
+    tbRefreshActionState();
 }
 
 // 顶部 3 个分段胶囊：保留现有「选中 primary 黑底白字 / 未选中透明黑字 + hover 高亮」样式，
@@ -405,7 +453,7 @@ void WinSettingAppearance::tbShowKindMenu()
 
 void WinSettingAppearance::buildToolbarTab(Ling::Node* host)
 {
-    // 工具栏外观：类型切换 / 显隐 / 拖拽排序 / 恢复默认 / 预览 / 主题色板
+    // 工具栏外观：类型切换 / 预览 / 初始属性 / 显隐拖拽排序 / 主题色板
     host->setFlexDirection(Ling::FlexDirection::Column);
     tbScroller = host->makeChild<Ling::ScrollerBox>();
     tbScroller->setFlexGrow(1.f);
@@ -413,21 +461,28 @@ void WinSettingAppearance::buildToolbarTab(Ling::Node* host)
     tbScroller->setScrollBarVisible(false);
     Ling::Node* content = tbScroller;
 
-    // 预览容器（默认隐藏，点「预览效果」展开）：放在**最前面**，展开时一眼就能看到
+    // 预览条（与「初始属性」互斥，默认收起）：与「初始属性」里那条工具栏共用同一套 ToolbarTheme
     tbPreviewWrap = content->makeChild<Ling::Node>();
     tbPreviewWrap->setWidthPercent(100.f);
     tbPreviewWrap->hide();
 
+    // 初始属性编辑器（默认收起，点顶部「初始属性」展开）
+    tbInitialWrap = content->makeChild<Ling::Node>();
+    tbInitialWrap->setWidthPercent(100.f);
+    tbInitialWrap->setFlexDirection(Ling::FlexDirection::Column);
+    tbInitialWrap->hide();
+    // 内容懒构建：点「初始属性」第一次展开时才创建
+
     // 显示区（无标题，仅卡片分区；内容区统一不描边）
-    auto* activeCard = SettingUi::card(content);
-    tbActiveBox = activeCard->makeChild<Ling::Node>();
+    tbActiveCard = SettingUi::card(content);
+    tbActiveBox = tbActiveCard->makeChild<Ling::Node>();
     tbActiveBox->setFlexDirection(Ling::FlexDirection::Row);
     tbActiveBox->setFlexWrap(Ling::Wrap::Wrap);
     tbActiveBox->setAlignItems(Ling::Align::Center);
 
     // 隐藏区（无标题；空时由 tbBuildChips 追加居中的预留提示文字；不描边）
-    auto* inactiveCard = SettingUi::card(content);
-    tbInactiveBox = inactiveCard->makeChild<Ling::Node>();
+    tbInactiveCard = SettingUi::card(content);
+    tbInactiveBox = tbInactiveCard->makeChild<Ling::Node>();
     tbInactiveBox->setFlexDirection(Ling::FlexDirection::Row);
     tbInactiveBox->setFlexWrap(Ling::Wrap::Wrap);
     tbInactiveBox->setAlignItems(Ling::Align::Center);
@@ -435,8 +490,8 @@ void WinSettingAppearance::buildToolbarTab(Ling::Node* host)
     // 主题色板
     tbBuildTheme(content);
 
-    // 初始数据（截图工具栏）
-    auto st = ToolbarStore::loadLayout(0);
+    // 初始数据（当前工具栏类型）
+    auto st = ToolbarStore::loadLayout(tbKind);
     tbActive = st.active;
     tbInactive = st.inactive;
     tbRebuildZones();
@@ -508,29 +563,6 @@ void WinSettingAppearance::buildOtherTab(Ling::Node* host)
     otherRememberStyleBtn = mkStateToggle(L"setting.rememberToolStyle",
         [] { return Setting::get()->getRememberToolStyle(); },
         [](bool on) { Setting::get()->setRememberToolStyle(on); }, {});
-    // 线迹标注类工具的默认宽度（1–10，默认 4）
-    {
-        std::vector<std::wstring> widths;
-        for (int i = 1; i <= 10; ++i) widths.push_back(std::to_wstring(i));
-        otherToolWidthBtn = SettingUi::selectRow(grid,
-            Lang::get(L"setting.toolDefaultWidth"),
-            widths,
-            std::clamp(Setting::get()->getToolDefaultWidth(), 1, 10) - 1,
-            [this](int i, const std::wstring&) {
-                Setting::get()->setToolDefaultWidth(i + 1);
-                this->tbRefreshRestore();
-            }, true);
-        // selectDdl 内部用一个 Label 显示当前值（Button 自身还有一个 Text 子节点，
-        // 两者类型不同，必须按类型找，不能直接取 front()）
-        if (otherToolWidthBtn) {
-            for (auto& ch : otherToolWidthBtn->children) {
-                if (auto* lab = dynamic_cast<Ling::Label*>(ch.get())) {
-                    otherToolWidthLabel = lab;
-                    break;
-                }
-            }
-        }
-    }
     SettingUi::grid2Cells(grid);
 }
 
@@ -1104,7 +1136,7 @@ void WinSettingAppearance::showSelectBox(Ling::Button* btn)
     selectPopup->open();
 }
 
-// ==================== 工具栏编辑器 ====================
+// ==================== 工具栏外观 ====================
 
 void WinSettingAppearance::tbSetKind(int kind)
 {
@@ -1144,11 +1176,11 @@ bool WinSettingAppearance::appearanceAtDefaults() const
     }
     if (tabIndex == 2) {
         return s->getFeatureTips() && !s->getHotkeyTip()
-            && !s->getRememberToolStyle() && !s->getHoverPreview()
-            && s->getToolDefaultWidth() == 4;
+            && !s->getRememberToolStyle() && !s->getHoverPreview();
     }
+    // 「工具栏外观」页：布局与初始属性都为默认值
     auto def = ToolbarStore::defaultLayout(tbKind);
-    return tbActive == def.active && tbInactive == def.inactive;
+    return !s->hasAnyToolDesign() && tbActive == def.active && tbInactive == def.inactive;
 }
 
 void WinSettingAppearance::tbRefreshRestore()
@@ -1193,8 +1225,8 @@ void WinSettingAppearance::tbRestoreDefaults()
         win->refresh();
         return;
     }
-    // 「其他外观」页：恢复本页开关/选项到默认值（功能提示开、快捷键提示关、
-    // 记忆工具样式关、悬停预览关、标注默认值 4），直接回写控件显示，不重建整页
+    // 「其他外观」页：恢复本页开关到默认值（功能提示开、快捷键提示关、
+    // 记忆工具样式关、悬停预览关），直接回写控件显示，不重建整页
     if (tabIndex == 2) {
         auto* s = Setting::get();
         s->setFeatureTips(true);
@@ -1202,33 +1234,550 @@ void WinSettingAppearance::tbRestoreDefaults()
         s->setHotkeyTip(false);
         s->setRememberToolStyle(false);
         s->setHoverPreview(false);
-        s->setToolDefaultWidth(4);
         if (otherFeatureTipsBtn) SettingUi::styleToggle(otherFeatureTipsBtn, true);
         if (otherHotkeyTipBtn) SettingUi::styleToggle(otherHotkeyTipBtn, false);
         if (otherRememberStyleBtn) SettingUi::styleToggle(otherRememberStyleBtn, false);
         if (otherHoverPreviewBtn) SettingUi::styleToggle(otherHoverPreviewBtn, false);
-        if (otherToolWidthLabel) otherToolWidthLabel->setText(std::to_wstring(4));
         tbRefreshRestore();
         win->refresh();
         return;
     }
-    // 「工具栏外观」页：重建 chip 并把布局写回默认
+    // 「工具栏外观」页：布局回到默认 + 清空初始属性（编辑器回到默认值显示）
     ToolbarStore::restoreDefaults(tbKind);
-    tbSetKind(tbKind);
-    // 强制刷新（tbSetKind 里 kind==tbKind 会直接 return）
+    Setting::get()->clearToolDesign();
     auto st = ToolbarStore::loadLayout(tbKind);
     tbActive = st.active;
     tbInactive = st.inactive;
     tbRebuildZones();
+    tbRefreshInitialToolbar();
+    tbRefreshInitialEditor();
+}
+
+namespace {
+	// 「初始属性」：默认形态表见 Tool/ToolInitialDefs.h（设置页 / 预览条 / 工具栏共用同一份）
+	using ToolInitial::InitialChoice;
+	using ToolInitial::InitialNum;
+	using ToolInitial::InitialToolDef;
+	using ToolInitial::kPolyNums;
+	using ToolInitial::kStarNums;
+	const InitialToolDef* initialDefOf(const std::wstring& id) { return ToolInitial::find(id); }
+	// —— 顶部工具栏：只列"有初始属性"的工具，顺序跟随实际工具栏（不在工具栏里的排在最后）——
+	int initialLayoutPos(const std::vector<std::wstring>& active, const wchar_t* defId)
+	{
+		auto findId = [&](const wchar_t* id) -> int {
+			for (size_t i = 0; i < active.size(); ++i)
+				if (active[i] == id) return (int)i;
+			return -1;
+		};
+		// 标注 / 渐隐画笔：固定排在箭头后面
+		if (wcscmp(defId, L"line") == 0 || wcscmp(defId, L"laser") == 0) {
+			const int ap = findId(L"arrow");
+			const int base = (ap >= 0 ? ap : 4) * 8;
+			return base + (wcscmp(defId, L"line") == 0 ? 1 : 2);
+		}
+		const wchar_t* toolId = defId;
+		if (wcscmp(defId, L"number") == 0) toolId = L"serial-number";
+		const int p = findId(toolId);
+		return p >= 0 ? p * 8 : (1 << 20);
+	}
+	std::vector<const InitialToolDef*> initialDefsInLayoutOrder(const std::vector<std::wstring>& active)
+	{
+		std::vector<const InitialToolDef*> out;
+		for (auto& d : ToolInitial::kInitialToolDefs) out.push_back(&d);
+		std::stable_sort(out.begin(), out.end(), [&](const InitialToolDef* a, const InitialToolDef* b) {
+			return initialLayoutPos(active, a->id) < initialLayoutPos(active, b->id);
+		});
+		return out;
+	}
+}
+
+void WinSettingAppearance::tbToggleInitialEditor()
+{
+	if (!tbInitialWrap) return;
+	tbInitialOpen = !tbInitialOpen;
+	if (tbInitialOpen) {
+		// 懒构建：第一次展开时才建卡片内容，避免进入设置页就构造一整棵无用子树
+		if (!tbInitialBuilt) {
+			tbInitialBuilt = true;
+			tbBuildInitialEditor(tbInitialWrap);
+		}
+		// 与「预览效果」互不干扰：两者可同时展开
+		// 展开初始属性时，暂时隐藏「显示区/隐藏区」两张卡片
+		tbHideChipClose();
+		if (tbActiveCard) tbActiveCard->hide();
+		if (tbInactiveCard) tbInactiveCard->hide();
+		tbInitialWrap->show();
+	}
+	else {
+		tbInitialWrap->hide();
+		if (tbActiveCard) tbActiveCard->show();
+		if (tbInactiveCard) tbInactiveCard->show();
+	}
+	tbRefreshActionState();
+}
+
+void WinSettingAppearance::tbBuildInitialEditor(Ling::Node* wrap)
+{
+	wrap->setMarginBottom(SettingTheme::blockGap);
+	// 工具行（不加外框，直接贴在页面上）
+	tbInitialBarBox = wrap->makeChild<Ling::Node>();
+	tbInitialBarBox->setFlexDirection(Ling::FlexDirection::Row);
+	tbInitialBarBox->setAlignItems(Ling::Align::Center);
+	tbInitialBarBox->setMarginBottom(SettingTheme::blockGap);
+	// 卡片2：选中工具的初始属性（未选中时是空卡片）
+	tbInitialEditorBox = SettingUi::card(wrap);
+	tbInitialEditorBox->setMarginBottom(0.f);
+
+	// 拖拽替换时跟手的幽灵（绝对定位，随本页销毁）
+	tbDragGhost = makeChild<Ling::Node>();
+	tbDragGhost->setPositionType(Ling::Position::Absolute);
+	tbDragGhost->setSize(36.f, 36.f);
+	tbDragGhost->setBg(SettingTheme::cardBg);
+	tbDragGhost->setBorder(1.f, SettingTheme::border);
+	tbDragGhost->setBorderRadius(SettingTheme::radiusSm);
+	tbDragGhost->setFlexDirection(Ling::FlexDirection::Row);
+	tbDragGhost->setAlignItems(Ling::Align::Center);
+	tbDragGhost->setJustifyContent(Ling::Justify::Center);
+	tbDragGhostIcon = tbDragGhost->makeChild<Ling::Label>();
+	tbDragGhostIcon->setFontFamily(Icon::Family);
+	tbDragGhostIcon->setFontSize(Icon::SizeSm);
+	tbDragGhostIcon->setColor(SettingTheme::textPrimary);
+	tbDragGhost->hide();
+
+	tbInitialSlot.clear();   // 初始为"未选中"→ 第二张卡片显示占位提示
+	tbRefreshInitialToolbar();
+	tbRefreshInitialEditor();
+}
+
+void WinSettingAppearance::tbRefreshInitialToolbar()
+{
+	if (!tbInitialBarBox) return;
+	ToolbarTheme::refresh();   // 选中色（iconActive）跟随工具栏主题
+	const float kBtnSide = 36.f, kBtnGap = 6.f;
+
+	// —— 工具行：跟「显示区」同款卡片 + 白色 chip，多行自动换行 ——
+	tbInitialBarBox->removeAllChildren();
+	auto* bar = SettingUi::card(tbInitialBarBox);
+	bar->setMarginBottom(0.f);   // 与下方属性卡片的间距由 tbInitialBarBox 负责
+	bar->setFlexDirection(Ling::FlexDirection::Row);
+	bar->setFlexWrap(Ling::Wrap::Wrap);
+	bar->setAlignItems(Ling::Align::Center);
+	for (auto* d : initialDefsInLayoutOrder(ToolbarStore::defaultLayout(0).active)) {
+		auto* b = bar->makeChild<Ling::Button>();
+		b->setSize(kBtnSide, kBtnSide);
+		b->setBorderRadius(SettingTheme::radiusSm);
+		b->setFontFamily(Icon::Family);
+		b->setFontSize(Icon::SizeSm);
+		b->setText(ToolInitial::iconOf(*d));   // 图标体现当前默认形态（文案不变）
+		b->setMargin(0.f, 0.f, kBtnGap, kBtnGap);
+		b->setFlexShrink(0.f);
+		b->setJustifyContent(Ling::Justify::Center);
+		b->setAlignItems(Ling::Align::Center);
+		const bool on = (tbInitialSlot == d->id);
+		b->setBg(on ? SettingTheme::secondary : SettingTheme::cardBg);
+		b->setBorder(1.f, on ? SettingTheme::input : SettingTheme::border);
+		b->setColor(on ? ToolbarTheme::iconActive : SettingTheme::textPrimary);   // 选中 = 主题绿
+		b->setHoverBg(SettingTheme::accent);
+		b->setHoverColor(on ? ToolbarTheme::iconActive : SettingTheme::textPrimary);
+		// 马赛克切到「模糊」：图标换成模糊复合图标，停悬文字也改成「模糊」
+		const bool mosaicBlur = (wcscmp(d->id, L"mosaic") == 0 && ToolInitial::isMosaicBlur());
+		if (mosaicBlur) {
+			const uint32_t c = on ? ToolbarTheme::iconActive : SettingTheme::textPrimary;
+			b->setText(L"");
+			ToolIcon::overlayGlyph(b, Icon::Blur2, Icon::Blur, Icon::SizeSm,
+				c, ToolIcon::withAlpha(c, 0x40));
+		}
+		if (tbTip_) tbTip_->bind(b, Lang::get(mosaicBlur ? L"tool.blur" : d->nameKey));
+		const std::wstring id = d->id;
+		b->onClick.add([this, id](Ling::Button*) { this->tbSelectInitialSlot(id); });
+	}
+}
+
+void WinSettingAppearance::tbSelectInitialSlot(const std::wstring& slot)
+{
+	// 再点一次同一图标 = 取消选中（回到占位提示），不强制持续选中
+	tbInitialSlot = (tbInitialSlot == slot) ? std::wstring{} : slot;
+	tbRefreshInitialToolbar();
+	tbRefreshInitialEditor();
+}
+
+void WinSettingAppearance::tbRefreshInitialEditor()
+{
+	if (!tbInitialEditorBox) return;
+	auto* box = tbInitialEditorBox;
+	box->removeAllChildren();
+	tbInitChips.clear();      // 先失效旧 chip 指针，避免占位态残留悬空引用
+	tbInitRow = nullptr;
+	tbInitCursor = nullptr;
+	tbInitDragIdx = -1;
+	tbInitDropIdx = -1;
+	box->show();
+	// 固定卡片高度：占位与属性态一致，切换时不跳动
+	box->setHeight(SettingTheme::cardPadY * 2.f + 36.f);
+	box->setJustifyContent(Ling::Justify::Center);
+	// 占位态：没点图标（或该工具无可配项）时显示提示文字
+	auto renderHint = [box]() {
+		auto* hint = box->makeChild<Ling::Label>();
+		hint->setText(Lang::get(L"setting.tbInitHint"));
+		hint->setFontSize(12.f);
+		hint->setColor(SettingTheme::textMuted);
+	};
+	const InitialToolDef* def = initialDefOf(tbInitialSlot);
+	auto* s = Setting::get();
+	if (!def || !s) { renderHint(); return; }
+
+	// 单行 chip：沿用原工具栏拖拽区的外观；选中态 = 浅灰实心
+	auto makeChip = [this](Ling::Node* row, const InitialChoice& c, bool on) {
+		auto* b = row->makeChild<Ling::Button>();
+		if (c.icon) {
+			b->setSize(36.f, 36.f);
+			b->setFontFamily(Icon::Family);
+			b->setFontSize(Icon::SizeSm);
+		}
+		else {
+			b->setSize(52.f, 36.f);
+			b->setFontSize(12.f);
+		}
+		b->setBorderRadius(SettingTheme::radiusSm);
+		if (c.overlayGlyph) {
+			// 复合图标：底字形 + 半透明叠字形（同实际属性栏的「模糊」按钮）
+			auto* stack = b->makeChild<Ling::Node>();
+			stack->setPositionType(Ling::Position::Absolute);
+			stack->setPosition(Ling::Edge::Left, 0.f);
+			stack->setPosition(Ling::Edge::Right, 0.f);
+			stack->setPosition(Ling::Edge::Top, 0.f);
+			stack->setPosition(Ling::Edge::Bottom, 0.f);
+			auto addGlyph = [&](const wchar_t* code, uint32_t color) {
+				auto* lb = stack->makeChild<Ling::Label>();
+				lb->setText(code);
+				lb->setFontFamily(Icon::Family);
+				lb->setFontSize(Icon::SizeSm);
+				lb->setColor(color);
+				lb->setPositionType(Ling::Position::Absolute);
+				lb->setPosition(Ling::Edge::Left, 0.f);
+				lb->setPosition(Ling::Edge::Right, 0.f);
+				lb->setPosition(Ling::Edge::Top, 0.f);
+				lb->setPosition(Ling::Edge::Bottom, 0.f);
+				lb->setJustifyContent(Ling::Justify::Center);
+				lb->setAlignItems(Ling::Align::Center);
+			};
+			const uint32_t base = SettingTheme::textPrimary;
+			addGlyph(c.glyph, base);
+			addGlyph(c.overlayGlyph, (base & 0xFFFFFF00u) | 0x40u);   // 叠字形 25% 透明
+		}
+		else b->setText(c.glyph);
+		b->setMarginRight(6.f);
+		b->setFlexShrink(0.f);
+		b->setJustifyContent(Ling::Justify::Center);
+		b->setAlignItems(Ling::Align::Center);
+		b->setBg(on ? SettingTheme::secondary : SettingTheme::cardBg);
+		b->setBorder(1.f, on ? SettingTheme::input : SettingTheme::border);
+		b->setColor(SettingTheme::textPrimary);
+		b->setHoverBg(SettingTheme::accent);
+		b->setHoverColor(SettingTheme::textPrimary);
+		if (tbTip_ && c.tipKey) tbTip_->bind(b, Lang::get(c.tipKey));
+		return b;
+	};
+
+	const bool hasForms = def->formKey && def->forms && !def->forms->empty();
+	const int curForm = hasForms
+		? s->getToolDesignInt(def->designId, def->formKey, def->forms->front().value)
+		: 0;
+
+	// 「显示光标」：只有一个胶囊开关（默认关闭 = 会话默认不显示光标）
+	if (wcscmp(def->id, L"show-cursor") == 0) {
+		auto* row = box->makeChild<Ling::Node>();
+		row->setWidthPercent(100.f);
+		row->setFlexDirection(Ling::FlexDirection::Row);
+		row->setAlignItems(Ling::Align::Center);
+		auto* lb = row->makeChild<Ling::Label>();
+		lb->setText(Lang::get(def->nameKey));
+		lb->setFontSize(12.f);
+		lb->setColor(SettingTheme::textSecondary);
+		lb->setFlexShrink(0.f);
+		lb->setMarginRight(10.f);
+		auto* sw = row->makeChild<Ling::Button>();
+		sw->setFlexShrink(0.f);
+		SettingUi::styleToggle(sw, s->getToolDesignInt(L"show-cursor", L"enabled", 0) != 0);
+		sw->onClick.add([this, sw](Ling::Button*) {
+			auto* st = Setting::get();
+			const bool next = st->getToolDesignInt(L"show-cursor", L"enabled", 0) == 0;
+			st->setToolDesignInt(L"show-cursor", L"enabled", next ? 1 : 0);
+			SettingUi::styleToggle(sw, next);
+			this->tbRefreshRestore();
+			this->win->refresh();
+			});
+		return;
+	}
+
+	// 该工具的默认数值（矩形的多边形/星形按形态补"边数/角数"）
+	std::vector<InitialNum> nums;
+	if (def->nums) nums = *def->nums;
+	if (def->formKey && wcscmp(def->designId, L"rect") == 0) {
+		if (curForm == 2) nums.push_back(kPolyNums.front());
+		else if (curForm == 3) nums.push_back(kStarNums.front());
+	}
+	// 没有可配项（例如「显示光标」）→ 卡片保持占位提示
+	if (!hasForms && nums.empty()) { renderHint(); return; }
+
+	// —— 一行：形态 chip（可拖拽排序）｜ 滑动条 ——
+	auto* row = box->makeChild<Ling::Node>();
+	row->setWidthPercent(100.f);
+	row->setFlexDirection(Ling::FlexDirection::Row);
+	row->setFlexWrap(Ling::Wrap::Wrap);
+	row->setAlignItems(Ling::Align::Center);
+	tbInitRow = row;
+
+	if (hasForms) {
+		// 形态顺序：存过 order 就按它排，首个 = 默认形态
+		std::vector<InitialChoice> forms = *def->forms;
+		const std::wstring order = s->getToolDesignStr(def->designId, L"order", L"");
+		if (!order.empty()) {
+			std::vector<InitialChoice> sorted;
+			std::vector<bool> used(forms.size(), false);
+			size_t pos = 0;
+			while (pos < order.size()) {
+				const size_t comma = order.find(L',', pos);
+				const std::wstring tok = order.substr(pos, comma == std::wstring::npos ? std::wstring::npos : comma - pos);
+				const int v = tok.empty() ? -1 : _wtoi(tok.c_str());
+				for (size_t i = 0; i < forms.size(); ++i) {
+					if (!used[i] && forms[i].value == v) { used[i] = true; sorted.push_back(forms[i]); break; }
+				}
+				if (comma == std::wstring::npos) break;
+				pos = comma + 1;
+			}
+			for (size_t i = 0; i < forms.size(); ++i) if (!used[i]) sorted.push_back(forms[i]);
+			forms.swap(sorted);
+		}
+		// 默认形态始终排在首位
+		for (size_t i = 1; i < forms.size(); ++i) {
+			if (forms[i].value == curForm) { std::swap(forms[0], forms[i]); break; }
+		}
+		tbInitDesignId = def->designId;
+		tbInitFormKey = def->formKey;
+		for (size_t i = 0; i < forms.size(); ++i) {
+			auto* b = makeChip(row, forms[i], i == 0);
+			tbInitChips.push_back({ b, forms[i].value });
+			if (i == 0 && forms.size() > 1) {
+				auto* sep = row->makeChild<Ling::Node>();
+				sep->setSize(1.f, 20.f);
+				sep->setBg(SettingTheme::border);
+				sep->setMarginLeft(4.f);
+				sep->setMarginRight(10.f);
+				sep->setFlexShrink(0.f);
+			}
+		}
+	}
+
+	// 拖拽插入提示：绿色竖条（绝对定位，不参与布局）
+	tbInitCursor = row->makeChild<Ling::Node>();
+	tbInitCursor->setPositionType(Ling::Position::Absolute);
+	tbInitCursor->setSize(2.f, 28.f);
+	tbInitCursor->setBg(0x34C759FF);
+	tbInitCursor->setBorderRadius(SettingTheme::radius);
+	tbInitCursor->hide();
+
+	// —— 滑动条：不加文案，整组靠右 ——
+	if (!nums.empty()) {
+		auto* numsBox = row->makeChild<Ling::Node>();
+		numsBox->setFlexGrow(1.f);   // 吃掉剩余宽度，把滑条组顶到右侧
+		numsBox->setFlexDirection(Ling::FlexDirection::Row);
+		numsBox->setAlignItems(Ling::Align::Center);
+		numsBox->setJustifyContent(Ling::Justify::End);
+		for (size_t i = 0; i < nums.size(); ++i) {
+			auto& n = nums[i];
+			auto* lb = numsBox->makeChild<Ling::Label>();
+			lb->setText(Lang::get(n.labelKey));
+			lb->setFontSize(12.f);
+			lb->setColor(SettingTheme::textSecondary);
+			lb->setFlexShrink(0.f);
+			lb->setMarginLeft(i == 0 ? 0.f : 12.f);
+			lb->setMarginRight(8.f);
+			const int cur = std::clamp(s->getToolDesignInt(def->designId, n.key, n.def), n.min, n.max);
+			auto* sl = numsBox->makeChild<Ling::Slider>();
+			sl->setWidth(110.f);
+			sl->setFlexShrink(0.f);
+			sl->setHeight(20.f);
+			sl->setRange((float)n.min, (float)n.max);
+			sl->setStep(1.f);
+			sl->setValue((float)cur);
+			sl->setTrackColor(SettingTheme::input);
+			sl->setFillColor(0x34C759FFu);
+			sl->setThumbColor(SettingTheme::primary);
+			sl->setHoverThumbColor(SettingTheme::primary);
+			auto* val = numsBox->makeChild<Ling::TextBox>();
+			val->setWidth(44.f);
+			val->setHeight(30.f);   // 与「工具栏主题」四个选项行等高
+			val->setFlexShrink(0.f);
+			val->setMarginLeft(8.f);
+			val->setBorderRadius(SettingTheme::radiusCtl);
+			val->setBorder(1.f, SettingTheme::input);
+			val->setBg(SettingTheme::inputBg);
+			val->setColor(SettingTheme::textPrimary);
+			val->setPadding(6.f, 0.f, 6.f, 0.f);
+			val->setFontSize(12.f);
+			val->setVerticalCenter(true);
+			val->setTextAlignCenter(true);
+			val->setScrollBarVisible(false);
+			val->setSelectionBgColor(0x34C75966u);
+			val->setText(std::to_wstring(cur));
+			const std::wstring designId = def->designId;
+			const std::wstring key = n.key;
+			const int mn = n.min, mx = n.max;
+			// 输入框与滑条双向同步（sync 防回环）
+			auto sync = std::make_shared<bool>(false);
+			auto applyVal = [this, val, sl, designId, key, mn, mx, sync](const std::wstring& t) {
+				if (*sync) return;
+				std::wstring digits;
+				for (wchar_t ch : t) if (ch >= L'0' && ch <= L'9') digits += ch;
+				// 越界夹紧：超上限直接显示上限（如箭头 64，输入 88 → 64），空值按最小值
+				const int iv = std::clamp(digits.empty() ? mn : _wtoi(digits.c_str()), mn, mx);
+				Setting::get()->setToolDesignInt(designId, key, iv);
+				*sync = true;
+				val->setText(std::to_wstring(iv));
+				sl->setValue((float)iv);
+				*sync = false;
+				this->tbRefreshRestore();
+				};
+			val->onTextChanged.add([applyVal](Ling::TextBox*, const std::wstring& t) { applyVal(t); });
+			val->onFocusChanged.add([applyVal, val](Ling::TextBox*, bool focused) {
+				if (!focused) applyVal(val->getText());   // 失焦兜底再正规化一次
+				});
+			sl->onValueChanged.add([this, designId, key, mn, mx, val, sync](Ling::Slider*, float v) {
+				if (*sync) return;
+				const int iv = std::clamp((int)std::lround(v), mn, mx);
+				Setting::get()->setToolDesignInt(designId, key, iv);
+				*sync = true;
+				val->setText(std::to_wstring(iv));
+				*sync = false;
+				this->tbRefreshRestore();
+				});
+		}
+	}
+}
+
+namespace {
+	// 节点当前可见区域命中（ScrollerBox 滚动只平移视觉，节点 x/y 仍是未滚动坐标）
+	bool tbHitVisible(Ling::Node* n, POINT p)
+	{
+		if (!n) return false;
+		auto [lx, ly] = SettingUi::visiblePos(n);
+		return p.x >= lx && p.x <= lx + n->w && p.y >= ly && p.y <= ly + n->h;
+	}
+}
+
+void WinSettingAppearance::tbInitDragGhostMove(POINT pos)
+{
+	if (!tbDragGhost) return;
+	tbDragGhost->setPosition(Ling::Edge::Left, (float)pos.x - this->x - 18.f);
+	tbDragGhost->setPosition(Ling::Edge::Top, (float)pos.y - this->y - 18.f);
+}
+
+void WinSettingAppearance::tbInitDragDown(POINT pos)
+{
+	if (!tbInitialOpen || tbInitChips.empty()) return;
+	for (size_t i = 0; i < tbInitChips.size(); ++i) {
+		auto* chip = tbInitChips[i].first;
+		if (!tbHitVisible(chip, pos)) continue;
+		tbInitDragging = true;
+		tbInitDragIdx = (int)i;
+		tbInitDropIdx = -1;
+		if (tbDragGhost && tbDragGhostIcon) {
+			tbDragGhostIcon->setText(chip ? chip->getText() : L"");
+			tbInitDragGhostMove(pos);
+			tbDragGhost->show();
+			win->refresh();
+		}
+		return;
+	}
+}
+
+// 光标落在形态行内时，算出插入位（0..n）；不在行内返回 -1
+int WinSettingAppearance::tbInitDropIndexAt(POINT pos) const
+{
+	if (!tbInitRow || tbInitChips.empty()) return -1;
+	if (!tbHitVisible(tbInitRow, pos)) return -1;
+	int idx = (int)tbInitChips.size();
+	for (size_t i = 0; i < tbInitChips.size(); ++i) {
+		auto* c = tbInitChips[i].first;
+		if (!c) continue;
+		if (pos.x < c->x + c->w / 2.f) { idx = (int)i; break; }
+	}
+	return idx;
+}
+
+void WinSettingAppearance::tbInitDragMove(POINT pos)
+{
+	if (!tbInitDragging) return;
+	tbInitDragGhostMove(pos);
+	tbInitDropIdx = tbInitDropIndexAt(pos);
+	if (tbInitCursor && tbInitRow) {
+		if (tbInitDropIdx < 0) tbInitCursor->hide();
+		else {
+			float x = tbInitRow->x, y = tbInitRow->y;
+			if (tbInitDropIdx >= (int)tbInitChips.size()) {
+				auto* last = tbInitChips.back().first;
+				if (last) { x = last->x + last->w + 3.f; y = last->y; }
+			}
+			else {
+				auto* c = tbInitChips[tbInitDropIdx].first;
+				if (c) { x = c->x - 3.f; y = c->y; }
+			}
+			tbInitCursor->setPosition(Ling::Edge::Left, x - tbInitRow->x);
+			tbInitCursor->setPosition(Ling::Edge::Top, y - tbInitRow->y + 4.f);
+			tbInitCursor->show();
+		}
+	}
+	win->refresh();
+}
+
+void WinSettingAppearance::tbInitDragUp(POINT pos)
+{
+	if (!tbInitDragging) return;
+	tbInitDragging = false;
+	if (tbDragGhost) tbDragGhost->hide();
+	if (tbInitCursor) tbInitCursor->hide();
+	const int drop = tbInitDropIndexAt(pos);
+	const int from = tbInitDragIdx;
+	tbInitDragIdx = -1;
+	tbInitDropIdx = -1;
+	if (drop < 0 || from < 0 || tbInitDesignId.empty()) { win->refresh(); return; }
+	int to = drop;
+	if (from < to) --to;                     // 先移除再插入，插入位左移一格
+	if (to == from) { win->refresh(); return; }
+
+	// 当前展示顺序 = tbInitChips 的 value 顺序
+	std::vector<int> order;
+	order.reserve(tbInitChips.size());
+	for (auto& c : tbInitChips) order.push_back(c.second);
+	const int moved = order[from];
+	order.erase(order.begin() + from);
+	order.insert(order.begin() + to, moved);
+
+	// 存顺序（首个 = 默认形态），并同步默认形态
+	std::wstring seq;
+	for (size_t i = 0; i < order.size(); ++i) {
+		if (i) seq += L',';
+		seq += std::to_wstring(order[i]);
+	}
+	auto* s = Setting::get();
+	s->setToolDesignStr(tbInitDesignId, L"order", seq);
+	if (!tbInitFormKey.empty() && !order.empty())
+		s->setToolDesignInt(tbInitDesignId, tbInitFormKey, order.front());
+	tbRefreshInitialToolbar();   // 工具行图标跟随新的默认形态
+	tbRefreshInitialEditor();
+	tbRebuildZones();            // 显示区/隐藏区 chip + 预览条同步
 }
 
 void WinSettingAppearance::tbTogglePreview()
 {
     if (!tbPreviewWrap) return;
     tbPreviewShown = !tbPreviewShown;
+    // 与「初始属性」互不干扰：只切换预览条本身
     if (tbPreviewShown) tbPreviewWrap->show();
     else tbPreviewWrap->hide();
     tbRefreshPreview();
+    tbRefreshActionState();
 }
 
 void WinSettingAppearance::tbRefreshPreview()
@@ -1285,13 +1834,22 @@ void WinSettingAppearance::tbRefreshPreview()
             b->setFontSize(10.f);
         }
         else {
-            auto ic = ToolbarStore::iconOf(id);
+            // 图标体现该工具的默认形态（如箭头默认换成趣味箭头 → 显示趣味箭头图标）
+            auto ic = ToolInitial::iconForSlot(id);
+            if (ic.empty()) ic = ToolbarStore::iconOf(id);
             b->setText(ic.empty() ? L"·" : ic);
             b->setFontFamily(Icon::Family);
             b->setFontSize(18.f);
+            if (ToolInitial::isMosaicBlur() && ToolInitial::defIdOfSlot(id) == L"mosaic") {
+                b->setText(L"");
+                ToolIcon::overlayGlyph(b, Icon::Blur2, Icon::Blur, 18.f,
+                    ToolbarTheme::iconNormal, ToolIcon::withAlpha(ToolbarTheme::iconNormal, 0x40));
+            }
         }
     }
 }
+
+// ==================== 显示区 / 隐藏区（chip 拖拽排序） ====================
 
 Ling::Button* WinSettingAppearance::tbMakeChip(const std::wstring& id, bool active)
 {
@@ -1318,10 +1876,17 @@ Ling::Button* WinSettingAppearance::tbMakeChip(const std::wstring& id, bool acti
             b->setFontSize(10.f);
         }
         else {
-            auto ic = ToolbarStore::iconOf(id);
+            // 图标体现该工具的默认形态（与预览条 / 实际工具栏一致）
+            auto ic = ToolInitial::iconForSlot(id);
+            if (ic.empty()) ic = ToolbarStore::iconOf(id);
             b->setText(ic.empty() ? L"·" : ic);
             b->setFontFamily(Icon::Family);
             b->setFontSize(Icon::SizeSm);
+            if (ToolInitial::isMosaicBlur() && ToolInitial::defIdOfSlot(id) == L"mosaic") {
+                b->setText(L"");
+                ToolIcon::overlayGlyph(b, Icon::Blur2, Icon::Blur, Icon::SizeSm,
+                    SettingTheme::textPrimary, ToolIcon::withAlpha(SettingTheme::textPrimary, 0x40));
+            }
         }
     }
     tbStyleChip(b, id, active);
@@ -1374,6 +1939,8 @@ std::wstring WinSettingAppearance::tbTipText(const std::wstring& id) const
 {
     if (id == L"record-time") return L"录制时长";
     if (tbIsSplitId(id)) return (id == L"split-extra") ? L"拖入工具栏添加分隔符" : L"分隔符";
+    // 马赛克切到「模糊」时，槽位文案跟着改名
+    if (const wchar_t* nk = ToolInitial::nameKeyForSlot(id)) return Lang::get(nk);
     struct M { const wchar_t* id; const wchar_t* key; };
     static const M kMap[] = {
         { L"show-cursor", L"tool.showCursor" },
@@ -1424,7 +1991,8 @@ void WinSettingAppearance::tbShowGhost(const std::wstring& id, POINT pos)
         tbGhostIcon->setFontSize(10.f);
     }
     else {
-        auto ic = ToolbarStore::iconOf(id);
+        auto ic = ToolInitial::iconForSlot(id);
+        if (ic.empty()) ic = ToolbarStore::iconOf(id);
         tbGhostIcon->setText(ic.empty() ? L"·" : ic);
         tbGhostIcon->setFontFamily(Icon::Family);
         tbGhostIcon->setFontSize(Icon::SizeSm);
@@ -1488,11 +2056,11 @@ void WinSettingAppearance::tbBuildChips(Ling::Node* box,
             hint->setMarginLeft(8.f);
         }
     }
-    // 插入位置光标：蓝色竖条，拖拽时显示；绝对定位，不参与 flex 布局
+    // 插入位置光标：绿色竖条，拖拽时显示；绝对定位，不参与 flex 布局
     auto* cursor = box->makeChild<Ling::Node>();
     cursor->setPositionType(Ling::Position::Absolute);
     cursor->setSize(2.f, 28.f);
-    cursor->setBg(0x34C759FF);   // 绿色插入提示（0x34C759）
+    cursor->setBg(0x34C759FF);
     cursor->setBorderRadius(SettingTheme::radius);
     cursor->hide();
     if (active) tbCursorActive = cursor; else tbCursorInactive = cursor;
@@ -1503,6 +2071,8 @@ void WinSettingAppearance::tbOnDown(POINT pos, bool right)
     tbDragging = false;
     tbDragId.clear();
     if (right || !tbScroller) return;
+    // 初始属性展开时两张卡片已隐藏：不响应 chip 命中（隐藏节点仍保有旧几何坐标）
+    if (tbInitialOpen) return;
     // 其它弹层打开时（如类型下拉）不响应 chip
     if (SettingUi::hasPopup()) return;
     POINT c = tbToContent(pos);
@@ -1557,7 +2127,7 @@ void WinSettingAppearance::tbOnMove(POINT pos)
         int dx = std::abs(pos.x - tbDragStart.x);
         int dy = std::abs(pos.y - tbDragStart.y);
         if (dx + dy > 6) {
-            tbDragging = true;   // 拖拽时原 chip 保持原样（不再加粗描边/淡蓝底，跟手幽灵已足够）
+            tbDragging = true;   // 拖拽时原 chip 保持原样（跟手幽灵已足够）
         }
     }
     if (!tbDragging) return;
@@ -1609,7 +2179,7 @@ void WinSettingAppearance::tbUpdateDropHint()
     if (idx < 0) return;
     // 在插入位（该 chip 左侧 / 列表末尾）显示绿色竖条，高度与图标行对齐。
     // chip->x/y 是"未滚动"的窗口绝对坐标，而 cursor 是 hostBox 的子节点（绝对定位相对 hostBox），
-    // 所以这里必须减去 hostBox 的原点 → 之前直接用绝对值，竖条被挪到了容器外（看不见）。
+    // 所以这里必须减去 hostBox 的原点。
     float x = hostBox->x, y = hostBox->y;
     if (!chips.empty()) {
         if (idx >= (int)chips.size()) {
@@ -1638,7 +2208,7 @@ void WinSettingAppearance::tbClearDropHint()
     if (tbCursorInactive) tbCursorInactive->hide();
     tbHideGhost();
     if (tbDragChip && !tbDragId.empty()) {
-        tbStyleChip(tbDragChip, tbDragId, tbDragFrom);
+        tbStyleChip(tbDragChip, tbDragId, tbDragFrom == 0);
     }
     tbDragChip = nullptr;
     tbLiveDropTo = -1;
@@ -1758,11 +2328,6 @@ bool WinSettingAppearance::tbLocked(const std::wstring& id) const
     case 3: return id == L"cancel" || id == L"confirm";
     }
     return false;
-}
-
-bool WinSettingAppearance::tbIsSplit(const std::wstring& id)
-{
-    return tbIsSplitId(id);
 }
 
 std::wstring WinSettingAppearance::tbNextSplitId()

@@ -40,11 +40,45 @@ private:
 	D2D1_RECT_F before_, after_;
 };
 
+// 编辑一步：记录目标标注编辑前后的几何，撤销时回退到 before、重做时回到 after
+class ShapeEditStep : public ShapeBase
+{
+public:
+	ShapeEditStep(AnnotHost* win, ShapeBase* target,
+		std::vector<float> before, std::vector<float> after)
+		: ShapeBase(win), target_(target), before_(std::move(before)), after_(std::move(after))
+	{
+	}
+	void paint(ID2D1DeviceContext*) override {}
+	void onUndoChanged(bool undone) override
+	{
+		if (!target_) return;
+		target_->applyEditSnapshot(undone ? before_ : after_);
+		target_->syncLinks();
+		win->refresh();
+	}
+	ShapeBase* target() const { return target_; }
+private:
+	ShapeBase* target_{ nullptr };
+	std::vector<float> before_;
+	std::vector<float> after_;
+};
+
 void SetShapeUndo(ShapeBase* shape, bool undone)
 {
 	if (!shape) return;
 	shape->isUndo = undone;
 	shape->onUndoChanged(undone);
+}
+
+// 尺寸/角度的数值文字是拖拽过程中后建的，和宿主线是一个整体：
+// 单独撤销只会删掉文字，留下一条没有数值的线。
+ShapeBase* undoGroupHost(ShapeBase* shape)
+{
+	if (auto* t = dynamic_cast<ShapeText*>(shape)) {
+		if (t->attachTo) return t->attachTo;
+	}
+	return shape;
 }
 }
 
@@ -153,15 +187,24 @@ ShapeBase* History::createShape(const std::wstring& state, const int& x, const i
     return result;
 }
 
-namespace {
-D2D1_RECT_F filterViewport(AnnotHost* win)
+D2D1_RECT_F annotImageRect(AnnotHost* win)
 {
 	if (auto* cap = dynamic_cast<WinCap*>(win)) {
 		if (cap->cutMask && cap->cutMask->hasRect())
 			return cap->cutMask->maskRect;
 	}
-	return D2D1::RectF(0.f, 0.f, (float)win->w, (float)win->h);
-}
+	// 标注坐标是图像像素：优先用底图自身尺寸，贴图缩放后客户区尺寸不再等于图像尺寸
+	const float sc = win->scale > 0.001f ? win->scale : 1.f;
+	const float annotW = (float)win->w / sc;
+	const float annotH = (float)win->h / sc;
+	if (win->screenImg) {
+		const D2D1_SIZE_U px = win->screenImg->GetPixelSize();
+		if (px.width > 0 && px.height > 0
+			&& std::fabs((float)px.width - annotW) <= 2.f
+			&& std::fabs((float)px.height - annotH) <= 2.f)
+			return D2D1::RectF(0.f, 0.f, (float)px.width, (float)px.height);
+	}
+	return D2D1::RectF(0.f, 0.f, annotW, annotH);
 }
 
 void History::syncViewportFilters(const std::wstring& toolId)
@@ -191,7 +234,7 @@ void History::syncViewportFilters(const std::wstring& toolId)
 		return;
 	}
 
-	const auto vp = filterViewport(win);
+	const auto vp = annotImageRect(win);
 	if (vp.right - vp.left < 2.f || vp.bottom - vp.top < 2.f) return;
 
 	ShapeBase* existing = nullptr;
@@ -250,15 +293,24 @@ void History::undo()
     {
         auto cur = shapes[i].get();
         // 渐隐画笔等临时笔迹不进撤销栈（laser 不提交成 op）
-        if (!cur->isUndo && !cur->isEphemeral()) {
-            SetShapeUndo(cur, true);
-            if (cur == win->shapeHover) {
-                win->shapeHover = nullptr;
-            }
-            win->refresh();
-            win->onHistoryChanged();
-            break;
+        if (cur->isUndo || cur->isEphemeral()) continue;
+
+        // 撤销以线为单位：文字单独成条时回溯到宿主，宿主与其文字一起走
+        ShapeBase* host = undoGroupHost(cur);
+        if (host->isUndo || host->isEphemeral()) host = cur;
+        if (host != cur) SetShapeUndo(cur, true);
+        SetShapeUndo(host, true);
+        for (auto& s : shapes) {
+            if (s.get() == host || s->isUndo) continue;
+            if (auto* t = dynamic_cast<ShapeText*>(s.get()); t && t->attachTo == host)
+                SetShapeUndo(s.get(), true);
         }
+        if (win->shapeHover == cur || win->shapeHover == host) {
+            win->shapeHover = nullptr;
+        }
+        win->refresh();
+        win->onHistoryChanged();
+        break;
     }
 }
 
@@ -267,12 +319,17 @@ void History::redo()
     for (size_t i = 0; i < shapes.size(); i++)
     {
         auto cur = shapes[i].get();
-        if (cur->isUndo) {
-            SetShapeUndo(cur, false);
-            win->refresh();
-            win->onHistoryChanged();
-            break;
+        if (!cur->isUndo) continue;
+        // 与撤销对称：恢复一条线时把它挂着的文字一起恢复
+        SetShapeUndo(cur, false);
+        for (auto& s : shapes) {
+            if (s.get() == cur || !s->isUndo) continue;
+            if (auto* t = dynamic_cast<ShapeText*>(s.get()); t && t->attachTo == cur)
+                SetShapeUndo(s.get(), false);
         }
+        win->refresh();
+        win->onHistoryChanged();
+        break;
     }
 }
 
@@ -336,6 +393,12 @@ void History::removeShape(ShapeBase* target)
     if (win->shapeHover == target) {
         win->shapeHover = nullptr;
     }
+    // 目标已删除：引用它的编辑步骤一并丢弃，避免撤销时作用到野指针
+    for (auto it2 = shapes.begin(); it2 != shapes.end(); ) {
+        auto* step = dynamic_cast<ShapeEditStep*>(it2->get());
+        if (step && step->target() == target) it2 = shapes.erase(it2);
+        else ++it2;
+    }
     win->refresh();
     win->onHistoryChanged();
 }
@@ -370,6 +433,15 @@ void History::addBoardResize(int page, const D2D1_RECT_F& before, const D2D1_REC
 	// 新操作会丢弃已撤销的重做栈（与 createShape 一致）
 	removeUndoShape();
 	shapes.push_back(std::make_unique<ShapeBoardResize>(win, page, before, after));
+	win->onHistoryChanged();
+}
+
+void History::addEditStep(ShapeBase* target, const std::vector<float>& before, const std::vector<float>& after)
+{
+	if (!target || before.empty() || before == after) return;
+	// 新操作会丢弃已撤销的重做栈
+	removeUndoShape();
+	shapes.push_back(std::make_unique<ShapeEditStep>(win, target, before, after));
 	win->onHistoryChanged();
 }
 

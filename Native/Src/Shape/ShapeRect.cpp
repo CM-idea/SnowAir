@@ -275,6 +275,26 @@ void ShapeRect::paintDragger(ID2D1DeviceContext* ctx)
 	});
 }
 
+std::vector<float> ShapeRect::editSnapshot() const
+{
+	return { rect.left, rect.top, rect.right, rect.bottom, angle,
+		radius[0], radius[1], radius[2], radius[3], radiusPct_, uniformPct_ ? 1.f : 0.f };
+}
+
+void ShapeRect::applyEditSnapshot(const std::vector<float>& s)
+{
+	if (s.size() < 11) return;
+	rect = D2D1::RectF(s[0], s[1], s[2], s[3]);
+	angle = s[4];
+	radius[0] = s[5];
+	radius[1] = s[6];
+	radius[2] = s[7];
+	radius[3] = s[8];
+	radiusPct_ = s[9];
+	uniformPct_ = s[10] > 0.5f;
+	updateDraggers();
+}
+
 void ShapeRect::mouseDrag(const float x, const float y)
 {
 	if (hoverDraggerIndex >= 10 && hoverDraggerIndex <= 13) {

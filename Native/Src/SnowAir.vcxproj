@@ -217,7 +217,6 @@
     <ClCompile Include="Lang.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Net\HttpClient.cpp" />
-    <ClCompile Include="Ocr\CloudOcr.cpp" />
     <ClCompile Include="Ocr\OcrModelManager.cpp" />
     <ClCompile Include="Ocr\OcrRuntimeManager.cpp" />
     <ClCompile Include="Ocr\OcrService.cpp" />
@@ -341,7 +340,6 @@
     <ClInclude Include="History.h" />
     <ClInclude Include="Lang.h" />
     <ClInclude Include="Net\HttpClient.h" />
-    <ClInclude Include="Ocr\CloudOcr.h" />
     <ClInclude Include="Ocr\OcrModelManager.h" />
     <ClInclude Include="Ocr\OcrPackVariant.h" />
     <ClInclude Include="Ocr\OcrRuntimeManager.h" />

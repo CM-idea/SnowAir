@@ -36,6 +36,8 @@ public:
 	// 坐标同 rect，都是标注坐标系
 	bool hitLabelBox(float x, float y) const;
 	float stylePrimarySize() const override { return fontSize; }
+	std::vector<float> editSnapshot() const override;
+	void applyEditSnapshot(const std::vector<float>& state) override;
 public:
 	bool isEditing{ false };
 	// 「线段中间打字」：画字之前先用底图把这块抠回来，线段/箭头从文字下穿过就会断成两截

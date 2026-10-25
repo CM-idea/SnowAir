@@ -3,6 +3,7 @@
 #include "Win/WinCap.h"
 #include "Win/CutMask.h"
 #include "Tool/ToolSub.h"
+#include "History.h"
 #include "ShapeHighlight.h"
 
 ShapeHighlight::ShapeHighlight(AnnotHost* win) : ShapeArea(win)
@@ -23,11 +24,8 @@ void ShapeHighlight::applyStyle()
 
 D2D1_RECT_F ShapeHighlight::viewportOf(AnnotHost* win)
 {
-	if (auto* cap = dynamic_cast<WinCap*>(win)) {
-		if (cap->cutMask && cap->cutMask->hasRect())
-			return cap->cutMask->maskRect;
-	}
-	return D2D1::RectF(0.f, 0.f, (float)win->w, (float)win->h);
+	// 与包浆/水印同一口径：覆盖标注坐标下的整张底图（贴图缩放后也正确）
+	return annotImageRect(win);
 }
 
 void ShapeHighlight::paintMerged(ID2D1DeviceContext* ctx, AnnotHost* win,

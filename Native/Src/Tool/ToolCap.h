@@ -36,7 +36,8 @@ public:
 	float getBtnCenterX() const;
 	// 属性栏跟随的按钮（默认跟随 curId）；白板这类"不是工具"的栏需要单独指定
 	void setAnchorId(const std::wstring& id) { anchorId = id; }
-	void cancelSelect();
+	// dropFilters=false：只清选中态，不撤掉视口滤镜（退出贴图编辑用，滤镜算已提交的标注）
+	void cancelSelect(bool dropFilters = true);
 	// 只恢复工具选中态（不弹属性栏）：白板属性栏收起时还原被临时取消的渐隐画笔
 	void restoreToolSelection(const std::wstring& id);
 	void selectTool(const std::wstring& id);
@@ -49,6 +50,8 @@ public:
 	void hideHoverTip();
 	void updateUndoEnabled();
 	std::wstring resolveToolId(const std::wstring& slotId) const;
+	// 内置的停悬气泡候选（未经初始属性裁剪）：设置页「初始属性」编辑气泡内容时用
+	static const std::vector<ToolPickItem>* getBuiltinSubTools(const std::wstring& slotId);
 	// 当前槽位 id。演示模式下 laser / pen 是同级排他槽位，laser 经 resolveToolId
 	// 映射到底层画笔工具（见 applyDemoLayout 的 pickedSub），所以标注引擎拿到的仍是 pen。
 	std::wstring curId;

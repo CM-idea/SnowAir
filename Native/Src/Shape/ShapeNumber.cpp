@@ -191,6 +191,25 @@ void ShapeNumber::paintDragger(ID2D1DeviceContext* ctx)
 	});
 }
 
+std::vector<float> ShapeNumber::editSnapshot() const
+{
+	return { cx, cy, r, angle, boxAngle, rect.left, rect.top, rect.right, rect.bottom };
+}
+
+void ShapeNumber::applyEditSnapshot(const std::vector<float>& s)
+{
+	if (s.size() < 9) return;
+	cx = s[0];
+	cy = s[1];
+	r = s[2];
+	angle = s[3];
+	boxAngle = s[4];
+	rect = D2D1::RectF(s[5], s[6], s[7], s[8]);
+	makePath();
+	makeTextLayout();
+	updateDraggers();
+}
+
 void ShapeNumber::mouseDrag(const float x, const float y)
 {
 	if (!isEmoji()) {

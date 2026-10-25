@@ -11,6 +11,8 @@
 #include "ToolbarChrome.h"
 #include "ToolbarTheme.h"
 #include "ToolbarStore.h"
+#include "ToolInitialDefs.h"   // 初始属性的默认形态 → 工具栏图标（文案不变）
+#include "ToolIconCompose.h"   // 复合图标（马赛克切模糊时叠两层）
 #include "../Win/AnnotHost.h"
 #include "../Win/PinMenu.h"
 #include "../Win/SettingWidgets.h"
@@ -394,29 +396,60 @@ bool ToolCap::hasSubTools(const std::wstring& slotId)
 	return slotId == L"mosaic" || slotId == L"ocr" || slotId == L"arrow";
 }
 
+namespace {
+	// 停悬气泡的内置候选（顺序即默认展示顺序）
+	const std::vector<ToolPickItem>& builtinSubs(const std::wstring& slotId)
+	{
+		static const std::vector<ToolPickItem> empty;
+		// 箭头槽位：箭头 / 标注（原来的「线段」，从箭头属性栏里独立出来）
+		static const std::vector<ToolPickItem> arrowSubs = {
+			{ L"arrow", Icon::Arrow, L"tool.arrow" },
+			{ L"line", Icon::Line, L"tool.line" },
+		};
+		static const std::vector<ToolPickItem> mosaicSubs = {
+			{ L"mosaic", Icon::Mosaic, L"tool.mosaic" },
+			{ L"patina", Icon::Patina, L"tool.patina" },
+			{ L"watermark", Icon::Watermark, L"tool.watermark" },
+			{ L"highlight", Icon::Highlight, L"tool.highlight" },
+		};
+		// 文字识别气泡 = 文字识别 + 识别二维码
+		static const std::vector<ToolPickItem> ocrSubs = {
+			{ L"ocr", Icon::Ocr, L"cap.ocr" },
+			{ L"qrcode", Icon::Qrcode, L"cap.qrcode" },
+		};
+		if (slotId == L"arrow") return arrowSubs;
+		if (slotId == L"mosaic") return mosaicSubs;
+		if (slotId == L"ocr") return ocrSubs;
+		return empty;
+	}
+	bool csvHas(const std::wstring& csv, const std::wstring& id)
+	{
+		const std::wstring all = L"," + csv + L",";
+		return all.find(L"," + id + L",") != std::wstring::npos;
+	}
+}
+
 const std::vector<ToolPickItem>* ToolCap::getSubTools(const std::wstring& slotId)
 {
-	// 箭头槽位的停悬气泡：箭头 / 标注（原来的「线段」，从箭头属性栏里独立出来）
-	static const std::vector<ToolPickItem> arrowSubs = {
-		{ L"arrow", Icon::Arrow, L"tool.arrow" },
-		{ L"line", Icon::Line, L"tool.line" },
-	};
-	static const std::vector<ToolPickItem> mosaicSubs = {
-		{ L"mosaic", Icon::Mosaic, L"tool.mosaic" },
-		{ L"patina", Icon::Patina, L"tool.patina" },
-		{ L"watermark", Icon::Watermark, L"tool.watermark" },
-		{ L"highlight", Icon::Highlight, L"tool.highlight" },
-	};
-	// 文字识别气泡 = 文字识别 + 识别二维码；
-	// 原来的「清除识别结果」是多余项，已移除。
-	static const std::vector<ToolPickItem> ocrSubs = {
-		{ L"ocr", Icon::Ocr, L"cap.ocr" },
-		{ L"qrcode", Icon::Qrcode, L"cap.qrcode" },
-	};
-	if (slotId == L"arrow") return &arrowSubs;
-	if (slotId == L"mosaic") return &mosaicSubs;
-	if (slotId == L"ocr") return &ocrSubs;
-	return nullptr;
+	static std::vector<ToolPickItem> filtered;
+	static std::wstring filteredSlot;
+	// 初始属性里可以裁剪每个槽位的气泡内容（toolDesign/{slot}/bubble，逗号分隔的 id）
+	// 没配过 = 内置全量；至少保留一项，避免出现空气泡
+	auto* s = Setting::get();
+	const std::wstring csv = s ? s->getToolDesignStr(slotId, L"bubble", L"") : std::wstring{};
+	static std::wstring lastCsv;
+	const auto& all = builtinSubs(slotId);
+	if (all.empty()) return nullptr;
+	if (filteredSlot != slotId || lastCsv != csv) {
+		filtered.clear();
+		for (const auto& item : all) {
+			if (csv.empty() || csvHas(csv, item.id)) filtered.push_back(item);
+		}
+		if (filtered.empty()) filtered = all;
+		filteredSlot = slotId;
+		lastCsv = csv;
+	}
+	return &filtered;
 }
 
 std::wstring ToolCap::resolveToolId(const std::wstring& slotId) const
@@ -430,6 +463,12 @@ void ToolCap::showComingSoon()
 {
 	MessageBoxW(hwnd, Lang::get(L"cap.comingSoon").c_str(), Lang::get(L"about.sysTip").c_str(),
 		MB_OK | MB_ICONINFORMATION);
+}
+
+const std::vector<ToolPickItem>* ToolCap::getBuiltinSubTools(const std::wstring& slotId)
+{
+	const auto& all = builtinSubs(slotId);
+	return all.empty() ? nullptr : &all;
 }
 
 void ToolCap::updateSlotButton(const std::wstring& slot)
@@ -576,7 +615,8 @@ void ToolCap::onHoverMove(POINT pos)
 		// 演示模式没有二级子工具（把马赛克/水印拆成独立槽，不弹气泡）
 		if (demoLayout) return;
 		const auto* subs = getSubTools(btn->id);
-		if (!subs) return;
+		// 初始属性把气泡裁到只剩一项时不再弹（单项气泡没有意义）
+		if (!subs || subs->size() < 2) return;
 		cancelHidePicker();
 		hoverBtn = btn;
 		picker->showFor(this, btn, *subs, resolveToolId(btn->id),
@@ -631,7 +671,8 @@ void ToolCap::onHoverMove(POINT pos)
 		return;
 	}
 
-	if (found && getSubTools(found->id)) {
+	const auto* foundSubs = found ? getSubTools(found->id) : nullptr;
+	if (foundSubs && foundSubs->size() >= 2) {
 		if (found == hoverBtn && picker->isOpen()) {
 			cancelHidePicker();
 			return;
@@ -712,10 +753,23 @@ void ToolCap::onCreated()
 	// 首次建窗时把当前主题色板刷进 ToolbarTheme（含 Icon::ColorNormal/Disabled），
 	// 之后所有 ToolbarTheme::background / hoverBg / 图标色调用点即拿到用户所选主题。
 	ToolbarTheme::refresh();
-	pickedSub[L"mosaic"] = L"mosaic";
+	// 槽位默认子工具：初始属性里选过就用它（toolDesign/{slot}/pick），没选过用内置默认
+	auto subPick = [](const wchar_t* slot, const wchar_t* def) -> std::wstring {
+		auto* s = Setting::get();
+		const std::wstring pick = s ? s->getToolDesignStr(slot, L"pick", def) : std::wstring{ def };
+		const auto* subs = ToolCap::getSubTools(slot);
+		if (subs) {
+			for (const auto& item : *subs) {
+				if (item.id == pick) return pick;
+			}
+			return subs->front().id;   // 记录的那项已被裁出气泡 → 回落到气泡第一项
+		}
+		return pick;
+	};
+	pickedSub[L"mosaic"] = subPick(L"mosaic", L"mosaic");
 	pickedSub[L"extra"] = L"video";
-	pickedSub[L"ocr"] = L"ocr";
-	pickedSub[L"arrow"] = L"arrow";
+	pickedSub[L"ocr"] = subPick(L"ocr", L"ocr");
+	pickedSub[L"arrow"] = subPick(L"arrow", L"arrow");
 	// 「渐隐画笔」是独立一级槽位，但底层工具仍是画笔（laser = pen + isPenFade）：
 	// 槽位 id → 工具 id 显式映射，curId 可以是 laser（排他选中 / 取消选中 / 属性栏锚点按它算），
 	// 而标注引擎通过 getCurToolId() 仍然拿到 pen。
@@ -765,11 +819,20 @@ void ToolCap::onCreated()
 		else {
 			auto btn = contentNode->makeChild<Ling::Button>();
 			btn->setId(id);
-			btn->setText(btnCodes[i]);
+			// 只同步图标（默认形态被替换后，按钮显示新形态的图标；停悬文案仍是工具名，
+			// 唯一例外：马赛克切到「模糊」时图标与文案一起变成模糊）
+			const std::wstring storeId = storeIdOfRuntime(id);
+			const std::wstring formIcon = ToolInitial::iconForSlot(storeId);
+			btn->setText(formIcon.empty() ? btnCodes[i] : formIcon);
 			styleToolbarBtn(btn);
 			btn->setFontFamily(Icon::Family);
 			btn->setFontSize(Icon::Size);
 			applyActionColors(btn);
+			if (ToolInitial::isMosaicBlur() && ToolInitial::defIdOfSlot(storeId) == L"mosaic") {
+				btn->setText(L"");
+				ToolIcon::overlayGlyph(btn, Icon::Blur2, Icon::Blur, Icon::Size,
+					ToolbarTheme::iconNormal, ToolIcon::withAlpha(ToolbarTheme::iconNormal, 0x40));
+			}
 			btn->onClick.add([this](Ling::Button* btn) { onClick(btn); });
 			if (winPin && id == L"close") {
 				tip->bind(btn, Lang::get(L"pin.cancelEdit"));
@@ -777,8 +840,10 @@ void ToolCap::onCreated()
 			else if (winPin && id == L"clipboard") {
 				tip->bind(btn, Lang::get(L"pin.confirmEdit"));
 			}
-			else if (!btnTips[i].empty()) {
-				bindTip(btn, Lang::get(btnTips[i]));
+			else {
+				const wchar_t* nameKey = ToolInitial::nameKeyForSlot(storeId);
+				const std::wstring tipKey = nameKey ? std::wstring(nameKey) : btnTips[i];
+				if (!tipKey.empty()) bindTip(btn, Lang::get(tipKey));
 			}
 			btns.push_back(btn);
 		}
@@ -1059,7 +1124,7 @@ void ToolCap::applySelectedStyle(Ling::Button* btn)
 	btn->setHoverColor(ToolbarTheme::iconActive);
 }
 
-void ToolCap::cancelSelect()
+void ToolCap::cancelSelect(bool dropFilters)
 {
 	if (curId.empty()) return;
 	for (auto b : btns)
@@ -1073,8 +1138,9 @@ void ToolCap::cancelSelect()
 		// 白板属性栏不跟着绘图工具一起收：右键层级是先取消工具，再取消编辑背景，
 		// 最后才收属性栏（见 WinCap::handleLayerCancel）。
 		if (host->toolSub && !host->toolSub->boardToolsBuilt()) host->toolSub->hideTools();
-		// 再点水印/包浆取消选中时立刻撤掉视口滤镜（不要等到切到别的工具）
-		host->syncViewportFilters();
+		// 再点水印/包浆取消选中时立刻撤掉视口滤镜（不要等到切到别的工具）；
+		// 退出贴图编辑时传 false，滤镜留在画面上
+		if (dropFilters) host->syncViewportFilters();
 		host->layoutTools();
 		// 白板属性栏只是被工具属性栏临时替换：取消工具后还回来
 		if (auto* cap = dynamic_cast<WinCap*>(host)) cap->restoreDemoBoardBar();

@@ -90,6 +90,9 @@ public:
 		const std::wstring& focusAppName = L"");
 	// 「保存格式」设置（如 "JPEG (*.jpg)"）→ 扩展名；认不出来一律 png
 	static std::wstring extensionFromSaveFormat(const std::wstring& fmt);
+	// 录制收尾：把临时目录里的成片移到「录屏文件路径」（未设置时退回图片\SnowAir），
+	// 按「视频录制文件名格式」命名、重名自动加序号。返回最终路径（空 = 失败，源文件原样保留）
+	static std::wstring commitRecordedFile(const std::wstring& tempPath);
 	// 当前前台窗口所属进程名（不含扩展名），本进程自己（截图覆盖窗等）返回空。
 	// 供文件名模板里的 {{FOCUS_WINDOW_APP_NAME}} 用，需在覆盖窗出现前调用。
 	static std::wstring foregroundAppName();

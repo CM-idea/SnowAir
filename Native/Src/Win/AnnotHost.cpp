@@ -107,7 +107,8 @@ bool AnnotHost::queryMainBarAnchor(MainBarAnchor& out) const
 
 void AnnotHost::requestFadeTick()
 {
-	setTimer(33, 211);
+	// 15ms 与系统时钟节拍对齐，实际约 64Hz
+	setTimer(15, 211);
 }
 
 std::wstring AnnotHost::getCurToolId() const
@@ -168,14 +169,35 @@ ShapeText* AnnotHost::ensureShaftText(ShapeBase* host, const std::wstring& text,
 	return raw;
 }
 
-// 尺寸自带文字 = 线长的物理尺寸。图像像素就是屏幕物理像素，
-// Windows 以 96 逻辑 DPI 为 1 英寸，所以 cm = px * 2.54 / (96 * dpi)。
+namespace {
+	// 显示器物理像素密度（每英寸像素）。系统 DPI 只是逻辑值，与物理密度无关，
+	// 不能直接用于厘米换算。
+	float physicalDpi()
+	{
+		static const float cached = [] {
+			float dpi = 96.f;
+			if (HDC hdc = GetDC(nullptr)) {
+				const int px = GetDeviceCaps(hdc, HORZRES);
+				const int mm = GetDeviceCaps(hdc, HORZSIZE);
+				ReleaseDC(nullptr, hdc);
+				if (px > 0 && mm > 0) {
+					const float v = (float)px * 25.4f / (float)mm;
+					if (v >= 40.f && v <= 1000.f) dpi = v;
+				}
+			}
+			return dpi;
+		}();
+		return cached;
+	}
+}
+
+// 尺寸标注文字：线长的物理尺寸。图像像素与屏幕物理像素一致，
+// 按显示器物理密度换算厘米。
 std::wstring AnnotHost::dimensionTextFor(ShapeBase* host) const
 {
 	float px = 0.f;
 	if (auto* a = dynamic_cast<ShapeArrow*>(host)) px = a->shaftLength();
-	const float d = dpi > 0.f ? dpi : 1.f;
-	const float cm = px * 2.54f / (96.f * d);
+	const float cm = px * 2.54f / physicalDpi();
 	wchar_t buf[32]{};
 	swprintf_s(buf, L"%.1f cm", cm);
 	return buf;
@@ -807,8 +829,9 @@ void AnnotHost::setSizePreviewHold(bool hold)
 	refresh();
 }
 
-void AnnotHost::pulseSizePreview()
+void AnnotHost::pulseSizePreview(bool shapePreview)
 {
+	sizePreviewShape = shapePreview;
 	sizePreviewPulseUntil = GetTickCount64() + 700;
 	setTimer(700, 210);
 	refresh();
@@ -823,7 +846,7 @@ void AnnotHost::annotTimer(UINT id)
 		return;
 	}
 	if (id == 211) {
-		// 渐隐画笔：按点寿命重建轮廓，整段过寿命后移除；绘制中也持续 tick
+		// 渐隐画笔：按点寿命重绘，整段过期后移除；绘制中同样需要刷新
 		if (!history) {
 			killTimer(211);
 			return;
@@ -838,7 +861,7 @@ void AnnotHost::annotTimer(UINT id)
 		}
 		for (auto* p : gone) history->removeShape(p);
 		refresh();
-		if (still) setTimer(33, 211);
+		if (still) setTimer(15, 211);
 		else killTimer(211);
 		return;
 	}
@@ -902,161 +925,103 @@ void AnnotHost::paintSizePreview(ID2D1DeviceContext* ctx)
 		return;
 	}
 
-	if (id == L"pen") {
-		const float stroke = toolSub->getSliderVal();
-		if (toolSub->isPenFade) {
-			// 渐隐画笔：预览是一条半透明线段示意笔迹大小
-			auto style = ArrowParts::makeShaftStyle(
-				Ling::D2D::get()->d2dFactory.Get(), stroke, true, false);
-			ctx->DrawLine({ x1, cy }, { x2, cy }, brush.Get(), stroke, style.Get());
-			pop();
-			return;
-		}
-		if (toolSub->isPenMarker) {
-			// 荧光笔：和线段一样是直线，平头；粗细 = 画笔滑条 × 倍数
-			const float hs = stroke * ShapeLine::HighlighterWidthScale;
-			auto style = ArrowParts::makeShaftStyle(
-				Ling::D2D::get()->d2dFactory.Get(), hs, false, false);
-			ctx->DrawLine({ x1, cy }, { x2, cy }, brush.Get(), hs, style.Get());
-			pop();
-			return;
-		}
-		const float amp = std::min(22.f, half * 0.28f);
-		std::vector<D2D1_POINT_2F> pts;
-		std::vector<int64_t> times;
-		static const float kT[] = { 0, 0.04f, 0.09f, 0.16f, 0.28f, 0.45f, 0.62f, 0.76f, 0.86f, 0.93f, 0.97f, 1.f };
-		for (float t : kT) {
-			pts.push_back({
-				x1 + (x2 - x1) * t,
-				cy + std::sin(t * kPiPrev * 2.f) * amp
-			});
-			// 假时间：两端慢、中间快，软笔预览能看出粗细变化
-			const float speed = 0.25f + 1.2f * std::sin(t * kPiPrev);
-			times.push_back(times.empty() ? 0 : times.back() + (int64_t)std::max(4.f, 18.f / speed));
-		}
-		if (!toolSub->isPenDash) {
-			auto geo = FreehandStroke::outline(
-				Ling::D2D::get()->d2dFactory.Get(), pts, stroke, toolSub->isPenSoft, times);
-			if (geo) ctx->FillGeometry(geo.Get(), brush.Get());
-		}
-		else {
-			ComPtr<ID2D1PathGeometry> path;
-			Ling::D2D::get()->d2dFactory->CreatePathGeometry(path.GetAddressOf());
-			ComPtr<ID2D1GeometrySink> sink;
-			path->Open(sink.GetAddressOf());
-			sink->BeginFigure(pts[0], D2D1_FIGURE_BEGIN_HOLLOW);
-			for (size_t i = 1; i < pts.size(); ++i) sink->AddLine(pts[i]);
-			sink->EndFigure(D2D1_FIGURE_END_OPEN);
-			sink->Close();
-			ComPtr<ID2D1StrokeStyle> style;
-			const float sw = std::max(stroke, 1.f);
-			float dashes[] = { 8.f / sw, 6.f / sw };
-			Ling::D2D::get()->d2dFactory->CreateStrokeStyle(
-				D2D1::StrokeStyleProperties(
-					D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
-					D2D1_LINE_JOIN_ROUND, 10.f, D2D1_DASH_STYLE_CUSTOM, 0.f),
-				dashes, ARRAYSIZE(dashes), style.GetAddressOf());
-			ctx->DrawGeometry(path.Get(), brush.Get(), stroke, style.Get());
-		}
-		pop();
-		return;
-	}
-
-	if (id == L"arrow") {
-		const float stroke = toolSub->getSliderVal();
-		const bool roundCap = toolSub->isArrowRound;
-		const std::vector<D2D1_POINT_2F> pts{ { x1, cy }, { x2, cy } };
-		auto factory = Ling::D2D::get()->d2dFactory.Get();
-		if (toolSub->isLine) {
-			// 线段 = 只有轴线：虚线作用于它，cap 跟「圆头」
-			auto style = ArrowParts::makeShaftStyle(factory, stroke, roundCap, toolSub->isArrowDash);
-			ctx->DrawLine({ x1, cy }, { x2, cy }, brush.Get(), stroke, style.Get());
-			pop();
-			return;
-		}
-		if (toolSub->arrowHead == ToolSub::ArrowBig) {
-			const auto outline = ArrowPolyState::buildBigArrowPolygon(pts, std::max(1.f, stroke) * 2.5f);
-			if (outline.size() >= 3) {
-				ComPtr<ID2D1PathGeometry> path;
-				Ling::D2D::get()->d2dFactory->CreatePathGeometry(path.GetAddressOf());
-				ComPtr<ID2D1GeometrySink> sink;
-				path->Open(sink.GetAddressOf());
-				sink->SetFillMode(D2D1_FILL_MODE_WINDING);
-				sink->BeginFigure(outline[0], D2D1_FIGURE_BEGIN_FILLED);
-				for (size_t i = 1; i < outline.size(); i++) sink->AddLine(outline[i]);
-				sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-				sink->Close();
-				ctx->FillGeometry(path.Get(), brush.Get());
-			}
-			pop();
-			return;
-		}
-
-		// 与 ShapeArrow::paint 同一套部件：杆身画到尖端（勿缩短，否则平头会卡在三角头里），
-		// 虚线只作用于杆身，圆头同时作用于杆身与箭头头部
-		auto bodyStyle = ArrowParts::makeShaftStyle(factory, stroke, roundCap, toolSub->isArrowDash);
-		const bool isFunHead = toolSub->arrowHead == ToolSub::ArrowFun;
-		const float baseHeadLen = 10.f + stroke * 2.f;
-		const float funHeadLen = std::min(baseHeadLen * 1.3f,
-			std::max(std::fabs(x2 - x1) * 0.16f, 14.f + stroke));
-		const float funHeadScale = funHeadLen / std::max(baseHeadLen, 1.f);
-		D2D1_POINT_2F funTipFrom{ x1, cy };
-		auto shaft = isFunHead
-			? ArrowParts::funShaftPath(factory, pts, 1.f, 0.f, &funTipFrom, funHeadLen)
-			: ArrowParts::shaftPath(factory, pts);
-		if (shaft) ctx->DrawGeometry(shaft.Get(), brush.Get(), stroke, bodyStyle.Get());
-
-		auto headStyle = ArrowParts::makeHeadStyle(factory, roundCap);
-		if (toolSub->arrowHead == ToolSub::ArrowAnnot) {
-			auto bars = ArrowParts::annotBarsPath(factory, pts, stroke);
-			if (bars) ctx->DrawGeometry(bars.Get(), brush.Get(), stroke, headStyle.Get());
-		}
-		else if (toolSub->arrowHead == ToolSub::ArrowBoth) {
-			if (auto head = ArrowParts::openHeadPath(factory, { x2, cy }, { x1, cy }, stroke, 1.1f))
-				ctx->DrawGeometry(head.Get(), brush.Get(), stroke, headStyle.Get());
-			if (auto head = ArrowParts::openHeadPath(factory, { x1, cy }, { x2, cy }, stroke, 1.1f))
-				ctx->DrawGeometry(head.Get(), brush.Get(), stroke, headStyle.Get());
-		}
-		else {
-			const D2D1_POINT_2F headFrom = isFunHead ? funTipFrom : D2D1::Point2F(x1, cy);
-			if (auto head = ArrowParts::openHeadPath(factory, headFrom, { x2, cy }, stroke,
-				isFunHead ? funHeadScale : 1.1f))
-				ctx->DrawGeometry(head.Get(), brush.Get(), stroke, headStyle.Get());
-		}
-		pop();
-		return;
-	}
-
-	// 多边形/星形：画一个当前"边数 + 圆角"的样例 —— 滑条悬停/拖动时就靠它预览
-	if (id == L"rect" && toolSub->rectKind != ToolSub::RectShape) {
+	// 多边形/星形：只有调整边数、角数、圆角时才画形状本身，
+	// 调粗细仍然用统一的笔迹预览
+	if (id == L"rect" && toolSub->rectKind != ToolSub::RectShape && sizePreviewShape) {
 		const bool star = toolSub->rectKind == ToolSub::StarShape;
 		const int sides = star ? toolSub->starPoints : toolSub->polygonSides;
-		const D2D1_RECT_F pr{ cx - half * 0.85f, cy - half, cx + half * 0.85f, cy + half };
+		const D2D1_RECT_F pr{ cx - half * 0.86f, cy - half * 0.86f, cx + half * 0.86f, cy + half * 0.86f };
 		auto geo = ShapeRect::buildPolyGeometry(pr,
 			star ? ShapeRect::Star : ShapeRect::Polygon, sides, toolSub->cornerRadius);
 		if (geo) {
-			const float stroke = toolSub->getSliderVal();
+			const float polyStroke = toolSub->getSliderVal();
 			if (toolSub->isRectFill) {
 				ctx->FillGeometry(geo.Get(), brush.Get());
 			}
 			else {
-				auto dash = toolSub->isRectDash ? ShapeRect::makeDashStroke(stroke) : nullptr;
-				ctx->DrawGeometry(geo.Get(), brush.Get(), stroke, dash.Get());
+				auto dash = toolSub->isRectDash ? ShapeRect::makeDashStroke(polyStroke) : nullptr;
+				ctx->DrawGeometry(geo.Get(), brush.Get(), polyStroke, dash.Get());
 			}
 		}
 		pop();
 		return;
 	}
 
-	// rect 等：半透明线段示意粗细
-	const float stroke = toolSub->getSliderVal();
-	ctx->DrawLine({ x1, cy }, { x2, cy }, brush.Get(), stroke);
+	// 所有工具的粗细预览统一成一条手绘风格的 S 形曲线：
+	// 比直线更容易看出笔迹的粗细、平滑与端头形态
+	float stroke = std::max(1.f, toolSub->getSliderVal());
+	bool dash = false;
+	bool soft = false;
+	if (id == L"pen") {
+		if (toolSub->isPenMarker) stroke *= ShapeLine::HighlighterWidthScale;
+		soft = toolSub->isPenSoft && !toolSub->isPenFade;
+		dash = toolSub->isPenDash;
+	}
+	else if (id == L"arrow") {
+		dash = toolSub->isArrowDash;
+	}
+	else if (id == L"rect") {
+		dash = toolSub->isRectDash;
+	}
+	// 端头跟随实际工具：画笔本身是圆头，箭头/线段看「圆头」开关，闭合形状按平头
+	const bool roundCap = (id == L"pen") || (id == L"arrow" && toolSub->isArrowRound);
+
+	// 幅度控制得小一些：跨度够长、起伏平缓，接近手写的一笔
+	const float amp = std::clamp(std::max(half * 0.18f, stroke * 0.6f), 6.f, half * 0.55f);
+	std::vector<D2D1_POINT_2F> pts;
+	std::vector<int64_t> times;
+	constexpr int kSamples = 32;
+	pts.reserve(kSamples + 1);
+	times.reserve(kSamples + 1);
+	for (int i = 0; i <= kSamples; ++i) {
+		const float t = (float)i / (float)kSamples;
+		pts.push_back({ x1 + (x2 - x1) * t, cy - std::sin(t * kPiPrev * 2.f) * amp });
+		// 假时间：两端慢、中间快，软笔预览能看出粗细变化
+		const float speed = 0.25f + 1.2f * std::sin(t * kPiPrev);
+		times.push_back(times.empty() ? 0 : times.back() + (int64_t)std::max(4.f, 18.f / speed));
+	}
+
+	ComPtr<ID2D1Factory> factory = Ling::D2D::get()->d2dFactory;
+	ComPtr<ID2D1StrokeStyle> style;
+	const float sw = std::max(stroke, 1.f);
+	const auto cap = roundCap ? D2D1_CAP_STYLE_ROUND : D2D1_CAP_STYLE_FLAT;
+	if (dash) {
+		float dashes[] = { 8.f / sw, 6.f / sw };
+		factory->CreateStrokeStyle(
+			D2D1::StrokeStyleProperties(cap, cap, cap,
+				D2D1_LINE_JOIN_ROUND, 10.f, D2D1_DASH_STYLE_CUSTOM, 0.f),
+			dashes, ARRAYSIZE(dashes), style.GetAddressOf());
+	}
+	else {
+		factory->CreateStrokeStyle(
+			D2D1::StrokeStyleProperties(cap, cap, cap, D2D1_LINE_JOIN_ROUND),
+			nullptr, 0, style.GetAddressOf());
+	}
+
+	if (!dash && soft && roundCap) {
+		// 软笔：只有填充轮廓能体现速度造成的粗细变化
+		auto geo = FreehandStroke::outline(factory.Get(), pts, stroke, true, times);
+		if (geo) ctx->FillGeometry(geo.Get(), brush.Get());
+	}
+	else {
+		ComPtr<ID2D1PathGeometry> path;
+		factory->CreatePathGeometry(path.GetAddressOf());
+		ComPtr<ID2D1GeometrySink> sink;
+		path->Open(sink.GetAddressOf());
+		sink->BeginFigure(pts[0], D2D1_FIGURE_BEGIN_HOLLOW);
+		for (size_t i = 1; i < pts.size(); ++i) sink->AddLine(pts[i]);
+		sink->EndFigure(D2D1_FIGURE_END_OPEN);
+		sink->Close();
+		ctx->DrawGeometry(path.Get(), brush.Get(), stroke, style.Get());
+	}
 	pop();
 }
 
 bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 {
 	ensureHistory();
+	editStepTarget = nullptr;
+	editStepBefore.clear();
 	// 编辑中点输入框外只提交退出，同一次点击不点选、不落笔
 	if (editingText) {
 		if (textBox && textBox->isPosIn(pos)) return true;
@@ -1294,6 +1259,9 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 					shapeHover = hit;
 					refresh();
 				}
+				// 记录编辑前几何：本次若拖动/缩放/旋转，抬手时作为独立一步进撤销栈
+				editStepTarget = hit;
+				editStepBefore = hit->editSnapshot();
 				shapeHover->mouseDown((float)imgPos.x, (float)imgPos.y);
 				lockAnnotDragFromHover();
 				return true;
@@ -1399,6 +1367,11 @@ void AnnotHost::annotMove(POINT pos)
 void AnnotHost::annotUp(POINT pos, BOOL isRight)
 {
 	if (isRight) return;
+	// 取走本次按下的编辑快照：早退路径也不会留下陈旧状态
+	ShapeBase* editTarget = editStepTarget;
+	std::vector<float> editBefore = std::move(editStepBefore);
+	editStepTarget = nullptr;
+	editStepBefore.clear();
 	annotMouseDown = false;
 	annotDragIndex = -1;
 	ReleaseCapture();
@@ -1437,6 +1410,12 @@ void AnnotHost::annotUp(POINT pos, BOOL isRight)
 	prevPressCreatedShape = (shapeHover == justCreated);
 	auto imgPos = toImgPos(pos);
 	shapeHover->mouseUp((float)imgPos.x, (float)imgPos.y);
+	// 拖动/缩放/旋转已有标注 = 一步编辑：几何真的变了才进撤销栈
+	if (!justCreated && editTarget && editTarget == shapeHover) {
+		const auto after = editTarget->editSnapshot();
+		if (hasDragged && !after.empty() && after != editBefore)
+			history->addEditStep(editTarget, editBefore, after);
+	}
 	// 抬手后按最终几何再采样一次（拖拽中已经跟手重算，这里收个尾更稳）
 	refreshFiltersAbove(shapeHover);
 

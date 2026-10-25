@@ -44,15 +44,17 @@ private:
 	void setAutoStartBtn(Ling::Button* btn);
 	void showSelectBox(Ling::Button* btn);
 
-	// —— 工具栏编辑器 ——
+	// —— 工具栏外观 ——
 	void tbSetKind(int kind);
-	void tbRebuildZones();
+	void tbRebuildZones();                // 重建「显示区/隐藏区」两张卡片的 chip
+	void tbPersist();                     // 布局写回配置
 	bool appearanceAtDefaults() const;   // 当前子页是否全部为默认值（用于「恢复默认」置灰判定）
-	void tbPersist();
 	void tbRefreshRestore();
+	void tbRefreshActionState();         // 「初始属性 / 预览效果」按钮的选中态
 	void tbRestoreDefaults();
 	void tbTogglePreview();
 	void tbRefreshPreview();
+	// 显隐 / 拖拽排序（两张卡片）
 	Ling::Button* tbMakeChip(const std::wstring& id, bool active);
 	void tbStyleChip(Ling::Button* b, const std::wstring& id, bool active);
 	std::wstring tbTipText(const std::wstring& id) const;   // chip 悬停文字
@@ -72,10 +74,21 @@ private:
 	void tbUpdateDropHint();
 	void tbClearDropHint();
 	bool tbLocked(const std::wstring& id) const;
-	static bool tbIsSplit(const std::wstring& id);
 	std::wstring tbNextSplitId();
 	POINT tbToContent(POINT pos) const;
 	int tbHitZone(POINT p, int fallback) const;
+	// 「初始属性」编辑器：入口切换 / 工具行 / 单工具默认属性
+	void tbToggleInitialEditor();
+	void tbBuildInitialEditor(Ling::Node* wrap);
+	void tbRefreshInitialToolbar();
+	void tbRefreshInitialEditor();
+	void tbSelectInitialSlot(const std::wstring& id);
+	// 形态"拖拽排序"：拖到目标位置松手，首个形态即默认形态（绿色插入提示）
+	void tbInitDragDown(POINT pos);
+	void tbInitDragMove(POINT pos);
+	void tbInitDragUp(POINT pos);
+	void tbInitDragGhostMove(POINT pos);
+	int tbInitDropIndexAt(POINT pos) const;
 	// —— 主题色板 ——
 	void tbBuildTheme(Ling::Node* host);
 	void tbRefreshTheme();
@@ -101,22 +114,36 @@ private:
 	Ling::Button* selectBtn{ nullptr };
 	std::unique_ptr<SettingUi::Popup> selectPopup;
 
-	// —— 工具栏编辑器状态 ——
-	Ling::ScrollerBox* tbScroller{ nullptr };
-	Ling::Node* tbActiveBox{ nullptr };
-	Ling::Node* tbInactiveBox{ nullptr };
-	Ling::Node* tbPreviewWrap{ nullptr };   // 预览容器（可整体隐藏）
+	// —— 工具栏外观状态 ——
+	Ling::Node* tbPreviewWrap{ nullptr };   // 预览条容器（默认展开，可用「预览效果」收起）
 	Ling::Button* tbRestoreBtn{ nullptr };
 	Ling::Button* tbPreviewBtn{ nullptr };   // 「预览效果」：仅工具栏外观页显示
-	// 「其他外观」页的行控件（恢复默认时直接回写显示，不重建整页）
-	Ling::Button* otherFeatureTipsBtn{ nullptr };
-	Ling::Button* otherHotkeyTipBtn{ nullptr };
-	Ling::Button* otherRememberStyleBtn{ nullptr };
-	Ling::Button* otherHoverPreviewBtn{ nullptr };
-	Ling::Button* otherToolWidthBtn{ nullptr };
-	Ling::Label* otherToolWidthLabel{ nullptr };   // 下拉按钮里显示当前值的 Label
-	int tbKind{ 0 };
-	std::vector<std::wstring> tbActive, tbInactive;
+	// 「初始属性」：卡片1 工具栏副本+气泡 / 卡片2 选中工具的默认属性
+	Ling::Button* tbInitialBtn{ nullptr };
+	Ling::Node* tbInitialWrap{ nullptr };
+	Ling::Node* tbInitialBarBox{ nullptr };      // 工具栏：固定 12 个有初始属性的工具
+	Ling::Node* tbInitialEditorBox{ nullptr };   // 卡片2：选中工具的默认属性
+	std::wstring tbInitialSlot;                  // 当前工具 id
+	// 形态拖拽替换的状态
+	Ling::Node* tbDragGhost{ nullptr };
+	Ling::Label* tbDragGhostIcon{ nullptr };
+	bool tbInitDragging{ false };
+	int tbInitDragIdx{ -1 };                    // 被拖 chip 在行内的下标
+	int tbInitDropIdx{ -1 };                    // 实时插入位（0..n）
+	Ling::Node* tbInitRow{ nullptr };           // 形态 chip 行（插入光标宿主）
+	Ling::Node* tbInitCursor{ nullptr };        // 绿色插入提示竖条
+	std::wstring tbInitDesignId, tbInitFormKey;
+	std::vector<std::pair<Ling::Button*, int>> tbInitChips;   // 行内形态 chip（顺序 = 展示顺序）
+	winrt::event_token tbInitDownTok, tbInitMoveTok, tbInitUpTok;
+	bool tbInitialOpen{ false };
+	bool tbInitialBuilt{ false };
+	// —— 显隐 / 拖拽排序（显示区 + 隐藏区两张卡片） ——
+	Ling::ScrollerBox* tbScroller{ nullptr };
+	Ling::Node* tbActiveCard{ nullptr };     // 显示区卡片（展开初始属性时暂时隐藏）
+	Ling::Node* tbInactiveCard{ nullptr };   // 隐藏区卡片（同上）
+	Ling::Node* tbActiveBox{ nullptr };
+	Ling::Node* tbInactiveBox{ nullptr };
+	std::vector<std::wstring> tbInactive;
 	std::vector<Ling::Button*> tbChips;     // 与 tbActive 顺序同步
 	std::vector<Ling::Button*> tbHidden;    // 与 tbInactive 顺序同步
 	// 拖拽
@@ -129,21 +156,28 @@ private:
 	int tbDragTo{ -1 };     // 落点区（tbDrop 用）
 	int tbDropIndex{ -1 };  // 落点插入位（tbDrop 用）
 	Ling::Button* tbDragChip{ nullptr };
-	// 拖拽视觉：拖动中在"插入位置"显示一条蓝色光标（竖条）
+	// 拖拽视觉：拖动中在"插入位置"显示一条绿色光标（竖条）
 	int tbLiveDropTo{ -1 };   // 实时落点区（0 active / 1 inactive）
 	int tbLiveDropIndex{ -1 };// 实时落点插入位
-	Ling::Node* tbCursorActive{ nullptr };   // 显示区插入光标（蓝色竖条，绝对定位）
+	Ling::Node* tbCursorActive{ nullptr };   // 显示区插入光标（绝对定位）
 	Ling::Node* tbCursorInactive{ nullptr }; // 隐藏区插入光标
-	// 拖拽幽灵：挂在设置窗 body 上的绝对定位浮块（不随页面滚动裁剪），跟手显示被拖的图标
+	// 拖拽幽灵：绝对定位浮块，跟手显示被拖的图标
 	Ling::Node* tbGhost{ nullptr };
 	Ling::Label* tbGhostIcon{ nullptr };
-	// chip 悬停文字（系统 tooltip，同截图工具栏）
-	std::unique_ptr<class Tip> tbTip_;
 	// chip 右上角红叉（页级共享，绝对定位；不挂在 chip 下，避免被 chip 圆角裁掉）
 	Ling::Button* tbChipClose{ nullptr };
 	std::wstring tbChipCloseId;
 	winrt::event_token tbDownTok;
 	winrt::event_token tbMoveTok, tbUpTok;
+	// 「其他外观」页的行控件（恢复默认时直接回写显示，不重建整页）
+	Ling::Button* otherFeatureTipsBtn{ nullptr };
+	Ling::Button* otherHotkeyTipBtn{ nullptr };
+	Ling::Button* otherRememberStyleBtn{ nullptr };
+	Ling::Button* otherHoverPreviewBtn{ nullptr };
+	int tbKind{ 0 };
+	std::vector<std::wstring> tbActive;     // 显示区布局（预览条镜像同一份数据）
+	// chip 悬停文字（系统 tooltip，同截图工具栏）
+	std::unique_ptr<class Tip> tbTip_;
 	// 预览
 	bool tbPreviewShown{ false };
 	// 主题色板

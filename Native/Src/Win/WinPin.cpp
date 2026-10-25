@@ -78,10 +78,14 @@ WinPin::WinPin(int x, int y, int w, int h, const std::vector<BYTE>* data, const 
 	onMoved.add([this]() { if (editing) layoutTools(); refreshOcrPanel(); });
 	onDpiChanged.add([this]() { dpiChanged = true; });
 	onSizeChanged.add([this]() {
-		if (!dpiChanged) return;
-		dpiChanged = false;
-		applyWinSize();
-		if (editing) layoutTools();
+		if (dpiChanged) {
+			dpiChanged = false;
+			applyWinSize();
+			if (editing) layoutTools();
+		}
+		// 手动拖右边 / 下边改尺寸时窗口本身不移动，onMoved → refreshOcrPanel 不会触发，
+		// 识别浮层会停在旧尺寸上（贴图里的字被拉伸、叠加的字还是原大小）。
+		deferOcrRelayout();
 	});
 	onMouseDown.add([this](POINT pos, BOOL isRight) { this->onDown(pos, isRight); });
 	onMouseMove.add([this](POINT pos) { this->onMove(pos); });
@@ -222,17 +226,21 @@ void WinPin::applyScale(float newScale, POINT anchor)
 	applyWinSize();
 	setPosition(x + anchor.x - static_cast<int>(std::lround(imgX * scale)),
 		y + anchor.y - static_cast<int>(std::lround(imgY * scale)));
-	scaleTip = Ling::D2D::get()->makeTextLayout(std::format(L"{}%", static_cast<int>(std::lround(scale * 100.f))), 11.f * dpi);
+	scaleTip = Ling::D2D::get()->makeTextLayout(std::format(L"{}%", static_cast<int>(std::lround(scale * 100.f))), 12.f * dpi);
 	setTimer(800, 101);
 	if (editing) layoutTools();
 	refresh();
 	// 识别结果是"持续显示"的：缩放期间只暂时收起（不销毁、不丢识别结果），
 	// 停手 200ms 后再按新尺寸重建并显示回来（见 onTimerCB 的 102）
-	if (toolOcr && toolOcr->hwnd) {
-		ocrHiddenByZoom = true;
-		toolOcr->hide();
-		setTimer(200, 102);
-	}
+	deferOcrRelayout();
+}
+
+void WinPin::deferOcrRelayout()
+{
+	if (thumbnail || !toolOcr || !toolOcr->hwnd || ocrHiddenByZoom) return;
+	ocrHiddenByZoom = true;
+	toolOcr->hide();
+	setTimer(200, 102);
 }
 
 void WinPin::paintScaleTip(ID2D1DeviceContext* ctx)
@@ -240,12 +248,15 @@ void WinPin::paintScaleTip(ID2D1DeviceContext* ctx)
 	if (!scaleTip || !brushTipBg) return;
 	DWRITE_TEXT_METRICS tm{};
 	if (FAILED(scaleTip->GetMetrics(&tm))) return;
-	auto pad = 3.f * dpi;
+	auto padX = 7.f * dpi;
+	auto padY = 3.f * dpi;
 	auto margin = 5.f * dpi;
-	D2D1_RECT_F bgRect{ w - margin - tm.width - pad * 2, margin, w - margin, margin + tm.height + pad * 2 };
-	if (bgRect.left < margin) bgRect.left = margin;
-	ctx->FillRectangle(bgRect, brushTipBg.Get());
-	ctx->DrawTextLayout({ bgRect.left + pad, bgRect.top + pad }, scaleTip.Get(), brushTipText.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+	// 左下角胶囊：高度的一半作圆角
+	const float tipW = tm.width + padX * 2.f;
+	const float tipH = tm.height + padY * 2.f;
+	const D2D1_RECT_F bgRect{ margin, h - margin - tipH, margin + tipW, h - margin };
+	ctx->FillRoundedRectangle(D2D1::RoundedRect(bgRect, tipH * 0.5f, tipH * 0.5f), brushTipBg.Get());
+	ctx->DrawTextLayout({ bgRect.left + padX, bgRect.top + padY }, scaleTip.Get(), brushTipText.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
 }
 
 void WinPin::layoutTools()
@@ -379,9 +390,9 @@ void WinPin::setEditing(bool on)
 		}
 	}
 	else {
-		// 退出编辑：收起工具栏
+		// 退出编辑：收起工具栏（滤镜属于已提交的标注，不能被这次取消选中撤掉）
 		if (toolCap) {
-			toolCap->cancelSelect();
+			toolCap->cancelSelect(false);
 			if (toolCap->hwnd) toolCap->hide();
 		}
 		if (toolSub) toolSub->hideTools();
@@ -1182,6 +1193,8 @@ void WinPin::setZoomMode(ZoomMode m)
 	zoomMode = m;
 	cropScale = 1.f;
 	cropCenterX = -1.f; cropCenterY = -1.f;
+	// 裁剪放大下没法把识别浮层映射到取景后的画面（整图坐标 ≠ 取景坐标），只能收起。
+	if (m == ZoomMode::Crop && toolOcr) toolOcr.reset();
 	refresh();
 }
 
@@ -1248,7 +1261,9 @@ void WinPin::applyImageTransform(int quarterTurns, bool flipH)
 	SetWindowPos(hwnd, nullptr, x, y, nWinW, nWinH, SWP_NOZORDER | SWP_NOACTIVATE);
 	cropCenterX = -1.f; cropCenterY = -1.f;
 	refresh();
-	refreshOcrPanel();
+	// 旋转 / 镜像换了底图，识别框还是旧图的坐标：继续按新尺寸铺开会整层"缩一圈 + 贴左上"。
+	// 结果本身也已经过时，直接收起；要看识别结果重新点一次即可。
+	if (toolOcr) toolOcr.reset();
 }
 
 void WinPin::refreshOcrPanel()
@@ -1259,7 +1274,7 @@ void WinPin::refreshOcrPanel()
 	if (ocrHiddenByZoom || thumbnail) return;
 	if (toolOcr && toolOcr->hwnd) {
 		const D2D1_RECT_F r = D2D1::RectF(0, 0, w, h);
-		toolOcr->syncToMask(r, x, y, dpi);
+		toolOcr->syncToMask(r, x, y);
 	}
 }
 
@@ -1268,6 +1283,14 @@ void WinPin::toggleOcrPanel(bool copyText)
 	killTimer(102);
 	ocrHiddenByZoom = false;
 	if (toolOcr) { toolOcr.reset(); refresh(); return; }
+	// 裁剪放大是"取景视图"：画面只显示整图的一块并放大，而识别浮层按整图坐标铺，
+	// 两者对不上（整层按整图比例缩小并贴向左上）。与进入编辑时同一处理：先回到直接放大。
+	if (zoomMode != ZoomMode::Direct) {
+		zoomMode = ZoomMode::Direct;
+		cropScale = 1.f;
+		cropCenterX = -1.f; cropCenterY = -1.f;
+		refresh();
+	}
 	std::vector<BYTE> px;
 	D2D1_SIZE_U sz{};
 	if (!getAnnotPixels(px, sz)) return;
@@ -1285,7 +1308,7 @@ void WinPin::toggleOcrPanel(bool copyText)
 		[this](POINT pos) { return pinChromeDown(pos); });
 	toolOcr->createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP);
 	const D2D1_RECT_F r = D2D1::RectF(0, 0, w, h);
-	toolOcr->syncToMask(r, x, y, dpi);
+	toolOcr->syncToMask(r, x, y);
 	// 贴图与浮层同为置顶窗：显式抬到置顶组最前，避免浮层被贴图压住（文字看不见也点不到）
 	SetWindowPos(toolOcr->hwnd, HWND_TOPMOST, 0, 0, 0, 0,
 		SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);

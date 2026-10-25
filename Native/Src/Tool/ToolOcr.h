@@ -13,7 +13,7 @@ public:
 	ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 		std::vector<BYTE> image, int imageW, int imageH);
 	~ToolOcr();
-	void syncToMask(const D2D1_RECT_F& maskRect, int hostX, int hostY, float hostDpi);
+	void syncToMask(const D2D1_RECT_F& maskRect, int hostX, int hostY);
 	// 宿主是贴图时置 true（须在建窗之前设）：不显示右上角复制按钮；
 	// 且只有识别文本框吃鼠标（可选中/复制文本），其余区域穿透 —— 贴图仍能右键弹菜单 / 滚轮缩放。
 	void setPinOverlay(bool on) { pinOverlay_ = on; }
@@ -67,6 +67,8 @@ private:
 	// 把译文本行填进各区域的 displayText 并重算整段文字（不重绘）
 	void applyTranslateLines(const std::vector<std::wstring>& lines);
 	void copyAll();
+	// 文本重排的编辑回退：Ctrl+Z / Ctrl+Y 走本类自己的栈（TextBox 本身没有 undo）
+	void undoRedoReflow(bool redo);
 	// 右上角「对比」：弹出/收起选区原图浮窗
 	void toggleCompare();
 	// 对比浮窗打开时按钮显示选中态（主题强调色）
@@ -96,6 +98,10 @@ private:
 	bool translateMode_{ false };
 	// 文本重排：整段结果放进一个普通可编辑文本框（Enter 换行），不再逐框覆盖原位置
 	bool reflow_{ false };
+	// 文本重排的编辑历史（每次文字变化记一步，Ctrl+Z/Ctrl+Y 在这里走）
+	std::vector<std::wstring> reflowHistory_;
+	int reflowHistPos_{ -1 };
+	bool reflowHistGuard_{ false };
 	std::wstring banner_;
 	bool bannerError_{ false };
 	// 非空 = 正在翻译：提示条在此期间必须一直可见（见 setBusy）
@@ -110,6 +116,8 @@ private:
 	// 与其它窗口的定时器 id 错开（属性栏 0x5000 / 系统按键 0x5100）
 	static constexpr UINT kHoverTimerId{ 0x5200 };
 	static constexpr UINT kHoverPollMs{ 100 };
+	// 上次建编辑框时的 dpi：换屏 / 改缩放后 DPI 变了，字号和坐标都得按新 dpi 重排。
+	float builtDpi_{ 0.f };
 	int imgW{ 1 }, imgH{ 1 };
 	// —— 跨行选区状态（阅读顺序：行优先；index = 行内字符偏移）——
 	bool selActive_{ false };

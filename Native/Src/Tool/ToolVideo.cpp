@@ -709,28 +709,31 @@ void ToolVideo::saveFile()
 		st->getVideoRecordFormat(), Setting::defaultVideoRecordFormat(), L"");
 	if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos) defName = defName.substr(slash + 1);
 	auto tarPath = Util::getSaveFilePath(nullptr, ext, defName, st->getRecordDir());
-	if (!tarPath.empty() && CopyFile(srcPath.data(), tarPath.data(), false)) {
-		// 录屏入历史：视频本身不复制（历史只记路径），封面用收工这一刻的画面 ——
-		// 此时工具条已隐藏，画面就是用户看到的样子；选区取不到就只记条目、不带封面。
-		int vw = 0, vh = 0;
-		std::vector<BYTE> cover;
-		if (win && win->cutMask) {
-			// maskRect 是客户坐标；WinCap 铺满虚拟屏，加 win->x/y 即屏幕坐标
-			const auto& sel = win->cutMask->maskRect;   // D2D1_RECT_F，客户坐标
-			const int cx = win->x + (int)sel.left;
-			const int cy = win->y + (int)sel.top;
-			const int cw2 = (int)(sel.right - sel.left);
-			const int ch2 = (int)(sel.bottom - sel.top);
-			if (cw2 > 0 && ch2 > 0) {
-				cover = Util::captureScreen(cx, cy, cw2, ch2);
-				if (cover.size() == (size_t)cw2 * (size_t)ch2 * 4) { vw = cw2; vh = ch2; }
-				else cover.clear();
-			}
-		}
-		st->addHistoryMedia(tarPath, vw, vh, L"record", cover);
-	}
+	if (!tarPath.empty() && CopyFile(srcPath.data(), tarPath.data(), false))
+		addRecordHistory(tarPath, totalSeconds);
 	DeleteFile(srcPath.data());
 	win->close();
+}
+
+void ToolVideo::addRecordHistory(const std::wstring& path, int durationSec)
+{
+	if (path.empty()) return;
+	int vw = 0, vh = 0;
+	std::vector<BYTE> cover;
+	if (win && win->cutMask) {
+		// maskRect 是客户坐标；WinCap 铺满虚拟屏，加 win->x/y 即屏幕坐标
+		const auto& sel = win->cutMask->maskRect;   // D2D1_RECT_F，客户坐标
+		const int cx = win->x + (int)sel.left;
+		const int cy = win->y + (int)sel.top;
+		const int cw2 = (int)(sel.right - sel.left);
+		const int ch2 = (int)(sel.bottom - sel.top);
+		if (cw2 > 0 && ch2 > 0) {
+			cover = Util::captureScreen(cx, cy, cw2, ch2);
+			if (cover.size() == (size_t)cw2 * (size_t)ch2 * 4) { vw = cw2; vh = ch2; }
+			else cover.clear();
+		}
+	}
+	Setting::get()->addHistoryMedia(path, vw, vh, L"record", durationSec, cover);
 }
 
 bool ToolVideo::onSaveKey(bool toClipboard)
@@ -749,7 +752,13 @@ void ToolVideo::finishRecord(bool toClipboard)
 	win->hideRecordOverlay();
 	auto srcPath = win->stopRecord();
 	if (toClipboard) {
-		if (!srcPath.empty()) Util::addFileToClipboard(srcPath);
+		if (!srcPath.empty()) {
+			// 剪贴板里要贴的是落在「录屏文件路径」里的成片，不是临时目录里的半成品
+			auto tarPath = Util::commitRecordedFile(srcPath);
+			Util::addFileToClipboard(tarPath.empty() ? srcPath : tarPath);
+			// 登记进历史，否则历史页只能按目录扫描把它当「其他」里的用户文件
+			if (!tarPath.empty()) addRecordHistory(tarPath, totalSeconds);
+		}
 	}
 	else {
 		if (!srcPath.empty()) DeleteFile(srcPath.data());

@@ -91,6 +91,9 @@ private:
 	D2D1_RECT_F cropSourceRect(float& f) const;    // 取景源矩形（图像像素）+ 缩放因子
 	int hitResizeEdges(POINT pos) const;           // 命中的边位（0=无）
 	void refreshOcrPanel();
+	// 叠层跟着窗口重新对齐：先收起，停手 200ms 后按新尺寸重建（复用定时器 102）。
+	// 逐帧重建太贵（每个文本框一套 swap chain），滚轮缩放和拖边框改尺寸都走这里。
+	void deferOcrRelayout();
 	void toggleOcrPanel(bool copyText = true);
 private:
 	Ling::Canvas* canvas{ nullptr };

@@ -46,16 +46,23 @@ namespace {
 		float fitH{ 0.f };   // 识别框高（物理像素）
 		float boxL{ 0.f };   // 识别框左上角 X（父视觉坐标，物理像素）
 		float boxT{ 0.f };   // 识别框左上角 Y
-		float inkH{ 0.f };   // 当前字号下的字形高度（物理像素）
+		float inkH{ 0.f };   // 当前字号下的字形高度（物理像素；竖排时是整列墨迹高）
 		float vFill{ 1.f };  // 纵向允许占到的框高比例（CJK 留余量，防上下两行叠字）
 		int align{ 0 };      // 原文对齐：0=居左 1=居中 2=居右（译文比原文短时才有区别）
+		// 竖排：控件里的文本是"每字一行"（用换行符堆叠），logical 才是真正要复制/选区的串。
+		bool vertical{ false };
+		std::wstring logical;
 	protected:
 		void layout() override
 		{
 			Ling::TextBox::layout();
 			if (fitW <= 0.f || fitH <= 0.f || inkH <= 0.f || w <= 0.f || h <= 0.f) return;
 			// 等比缩放（取"框宽/文字宽"与"框高/字形高"的较小者），横纵同比例，绝不单独拉伸某一轴。
-			const float s = std::min(fitW / w, fitH * vFill / inkH);
+			// 竖排是"每字一行"的多行文本，行距由排版决定、不能再用 inkH 估算，直接按整列自然高度缩放；
+			// 且只缩不放（上限 1.0）：列短时保持字号与其它列一致，靠居中对齐而不是把字撑大。
+			const float s = vertical
+				? std::min(std::min(fitW / w, fitH * 0.98f / h), 1.f)
+				: std::min(fitW / w, fitH * vFill / inkH);
 			// 水平按原文对齐摆放：译文比原文短、装不满框时，居左/居中/居右的差别才看得出来。
 			// 居左 = 和原文一样从同一列起排；居中/居右照原样还原。
 			const float visW = w * s;
@@ -382,12 +389,17 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 		applySelection();
 	});
 	onKeyDown.add([this](UINT key) {
-		// 文本重排且文本框已聚焦：编辑键、Ctrl+A/C/V 全归 TextBox；只把 Esc 透给宿主
+		const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+		// 文本重排且文本框已聚焦：编辑键、Ctrl+A/C/V 全归 TextBox，只把 Esc 透给宿主。
+		// Ctrl+Z / Ctrl+Y 例外：TextBox 没有 undo，交给本类的编辑历史 —— 否则会被当成"撤销标注"。
 		if (reflow_ && !editors.empty() && editors[0] && editors[0]->isFocused()) {
+			if (ctrl && (key == 'Z' || key == 'Y')) {
+				undoRedoReflow(key == 'Y');
+				return;
+			}
 			if (key == VK_ESCAPE && this->host) this->host->onKeyDown(key);
 			return;
 		}
-		const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 		if (ctrl && key == 'A') {   // 全选（跨行）
 			if (!editors.empty()) {
 				selActive_ = true;
@@ -572,6 +584,7 @@ void ToolOcr::refreshCompareBtnState()
 
 void ToolOcr::rebuildEditors()
 {
+	builtDpi_ = dpi;   // 这一版编辑框是用当前 dpi 排的（换屏后 syncToMask 据此判断要不要重排）
 	for (auto* e : editors) {
 		if (e) body->removeChild(e);
 	}
@@ -729,32 +742,70 @@ void ToolOcr::rebuildEditors()
 		//    墨迹比按脚本分：方块字占 em 的比例比西文大，用同一个比会把中文算大、与上下行叠在一起。
 		const std::wstring text = reg.displayText.empty() ? reg.text : reg.displayText;
 		const float boxW = std::max(1.f, reg.w * scaleX);   // 面板物理像素
-		const float boxH = (hEff[i] > 0.f) ? hEff[i] : std::max(1.f, reg.h * scaleY);
-		const bool wide = hasWideGlyph(text);
-		const float inkRatio = wide ? kCjkInkRatio : kYaheiInkRatio;
-		const float vFill = wide ? kCjkVFill : 1.f;
-		const float fLogical = std::clamp(boxH * vFill / (inkRatio * dpi), 7.f / dpi, 300.f / dpi);
+		// 竖排列高各不相同（长列 679、短列 111…），不能用横排那套"统一正文行高"，
+		// 否则长列被缩短上移、短列被撑高、字距拉大。竖排一律用它自己的框高。
+		const float boxH = reg.vertical
+			? std::max(1.f, reg.h * scaleY)
+			: ((hEff[i] > 0.f) ? hEff[i] : std::max(1.f, reg.h * scaleY));
 
 		auto* box = body->makeChild<OcrText>();
 		box->fitW = boxW;
 		box->fitH = boxH;
 		box->boxL = reg.x * scaleX;
 		box->boxT = reg.y * scaleY;
-		box->inkH = fLogical * dpi * inkRatio;
-		box->vFill = vFill;
-		box->align = (i < aligns.size()) ? aligns[i] : 0;
 		box->setPositionType(Ling::Position::Absolute);
 		// 节点自身几何按识别框摆放（文字命中选择用）；实际绘制位置由 layout() 精确定位。
 		box->setPosition(Ling::Edge::Left, rx);
 		box->setPosition(Ling::Edge::Top, ry);
-		box->setFontSize(fLogical);
 		box->setColor(fg);
 		// 拖选文字的背景色统一 #1890FF（原位覆盖 / 文本重排一致）
 		box->setSelectionBgColor(0x1890FFFF);
 		box->setSelectionTextColor(0xFFFFFFFF);   // 拖选反白
+		// 不能留 TextBox 默认的 6px 内边距：OcrText 的缩放比是按「识别框宽 / 控件宽」算的，
+		// 控件宽含内边距就会被算成"文字比框宽 12px"，文字被整体压小一圈（短行尤其明显），
+		// 纵向也会因为多出的上下内边距而偏移。识别文字是原位覆盖，不需要内边距。
+		box->setPadding(0.f);
 		box->setAutoSize(true);
-		box->setText(text);
 		box->setMouseSelectionEnabled(false);   // 选区由 ToolOcr 统一接管
+		box->align = (i < aligns.size()) ? aligns[i] : 0;
+
+		if (reg.vertical && !text.empty()) {
+			// 竖排：一个字一行（换行符让 TextBox 自然堆叠）。
+			// 字号按"格的短边"定，整列再由 OcrText 按框高缩放 —— 之前按横排塞进
+			// 54px 宽的窄框会把字缩到十来个像素，看起来就是一片空白。
+			std::wstring stacked;
+			int cells = 0;
+			for (size_t k = 0; k < text.size(); ++k) {
+				const wchar_t c = text[k];
+				if (c == L'\r' || c == L'\n') continue;
+				if (!stacked.empty()) stacked += L'\n';
+				stacked += c;
+				if (c >= 0xD800 && c <= 0xDBFF && k + 1 < text.size()) stacked += text[++k];   // 代理对
+				++cells;
+			}
+			// 字号按**列宽**定（与参考仓库一致：字大小跟着线宽走，不跟列高走），
+			// 再用 boxH/n 兜底防止字多放不下。系数取 0.70：识别框比字形宽 0.15×列宽
+			// （见 OcrEngine 的外扩），0.75 算出来会比原图略大一圈。
+			const float cell = std::min(boxW * 0.70f, boxH / (float)std::max(1, cells));
+			const float fLogical = std::clamp(cell / (kCjkInkRatio * dpi), 7.f / dpi, 300.f / dpi);
+			box->inkH = (float)cells * fLogical * dpi * kCjkInkRatio;
+			box->vFill = 0.98f;
+			box->align = 1;                        // 竖排一律在列内水平居中
+			box->vertical = true;
+			box->logical = text;
+			box->setFontSize(fLogical);
+			box->setText(stacked);
+		}
+		else {
+			const bool wide = hasWideGlyph(text);
+			const float inkRatio = wide ? kCjkInkRatio : kYaheiInkRatio;
+			const float vFill = wide ? kCjkVFill : 1.f;
+			const float fLogical = std::clamp(boxH * vFill / (inkRatio * dpi), 7.f / dpi, 300.f / dpi);
+			box->inkH = fLogical * dpi * inkRatio;
+			box->vFill = vFill;
+			box->setFontSize(fLogical);
+			box->setText(text);
+		}
 		editors.push_back(box);
 	}
 	// 文本重排（或没有逐框结果时）落成一个整段文本框：可编辑、Enter 换行，
@@ -789,6 +840,20 @@ void ToolOcr::rebuildEditors()
 		box->setSelectionBgColor(0x1890FFFF);   // 拖选文字背景色统一 #1890FF
 		box->setSelectionTextColor(0xFFFFFFFF);   // 拖选反白
 		box->setText(fullText);
+		// 文本重排可编辑：每次文字变化记一步，Ctrl+Z / Ctrl+Y 由本类处理（TextBox 没有 undo）
+		reflowHistory_.assign(1, fullText);
+		reflowHistPos_ = 0;
+		box->onTextChanged.add([this](Ling::TextBox*, const std::wstring& t) {
+			if (reflowHistGuard_) return;
+			// 在历史中间又编辑：丢掉 redo 分支再追加
+			reflowHistory_.resize((size_t)reflowHistPos_ + 1);
+			reflowHistory_.push_back(t);
+			reflowHistPos_ = (int)reflowHistory_.size() - 1;
+			if (reflowHistory_.size() > 200) {
+				reflowHistory_.erase(reflowHistory_.begin());
+				reflowHistPos_ = (int)reflowHistory_.size() - 1;
+			}
+		});
 		editors.push_back(box);
 	}
 	// 选区状态跟着重建作废；镜像层保持在最上层
@@ -872,6 +937,18 @@ void ToolOcr::clearBusy()
 	busyMsg_.clear();
 }
 
+void ToolOcr::undoRedoReflow(bool redo)
+{
+	if (reflowHistory_.empty() || editors.empty() || !editors[0]) return;
+	const int next = reflowHistPos_ + (redo ? 1 : -1);
+	if (next < 0 || next >= (int)reflowHistory_.size()) return;
+	reflowHistPos_ = next;
+	reflowHistGuard_ = true;
+	editors[0]->setText(reflowHistory_[(size_t)next]);
+	reflowHistGuard_ = false;
+	repaint();
+}
+
 void ToolOcr::copyAll()
 {
 	// 有选区就只复制选中的部分；没有就整段
@@ -879,7 +956,8 @@ void ToolOcr::copyAll()
 	if (text.empty()) {
 		for (size_t i = 0; i < editors.size(); i++) {
 			if (i) text += L'\n';
-			text += editors[i]->getText();
+			auto* ot = dynamic_cast<OcrText*>(editors[i]);
+			text += (ot && ot->vertical) ? ot->logical : editors[i]->getText();
 		}
 	}
 	if (text.empty()) text = result_.text;
@@ -904,22 +982,40 @@ ToolOcr::SelPoint ToolOcr::hitSelPoint(POINT p) const
 {
 	SelPoint sp;
 	if (editors.empty()) return sp;
-	// 先按 Y 定行：落在某行内就用它，否则取纵向最近的一行
+	// 先定"行"。竖排整版时各列的 Y 区间几乎完全重合，按 Y 定会永远命中第一列
+	// （表现为拖选拉不到别的列），所以竖排为主时必须按 X 定列；横排仍按 Y 定行。
+	int vertCount = 0, totalCount = 0;
+	for (auto* e : editors) {
+		if (!e) continue;
+		++totalCount;
+		auto* t = dynamic_cast<OcrText*>(e);
+		if (t && t->vertical) ++vertCount;
+	}
+	const bool byX = totalCount > 0 && vertCount * 2 >= totalCount;
+
 	int best = 0;
 	float bestDist = FLT_MAX;
 	for (size_t i = 0; i < editors.size(); ++i) {
 		auto* e = editors[i];
 		if (!e) continue;
-		if ((float)p.y >= e->y && (float)p.y <= e->y + e->h) { best = (int)i; bestDist = 0.f; break; }
-		const float d = std::fabs((float)p.y - (e->y + e->h * 0.5f));
+		const float primary = byX ? (float)p.x : (float)p.y;
+		const float lo = byX ? e->x : e->y;
+		const float hi = lo + (byX ? e->w : e->h);
+		if (primary >= lo && primary <= hi) { best = (int)i; bestDist = 0.f; break; }
+		const float d = std::fabs(primary - (lo + hi) * 0.5f);
 		if (d < bestDist) { bestDist = d; best = (int)i; }
 	}
 	auto* e = editors[best];
 	if (!e) return sp;
 	sp.line = best;
-	const int n = (int)e->getText().size();   // 命中矩形已是缩放后的视觉矩形（见 OcrText::layout）
-	if (n > 0 && e->w > 1.f) {
-		const float f = std::clamp(((float)p.x - e->x) / e->w, 0.f, 1.f);
+	// 竖排按 Y 轴换算字符位置，横排按 X 轴（命中矩形都是缩放后的视觉矩形，见 OcrText::layout）
+	auto* ot = dynamic_cast<OcrText*>(e);
+	const bool vert = ot && ot->vertical;
+	const int n = vert ? (int)ot->logical.size() : (int)e->getText().size();
+	const float extent = vert ? e->h : e->w;
+	const float offset = vert ? ((float)p.y - e->y) : ((float)p.x - e->x);
+	if (n > 0 && extent > 1.f) {
+		const float f = std::clamp(offset / extent, 0.f, 1.f);
 		const float pos = f * (float)n;            // 0~n：落在第几个字符边界上
 		// 首尾各放宽半格到 0.75 格：起手/收手常按在第一个字符上，
 		// 按"最近边界"取整就会从第二个字开始选（用户反馈拖选老是从第二字起）。
@@ -942,13 +1038,24 @@ void ToolOcr::applySelection()
 		auto* e = editors[i];
 		if (!e) continue;
 		if (i < sl || i > el) { e->setSelectionRange(0, 0); continue; }
-		const int len = (int)e->getText().size();
+		auto* ot = dynamic_cast<OcrText*>(e);
+		const bool vert = ot && ot->vertical;
+		const int len = vert ? (int)ot->logical.size() : (int)e->getText().size();
 		int a = 0, b = 0;
 		if (sl == el) { a = si; b = ei; }
 		else if (i == sl) { a = si; b = len; }
 		else if (i == el) { a = 0; b = ei; }
 		else { a = 0; b = len; }
-		e->setSelectionRange(a, b);
+		if (vert) {
+			// 竖排控件的文本是"字\n字\n字"：逻辑下标换算回控件下标再做高亮
+			const int rawLen = (int)e->getText().size();
+			const int rawA = std::clamp(a * 2, 0, rawLen);
+			const int rawB = (b > a) ? std::clamp(b * 2 - 1, 0, rawLen) : rawA;
+			e->setSelectionRange(rawA, rawB);
+		}
+		else {
+			e->setSelectionRange(a, b);
+		}
 	}
 }
 
@@ -971,7 +1078,8 @@ std::wstring ToolOcr::selectedText() const
 	for (int i = sl; i <= el; ++i) {
 		auto* e = editors[i];
 		if (!e) continue;
-		const std::wstring t = e->getText();
+		auto* ot = dynamic_cast<OcrText*>(e);
+		const std::wstring t = (ot && ot->vertical) ? ot->logical : e->getText();
 		const int len = (int)t.size();
 		int a = (i == sl) ? si : 0;
 		int b = (i == el) ? ei : len;
@@ -1006,9 +1114,8 @@ void ToolOcr::layout()
 	}
 }
 
-void ToolOcr::syncToMask(const D2D1_RECT_F& maskRect, int hostX, int hostY, float hostDpi)
+void ToolOcr::syncToMask(const D2D1_RECT_F& maskRect, int hostX, int hostY)
 {
-	dpi = hostDpi;
 	maskRect_ = maskRect;
 	hasMask_ = true;
 	const int left = (int)std::lround(maskRect.left);
@@ -1020,14 +1127,20 @@ void ToolOcr::syncToMask(const D2D1_RECT_F& maskRect, int hostX, int hostY, floa
 	const int panelW = std::max(1, right - left);
 	const int panelH = std::max(1, bottom - top);
 	const bool sizeChanged = (panelW != panelW_ || panelH != panelH_);
-	if (sizeChanged) {
-		panelW_ = panelW;
-		panelH_ = panelH;
-		setSize((float)panelW / dpi, (float)panelH / dpi);
-	}
+	panelW_ = panelW;
+	panelH_ = panelH;
+	// 顺序很重要：**先定位、后定尺寸**。
+	// 选区可能在另一块缩放比不同的显示器上，SetWindowPos 挪过去会触发 WM_DPICHANGED，
+	// 系统随即按「建议矩形」把窗口改成 旧尺寸 ×(新DPI/旧DPI)（120%→100% 就只剩 5/6 宽）。
+	// 尺寸放在后面，才是用已经生效的 dpi 算出来的、真正等于选区的那一份；反过来写，
+	// w 会停在建议矩形上，rebuildEditors 的 scaleX = w / 识别图宽 就把整层文字缩小、
+	// 贴向左上（右上角按钮也跟着往里缩）。
+	// 尺寸每次都要重新设：系统可能在我们不知道的时候（DPI 变化）改过窗口。
 	setPosition(hostX + left, hostY + top);
-	// 只在尺寸变化时重建编辑框：拖动只是挪窗口，逐帧重建（还带整图字号分析）会明显卡。
-	if (sizeChanged) rebuildEditors();
+	setSize((float)panelW / dpi, (float)panelH / dpi);
+	// 字号和坐标都是按 dpi 换算的：dpi 变了（换屏 / 改缩放）必须重排。
+	// dpi 的变化就发生在上面的 setPosition 里，所以放在这里判断。
+	if (sizeChanged || std::fabs(dpi - builtDpi_) > 0.001f) rebuildEditors();
 }
 
 bool ToolOcr::hitText(POINT client)

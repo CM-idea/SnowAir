@@ -4,17 +4,21 @@
 #include "OcrPackFetch.h"
 #include "PluginPaths.h"
 #include "LwPpOcrEngine.h"
+#include <fstream>
 #include <thread>
 
 namespace {
-	// lw.PPOCR.C 官方模型包（PP-OCRv6 Tiny：det + cls + rec + 字典）。
+	// lw.PPOCR.C 官方模型包（det + cls + rec + 字典），按档位取不同 zip。
 	// 固定到发布号，避免与运行时版本串味（其文档明确要求"一个发布号的整套一起用"）。
-	const std::wstring kTinyPackUrl =
-		L"https://github.com/lxw112190/lw.PPOCR.C/releases/download/v1.2.0/"
-		L"lw.PPOCR.C-1.2.0-ppocrv6-tiny-runtime.zip";
+	const std::wstring kPackBase =
+		L"https://github.com/lxw112190/lw.PPOCR.C/releases/download/v1.2.0/";
 
-	// 装好后模型目录里应有的文件（从包内摊平到 ocr-models/ppocr-v6/）
+	// 装好后模型目录里应有的文件（从包内摊平到 ocr-models/<档位目录>/）
 	const wchar_t* const kFiles[] = { L"det.lwm", L"cls.lwm", L"rec.lwm", L"ppocr_keys.txt" };
+
+	// 模型档位标记。换了档位后老安装必须重新下载：
+	// 只补缺文件会留下 A 档的 det 配 B 档的 rec/字典，类别数对不上，引擎直接初始化失败。
+	const wchar_t* const kPackMarkerName = L"pack.id";
 }
 
 OcrModelManager& OcrModelManager::instance()
@@ -47,7 +51,13 @@ bool OcrModelManager::isInstalled(OcrPackVariant v) const
 		if (!std::filesystem::is_regular_file(p, ec)) return false;
 		if (std::filesystem::file_size(p, ec) == 0) return false;
 	}
-	return true;
+	// 档位标记：别的档位装过（或旧版本没这个文件）→ 视为未安装，引导重新下载对应档位
+	std::ifstream marker(dir / kPackMarkerName, std::ios::binary);
+	std::string value;
+	std::getline(marker, value);
+	while (!value.empty() && (value.back() == '\r' || value.back() == '\n' || value.back() == ' '))
+		value.pop_back();
+	return value == OcrPack::markerValue(v);
 }
 
 void OcrModelManager::download(OcrPackVariant v,
@@ -65,13 +75,16 @@ void OcrModelManager::download(OcrPackVariant v,
 			return;
 		}
 
-		// 下载官方模型包 → 解压 → 把 4 个文件摊到模型目录（不重下已存在的单个文件）
+		// 覆盖安装前先放掉引擎：老模型正被读着时删/换文件会失败
+		LwPpOcrEngine::release();
+
+		// 下载官方模型包 → 解压 → 把 4 个文件摊到模型目录
 		auto tmp = destRoot / L"_pkg";
 		std::filesystem::remove_all(tmp, ec);
 		std::filesystem::create_directories(tmp, ec);
-		auto zip = tmp / L"ppocrv6-tiny-runtime.zip";   // Expand-Archive 只认 .zip 扩展名
+		auto zip = tmp / OcrPack::packFile(v);   // Expand-Archive 只认 .zip 扩展名
 
-		if (!OcrPackFetch::tryDownload(OcrPackFetch::githubMirrors(kTinyPackUrl), zip,
+		if (!OcrPackFetch::tryDownload(OcrPackFetch::githubMirrors(kPackBase + OcrPack::packFile(v)), zip,
 			[&](float p) { if (progress) progress(p * 0.7f); })) {
 			std::filesystem::remove_all(tmp, ec);
 			if (done) done(false, L"PP-OCRv6 模型包下载失败，请检查网络后重试");
@@ -85,10 +98,9 @@ void OcrModelManager::download(OcrPackVariant v,
 		}
 		if (progress) progress(0.85f);
 
+		// 四个文件必须整体覆盖：混档（tiny 的 det + small 的 rec/字典）会让类别数对不上
 		for (const auto* name : kFiles) {
 			auto dst = destRoot / name;
-			if (std::filesystem::is_regular_file(dst, ec) && std::filesystem::file_size(dst, ec) > 0)
-				continue;   // 已有且非空：跳过
 			auto src = OcrPackFetch::findFile(extract, name, L"");
 			if (src.empty()) {
 				std::filesystem::remove_all(tmp, ec);
@@ -103,6 +115,17 @@ void OcrModelManager::download(OcrPackVariant v,
 			}
 		}
 		std::filesystem::remove_all(tmp, ec);
+
+		// 标记最后写：中途失败时保持"未安装"，下次还能重试
+		{
+			std::ofstream marker(destRoot / kPackMarkerName, std::ios::binary | std::ios::trunc);
+			marker << OcrPack::markerValue(v);
+			if (!marker) {
+				if (done) done(false, L"模型包标记写入失败");
+				return;
+			}
+		}
+
 		if (progress) progress(1.f);
 		if (done) done(true, {});
 	}).detach();

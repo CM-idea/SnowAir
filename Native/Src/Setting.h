@@ -3,7 +3,6 @@
 #include <filesystem>
 #include <functional>
 #include <winrt/Windows.Data.Json.h>
-#include "Ocr/CloudOcr.h"
 using namespace winrt::Windows::Data::Json;
 
 class Setting
@@ -61,15 +60,12 @@ public:
 
 	int getOcrEngine();
 	void setOcrEngine(int v);
+	// 离线 OCR 模型档位：0 = 轻量（默认，最快，不含日文假名），1 = 标准（支持日文）
+	int getOcrPackVariant();
+	void setOcrPackVariant(int v);
 	// OCR 结果版式：0 = 原位覆盖（默认），1 = 文本重排（整段可编辑文本框）
 	int getOcrResultMode();
 	void setOcrResultMode(int v);
-	std::wstring getOcrCloudConfigId();
-	void setOcrCloudConfigId(const std::wstring& id);
-	std::vector<OcrCloudConfig> getOcrCloudConfigs();
-	void setOcrCloudConfigs(const std::vector<OcrCloudConfig>& list);
-	OcrCloudConfig getOcrCloudConfig();
-	void setOcrCloudConfig(const OcrCloudConfig& cfg);
 
 	std::wstring getTranslateProvider();
 	void setTranslateProvider(const std::wstring& v);
@@ -107,6 +103,17 @@ public:
 	// 线迹标注类工具（矩形/箭头/画笔/高亮）的默认宽度，1–10
 	int getToolDefaultWidth();
 	void setToolDefaultWidth(int v);
+	// —— 初始属性（外观 > 工具栏外观）：每个工具的默认形态 / 数值 ——
+	// 存在 features.toolDesign/{工具 id}/{键}；没存过就返回默认值，运行时可据此回落
+	bool hasToolDesign(const std::wstring& toolId);
+	// 是否有任意工具存过初始属性（「恢复默认」的可用态用）
+	bool hasAnyToolDesign();
+	int getToolDesignInt(const std::wstring& toolId, const std::wstring& key, int def);
+	void setToolDesignInt(const std::wstring& toolId, const std::wstring& key, int value);
+	// 初始属性里的字符串项（目前用于停悬气泡的子工具清单，逗号分隔）
+	std::wstring getToolDesignStr(const std::wstring& toolId, const std::wstring& key, const std::wstring& def);
+	void setToolDesignStr(const std::wstring& toolId, const std::wstring& key, const std::wstring& value);
+	void clearToolDesign();
 	// 记忆工具样式：记住上次选中的标注工具样式（如箭头样式），不记忆滑动条
 	bool getRememberToolStyle();
 	void setRememberToolStyle(bool on);
@@ -236,6 +243,7 @@ public:
 		std::wstring source;
 		int width{ 0 };
 		int height{ 0 };
+		int durationSec{ 0 };      // 录屏时长（秒）；截图/未知为 0
 		long long createdAt{ 0 };  // ms epoch
 		// 仅剪切板条目的界面数据（不落盘）
 		std::wstring text;
@@ -252,7 +260,8 @@ public:
 		const std::wstring& source);
 	// 录屏：登记视频路径，coverBgra 只写进缩略图缓存当网格缩略图
 	std::wstring addHistoryMedia(const std::wstring& mediaPath, int width, int height,
-		const std::wstring& source, const std::vector<BYTE>& coverBgra = {});
+		const std::wstring& source, int durationSec = 0,
+		const std::vector<BYTE>& coverBgra = {});
 	// 自定义标签：按真实文件路径存（目录扫描出来、未登记的条目也能打标签）
 	std::vector<std::wstring> getHistoryTags(const std::wstring& filePath);
 	void setHistoryTags(const std::wstring& filePath, const std::vector<std::wstring>& tags);

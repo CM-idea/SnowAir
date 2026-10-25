@@ -22,6 +22,8 @@ public:
 	// 序号值 / 序号样式（属性栏「当前序号」推算下一个值时要看已有形状）
 	int numberVal() const { return val; }
 	float stylePrimarySize() const override { return r; }
+	std::vector<float> editSnapshot() const override;
+	void applyEditSnapshot(const std::vector<float>& state) override;
 public:
 private:
 	static int getNextVal(AnnotHost* win, int style);

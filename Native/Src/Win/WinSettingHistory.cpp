@@ -1089,11 +1089,13 @@ void WinSettingHistory::rebuildFilterPanel()
 	if (tip) tip->hide();     // 已经挂着的停悬提示先收掉
 	// 气泡内所有配色跟随软件主题（不使用截图工具栏主题）
 	const uint32_t tFg = SettingTheme::textPrimary;
-	const uint32_t tHover = SettingTheme::accent;
+	// 停悬底色：比常态（分隔线色）深一档，两种主题各自取值
+	const uint32_t tHover = SettingTheme::isDark() ? 0x3A3A3AFF : 0xE5E5E5FF;
 	const uint32_t tActive = SettingTheme::brand;   // 标签选中态
 	const uint32_t fgFaint = (tFg & 0xFFFFFF00u) | 0x66u;
 	// 日历格：今天 = 次级底 + 主文字；选中 = 主色底 + 主色前景（深/浅主题各自成立）
-	const uint32_t todayBg = SettingTheme::secondary;
+	// 当前日期（含当前月/当前年）的默认底色：暗色与分隔线同色，浅色用 #F5F4F4
+	const uint32_t todayBg = SettingTheme::isDark() ? SettingTheme::border : 0xF5F4F4FF;
 	const uint32_t todayFg = SettingTheme::textPrimary;
 	const uint32_t selBg = SettingTheme::primary;
 	const uint32_t selFg = SettingTheme::primaryForeground;
@@ -1209,8 +1211,9 @@ void WinSettingHistory::rebuildFilterPanel()
 		// 日历展开时取消/确认也让位，别又冒出来
 		toggle(sec->rangeBtns, range && !*calOpen);
 		if (sec->pick) {
-			// 选中态：停悬底色 + 正常文字色（不再变绿）
-			sec->pick->setBg(range ? tHover : 0);
+			// 选中态：比停悬再深一档的底 + 正常文字色（不再变绿）
+			const uint32_t pickedBg = SettingTheme::isDark() ? 0x4A4A4AFF : 0xE5E5E5FF;
+			sec->pick->setBg(range ? pickedBg : 0);
 			sec->pick->setColor(tFg);
 			sec->pick->setHoverColor(tFg);
 		}
@@ -1288,7 +1291,9 @@ void WinSettingHistory::rebuildFilterPanel()
 		dateRow->setWidthPercent(100.f);
 		dateRow->setMarginBottom(8.f);
 
-		// 日期选择框：用按钮做外观（文字天然水平居中），点一下展开日历
+		// 日期选择框：用按钮做外观（文字天然水平居中），点一下展开日历；
+		// 暗色与分隔线同色，浅色用更浅一档的输入面
+		const uint32_t dateBoxBg = SettingTheme::isDark() ? SettingTheme::border : 0xF5F4F4FF;
 		auto mkDateBox = [&](const std::wstring& value, const std::wstring& hint) {
 			auto* b = dateRow->makeChild<Ling::Button>();
 			b->setHeight(SettingTheme::ctrlH);
@@ -1296,8 +1301,8 @@ void WinSettingHistory::rebuildFilterPanel()
 			b->setFlexShrink(1.f);
 			b->setBorderRadius(ToolbarTheme::hoverRadius);
 			b->setBorder(0.f, 0);
-			b->setBg(tHover);
-			b->setHoverBg(tHover);
+			b->setBg(dateBoxBg);
+			b->setHoverBg(dateBoxBg);
 			b->setFontSize(SettingTheme::fontSm);
 			b->setPadding(10.f, 0.f, 10.f, 0.f);
 			b->setJustifyContent(Ling::Justify::Center);
@@ -1786,19 +1791,21 @@ void WinSettingHistory::rebuildFilterPanel()
 	listSec->setFlexShrink(1.f);
 	sec->list = listSec;
 
-	// 搜索框（文件名 / 标签）
+	// 搜索框（文件名 / 标签）：暗色与分隔线同色，浅色用更浅一档的输入面
+	const bool dark = SettingTheme::isDark();
+	const uint32_t searchBg = dark ? SettingTheme::border : 0xF5F4F4FF;
 	auto* search = listSec->makeChild<Ling::TextBox>();
 	search->setHeight(30.f);
 	search->setWidthPercent(100.f);
 	search->setBorderRadius(ToolbarTheme::hoverRadius);
 	search->setBorder(0.f, 0);
-	search->setBg(tHover);
+	search->setBg(searchBg);
 	search->setColor(tFg);
 	search->setFontSize(SettingTheme::fontSm);
 	search->setPadding(8.f, 0.f, 8.f, 0.f);
 	search->setVerticalCenter(true);
 	search->setPlaceholder(Lang::get(L"setting.filterSearchHint"));
-	search->setPlaceholderColor(fgFaint);
+	search->setPlaceholderColor(SettingTheme::placeholder);
 	search->setMarginBottom(10.f);
 	search->setText(filter.keyword);
 	search->onTextChanged.add([this](Ling::TextBox*, const std::wstring& t) {
@@ -1853,14 +1860,19 @@ void WinSettingHistory::rebuildFilterPanel()
 	tagScroll->content->setWidthPercent(100.f);
 
 	auto tagBtns = std::make_shared<std::vector<std::pair<Ling::Button*, std::wstring>>>();
-	auto syncTagBtns = [this, tagBtns, tFg, tActive, tHover]() {
+	// 标签底色：暗色与分隔线同色，浅色用 #F5F4F4；停悬统一加深一档
+	const uint32_t tagIdleBg = dark ? SettingTheme::border : 0xF5F4F4FF;
+	const uint32_t tagHoverBg = dark ? 0x3A3A3AFF : 0xE5E5E5FF;
+	// 标签文字：常态用次级色，停悬才变实色；选中用主题绿
+	const uint32_t tagIdleFg = SettingTheme::textSecondary;
+	auto syncTagBtns = [this, tagBtns, tFg, tActive, tagIdleFg, tagIdleBg, tagHoverBg]() {
 			for (auto& [b, tag] : *tagBtns) {
 				if (!b) continue;
 				const bool active = (filter.tag == tag);
-				b->setColor(active ? tActive : tFg);
+				b->setColor(active ? tActive : tagIdleFg);
 				b->setHoverColor(active ? tActive : tFg);
-				b->setBg(0);
-				b->setHoverBg(tHover);
+				b->setBg(tagIdleBg);
+				b->setHoverBg(tagHoverBg);
 			}
 		};
 
@@ -1872,9 +1884,9 @@ void WinSettingHistory::rebuildFilterPanel()
 		b->setPadding(6.f, 0.f, 6.f, 0.f);
 		b->setBorderRadius(ToolbarTheme::hoverRadius);
 		b->setBorder(0.f, 0);
-		b->setBg(0);
-		b->setHoverBg(tHover);
-		b->setColor(tFg);
+		b->setBg(tagIdleBg);
+		b->setHoverBg(tagHoverBg);
+		b->setColor(tagIdleFg);
 		b->setHoverColor(tFg);
 		b->setJustifyContent(Ling::Justify::Center);
 		b->setAlignItems(Ling::Align::Center);
@@ -2259,6 +2271,14 @@ void WinSettingHistory::refreshGrid()
 		else
 			wcsftime(whenBuf, 32, L"%Y-%m-%d", &t);
 		std::wstring metaText = std::wstring(whenBuf);
+		// 录屏条目补上时长（修复前登记的旧条目没有这个字段，dur=0 时不显示）
+		if (isMedia && it.durationSec > 0) {
+			const int sec = it.durationSec;
+			wchar_t dur[24]{};
+			if (sec >= 3600) swprintf_s(dur, L"%d:%02d:%02d", sec / 3600, (sec % 3600) / 60, sec % 60);
+			else swprintf_s(dur, L"%02d:%02d", sec / 60, sec % 60);
+			metaText += L" · " + std::wstring(dur);
+		}
 		if (it.width > 0 && it.height > 0)
 			metaText += L" · " + std::to_wstring(it.width) + L"×" + std::to_wstring(it.height);
 		// 单个视频/其它文件：额外显示文件大小；图片、文件夹、多文件不显示

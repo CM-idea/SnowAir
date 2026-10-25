@@ -10,6 +10,7 @@
 #include "../Ocr/OcrModelManager.h"
 #include "../Ocr/OcrRuntimeManager.h"
 #include "../Ocr/OcrPackVariant.h"
+#include "../Ocr/LwPpOcrEngine.h"
 #include "../Translate/TranslateTypes.h"
 #include "WinSetting.h"
 #include <shobjidl.h>
@@ -265,70 +266,6 @@ namespace {
 		return box;
 	}
 
-	// API 卡片内的「字段」：label 在上、输入框在下的竖排小块
-	Ling::Node* apiField(Ling::Node* parent, const std::wstring& label,
-		const std::wstring& value,
-		std::function<void(const std::wstring&)> onCommit, Ling::TextBox** out = nullptr)
-	{
-		auto* col = parent->makeChild<Ling::Node>();
-		col->setFlexDirection(Ling::FlexDirection::Column);
-		col->setFlexShrink(1.f);
-		YGNodeStyleSetMinWidth(col->node, 0.f);
-
-		auto* lab = col->makeChild<Ling::Label>();
-		lab->setText(label);
-		lab->setFontSize(SettingTheme::fontBase);
-		lab->setColor(SettingTheme::textPrimary);
-		lab->setMarginBottom(SettingTheme::sp2);
-
-		auto* box = col->makeChild<Ling::TextBox>();
-		box->setHeight(SettingTheme::ctrlH);
-		box->setWidthPercent(100.f);
-		box->setBorderRadius(SettingTheme::radiusCtl);   // 与外层容器同心（比外框小一档）
-		box->setBorder(1.f, SettingTheme::input);
-		box->setBg(SettingTheme::card);
-		box->setColor(SettingTheme::textPrimary);
-		box->setPadding(SettingTheme::sp2, 0, SettingTheme::sp2, 0);
-		box->setFontSize(SettingTheme::fontBase);
-		box->setVerticalCenter(true);
-		box->setPlaceholder(Lang::get(L"setting.fnInputHint"));
-		box->setPlaceholderColor(SettingTheme::placeholder);
-		box->setText(value);
-		box->onFocusChanged.add([onCommit](Ling::TextBox* tb, bool focused) {
-			if (!focused && onCommit) onCommit(tb->getText());
-		});
-		if (out) *out = box;
-		return col;
-	}
-
-	// 方形图标按钮（36×36，圆角 10）：样式对齐「插件集成 → 下载按钮」——
-	// 平铺浅灰(#F5F4F4)、无描边、无停悬变化；垃圾桶图标（删除）走红底(20% 红)+红图标。
-	Ling::Button* squareIconBtn(Ling::Node* parent, const wchar_t* glyph,
-		std::function<void()> onClick)
-	{
-		const bool danger = isTrashGlyph(glyph);
-		auto* btn = parent->makeChild<Ling::Button>();
-		btn->setSize(36.f, 36.f);
-		btn->setBorderRadius(SettingTheme::radiusLg);
-		btn->setBorderWidth(0.f);
-		btn->setBg(danger ? kDangerRedBg : 0xF5F4F4FF);
-		btn->setHoverBg(danger ? kDangerRedBg : 0xF5F4F4FF);
-		btn->setFlexDirection(Ling::FlexDirection::Row);
-		btn->setJustifyContent(Ling::Justify::Center);
-		btn->setAlignItems(Ling::Align::Center);
-		btn->setText(glyph);
-		btn->setFontFamily(Icon::Family);
-		btn->setFontSize(18.f);
-		btn->setColor(danger ? kDangerRed : 0x000000FF);
-		btn->setHoverColor(danger ? kDangerRed : 0x000000FF);
-		btn->onClick.add([onClick](Ling::Button*) { if (onClick) onClick(); });
-		return btn;
-	}
-}
-
-std::wstring WinSettingFeatures::newId()
-{
-	return L"id-" + std::to_wstring(GetTickCount64());
 }
 
 WinSettingFeatures::WinSettingFeatures(Ling::WinBase* parent) : Ling::Node(parent)
@@ -798,36 +735,59 @@ void WinSettingFeatures::buildOutput(Ling::Node* p)
 void WinSettingFeatures::buildOcr(Ling::Node* p)
 {
 	auto* s = Setting::get();
+	// Lite 版不提供云端 / API 识图：只保留本地 PP-OCRv6 与系统 OCR。
+	// PP-OCRv6 有轻量/标准两档，已装哪档就在「模型规格」里列出哪档。
+	std::vector<OcrPackVariant> installed;
+	for (int i = 0; i < OcrPack::kCount; ++i) {
+		const auto v = OcrPack::clampVariant(i);
+		if (OcrModelManager::instance().isInstalled(v)
+			&& OcrRuntimeManager::instance().isInstalled(v))
+			installed.push_back(v);
+	}
+
 	std::vector<std::wstring> labels;
 	std::vector<int> engines;
-	std::vector<std::wstring> cloudIds;
-	if (OcrModelManager::instance().isInstalled(OcrPackVariant::Official)
-		&& OcrRuntimeManager::instance().isInstalled(OcrPackVariant::Official)) {
-		labels.push_back(OcrPack::label(OcrPackVariant::Official)); engines.push_back(0); cloudIds.push_back(L"");
-	}
+	if (!installed.empty()) { labels.push_back(L"PP-OCRv6"); engines.push_back(0); }
 	// 文本识别模型默认只有「系统 OCR」
-	labels.push_back(Lang::get(L"setting.fnOcrSystem")); engines.push_back(4); cloudIds.push_back(L"");
-	for (auto& c : s->getOcrCloudConfigs()) {
-		if (!c.isConfigured()) continue;
-		labels.push_back(c.displayName());
-		engines.push_back(5);
-		cloudIds.push_back(c.id);
-	}
+	labels.push_back(Lang::get(L"setting.fnOcrSystem")); engines.push_back(4);
 	int cur = 0;
 	for (int i = 0; i < (int)engines.size(); i++) {
-		if (engines[i] == s->getOcrEngine()
-			&& (engines[i] != 5 || cloudIds[i] == s->getOcrCloudConfigId())) {
-			cur = i; break;
-		}
+		if (engines[i] == s->getOcrEngine()) { cur = i; break; }
 	}
 	{
 		auto* g = SettingUi::grid2(p);
 		SettingUi::selectRow(g, Lang::get(L"setting.fnOcrModel"), labels, cur,
-			[engines, cloudIds](int i, const std::wstring&) {
+			[this, engines](int i, const std::wstring&) {
 				if (i < 0 || i >= (int)engines.size()) return;
+				const bool changed = Setting::get()->getOcrEngine() != engines[i];
 				Setting::get()->setOcrEngine(engines[i]);
-				Setting::get()->setOcrCloudConfigId(cloudIds[i]);
+				// 切到系统 OCR 时「模型规格」要收起来（反之亦然），按需重建本页
+				if (changed) this->deferRebuildTab(3);
 			}, true);
+
+		// 模型规格：只有选中 PP-OCRv6 且装了模型才出现；系统 OCR 不需要模型，不显示这一行
+		if (s->getOcrEngine() == 0 && !installed.empty()) {
+			std::vector<std::wstring> tiers;
+			std::vector<int> tierIds;
+			for (auto v : installed) {
+				tiers.push_back(OcrPack::tierLabel(v));
+				tierIds.push_back((int)v);
+			}
+			int curTier = 0;
+			for (int i = 0; i < (int)tierIds.size(); ++i)
+				if (tierIds[i] == s->getOcrPackVariant()) { curTier = i; break; }
+			// 「?」放在标题「模型规格」右侧（optionRow 的 helpText 就是干这个的）
+			auto tierRow = SettingUi::optionRow(g, Lang::get(L"setting.fnOcrTier"), L"", true,
+				SettingTheme::ctrlH, Lang::get(L"setting.plugOcrTierTip"));
+			auto* ddl = SettingUi::selectDdl(tierRow.ctrlBox, tiers, curTier,
+				[tierIds](int i, const std::wstring&) {
+					if (i < 0 || i >= (int)tierIds.size()) return;
+					Setting::get()->setOcrPackVariant(tierIds[i]);
+					LwPpOcrEngine::release();   // 换档要重建引擎
+				});
+			ddl->setWidth(SettingTheme::dropdownWidth);
+			ddl->setFlexShrink(0.f);
+		}
 		// 识别结果版式：原位覆盖（逐框贴回原位置）/ 文本重排（整段可编辑文本框）
 		SettingUi::selectRow(g, Lang::get(L"setting.fnOcrResultMode"),
 			{ Lang::get(L"setting.fnOcrResultOverlay"), Lang::get(L"setting.fnOcrResultReflow") },
@@ -835,161 +795,6 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 			[](int i, const std::wstring&) { Setting::get()->setOcrResultMode(i); }, true);
 		SettingUi::grid2Cells(g);
 	}
-
-	SettingUi::groupLabel(p, Lang::get(L"setting.fnApiGroup"));
-	auto clouds = s->getOcrCloudConfigs();
-	for (size_t i = 0; i < clouds.size(); i++) {
-		const auto cfg = clouds[i];
-		const bool youdao = cfg.provider == L"youdao";
-
-		// 卡片容器：白底 + 1px 描边 + 圆角 8（与文件输出卡片一致，保持整体统一）
-		auto* card = p->makeChild<Ling::Node>();
-		card->setFlexDirection(Ling::FlexDirection::Column);
-		card->setWidthPercent(100.f);
-		card->setBg(SettingTheme::card);
-		card->setBorder(1.f, SettingTheme::border);
-		card->setBorderRadius(SettingTheme::radiusLg);
-		card->setPadding(SettingTheme::sp3, SettingTheme::sp3, SettingTheme::sp3, SettingTheme::sp3);
-		card->setMarginBottom(SettingTheme::blockGap);
-
-		auto saveField = [i](const std::function<void(OcrCloudConfig&)>& apply) {
-			auto list = Setting::get()->getOcrCloudConfigs();
-			if (i >= list.size()) return;
-			apply(list[i]);
-			Setting::get()->setOcrCloudConfigs(list);
-		};
-
-		// 首行：左「识图服务」下拉，右「显示名称」输入 + 复制/删除方形图标按钮
-		auto* top = card->makeChild<Ling::Node>();
-		top->setFlexDirection(Ling::FlexDirection::Row);
-		top->setWidthPercent(100.f);
-		top->setAlignItems(Ling::Align::FlexEnd);
-		YGNodeStyleSetMinWidth(top->node, 0.f);
-
-		auto* svcCol = top->makeChild<Ling::Node>();
-		svcCol->setFlexDirection(Ling::FlexDirection::Column);
-		svcCol->setFlexGrow(1.f);
-		svcCol->setFlexShrink(1.f);
-		svcCol->setMarginRight(SettingTheme::sp3);
-		YGNodeStyleSetMinWidth(svcCol->node, 0.f);
-		auto* svcLab = svcCol->makeChild<Ling::Label>();
-		svcLab->setText(Lang::get(L"setting.fnOcrProvider"));
-		svcLab->setFontSize(SettingTheme::fontBase);
-		svcLab->setColor(SettingTheme::textPrimary);
-		svcLab->setMarginBottom(SettingTheme::sp2);
-		SettingUi::selectDdl(svcCol,
-			{ Lang::get(L"setting.fnProviderBaidu"), Lang::get(L"setting.fnProviderYoudao"), Lang::get(L"setting.fnProviderCustom") },
-			youdao ? 1 : (cfg.provider == L"custom" ? 2 : 0),
-			[this, i](int idx, const std::wstring&) {
-				auto list = Setting::get()->getOcrCloudConfigs();
-				if (i >= list.size()) return;
-				list[i].provider = idx == 1 ? L"youdao" : idx == 2 ? L"custom" : L"baidu";
-				Setting::get()->setOcrCloudConfigs(list);
-				deferRebuildTab(3);   // 服务商变化会换字段标签/显隐，整卡重建
-			});
-
-		auto* nameCol = top->makeChild<Ling::Node>();
-		nameCol->setFlexDirection(Ling::FlexDirection::Column);
-		nameCol->setFlexGrow(1.f);
-		nameCol->setFlexShrink(1.f);
-		YGNodeStyleSetMinWidth(nameCol->node, 0.f);
-		auto* nameLab = nameCol->makeChild<Ling::Label>();
-		nameLab->setText(Lang::get(L"setting.fnDisplayName"));
-		nameLab->setFontSize(SettingTheme::fontBase);
-		nameLab->setColor(SettingTheme::textPrimary);
-		nameLab->setMarginBottom(SettingTheme::sp2);
-		auto* nameRow = nameCol->makeChild<Ling::Node>();
-		nameRow->setFlexDirection(Ling::FlexDirection::Row);
-		nameRow->setWidthPercent(100.f);
-		nameRow->setAlignItems(Ling::Align::FlexEnd);
-		YGNodeStyleSetMinWidth(nameRow->node, 0.f);
-		{
-			auto* nameBox = nameRow->makeChild<Ling::TextBox>();
-			nameBox->setHeight(SettingTheme::ctrlH);
-			nameBox->setWidthPercent(0.f);
-			nameBox->setFlexGrow(1.f);
-			nameBox->setFlexShrink(1.f);
-			YGNodeStyleSetMinWidth(nameBox->node, 0.f);
-			nameBox->setBorderRadius(SettingTheme::radiusCtl);   // 与外层卡片同心（比外框小一档）
-			nameBox->setBorder(1.f, SettingTheme::input);
-			nameBox->setBg(SettingTheme::card);
-			nameBox->setColor(SettingTheme::textPrimary);
-			nameBox->setPadding(SettingTheme::sp2, 0, SettingTheme::sp2, 0);
-			nameBox->setFontSize(SettingTheme::fontBase);
-			nameBox->setVerticalCenter(true);
-			nameBox->setPlaceholder(Lang::get(L"setting.fnInputHint"));
-			nameBox->setPlaceholderColor(SettingTheme::placeholder);
-			nameBox->setText(cfg.name);
-			nameBox->onFocusChanged.add([saveField](Ling::TextBox* tb, bool focused) {
-				if (!focused) saveField([&](OcrCloudConfig& c) { c.name = tb->getText(); });
-			});
-		}
-		{
-			auto* copyBtn = squareIconBtn(nameRow, Icon::Copy, [this, i, cfg]() {
-				auto list = Setting::get()->getOcrCloudConfigs();
-				if (i >= list.size()) return;
-				OcrCloudConfig dup = cfg;
-				dup.id = newId();
-				dup.name = cfg.displayName() + L" 2";
-				list.insert(list.begin() + (int)i + 1, dup);
-				Setting::get()->setOcrCloudConfigs(list);
-				deferRebuildTab(3);
-			});
-			copyBtn->setMarginLeft(SettingTheme::sp2);
-			auto* delBtn = squareIconBtn(nameRow, Icon::Remove, [this, i]() {
-				auto list = Setting::get()->getOcrCloudConfigs();
-				if (i >= list.size()) return;
-				list.erase(list.begin() + (int)i);
-				Setting::get()->setOcrCloudConfigs(list);
-				deferRebuildTab(3);
-			});
-			delBtn->setMarginLeft(SettingTheme::sp2);
-		}
-
-		// 次行：App ID / API Key 双栏（有道时隐藏 API Key，只留「应用 ID」）
-		auto* row2 = card->makeChild<Ling::Node>();
-		row2->setFlexDirection(Ling::FlexDirection::Row);
-		row2->setWidthPercent(100.f);
-		row2->setMarginTop(SettingTheme::sp3);
-		YGNodeStyleSetMinWidth(row2->node, 0.f);
-		auto* appIdCol = apiField(row2, Lang::get(youdao ? L"setting.fnAppIdStar" : L"setting.fnAppIdOptional"),
-			cfg.appId, [saveField](const std::wstring& v) {
-				saveField([&](OcrCloudConfig& c) { c.appId = v; });
-			});
-		appIdCol->setFlexGrow(1.f);
-		if (!youdao) {
-			auto* keyCol = apiField(row2, Lang::get(L"setting.fnApiKeyStar"), cfg.apiKey,
-				[saveField](const std::wstring& v) {
-					saveField([&](OcrCloudConfig& c) { c.apiKey = v; });
-				});
-			keyCol->setFlexGrow(1.f);
-			keyCol->setMarginLeft(SettingTheme::sp3);
-		}
-
-		// 第三行：Secret Key 独占整行
-		auto* secretCol = apiField(card, Lang::get(youdao ? L"setting.fnSecretYd" : L"setting.fnSecretStar"),
-			cfg.secret, [saveField](const std::wstring& v) {
-				saveField([&](OcrCloudConfig& c) { c.secret = v; });
-			});
-		secretCol->setWidthPercent(100.f);
-		secretCol->setMarginTop(SettingTheme::sp3);
-
-		// 帮助文案（有道/百度各一套）
-		auto* hint = card->makeChild<Ling::Label>();
-		hint->setText(Lang::get(youdao ? L"setting.fnOcrHintYoudao" : L"setting.fnOcrHintBaidu"));
-		hint->setFontSize(SettingTheme::fontSm);
-		hint->setColor(SettingTheme::textSecondary);
-		hint->setMarginTop(SettingTheme::sp3);
-	}
-	SettingUi::dashedAdd(p, Lang::get(L"setting.fnAddConfig"), [this]() {
-		auto list = Setting::get()->getOcrCloudConfigs();
-		OcrCloudConfig c;
-		c.id = newId();
-		c.provider = L"baidu";
-		list.push_back(c);
-		Setting::get()->setOcrCloudConfigs(list);
-		deferRebuildTab(3);
-	});
 }
 
 void WinSettingFeatures::buildTranslate(Ling::Node* p)

@@ -141,6 +141,21 @@ void ShapeEllipse::paintDragger(ID2D1DeviceContext* ctx)
 	});
 }
 
+std::vector<float> ShapeEllipse::editSnapshot() const
+{
+	return { rect.left, rect.top, rect.right, rect.bottom, angle, strokeWidth };
+}
+
+void ShapeEllipse::applyEditSnapshot(const std::vector<float>& s)
+{
+	if (s.size() < 5) return;
+	rect = D2D1::RectF(s[0], s[1], s[2], s[3]);
+	angle = s[4];
+	if (s.size() > 5) strokeWidth = s[5];
+	syncEllipseFromRect();
+	updateDraggers();
+}
+
 void ShapeEllipse::mouseDrag(const float x, const float y)
 {
 	if (hoverDraggerIndex == 9) {

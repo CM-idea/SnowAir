@@ -354,6 +354,9 @@ void WinCap::initNow(StartMode mode, std::shared_ptr<std::vector<BYTE>> grab)
     if (winCap) return;   // 抓屏这段空窗里已经开过了
     auto ptr = new WinCap();
     winCap.reset(ptr);
+    // 初始属性：默认显示光标（每次会话开始时按设置重置）
+    if (auto* s = Setting::get())
+        ptr->showCursor = s->getToolDesignInt(L"show-cursor", L"enabled", 0) != 0;
     ptr->cutMask = std::make_unique<CutMask>(ptr);
     // 选区挪动 → 通知录制侧把裁剪框一起平移（拖拽/鼠标跟随/方向键/滚轮全走 CutMask 这一处）
     ptr->cutMask->onRectMoved = [p = ptr]() { p->onMaskRectChanged(); };
@@ -556,6 +559,7 @@ void WinCap::demoRecToggleGif()
 void WinCap::demoRecSaveAs()
 {
 	if (!demoRecRunning_) return;
+	const int dur = demoRecElapsed_;   // stopDemoRecording 会清零，先记下时长
 	auto srcPath = stopDemoRecording(false);
 	if (srcPath.empty()) return;
 	// 与 ToolVideo::saveFile 同一套命名/目录规则；录完留在演示画布
@@ -568,26 +572,31 @@ void WinCap::demoRecSaveAs()
 	if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos) defName = defName.substr(slash + 1);
 	// 画布是置顶全屏窗：用 hwnd 做 owner，保存框才会压在画布之上且模态
 	auto tarPath = Util::getSaveFilePath(hwnd, ext, defName, st->getRecordDir());
-	if (!tarPath.empty() && CopyFileW(srcPath.c_str(), tarPath.c_str(), FALSE)) {
-		// 历史封面用收工这一刻的选区画面（HDR 屏走 ScreenCapture，避免 GDI 抓黑）
-		int vw = 0, vh = 0;
-		std::vector<BYTE> cover;
-		if (cutMask) {
-			const auto& sel = cutMask->maskRect;
-			const int cx = x + (int)sel.left;
-			const int cy = y + (int)sel.top;
-			const int cw2 = (int)(sel.right - sel.left);
-			const int ch2 = (int)(sel.bottom - sel.top);
-			if (cw2 > 0 && ch2 > 0) {
-				cover = ScreenCapture::captureOrGdi(cx, cy, cw2, ch2);
-				if (cover.size() == (size_t)cw2 * (size_t)ch2 * 4) { vw = cw2; vh = ch2; }
-				else cover.clear();
-			}
-		}
-		st->addHistoryMedia(tarPath, vw, vh, L"record", cover);
-	}
+	if (!tarPath.empty() && CopyFileW(srcPath.c_str(), tarPath.c_str(), FALSE))
+		addRecordHistory(tarPath, dur);
 	DeleteFileW(srcPath.c_str());
 	refresh();
+}
+
+void WinCap::addRecordHistory(const std::wstring& path, int durationSec)
+{
+	if (path.empty()) return;
+	// 历史封面用收工这一刻的选区画面（HDR 屏走 ScreenCapture，避免 GDI 抓黑）
+	int vw = 0, vh = 0;
+	std::vector<BYTE> cover;
+	if (cutMask) {
+		const auto& sel = cutMask->maskRect;
+		const int cx = x + (int)sel.left;
+		const int cy = y + (int)sel.top;
+		const int cw2 = (int)(sel.right - sel.left);
+		const int ch2 = (int)(sel.bottom - sel.top);
+		if (cw2 > 0 && ch2 > 0) {
+			cover = ScreenCapture::captureOrGdi(cx, cy, cw2, ch2);
+			if (cover.size() == (size_t)cw2 * (size_t)ch2 * 4) { vw = cw2; vh = ch2; }
+			else cover.clear();
+		}
+	}
+	Setting::get()->addHistoryMedia(path, vw, vh, L"record", durationSec, cover);
 }
 
 void WinCap::demoRecCancel()
@@ -601,8 +610,15 @@ void WinCap::demoRecCancel()
 void WinCap::demoRecFinish()
 {
 	if (!demoRecRunning_) return;
+	const int dur = demoRecElapsed_;   // stopDemoRecording 会清零，先记下时长
 	auto path = stopDemoRecording(false);
-	if (!path.empty()) Util::addFileToClipboard(path);
+	if (!path.empty()) {
+		// 同录屏收尾：先落到「录屏文件路径」，剪贴板贴这份稳定文件
+		auto tarPath = Util::commitRecordedFile(path);
+		Util::addFileToClipboard(tarPath.empty() ? path : tarPath);
+		// 登记进历史，否则历史页只能按目录扫描把它当「其他」里的用户文件
+		if (!tarPath.empty()) addRecordHistory(tarPath, dur);
+	}
 	exitDemoCanvas();
 }
 
@@ -1395,6 +1411,8 @@ void WinCap::selectFullScreenRect()
     cutMask->maskRect = D2D1::RectF(0.f, 0.f, (float)w, (float)h);
     cutMask->refreshLabel();
     stage = CapStage::Adjust;
+    // 选区被整块换掉：识别/翻译浮层对不上新选区了（见 onMaskRectChanged）
+    onMaskRectChanged();
     refresh();
     makeToolCap();
 }
@@ -3092,8 +3110,20 @@ void WinCap::paintMouseHighlight(ID2D1DeviceContext* ctx)
 // 录制中把平移同步给采集线程，否则屏幕上选区已经挪走、录出来的画面还是原来那一块。
 void WinCap::onMaskRectChanged()
 {
-	if (stage != CapStage::Video || !capVideo || !capVideo->isRecording()) return;
-	capVideo->syncCaptureMove();
+	if (stage == CapStage::Video && capVideo && capVideo->isRecording())
+		capVideo->syncCaptureMove();
+	// 识别/翻译浮层是独立窗口，选区变化时它必须跟着走（以前只同步了录制侧）：
+	//   · 拖动选区（尺寸不变）：只挪浮层位置，识别结果仍与原图对齐；
+	//   · 改过尺寸：识别用的图已经不对应当前选区，继续按新尺寸铺开只会把旧结果整体缩放，
+	//     看起来就是"字变小、盖不住原文"，所以直接收起面板，要看得重新识别。
+	if (!toolOcr || !toolOcr->hwnd || !cutMask || !cutMask->hasRect()) return;
+	const float mw = cutMask->maskRect.right - cutMask->maskRect.left;
+	const float mh = cutMask->maskRect.bottom - cutMask->maskRect.top;
+	if (std::lround(mw) != std::lround(toolOcr->w) || std::lround(mh) != std::lround(toolOcr->h)) {
+		clearOcrPanel();
+		return;
+	}
+	syncOcrPanel();
 }
 
 bool WinCap::annotRightClick()
@@ -3797,7 +3827,7 @@ namespace {
 		OcrResult out = in;
 		if (in.regions.size() < 2) return out;   // 本来就一行一块：不动
 
-		struct Line { float x0, y0, x1, y1; std::vector<size_t> idx; };
+		struct Line { float x0, y0, x1, y1; std::vector<size_t> idx; bool vertical; };
 		std::vector<Line> lines;
 		// 判"同一视觉行"：纵向重叠超过较矮一方的一半；或几乎不重叠、但两条中线挨得够近
 		// （同一行里基线轻微上下漂移的情况也算）。否则一行会被拆成好几块。
@@ -3821,9 +3851,26 @@ namespace {
 		for (size_t i = 0; i < in.regions.size(); i++) {
 			const auto& r = in.regions[i];
 			Line* hit = nullptr;
-			for (auto& ln : lines) if (overlaps(ln, r) && sideBySide(ln, r)) { hit = &ln; break; }
+			for (auto& ln : lines) {
+				// 横排与竖排绝不合并：两条管线的"同一行"判据完全不同
+				if (ln.vertical != r.vertical) continue;
+				if (r.vertical) {
+					// 竖排只在**同一列**内合并（横向高度重合 + 纵向缝隙很小）。
+					// 不同列绝不并：竖排各列的 y 区间完全重叠，按横排规则会把整页
+					// 竖排并成一个整页框（实测 12 列日文被并成 1 行 162 字）。
+					const float w = std::min(ln.x1 - ln.x0, r.w);
+					if (w <= 0.f) continue;
+					const float ox = std::min(ln.x1, r.x + r.w) - std::max(ln.x0, r.x);
+					const float gap = std::max(0.f, std::max(ln.y0 - (r.y + r.h), r.y - ln.y1));
+					if (ox >= 0.6f * w && gap <= std::max(4.f, w * 0.5f)) { hit = &ln; break; }
+				}
+				else if (overlaps(ln, r) && sideBySide(ln, r)) {
+					hit = &ln;
+					break;
+				}
+			}
 			if (!hit) {
-				lines.push_back({ r.x, r.y, r.x + r.w, r.y + r.h, { i } });
+				lines.push_back({ r.x, r.y, r.x + r.w, r.y + r.h, { i }, r.vertical });
 			}
 			else {
 				hit->x0 = std::min(hit->x0, r.x);
@@ -3835,25 +3882,41 @@ namespace {
 		}
 
 		std::vector<OcrRegion> merged;
-		std::wstring plain;
 		for (auto& ln : lines) {
+			// 竖排按 y（从上到下）、横排按 x（从左到右）拼同行碎片
 			std::sort(ln.idx.begin(), ln.idx.end(),
-				[&](size_t a, size_t b) { return in.regions[a].x < in.regions[b].x; });
+				[&](size_t a, size_t b) {
+					return ln.vertical ? (in.regions[a].y < in.regions[b].y)
+						: (in.regions[a].x < in.regions[b].x);
+				});
 			std::wstring text;
 			for (size_t k : ln.idx) appendFragment(text, in.regions[k].text);
 			OcrRegion reg;
 			reg.text = text;
 			reg.displayText = text;
+			reg.vertical = ln.vertical;
 			reg.x = ln.x0;
 			reg.y = ln.y0;
 			reg.w = std::max(2.f, ln.x1 - ln.x0);
 			reg.h = std::max(2.f, ln.y1 - ln.y0);
 			merged.push_back(reg);
-			if (!plain.empty()) plain += L'\n';
-			plain += text;
 		}
+
+		// 以竖排为主（日文/中文竖写）：阅读顺序是**从右往左的列序**，按 x 降序重排；
+		// 引擎给的是检测顺序（从左到右），直接用会得到"从最后一列读起"的乱序文本。
+		int verticalCount = 0;
+		for (const auto& r : merged) if (r.vertical) ++verticalCount;
+		if (verticalCount * 2 > (int)merged.size()) {
+			std::stable_sort(merged.begin(), merged.end(),
+				[](const OcrRegion& a, const OcrRegion& b) { return a.x > b.x; });
+		}
+
 		out.regions = std::move(merged);
-		out.text = plain;
+		out.text.clear();
+		for (const auto& r : out.regions) {
+			if (!out.text.empty()) out.text += L'\n';
+			out.text += r.text;
+		}
 		return out;
 	}
 }
@@ -3994,27 +4057,55 @@ void WinCap::startOcrInternal(bool translateMode)
 		return;
 	}
 
-	// —— 识别（非翻译）模式：同步识别 + 直接出结果 ——
-	OcrResult result;
+	// —— 识别（非翻译）模式：识别放后台，面板先摆"正在识别…" ——
+	// 第一次识别含模型加载（约 135ms）+ 推理（约 250ms），同步跑会把界面冻住；
+	// 与翻译模式一样先建空壳面板、置忙，识别完成后再回 UI 线程填结果。
 	if (g_ocrCacheValid && sameOcrRect(g_ocrCacheRect, sel)) {
-		result = g_ocrCache;   // 同一块选区：识别结果直接用临时缓存（省掉识别那几百毫秒）
-	}
-	else {
-		result = OcrService::instance().recognize(cw, ch, pixels.data());
-		g_ocrCache = result;
-		g_ocrCacheRect = sel;
-		g_ocrCacheValid = true;
+		// 同一块选区：识别结果直接用临时缓存（省掉识别那几百毫秒）
+		const OcrResult merged = ocrResultMergedToLines(g_ocrCache);
+		makePanel(merged, std::move(pixels));
+		if (merged.ok && !merged.text.empty()) {
+			Ling::Util::setTextToClipboard(merged.text);
+		}
+		refresh();
+		return;
 	}
 
-	// 先把碎片区域并成视觉行：OCR 常把一整行切成好几块，逐块显示会让拖选断断续续、
-	// 文字上下位置也飘（每块各自居中）；并成整行后每行一个框，选择/复制连续、排版也齐。
-	const OcrResult merged = ocrResultMergedToLines(result);
-
-	makePanel(merged, std::move(pixels));
-	if (merged.ok && !merged.text.empty()) {
-		Ling::Util::setTextToClipboard(merged.text);
+	{
+		OcrResult pending;
+		pending.ok = true;   // ok=true 才不会由 rebuildEditors 判成「识别失败」
+		makePanel(std::move(pending), std::move(pixels));
+		if (toolOcr) {
+			toolOcr->setBusy(Lang::get(L"ocr.recognizing"));
+			toolOcr->repaint();   // 主动刷一次面板，别只刷截图窗
+		}
+		refresh();
 	}
-	refresh();
+
+	HWND host = hwnd;
+	const std::vector<BYTE> ocrPixels = toolOcr ? toolOcr->srcImage() : std::vector<BYTE>{};
+	std::thread([host, sel, ocrPixels, cw, ch]() {
+		// 后台线程里会碰 WinRT（系统 OCR 兜底），先初始化 apartment；已初始化会抛，忽略即可
+		try { winrt::init_apartment(winrt::apartment_type::multi_threaded); } catch (...) {}
+
+		const OcrResult raw = OcrService::instance().recognize(cw, ch, ocrPixels.data());
+		const OcrResult merged = ocrResultMergedToLines(raw);
+
+		Ling::App::get()->dq.TryEnqueue([host, sel, raw, merged]() {
+			auto* cap = WinCap::get();
+			if (!cap || cap->hwnd != host) return;   // 会话已结束
+			cap->storeOcrCache(raw, sel);
+			if (cap->toolOcr) {
+				cap->toolOcr->clearBusy();
+				cap->toolOcr->setResult(merged);
+				cap->toolOcr->repaint();
+			}
+			if (merged.ok && !merged.text.empty()) {
+				Ling::Util::setTextToClipboard(merged.text);
+			}
+			cap->refresh();
+		});
+	}).detach();
 }
 
 void WinCap::storeOcrCache(const OcrResult& r, const D2D1_RECT_F& rect)
@@ -4068,7 +4159,7 @@ void WinCap::finishOcrTranslate(const OcrResult& merged, const TranslateResult& 
 void WinCap::syncOcrPanel()
 {
 	if (!toolOcr || !cutMask || !cutMask->hasRect() || !toolOcr->hwnd) return;
-	toolOcr->syncToMask(cutMask->maskRect, x, y, dpi);
+	toolOcr->syncToMask(cutMask->maskRect, x, y);
 }
 
 void WinCap::clearOcrPanel()

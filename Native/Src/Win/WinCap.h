@@ -289,6 +289,8 @@ private:
 	void startDemoRecording();
 	// 停止采集并复位状态；deleteFile=true 时把临时文件删掉（取消）
 	std::wstring stopDemoRecording(bool deleteFile);
+	// 录屏入历史：历史只记视频路径，封面取收工这一刻的选区画面
+	void addRecordHistory(const std::wstring& path, int durationSec);
 	void closeDemoRecBar();
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushBoard_;
 	void paintDemoBoard(ID2D1DeviceContext* ctx);
