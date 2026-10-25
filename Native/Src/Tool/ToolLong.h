@@ -65,7 +65,7 @@ private:
 	static constexpr float toolbarRadius{ ToolbarTheme::borderRadius };
 	static constexpr float hoverRadius{ ToolbarTheme::hoverRadius };
 	static constexpr float hoverInset{ 4.f };
-	static constexpr float spliterH{ 24.f };
+	static constexpr float spliterH{ 18.f };
 	static constexpr float spliterW{ 1.f };
 	std::unique_ptr<Tip> tip;
 };

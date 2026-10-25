@@ -137,7 +137,7 @@ private:
 	static constexpr float hoverRadius{ ToolbarTheme::hoverRadius };
 	static constexpr float hoverInset{ 4.f };
 	static constexpr float spliterW{ 1.f };
-	static constexpr float spliterH{ 24.f };
+	static constexpr float spliterH{ 18.f };
 	void styleToolbarBtn(Ling::Button* btn);
 	// 停悬气泡：按「快捷键提示」开关决定是否追加当前键位（"矩形" → "矩形（1）"）。
 	// lookup 留空 = 用 btn->id 再经 resolveToolId 取到已选子工具

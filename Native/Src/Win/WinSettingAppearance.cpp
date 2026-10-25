@@ -464,6 +464,7 @@ void WinSettingAppearance::buildToolbarTab(Ling::Node* host)
     // 预览条（与「初始属性」互斥，默认收起）：与「初始属性」里那条工具栏共用同一套 ToolbarTheme
     tbPreviewWrap = content->makeChild<Ling::Node>();
     tbPreviewWrap->setWidthPercent(100.f);
+    tbPreviewWrap->setAlignItems(Ling::Align::FlexStart);   // 预览条按内容自适应宽度，不拉满
     tbPreviewWrap->hide();
 
     // 初始属性编辑器（默认收起，点顶部「初始属性」展开）
@@ -1791,31 +1792,18 @@ void WinSettingAppearance::tbRefreshPreview()
     auto* bar = tbPreviewWrap->makeChild<Ling::Node>();
     bar->setFlexDirection(Ling::FlexDirection::Row);
     bar->setAlignItems(Ling::Align::Center);
-    bar->setWidthPercent(100.f);
     bar->setBg(ToolbarTheme::background);
     bar->setBorder(ToolbarTheme::borderWidth, ToolbarTheme::border);
     bar->setBorderRadius(ToolbarTheme::borderRadius);
-    bar->setPadding(6.f, 6.f, 6.f, 6.f);
+    // 左右留白比上下更大，右端更宽松，模拟真实工具栏（12 / 24）的收尾留白
+    bar->setPadding(10.f, 6.f, 14.f, 6.f);
     bar->setMarginBottom(SettingTheme::blockGap);
-    // 最左：拖拽手柄（与实际工具栏一致：半透明手柄、无悬停灰底）
-    {
-        auto* dh = bar->makeChild<Ling::Button>();
-        dh->setSize(30.f, 30.f);
-        dh->setText(Icon::DragHandle);
-        dh->setFontFamily(Icon::Family);
-        dh->setFontSize(18.f);
-        dh->setColor(ToolbarTheme::dragHandleColor);
-        dh->setHoverColor(ToolbarTheme::dragHandleColor);
-        dh->setHoverBg(0);
-        dh->setMarginRight(6.f);
-        dh->setFlexShrink(0.f);
-    }
     for (auto& id : tbActive) {
         if (tbIsSplitId(id)) {
             auto* s = bar->makeChild<Ling::Node>();
-            s->setSize(1.f, 22.f);
+            s->setSize(1.f, 16.f);
             s->setBg(ToolbarTheme::splitter);
-            s->setMargin(5.f, 0.f, 5.f, 0.f);
+            s->setMargin(4.f, 0.f, 4.f, 0.f);
             continue;
         }
         auto* b = bar->makeChild<Ling::Button>();
@@ -1831,7 +1819,7 @@ void WinSettingAppearance::tbRefreshPreview()
         b->setHoverColor(actCancel ? Icon::ColorCancel : actDone ? Icon::ColorDone : ToolbarTheme::iconNormal);
         if (id == L"record-time") {
             b->setText(L"00:00");
-            b->setFontSize(10.f);
+            b->setFontSize(11.f);
         }
         else {
             // 图标体现该工具的默认形态（如箭头默认换成趣味箭头 → 显示趣味箭头图标）
