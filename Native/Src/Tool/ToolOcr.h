@@ -109,6 +109,11 @@ private:
 	Ling::Node* bannerNode{ nullptr };
 	Ling::Label* bannerLabel{ nullptr };
 	std::vector<Ling::TextBox*> editors;
+	// 翻译：译文按原行宽折行后纵向顺延，超出选区时用滚轮滚动（不画滚动条）
+	std::vector<Ling::TextBox*> trBoxes_;
+	std::vector<float> trTops_;    // 各框未滚动时的顶端（物理像素）
+	float trScrollY_{ 0.f };
+	float trMaxScroll_{ 0.f };
 	Ling::Button* copyBtn{ nullptr };
 	Ling::Button* compareBtn{ nullptr };
 	bool buttonsShown_{ false };

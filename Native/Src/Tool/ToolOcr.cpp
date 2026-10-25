@@ -102,6 +102,24 @@ namespace {
 		return m.widthIncludingTrailingWhitespace > 0.f ? m.widthIncludingTrailingWhitespace : m.width;
 	}
 
+	// 量一段文本按指定宽度折行后的总高度，设备像素（折行设置与 TextBox 保持一致）。
+	float measureTextHeight(const std::wstring& s, float fontSizeLogical, float maxWidthLogical, float dpi)
+	{
+		auto* d2d = Ling::D2D::get();
+		if (!d2d || !d2d->dwriteFactory || s.empty() || maxWidthLogical <= 0.f) return 0.f;
+		auto fmt = d2d->getTextFormat(L"");
+		if (!fmt) return 0.f;
+		Microsoft::WRL::ComPtr<IDWriteTextLayout> tl;
+		if (FAILED(d2d->dwriteFactory->CreateTextLayout(s.c_str(), (UINT32)s.size(),
+			fmt, maxWidthLogical * dpi, FLT_MAX, tl.GetAddressOf())) || !tl)
+			return 0.f;
+		tl->SetFontSize(fontSizeLogical * dpi, { 0, INT_MAX });
+		tl->SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
+		DWRITE_TEXT_METRICS m{};
+		if (FAILED(tl->GetMetrics(&m))) return 0.f;
+		return m.height;
+	}
+
 	// 逐通道中位数
 	int medianOf(std::vector<int>& v)
 	{
@@ -435,6 +453,15 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 	onCursor.add([this](bool* handled) {
 		if (selActive_) { SetCursor(LoadCursor(nullptr, IDC_IBEAM)); *handled = true; }
 	});
+	// 翻译：译文折行后整段可能超出选区，滚轮上下滚动（不画滚动条）。
+	// 贴图宿主不接管 —— 滚轮要留给贴图缩放。
+	onMouseWheel.add([this](POINT, float space) {
+		if (!translateMode_ || pinOverlay_ || trMaxScroll_ <= 0.f) return;
+		trScrollY_ = std::clamp(trScrollY_ - space, 0.f, trMaxScroll_);
+		for (size_t i = 0; i < trBoxes_.size() && i < trTops_.size(); ++i)
+			trBoxes_[i]->setPosition(Ling::Edge::Top, (trTops_[i] - trScrollY_) / dpi);
+		refresh();
+	});
 	// 右上角按钮的显示/隐藏靠轮询：面板除文字块外全穿透，空白处的悬停事件收不到
 	onTimer.add([this](UINT id) {
 		if (id == kHoverTimerId) updateButtonsHover();
@@ -593,6 +620,10 @@ void ToolOcr::rebuildEditors()
 		if (n) body->removeChild(n);
 	}
 	bgs_.clear();
+	trBoxes_.clear();
+	trTops_.clear();
+	trScrollY_ = 0.f;
+	trMaxScroll_ = 0.f;
 
 	if (!result_.ok) {
 		// 正在翻译时依然顶着忙碌提示（识别失败也不能把"正在翻译…"换成红条）
@@ -708,8 +739,71 @@ void ToolOcr::rebuildEditors()
 		}
 	}
 
+	// 翻译：译文**不压缩进原框**，而是按原文行宽折行、字号取原文行高（西文再收 5%）；
+	// 折行后行高增加，后面的行依次顺延。整段超出选区时滚轮上下滚动（不画滚动条）。
+	if (translateMode_ && !result_.regions.empty()) {
+		// 译文不再原位覆盖原文，行被推开后空档会露出原字 —— 整块用采样底色盖死
+		body->setBg(palBg_);
+		float cursorY = 0.f;   // 物理像素：下一行允许的最上端
+		for (size_t i = 0; i < result_.regions.size(); ++i) {
+			auto& reg = result_.regions[i];
+			const std::wstring text = reg.displayText.empty() ? reg.text : reg.displayText;
+			if (text.empty()) continue;
+			const float px = reg.x * scaleX;
+			const float py = reg.y * scaleY;
+			const float pw = std::max(1.f, reg.w * scaleX);
+			const float ph = (hEff[i] > 0.f) ? hEff[i] : std::max(1.f, reg.h * scaleY);
+			// 折行宽度：右边有空间就伸到选区右边界，只被同一行带上的右侧文本挡住
+			// （左右分栏时才保留原列宽，免得跟邻栏打架）；居中/右对齐保持原框宽，避免对齐跑偏。
+			float rightLimit = w;
+			if (aligns[i] == 0) {
+				const float iy0 = reg.y * scaleY, iy1 = (reg.y + reg.h) * scaleY;
+				for (size_t j = 0; j < result_.regions.size(); ++j) {
+					if (j == i) continue;
+					const auto& o = result_.regions[j];
+					const float ox = o.x * scaleX;
+					if (ox <= px + 0.5f) continue;   // 只受右侧文本限制
+					const float oy0 = o.y * scaleY, oy1 = (o.y + o.h) * scaleY;
+					if (std::min(oy1, iy1) - std::max(oy0, iy0) <= 0.f) continue;
+					rightLimit = std::min(rightLimit, ox);
+				}
+			}
+			else {
+				rightLimit = px + pw;
+			}
+			const float boxW = std::max(pw, std::min(rightLimit, w) - px);
+			const bool wide = hasWideGlyph(text);
+			const float inkRatio = wide ? kCjkInkRatio : kYaheiInkRatio;
+			const float vFill = wide ? kCjkVFill : 1.f;
+			const float fLogical = std::clamp(ph * vFill / (inkRatio * dpi), 7.f / dpi, 300.f / dpi)
+				* (wide ? 1.f : 0.95f);   // 西文字形偏小，同字号看着略小，收一点更贴近原文
+			const float measured = measureTextHeight(text, fLogical, boxW / dpi, dpi);
+			const float boxH = std::max(1.f, measured > 0.f ? measured + 1.f : ph);
+			const float top = std::max(py, cursorY);
+			auto* box = body->makeChild<Ling::TextBox>();
+			box->setPositionType(Ling::Position::Absolute);
+			box->setPosition(Ling::Edge::Left, px / dpi);
+			box->setPosition(Ling::Edge::Top, top / dpi);
+			box->setSize(boxW / dpi, boxH / dpi);
+			box->setColor(palFg_);
+			box->setPadding(0.f);
+			box->setFontSize(fLogical);
+			box->setScrollBarVisible(false);   // 单个框不滚（高度已按内容给足），滚动只发生在整层
+			box->setTextAlignCenter(aligns[i] == 1);
+			box->setSelectionBgColor(0x1890FFFF);
+			box->setSelectionTextColor(0xFFFFFFFF);
+			box->setMouseSelectionEnabled(false);   // 选区由 ToolOcr 统一接管
+			box->setText(text);
+			editors.push_back(box);
+			trBoxes_.push_back(box);
+			trTops_.push_back(top);
+			cursorY = top + boxH;
+		}
+		trMaxScroll_ = std::max(0.f, cursorY - h);
+	}
+
 	// 文本重排：跳过逐框覆盖，走下面「整段文本框」分支
-	const size_t regionCount = reflow_ ? 0 : result_.regions.size();
+	const size_t regionCount = (reflow_ || translateMode_) ? 0 : result_.regions.size();
 	for (size_t i = 0; i < regionCount; ++i) {
 		auto& reg = result_.regions[i];
 		const float rx = reg.x * scaleX / dpi;
