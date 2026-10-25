@@ -791,8 +791,12 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 				if (changed) this->deferRebuildTab(3);
 			}, true);
 
-		// 模型规格：只有选中 PP-OCRv6 且装了模型才出现；系统 OCR 不需要模型，不显示这一行
+		// 模型规格：只有选中 PP-OCRv6 且装了模型才出现；系统 OCR 不需要模型，不显示
 		if (tierShown) {
+			// 识别结果版式放第一行右列（与文本识别模型并排）
+			addResultRow(makeCol(row1, true));
+
+			// 模型规格独占第二行左列（半栏）
 			std::vector<std::wstring> tiers;
 			std::vector<int> tierIds;
 			for (auto v : installed) {
@@ -803,7 +807,7 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 			for (int i = 0; i < (int)tierIds.size(); ++i)
 				if (tierIds[i] == s->getOcrPackVariant()) { curTier = i; break; }
 			// 「?」放在标题「模型规格」右侧（optionRow 的 helpText 就是干这个的）
-			auto tierRow = SettingUi::optionRow(makeCol(row1, true), Lang::get(L"setting.fnOcrTier"), L"", true,
+			auto tierRow = SettingUi::optionRow(makeCol(makeRow(), false), Lang::get(L"setting.fnOcrTier"), L"", true,
 				SettingTheme::ctrlH, Lang::get(L"setting.plugOcrTierTip"));
 			auto* ddl = SettingUi::selectDdl(tierRow.ctrlBox, tiers, curTier,
 				[tierIds](int i, const std::wstring&) {
@@ -813,9 +817,6 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 				});
 			ddl->setWidth(SettingTheme::dropdownWidth);
 			ddl->setFlexShrink(0.f);
-
-			// 识别结果版式：有「模型规格」时它自己占第二行左列（半栏）
-			addResultRow(makeCol(makeRow(), false));
 		}
 		else {
 			// 系统 OCR：没有模型规格，识别结果版式直接并到第一行右列
