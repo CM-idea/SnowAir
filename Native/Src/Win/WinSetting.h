@@ -38,6 +38,7 @@ private:
 	LRESULT onHitTest(const POINT pos) override;
 private:
 	std::vector<Ling::Button*> menus;
+	unsigned long long uid{ 0 };   // 实例代号：延迟析构回调据此判断是否已被新实例取代
 	int menuIndex{ 0 };
 	int pendingPage{ -1 };       // 待切换的页（scheduleLoadPage 排队用）
 	bool pageQueued{ false };    // 是否已有一次切页在队列中

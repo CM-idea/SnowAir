@@ -32,13 +32,20 @@
 
 std::unique_ptr<WinSetting> winSetting;
 
+namespace {
+	unsigned long long gSettingUid = 0;   // 每建一个设置窗 +1
+}
+
 WinSetting::WinSetting() : Ling::WinBase()
 {
+	uid = ++gSettingUid;
 	// ★ 主题必须先套用：SettingTheme 的语义色是运行时变量，各子页在构建时就把它读进控件了，
 	//   所以要在建窗（onCreated → loadPage）之前按设置重写一遍调色板。
 	SettingTheme::apply(Setting::get()->getAppTheme());
-	onDestroy.add([]() {
-		Ling::App::get()->dq.TryEnqueue([]() {
+	onDestroy.add([uid = uid]() {
+		Ling::App::get()->dq.TryEnqueue([uid]() {
+			// 关闭后可能已经开了新窗口，旧回调不能把新实例 reset 掉
+			if (!winSetting || winSetting->uid != uid) return;
 			winSetting.reset();
 			// 设置页属于"用完即关"的窗口：关掉后若一个窗口都不剩，就把空闲的图形设备放掉，
 			// 并把工作集里的闲页换出去。否则它会一直挂在二十几 MB 不回落 —— 截图会话收工
@@ -434,8 +441,10 @@ void WinSetting::scheduleLoadPage(int index)
 	if (pageQueued) return;   // 已排队：只更新目标页，避免连点堆积
 	pageQueued = true;
 	if (auto* app = Ling::App::get()) {
-		app->dq.TryEnqueue([]() {
-			if (!winSetting) return;
+		const auto id = uid;
+		app->dq.TryEnqueue([id]() {
+			// 排队期间窗口可能已被关掉并重开，旧回调不能落到新实例上
+			if (!winSetting || winSetting->uid != id) return;
 			winSetting->pageQueued = false;
 			const int idx = winSetting->pendingPage;
 			winSetting->pendingPage = -1;
