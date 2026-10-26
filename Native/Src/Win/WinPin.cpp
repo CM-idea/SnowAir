@@ -972,6 +972,14 @@ void WinPin::onKey(UINT key)
 		return;
 	}
 	if (editing) annotKey(key);
+	// 选中标注后：方向键微调位置（客户区像素换算成标注坐标，Shift 加速）
+	if (key == VK_UP || key == VK_DOWN || key == VK_LEFT || key == VK_RIGHT) {
+		const int step = (GetKeyState(VK_SHIFT) & 0x8000) ? 10 : 1;
+		const float d = (float)step / (scale > 0.f ? scale : 1.f);
+		const float dx = (key == VK_LEFT) ? -d : (key == VK_RIGHT) ? d : 0.f;
+		const float dy = (key == VK_UP) ? -d : (key == VK_DOWN) ? d : 0.f;
+		if (nudgeSelectedAnnot(dx, dy)) return;
+	}
 	bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 	// 识别结果浮层开着且鼠标在贴图上：Ctrl+C 复制识别文字（拖选过只复制选区，没拖选复制整段）。
 	// 鼠标不在贴图上时一律不拦 Ctrl+C，留给系统/其他程序。

@@ -287,6 +287,13 @@ void ShapeArrow::applyEditSnapshot(const std::vector<float>& s)
 	rebuild();
 }
 
+bool ShapeArrow::translateBy(float dx, float dy)
+{
+	poly.translate(dx, dy);
+	rebuild();
+	return true;
+}
+
 void ShapeArrow::mouseDrag(const float x, const float y)
 {
 	if (poly.drag == ArrowPolyState::DragKind::None) return;

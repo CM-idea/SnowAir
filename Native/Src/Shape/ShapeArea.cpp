@@ -117,6 +117,16 @@ int ShapeArea::hitResizeZone(float lx, float ly) const
 	return hitBoxEdgeOrCorner(lx, ly, rect, std::max(8.f * win->dpi, strokeHitPad()));
 }
 
+bool ShapeArea::translateBy(float dx, float dy)
+{
+	rect = offsetRect(rect, dx, dy);
+	updateDraggers();
+	// 马赛克/模糊要按新位置重新采样；高亮等是空实现
+	onGeometryChanged();
+	onGeometrySettled();
+	return true;
+}
+
 float ShapeArea::strokeHitPad() const
 {
 	return 6.f * win->dpi;

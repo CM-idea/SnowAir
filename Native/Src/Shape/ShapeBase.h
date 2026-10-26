@@ -29,6 +29,8 @@ public:
 	// 返回空表示该形状不支持（视口滤镜等）。
 	virtual std::vector<float> editSnapshot() const { return {}; }
 	virtual void applyEditSnapshot(const std::vector<float>& state) { (void)state; }
+	// 整体平移（方向键微调）：返回 false 表示这个形状不支持单独移动
+	virtual bool translateBy(float dx, float dy) { (void)dx; (void)dy; return false; }
 	// —— 连线：能被吸附的一侧（矩形/椭圆） ——
 	// 能不能当连线目标
 	virtual bool isLinkTarget() const { return false; }
@@ -66,6 +68,11 @@ public:
 	bool backgroundLayer{ false };
 	int hoverDraggerIndex{ -1 };
 protected:
+	// 矩形整体平移（各形状的 translateBy 共用）
+	static D2D1_RECT_F offsetRect(const D2D1_RECT_F& r, float dx, float dy)
+	{
+		return D2D1::RectF(r.left + dx, r.top + dy, r.right + dx, r.bottom + dy);
+	}
 	// 四角优先、四边次之（不必精确点到控点）；返回 0–7，未命中 -1
 	int hitBoxEdgeOrCorner(float x, float y, const D2D1_RECT_F& r, float band) const;
 	// —— 四角外侧旋转 ——

@@ -87,6 +87,9 @@ private:
 	std::wstring selectedText() const;
 	LRESULT onHitTest(const POINT pos) override;
 	void onMinMaxInfo(MINMAXINFO* mmi) override;
+	BOOL setCursor() override;
+	// 命中"文字带"：文本框外扩一圈
+	bool nearText(POINT client) const;
 private:
 	Ling::WinBase* host;
 	// 覆盖矩形（客户区坐标）：onHitTest 用它把选区外的部分设为穿透

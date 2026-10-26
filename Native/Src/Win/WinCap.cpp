@@ -1596,6 +1596,8 @@ bool WinCap::beginMaskResize(POINT pos)
 	// 演示画布没有"选区"这个概念（铺满整屏、不描边不压暗）：不许拖/调边，
 	// 否则一拖就把看不见的选区挪走、还会 setToolChromeHidden 把工具条藏掉
 	if (demoMode) return false;
+	// 缩放只能由一次新的按下发起：拖动（拖选区/拖标注）过程中经过边缘不触发
+	if (isPress || maskDragging || annotMouseDown) return false;
 	const auto hit = cutMask->hitTest(pos);
 	if (hit == MaskHit::None) return false;
 	// 画幅已锁定（录屏开录 / 长图滚动）时：一律不许拖边、拖角。
@@ -1606,9 +1608,16 @@ bool WinCap::beginMaskResize(POINT pos)
 		if (hit != MaskHit::Inside || isMouseTransparent) return false;
 	}
 	if (hit == MaskHit::Inside) {
+		// 识别/二维码结果面板开着：整体拖移会把结果一起带走，禁用（边/角缩放仍保留）
+		if (toolOcr || toolQrcode) return false;
 		// 区内平移：要求未选中标注工具；截图与长图还要求未绘制标注，录屏开录后不作要求
 		if (!getCurToolId().empty()) return false;
 		if (!sizeLocked && hasAnnotShapes()) return false;
+	}
+	else if (hasAnnotShapes()) {
+		// 按下点落在已有标注上：这一下是选中/拖动标注，不能被拖边抢走
+		const auto img = toImgPos(pos);
+		if (probeShapeUnder((float)img.x, (float)img.y, shapeHover)) return false;
 	}
 	maskDragging = true;
 	isPress = true;
@@ -1652,6 +1661,8 @@ BOOL WinCap::setCursor()
 	POINT pos{};
 	GetCursorPos(&pos);
 	ScreenToClient(hwnd, &pos);
+	// 识别/二维码结果面板开着时选区已定：不再给拖移/调边光标，与 beginMaskResize 的闸门一致
+	const bool panelLocked = (toolOcr != nullptr || toolQrcode != nullptr);
 
 	// 演示画布调整背景：缩放光标优先于当前绘图工具的光标（画笔/橡皮等会把它盖掉）
 	if (demoMode && demoBoardActive() && demoBoard_.adjust) {
@@ -1717,7 +1728,7 @@ BOOL WinCap::setCursor()
 		// 画幅锁定后不再给缩放光标（避免可拖动的误导）；区内可整体挪动时给四向光标。
 		// 这两项须与 beginMaskResize 的两道闸门一一对应，否则光标与实际可操作性不符。
 		const bool selResizable = !maskSizeLocked();
-		const bool selMovable = !maskMoveLocked() && getCurToolId().empty() && !isMouseTransparent
+		const bool selMovable = !maskMoveLocked() && !panelLocked && getCurToolId().empty() && !isMouseTransparent
 			&& (maskSizeLocked() || !hasAnnotShapes());
 		if (!demoMode && cutMask && cutMask->hasRect() && !longEdit) {
 			if (cutMask->hitInfoControl(pos) != InfoHit::None) {
@@ -1726,6 +1737,11 @@ BOOL WinCap::setCursor()
 			}
 			const auto hit = cutMask->hitTest(pos);
 			if (hit != MaskHit::None && hit != MaskHit::Inside && selResizable) {
+				// 与 beginMaskResize 一致：按下去会落到已有标注上时，光标给标注而不是拖边
+				if (hasAnnotShapes() && probeShapeUnder(ix, iy, shapeHover)) {
+					applyAnnotCursor();
+					return TRUE;
+				}
 				applyMaskHitCursor(hit);
 				return TRUE;
 			}
@@ -1769,7 +1785,12 @@ BOOL WinCap::setCursor()
 			applyMaskHitCursor(hit != MaskHit::None ? hit : cutMask->hitTest(pos));
 		}
 		else {
-			applyMaskHitCursor(cutMask->hitTest(pos));
+			const auto hit = cutMask->hitTest(pos);
+			// 结果面板开着时区内不可拖移，别给出四向光标
+			if (panelLocked && hit == MaskHit::Inside)
+				SetCursor(LoadCursor(nullptr, IDC_ARROW));
+			else
+				applyMaskHitCursor(hit);
 		}
 		return TRUE;
 	}
@@ -2191,6 +2212,12 @@ void WinCap::onKey(UINT key)
         const int dx = (key == VK_LEFT) ? -step : (key == VK_RIGHT) ? step : 0;
         const int dy = (key == VK_UP) ? -step : (key == VK_DOWN) ? step : 0;
         if (nudgeSelectionByArrow(dx, dy)) return;
+        // 二次选中标注后：方向键微调标注位置（有标注时选框本身不动，见 nudgeSelectionByArrow）
+        const POINT base = toImgPos(POINT{ 0, 0 });
+        const POINT moved = toImgPos(POINT{ dx, dy });
+        if (nudgeSelectedAnnot((float)(moved.x - base.x), (float)(moved.y - base.y))) return;
+        // 有标注但没选中：选框不挪（见 nudgeSelectionByArrow），方向键也不再去挪系统光标
+        if (annotLive && hasAnnotShapes()) return;
         // 查找元素阶段：方向键挪光标跟手高亮
         POINT pos;
         GetCursorPos(&pos);
@@ -2238,6 +2265,8 @@ bool WinCap::nudgeSelectionByArrow(int dx, int dy)
 	if (demoMode) return false;
 	// 长图滚动中：方向键同样不挪选区（与鼠标拖动同一规则，见 maskMoveLocked）
 	if (maskMoveLocked()) return false;
+	// 识别/二维码面板开着时选区已定，不让它带着结果一起挪
+	if (toolOcr || toolQrcode) return false;
 	if (stage != CapStage::Adjust && !annotLive && !videoCanAdjust()) return false;
 	if (maskDragging || isPress) return false;
 	// 已有标注时方向键不挪选区

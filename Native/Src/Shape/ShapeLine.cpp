@@ -365,6 +365,12 @@ void ShapeLine::applyEditSnapshot(const std::vector<float>& s)
 	}
 }
 
+bool ShapeLine::translateBy(float dx, float dy)
+{
+	poly.translate(dx, dy);
+	return true;
+}
+
 void ShapeLine::mouseDrag(const float x, const float y)
 {
 	if (poly.drag == ArrowPolyState::DragKind::None) return;

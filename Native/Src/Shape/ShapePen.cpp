@@ -398,6 +398,19 @@ void ShapePen::applyEditSnapshot(const std::vector<float>& s)
 	updateDraggers();
 }
 
+bool ShapePen::translateBy(float dx, float dy)
+{
+	rect = offsetRect(rect, dx, dy);
+	// pts 与 rect 同一空间（未旋转局部坐标），一起平移
+	for (auto& p : pts) {
+		p.x += dx;
+		p.y += dy;
+	}
+	rebuildPath();
+	updateDraggers();
+	return true;
+}
+
 void ShapePen::mouseDrag(const float x, const float y)
 {
 	if (!settled) {

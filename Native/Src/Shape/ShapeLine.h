@@ -54,6 +54,7 @@ public:
 	float stylePrimarySize() const override { return strokeWidth; }
 	std::vector<float> editSnapshot() const override;
 	void applyEditSnapshot(const std::vector<float>& state) override;
+	bool translateBy(float dx, float dy) override;
 private:
 	void ensureStrokeStyle();
 	void ensureMinLength();

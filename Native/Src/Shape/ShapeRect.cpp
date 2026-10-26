@@ -295,6 +295,13 @@ void ShapeRect::applyEditSnapshot(const std::vector<float>& s)
 	updateDraggers();
 }
 
+bool ShapeRect::translateBy(float dx, float dy)
+{
+	rect = offsetRect(rect, dx, dy);
+	updateDraggers();
+	return true;
+}
+
 void ShapeRect::mouseDrag(const float x, const float y)
 {
 	if (hoverDraggerIndex >= 10 && hoverDraggerIndex <= 13) {

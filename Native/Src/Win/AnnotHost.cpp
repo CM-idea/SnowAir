@@ -225,6 +225,25 @@ ShapeBase* AnnotHost::hitShapeAt(float x, float y)
 	return nullptr;
 }
 
+bool AnnotHost::nudgeSelectedAnnot(float dx, float dy)
+{
+	if (!history || !hasSelectedAnnot()) return false;
+	// 落笔中/拖动中/编辑文字时不存在"选中标注微调"
+	if (annotMouseDown || newShape || editingText) return false;
+	ShapeBase* s = shapeHover;
+	const auto before = s->editSnapshot();
+	if (!s->translateBy(dx, dy)) return false;
+	// 连线跟着贴回新位置（与鼠标拖动同一口径）
+	for (auto& o : history->shapes) {
+		if (o && !o->isUndo && o.get() != s) o->syncLinks();
+	}
+	refreshFiltersAbove(s);
+	const auto after = s->editSnapshot();
+	if (!before.empty() && after != before) history->addEditStep(s, before, after);
+	refresh();
+	return true;
+}
+
 void AnnotHost::clearAnnotSelection()
 {
 	if (!shapeHover) return;

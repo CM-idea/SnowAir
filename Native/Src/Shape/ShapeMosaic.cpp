@@ -132,6 +132,11 @@ ComPtr<ID2D1Bitmap> ShapeMosaic::createEffectBitmap()
 	// 取样源：会话底图；演示画布用构造时拍的那张桌面快照
 	ID2D1Bitmap* src = win->screenImg ? win->screenImg.Get() : liveSource.Get();
 	if (!src) return result;
+	// 取样/绘制按底图自然尺寸：贴图缩放后窗口尺寸 ≠ 图像尺寸，用窗口尺寸会取样错位、效果被裁
+	const auto srcSize = src->GetSize();
+	const int imgW = (int)std::lround(srcSize.width);
+	const int imgH = (int)std::lround(srcSize.height);
+	if (imgW <= 0 || imgH <= 0) return result;
 
 	auto d2d = Ling::D2D::get();
 	auto ctx = d2d->deviceContext.Get();
@@ -143,11 +148,10 @@ ComPtr<ID2D1Bitmap> ShapeMosaic::createEffectBitmap()
 
 	// 旋转时按旋转矩形的 AABB 取样（内容仍轴对齐）
 	const auto aabb = sampleAabb();
-	const int winW = (int)win->w, winH = (int)win->h;
-	int left = std::max(0, std::min((int)std::floor(aabb.left) - pad, winW));
-	int top = std::max(0, std::min((int)std::floor(aabb.top) - pad, winH));
-	int right = std::max(0, std::min((int)std::ceil(aabb.right) + pad + 1, winW));
-	int bottom = std::max(0, std::min((int)std::ceil(aabb.bottom) + pad + 1, winH));
+	int left = std::max(0, std::min((int)std::floor(aabb.left) - pad, imgW));
+	int top = std::max(0, std::min((int)std::floor(aabb.top) - pad, imgH));
+	int right = std::max(0, std::min((int)std::ceil(aabb.right) + pad + 1, imgW));
+	int bottom = std::max(0, std::min((int)std::ceil(aabb.bottom) + pad + 1, imgH));
 	if (left >= right || top >= bottom) return result;
 
 	mosaicOrigin = { (float)left, (float)top };
@@ -167,7 +171,7 @@ ComPtr<ID2D1Bitmap> ShapeMosaic::createEffectBitmap()
 	ctx->SetTransform(D2D1::Matrix3x2F::Translation(-mosaicOrigin.x, -mosaicOrigin.y));
 	ctx->BeginDraw();
 	ctx->Clear(D2D1::ColorF(0, 0.0f));
-	ctx->DrawBitmap(src, D2D1::RectF(0, 0, win->w, win->h));
+	ctx->DrawBitmap(src, D2D1::RectF(0.f, 0.f, (float)imgW, (float)imgH));
 	for (auto& shape : win->history->shapes) {
 		auto cur = shape.get();
 		if (cur == this) break;

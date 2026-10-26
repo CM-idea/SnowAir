@@ -38,6 +38,7 @@ public:
 	float stylePrimarySize() const override { return fontSize; }
 	std::vector<float> editSnapshot() const override;
 	void applyEditSnapshot(const std::vector<float>& state) override;
+	bool translateBy(float dx, float dy) override;
 public:
 	bool isEditing{ false };
 	// 「线段中间打字」：画字之前先用底图把这块抠回来，线段/箭头从文字下穿过就会断成两截

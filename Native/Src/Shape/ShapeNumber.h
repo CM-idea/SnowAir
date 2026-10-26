@@ -24,6 +24,7 @@ public:
 	float stylePrimarySize() const override { return r; }
 	std::vector<float> editSnapshot() const override;
 	void applyEditSnapshot(const std::vector<float>& state) override;
+	bool translateBy(float dx, float dy) override;
 public:
 private:
 	static int getNextVal(AnnotHost* win, int style);

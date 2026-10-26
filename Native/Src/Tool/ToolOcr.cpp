@@ -48,11 +48,14 @@ namespace {
 		float boxT{ 0.f };   // 识别框左上角 Y
 		float inkH{ 0.f };   // 当前字号下的字形高度（物理像素；竖排时是整列墨迹高）
 		float vFill{ 1.f };  // 纵向允许占到的框高比例（CJK 留余量，防上下两行叠字）
+		float scale_{ 1.f }; // 本次布局的视觉缩放比（命中测试用）
 		int align{ 0 };      // 原文对齐：0=居左 1=居中 2=居右（译文比原文短时才有区别）
 		// 竖排：控件里的文本是"每字一行"（用换行符堆叠），logical 才是真正要复制/选区的串。
 		bool vertical{ false };
 		std::wstring logical;
 	protected:
+		// layout() 里把节点几何改成了视觉矩形，命中测试要按同一比例换算回布局坐标
+		float hitTestScale() const override { return scale_; }
 		void layout() override
 		{
 			Ling::TextBox::layout();
@@ -63,6 +66,7 @@ namespace {
 			const float s = vertical
 				? std::min(std::min(fitW / w, fitH * 0.98f / h), 1.f)
 				: std::min(fitW / w, fitH * vFill / inkH);
+			scale_ = s;
 			// 水平按原文对齐摆放：译文比原文短、装不满框时，居左/居中/居右的差别才看得出来。
 			// 居左 = 和原文一样从同一列起排；居中/居右照原样还原。
 			const float visW = w * s;
@@ -1110,20 +1114,25 @@ ToolOcr::SelPoint ToolOcr::hitSelPoint(POINT p) const
 	auto* e = editors[best];
 	if (!e) return sp;
 	sp.line = best;
-	// 竖排按 Y 轴换算字符位置，横排按 X 轴（命中矩形都是缩放后的视觉矩形，见 OcrText::layout）
 	auto* ot = dynamic_cast<OcrText*>(e);
-	const bool vert = ot && ot->vertical;
-	const int n = vert ? (int)ot->logical.size() : (int)e->getText().size();
-	const float extent = vert ? e->h : e->w;
-	const float offset = vert ? ((float)p.y - e->y) : ((float)p.x - e->x);
-	if (n > 0 && extent > 1.f) {
-		const float f = std::clamp(offset / extent, 0.f, 1.f);
-		const float pos = f * (float)n;            // 0~n：落在第几个字符边界上
-		// 首尾各放宽半格到 0.75 格：起手/收手常按在第一个字符上，
-		// 按"最近边界"取整就会从第二个字开始选（用户反馈拖选老是从第二字起）。
-		if (pos <= 0.75f) sp.index = 0;
-		else if (pos >= (float)n - 0.75f) sp.index = n;
-		else sp.index = std::clamp((int)std::lround(pos), 0, n);
+	if (ot && ot->vertical) {
+		// 竖排是"每字一行"的堆叠文本，按 Y 轴均分到字符格
+		const int n = (int)ot->logical.size();
+		const float extent = e->h;
+		const float offset = (float)p.y - e->y;
+		if (n > 0 && extent > 1.f) {
+			const float f = std::clamp(offset / extent, 0.f, 1.f);
+			const float pos = f * (float)n;            // 0~n：落在第几个字符边界上
+			// 首尾各放宽半格到 0.75 格：起手/收手常按在第一个字符上，
+			// 按"最近边界"取整就会从第二个字开始选（用户反馈拖选老是从第二字起）。
+			if (pos <= 0.75f) sp.index = 0;
+			else if (pos >= (float)n - 0.75f) sp.index = n;
+			else sp.index = std::clamp((int)std::lround(pos), 0, n);
+		}
+	}
+	else {
+		// 横排（含翻译框）：按真实字形边界命中；点在框外时 DWrite 夹到首/尾，正是边缘起手/收手要的
+		sp.index = e->hitTextIndex(p);
 	}
 	return sp;
 }
@@ -1265,23 +1274,47 @@ bool ToolOcr::hitText(POINT client)
 	return false;
 }
 
+bool ToolOcr::nearText(POINT client) const
+{
+	// 文本框外扩一圈：边缘起手与工字光标共用
+	const float pad = 4.f * (dpi > 0.f ? dpi : 1.f);
+	for (auto* e : editors) {
+		if (!e) continue;
+		if ((float)client.x >= e->x - pad && (float)client.x <= e->x + e->w + pad
+			&& (float)client.y >= e->y - pad && (float)client.y <= e->y + e->h + pad)
+			return true;
+	}
+	// 贴图：识别框自身的留白也算文字区域；截图模式不加，留白继续让给画布
+	if (pinOverlay_ && !reflow_) {
+		for (auto* bg : bgs_) {
+			if (bg && bg->isPosIn(client)) return true;
+		}
+	}
+	return false;
+}
+
+BOOL ToolOcr::setCursor()
+{
+	if (hwnd) {
+		POINT p{};
+		GetCursorPos(&p);
+		ScreenToClient(hwnd, &p);
+		if (nearText(p)) {
+			SetCursor(LoadCursor(nullptr, IDC_IBEAM));
+			return TRUE;
+		}
+	}
+	return Ling::WinBase::setCursor();
+}
+
 LRESULT ToolOcr::onHitTest(const POINT screenPos)
 {
-	// 只有识别文本框（及右上角复制按钮）吃鼠标：可选中/复制文字；其余区域一律穿透。
+	// 只有识别文本框附近吃鼠标：可选中/复制文字；其余区域一律穿透。
 	//  - 贴图模式：穿透后贴图仍能右键弹菜单 / 滚轮缩放；
 	//  - 截图模式：穿透后主画布照常收到鼠标 —— 识别面板开着也能继续画标注，不必先取消识别。
 	POINT client = screenPos;
 	ScreenToClient(hwnd, &client);
-	for (auto* e : editors) {
-		if (e && e->isPosIn(client)) return HTCLIENT;
-	}
-	// 贴图：识别框自身的留白也算文字区域，避免"点在字边上却把贴图拖走了"。
-	// 截图模式不加这一段 —— 那边要让点在框间的鼠标继续落到画布上画标注。
-	if (pinOverlay_ && !reflow_) {
-		for (auto* bg : bgs_) {
-			if (bg && bg->isPosIn(client)) return HTCLIENT;
-		}
-	}
+	if (nearText(client)) return HTCLIENT;
 	// 贴图宿主控件在浮层最上层：命中就吃鼠标（点击由 chromeDown_ 转给宿主）
 	if (pinOverlay_ && chromeHit_ && chromeHit_(client)) return HTCLIENT;
 	// 右上角按钮平时隐藏，只有悬停在选区内才吃鼠标（隐藏时点击继续落到宿主画布上）

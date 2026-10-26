@@ -335,6 +335,22 @@ void ShapeText::applyEditSnapshot(const std::vector<float>& s)
 	updateDraggers();
 }
 
+bool ShapeText::translateBy(float dx, float dy)
+{
+	// 挂在箭头/线段上的文字跟着线走，不单独平移
+	if (attachTo) return false;
+	rect = offsetRect(rect, dx, dy);
+	if (tailCustom_) {
+		bubbleTail_.x += dx;
+		bubbleTail_.y += dy;
+	}
+	else {
+		updateBubbleTail();
+	}
+	updateDraggers();
+	return true;
+}
+
 void ShapeText::mouseDrag(const float x, const float y)
 {
 	if (bubble_ && hoverDraggerIndex >= 10 && hoverDraggerIndex <= 13) {

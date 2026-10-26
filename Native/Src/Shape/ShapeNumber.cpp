@@ -210,6 +210,16 @@ void ShapeNumber::applyEditSnapshot(const std::vector<float>& s)
 	updateDraggers();
 }
 
+bool ShapeNumber::translateBy(float dx, float dy)
+{
+	cx += dx;
+	cy += dy;
+	rect = offsetRect(rect, dx, dy);
+	makePath();
+	updateDraggers();
+	return true;
+}
+
 void ShapeNumber::mouseDrag(const float x, const float y)
 {
 	if (!isEmoji()) {

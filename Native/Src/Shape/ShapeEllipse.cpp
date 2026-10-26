@@ -156,6 +156,14 @@ void ShapeEllipse::applyEditSnapshot(const std::vector<float>& s)
 	updateDraggers();
 }
 
+bool ShapeEllipse::translateBy(float dx, float dy)
+{
+	rect = offsetRect(rect, dx, dy);
+	syncEllipseFromRect();
+	updateDraggers();
+	return true;
+}
+
 void ShapeEllipse::mouseDrag(const float x, const float y)
 {
 	if (hoverDraggerIndex == 9) {

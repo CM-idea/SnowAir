@@ -112,6 +112,8 @@ protected:
 	virtual POINT toImgPos(const POINT& pos) const;
 	// 按下时命中（优先当前选中的控点）
 	ShapeBase* hitShapeAt(float x, float y);
+	// 方向键微调当前选中的标注（dx/dy 为标注坐标增量）：没有可移动的选中标注时返回 false
+	bool nudgeSelectedAnnot(float dx, float dy);
 	// 尺寸/角度：在线上挂一句自动文字（已存在则直接返回）；拖拽过程中就调用 → 文字实时出现
 	ShapeText* ensureShaftText(ShapeBase* host, const std::wstring& text, float px);
 	// 尺寸自带文字：按屏幕 DPI 把线长换算成物理尺寸（cm）；用户双击改过之后不再自动改写
