@@ -60,10 +60,14 @@ public:
 	void repaintOverlay() { if (hwnd) refresh(); }
 	// 主动重绘本面板（提示条/文字改动后调用，别指望宿主那次 refresh 会带上本窗口）
 	void repaint() { if (hwnd) refresh(); }
+protected:
+	// 覆盖矩形就是选区的精确物理尺寸：DPI 变了由本类按选区重贴，不套系统的建议矩形
+	bool keepGeometryOnDpiChange() const override { return true; }
 private:
 	void onCreated() override;
 	void layout() override;
 	void rebuildEditors();
+	void applyMaskGeometry();
 	// 把译文本行填进各区域的 displayText 并重算整段文字（不重绘）
 	void applyTranslateLines(const std::vector<std::wstring>& lines);
 	void copyAll();
@@ -121,6 +125,7 @@ private:
 	// 与其它窗口的定时器 id 错开（属性栏 0x5000 / 系统按键 0x5100）
 	static constexpr UINT kHoverTimerId{ 0x5200 };
 	static constexpr UINT kHoverPollMs{ 100 };
+	int hostX_{ 0 }, hostY_{ 0 };   // 宿主窗口位置（覆盖矩形是宿主客户坐标）
 	// 上次建编辑框时的 dpi：换屏 / 改缩放后 DPI 变了，字号和坐标都得按新 dpi 重排。
 	float builtDpi_{ 0.f };
 	int imgW{ 1 }, imgH{ 1 };

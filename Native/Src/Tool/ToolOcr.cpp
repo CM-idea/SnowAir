@@ -462,6 +462,14 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 			trBoxes_[i]->setPosition(Ling::Edge::Top, (trTops_[i] - trScrollY_) / dpi);
 		refresh();
 	});
+	// 跨屏缩放不同：DPI 变了按选区物理尺寸重贴并重排。窗口自己管几何（见 keepGeometryOnDpiChange），
+	// 系统不会再套「建议矩形」把它改小/改偏。
+	onDpiChanged.add([this]() {
+		if (!hasMask_) return;
+		applyMaskGeometry();
+		rebuildEditors();
+		refresh();
+	});
 	// 右上角按钮的显示/隐藏靠轮询：面板除文字块外全穿透，空白处的悬停事件收不到
 	onTimer.add([this](UINT id) {
 		if (id == kHoverTimerId) updateButtonsHover();
@@ -1212,6 +1220,8 @@ void ToolOcr::syncToMask(const D2D1_RECT_F& maskRect, int hostX, int hostY)
 {
 	maskRect_ = maskRect;
 	hasMask_ = true;
+	hostX_ = hostX;
+	hostY_ = hostY;
 	const int left = (int)std::lround(maskRect.left);
 	const int top = (int)std::lround(maskRect.top);
 	const int right = (int)std::lround(maskRect.right);
@@ -1223,18 +1233,20 @@ void ToolOcr::syncToMask(const D2D1_RECT_F& maskRect, int hostX, int hostY)
 	const bool sizeChanged = (panelW != panelW_ || panelH != panelH_);
 	panelW_ = panelW;
 	panelH_ = panelH;
-	// 顺序很重要：**先定位、后定尺寸**。
-	// 选区可能在另一块缩放比不同的显示器上，SetWindowPos 挪过去会触发 WM_DPICHANGED，
-	// 系统随即按「建议矩形」把窗口改成 旧尺寸 ×(新DPI/旧DPI)（120%→100% 就只剩 5/6 宽）。
-	// 尺寸放在后面，才是用已经生效的 dpi 算出来的、真正等于选区的那一份；反过来写，
-	// w 会停在建议矩形上，rebuildEditors 的 scaleX = w / 识别图宽 就把整层文字缩小、
-	// 贴向左上（右上角按钮也跟着往里缩）。
-	// 尺寸每次都要重新设：系统可能在我们不知道的时候（DPI 变化）改过窗口。
-	setPosition(hostX + left, hostY + top);
-	setSize((float)panelW / dpi, (float)panelH / dpi);
+	applyMaskGeometry();
 	// 字号和坐标都是按 dpi 换算的：dpi 变了（换屏 / 改缩放）必须重排。
 	// dpi 的变化就发生在上面的 setPosition 里，所以放在这里判断。
 	if (sizeChanged || std::fabs(dpi - builtDpi_) > 0.001f) rebuildEditors();
+}
+
+// 把面板重新贴回选区。跨屏缩放不同时，系统会在 WM_DPICHANGED 后按「建议矩形」改窗口尺寸，
+// 所以 DPI 稳定后再按选区物理尺寸重算一次；顺序仍是先定位、后定尺寸。
+void ToolOcr::applyMaskGeometry()
+{
+	if (!hwnd || !hasMask_ || panelW_ <= 0 || panelH_ <= 0) return;
+	setPosition(hostX_ + (int)std::lround(maskRect_.left),
+		hostY_ + (int)std::lround(maskRect_.top));
+	setSize((float)panelW_ / dpi, (float)panelH_ / dpi);
 }
 
 bool ToolOcr::hitText(POINT client)
