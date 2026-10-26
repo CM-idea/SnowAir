@@ -6,6 +6,7 @@
 #include <format>
 #include <winrt/Windows.Web.Http.h>
 #include <winrt/Windows.Web.Http.Filters.h>
+#include <winrt/Windows.Web.Http.Headers.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.System.Threading.h>
 #include "Update.h"
@@ -269,9 +270,80 @@ namespace {
 		Setting::get()->setUpdateCheckDay(today());
 		doCheck();
 	}
+
+	// ── 每日静默检查（GitHub releases）──────────────────────────────────
+	// 只判断有没有新版本，不下载；结果缓存起来给「关于」页显示。
+	// 只在 UI 线程读写
+	std::wstring g_pendingVersion;
+
+	// "v0.1.12" / "0.1.12" → {0,1,12}；认不出来返回全 0（等于「没有新版」）
+	std::array<int, 3> parseTag(const std::wstring& tag)
+	{
+		std::array<int, 3> ver{ 0, 0, 0 };
+		int idx = 0;
+		std::wstring digits;
+		auto flush = [&]() {
+			if (digits.empty() || idx >= 3) { digits.clear(); return; }
+			try { ver[idx++] = std::stoi(digits); }
+			catch (...) {}
+			digits.clear();
+		};
+		for (wchar_t ch : tag) {
+			if (ch >= L'0' && ch <= L'9') digits.push_back(ch);
+			else flush();
+		}
+		flush();
+		return ver;
+	}
+
+	winrt::fire_and_forget checkGithubLatest()
+	{
+		std::wstring ver;
+		try {
+			co_await winrt::resume_background();
+			winrt::Windows::Web::Http::Filters::HttpBaseProtocolFilter filter;
+			filter.CacheControl().ReadBehavior(
+				winrt::Windows::Web::Http::Filters::HttpCacheReadBehavior::NoCache);
+			winrt::Windows::Web::Http::HttpClient client{ filter };
+			client.DefaultRequestHeaders().UserAgent().TryParseAdd(L"SnowAir");
+			auto op = client.GetStringAsync(Uri{
+				L"https://api.github.com/repos/CM-idea/SnowAir/releases/latest" });
+			auto guard = ThreadPoolTimer::CreateTimer(
+				[op](const ThreadPoolTimer&) { op.Cancel(); }, std::chrono::seconds(8));
+			std::wstring body{ co_await op };
+			guard.Cancel();
+			JsonObject obj{ nullptr };
+			if (JsonObject::TryParse(body, obj)) {
+				const std::wstring tag{ obj.GetNamedString(L"tag_name", L"") };
+				if (!tag.empty()) {
+					const auto remote = parseTag(tag);
+					if (remote > Ling::Util::getVerNum()) {
+						ver = std::format(L"{}.{}.{}", remote[0], remote[1], remote[2]);
+					}
+				}
+			}
+		}
+		catch (...) {
+			// 网络不通 / 超时 / 返回不是 JSON：静默放弃，明天再来
+		}
+		if (!ver.empty()) {
+			if (auto app = Ling::App::get()) {
+				app->dq.TryEnqueue([ver]() { g_pendingVersion = ver; });
+			}
+		}
+	}
+}
+
+std::wstring Update::pendingVersion()
+{
+	return g_pendingVersion;
 }
 
 void Update::checkLater()
 {
-    // SnowAir 暂无在线更新服务；保留接口供后续接入
+	// 每天只查一次（记账在配置里，跨进程有效；失败了也不当天反复重试）
+	const long long day = today();
+	if (Setting::get()->getUpdateCheckDay() == day) return;
+	Setting::get()->setUpdateCheckDay(day);
+	checkGithubLatest();
 }

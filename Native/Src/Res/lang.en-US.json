@@ -548,7 +548,19 @@
     "appName": "SnowAir",
     "versionFmt": "Version %1",
     "checkUpdate": "Check for Updates",
-    "feedback": "Report an Issue"
+    "feedback": "Report an Issue",
+    "repo": "Repository",
+    "slogan": "Fast and free, all in SnowAir",
+    "dataDir": "Data folder",
+    "openDataDir": "Open data folder",
+    "changelog": "Changelog",
+    "notChecked": "Not checked yet",
+    "checking": "Checking for updates…",
+    "checkingBtn": "Checking…",
+    "upToDate": "You're up to date",
+    "newVersion": "New version available",
+    "checkFailed": "Update check failed, try again later",
+    "justNow": "· just checked"
   },
   "shortcut": {
     "pressKey": "Waiting for key…",

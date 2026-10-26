@@ -1,15 +1,17 @@
 #pragma once
 #include <include/Ling.h>
+#include <string>
 
 // 自动升级。
-// 时机：应用回到"只剩托盘图标待命"的状态时（App::trimMemoryLater 里调），才去访问服务端的
-// version.json —— 启动时就请求会跟截图抢资源，用户也可能是拿快捷键抓一张就走的。
-// 流程：比版本 -> 新版 exe 下到 %appdata%\SnowAir -> 再等一个空闲时机弹窗问用户 ->
-// 用户点确定就起一段 PowerShell：等本进程退出、把新 exe 覆盖过去、用 --enter=tray 重新拉起来。
-// 请求控制得很死：用完即走模式不查、一天最多查一次、一次运行最多查一次。
+// 时机：应用回到"只剩托盘图标待命"的状态时（App::trimMemoryLater 里调），才去访问 GitHub —— 
+// 启动时就请求会跟截图抢资源，用户也可能是拿快捷键抓一张就走的。
+// 每天最多查一次（Setting::getUpdateCheckDay 记账），查到的新版本号缓存在内存里，
+// 「关于」页打开时直接显示「发现新版本 x.y.z」，点检查更新会跳到 releases 页。
 class Update
 {
 public:
 	// 每次回到空闲状态都会调，真正干活的条件见上。多调无害
 	static void checkLater();
+	// 每日检查发现的新版本号（如 "0.1.12"）；空 = 没有新版 / 今天还没查
+	static std::wstring pendingVersion();
 };

@@ -9,6 +9,7 @@
 #include "../App.h"
 #include "../Lang.h"
 #include "../Setting.h"
+#include "../Update.h"
 #include "../Util.h"
 #include "WinSetting.h"
 #include "SettingTheme.h"
@@ -346,6 +347,10 @@ void WinSetting::onCreated()
 	// 加载默认页（热键页 index=0）
 	loadPage(menuIndex);
 
+	// 每天一次的静默版本检查：应用长期不退出时，靠「打开设置」把这一天的检查补上
+	//（内部按 Setting::updateCheckDay 记账，同一天不会重复请求）
+	Update::checkLater();
+
 	// onCreated 早于 createNativeWindow 的 layout()，先手动排版，避免首帧节点都在 (0,0)
 	layout();
 
@@ -478,7 +483,7 @@ void WinSetting::loadPage(int index)
 {
 	if (!content) return;
 
-	// 若上一页是「直挂视口容器」的页（QuickTranslate / History）：它们不经 contentScroll，
+	// 若上一页是「直挂视口容器」的页（QuickTranslate / History / About）：它们不经 contentScroll，
 	// 切走前必须先把 contentScroll 恢复显示、并把页面从 cardNode 摘除，
 	// 否则页面残留为 cardNode 子节点、contentScroll 被 display:none 钉死。
 	contentScroll->show();
@@ -489,6 +494,10 @@ void WinSetting::loadPage(int index)
 	if (pageHistory) {
 		cardNode->removeChild(pageHistory);
 		pageHistory = nullptr;
+	}
+	if (pageAbout) {
+		cardNode->removeChild(pageAbout);
+		pageAbout = nullptr;
 	}
 
 	// 清理旧子页：先手动置空指针（避免访问悬空），再清空 content 的所有子节点
@@ -584,8 +593,15 @@ void WinSetting::loadPage(int index)
 		adopt(pagePlugins); makeFullFill(pagePlugins);
 		break;
 	case 7:
+		// 关于页：设计稿要求分隔线与目录信息贴卡片底 → 页面高度必须恒等于卡片高度。
+		// 与「快捷翻译 / 截图历史」同策略：隐藏整页滚动容器，页面直接挂到视口容器 cardNode，
+		// 页面再用 margin-top:auto 把按钮组顶到底部、目录信息压在最下面。
+		contentScroll->hide();
 		pageAbout = new WinSettingAbout(this);
-		adopt(pageAbout); makeFullFill(pageAbout);
+		SettingUi::adoptChild(cardNode, pageAbout);
+		makeFullFill(pageAbout);
+		pageAbout->setPadding(SettingTheme::contentPadX, SettingTheme::contentPadY,
+			SettingTheme::contentPadX, SettingTheme::contentPadY);
 		break;
 	}
 }

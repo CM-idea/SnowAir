@@ -42,6 +42,7 @@ namespace Icon
 	inline constexpr const wchar_t* Undo = L"\ue63f";           // 撤销
 	// 重做无工具栏按钮；History::redo + Ctrl+Y 仍可用。字库若日后补「重做」可再挂上。
 	inline constexpr const wchar_t* Redo = L"\ue60a";           // 重置（备用）
+	inline constexpr const wchar_t* Refresh = L"\ue60a";        // 刷新（字库里叫「重置 1」）
 	inline constexpr const wchar_t* LongShot = L"\ue608";       // 长截图
 	inline constexpr const wchar_t* Video = L"\ue630";          // 录屏
 	inline constexpr const wchar_t* Ocr = L"\ue61d";            // 识别文字
@@ -152,6 +153,7 @@ namespace Icon
 	inline constexpr const wchar_t* User = L"\ue666";               // 用户
 
 	// —— 新字库 5228143 增补（e67a、e680-e685）——
+	inline constexpr const wchar_t* Github = L"\ue67b";             // GitHub
 	inline constexpr const wchar_t* Polygon = L"\ue680";            // 多边形
 	inline constexpr const wchar_t* Star = L"\ue681";               // 星形
 	inline constexpr const wchar_t* Bubble = L"\ue682";             // 气泡

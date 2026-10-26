@@ -10,10 +10,15 @@ icon.ttf RCDATA "SnowAirIcons.ttf"
 // 所以改动 lang.*.json 后需要让本 .rc 重新编译才能生效。
 zh-CN RCDATA "lang.zh-CN.json"
 en-US RCDATA "lang.en-US.json"
+// 关于页顶部配图（520×176 展示位）。源图放在仓库根目录 images/About.png，
+// 由 SnowAir.vcxproj 的 CopyAboutImage 目标在编译资源前拷到本目录，
+// 这样 .rc 里只写裸文件名，不依赖 rc 的工作目录/搜索路径。
+// MSBuild 不跟踪 RCDATA 数据文件，换图后需要让本 .rc 重新编译。
+about RCDATA "About.png"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 0,1,10,0
-PRODUCTVERSION 0,1,10,0
+FILEVERSION 0,1,11,0
+PRODUCTVERSION 0,1,11,0
 FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
 FILEFLAGS 0x1L
@@ -30,12 +35,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "CM-idea"
             VALUE "FileDescription", "SnowAir 轻雪"
-            VALUE "FileVersion", "0.1.10.0"
+            VALUE "FileVersion", "0.1.11.0"
             VALUE "InternalName", "SnowAir.exe"
             VALUE "LegalCopyright", "Copyright (C) CM-idea"
             VALUE "OriginalFilename", "SnowAir.exe"
             VALUE "ProductName", "SnowAir 轻雪"
-            VALUE "ProductVersion", "0.1.10.0"
+            VALUE "ProductVersion", "0.1.11.0"
         END
     END
     BLOCK "VarFileInfo"

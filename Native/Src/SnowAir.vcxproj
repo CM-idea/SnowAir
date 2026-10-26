@@ -438,6 +438,7 @@
   </ItemGroup>
   <ItemGroup>
     <Image Include="Res\logo.ico" />
+    <Image Include="..\..\images\About.png" />
   </ItemGroup>
   <ItemGroup>
     <Font Include="Res\SnowAirIcons.ttf" />
@@ -453,6 +454,13 @@
       <Project>{540bb258-d062-4159-8cf3-fe9ab9e4b0ae}</Project>
     </ProjectReference>
   </ItemGroup>
+  <!-- 关于页配图：源图在仓库根 images/About.png，编译资源前拷到 Res/ 供 Resource.rc 打包。
+       放成目标而不是手工拷贝，是为了「改图 → 直接编译」就能生效（SkipUnchangedFiles 避免每次重复写）。 -->
+  <Target Name="CopyAboutImage" BeforeTargets="ResourceCompile">
+    <Copy SourceFiles="$(ProjectDir)..\..\images\About.png"
+          DestinationFiles="$(ProjectDir)Res\About.png"
+          SkipUnchangedFiles="true" />
+  </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>

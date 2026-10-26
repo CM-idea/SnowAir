@@ -548,7 +548,19 @@
     "appName": "SnowAir 轻雪",
     "versionFmt": "版本 %1",
     "checkUpdate": "检查更新",
-    "feedback": "反馈问题"
+    "feedback": "反馈问题",
+    "repo": "开源仓库",
+    "slogan": "高效自由，尽在轻雪",
+    "dataDir": "配置目录",
+    "openDataDir": "打开配置目录",
+    "changelog": "更新日志",
+    "notChecked": "尚未检查",
+    "checking": "正在检查更新…",
+    "checkingBtn": "检查中…",
+    "upToDate": "已是最新版本",
+    "newVersion": "发现新版本",
+    "checkFailed": "检查失败，请稍后再试",
+    "justNow": "· 刚刚检查"
   },
   "shortcut": {
     "pressKey": "等待按键…",
