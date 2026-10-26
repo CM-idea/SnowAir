@@ -3,6 +3,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 #include "IconCodes.h"
 #include "ToolPicker.h"
@@ -139,6 +140,11 @@ private:
 	static constexpr float spliterW{ 1.f };
 	static constexpr float spliterH{ 18.f };
 	void styleToolbarBtn(Ling::Button* btn);
+	// 槽位按钮图标：默认形态是复合图标（模糊）时叠两层。
+	// 换图标只摘掉自己加的那层，不能 removeAllChildren —— Button 内部还有一个文字子节点。
+	void setSlotIcon(Ling::Button* btn, const std::wstring& toolId,
+		const std::wstring& fallback, uint32_t color);
+	void restyleSlotOverlay(Ling::Button* btn, const std::wstring& toolId, uint32_t color);
 	// 停悬气泡：按「快捷键提示」开关决定是否追加当前键位（"矩形" → "矩形（1）"）。
 	// lookup 留空 = 用 btn->id 再经 resolveToolId 取到已选子工具
 	void bindTip(Ling::Button* btn, const std::wstring& text, const std::wstring& lookup = L"");
@@ -168,4 +174,5 @@ private:
 	};
 	std::vector<Ling::Button*> btns;
 	std::vector<Ling::Node*> splitterNodes;
+	std::vector<std::pair<Ling::Button*, Ling::Node*>> slotOverlays;   // 各槽位上的复合图标叠层
 };

@@ -9,6 +9,8 @@ public:
 	virtual ~ShapeBase();
 	virtual void paint(ID2D1DeviceContext* ctx) = 0;
 	virtual void paintDragger(ID2D1DeviceContext* ctx) {};
+	// 临时范围提示（控件层）：画在标注之上、只出现在屏幕上，导出不带（withChrome=false）
+	virtual void paintHint(ID2D1DeviceContext* ctx) {};
 	virtual void mouseMove(const float x, const float y) { };
 	virtual void mouseDrag(const float x, const float y) {};
 	virtual void mouseDown(const float x, const float y) { };

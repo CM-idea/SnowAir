@@ -25,9 +25,6 @@ public:
 	// 下层标注变了（拖动/改属性/撤销删除）→ 重新采样它上面盖着的模糊/马赛克。
 	// changed 传 nullptr 表示"全部滤镜都重算"。z 序后面的才是盖在上面的。
 	void refreshFiltersAbove(ShapeBase* changed);
-	// 拖动过程中用的限流版：重采样含 CPU 模糊（O(w*h*r)），全屏滤镜每帧重算会卡；
-	// 抬手时再调一次不限流的做收尾，保证最终一定准确。
-	void refreshFiltersAboveThrottled(ShapeBase* changed);
 	void syncViewportFilters();
 	void setSizePreviewHold(bool hold);
 	// shapePreview：预览形状本身（多边形边数、星形角数、圆角），否则预览笔迹粗细
@@ -176,5 +173,4 @@ protected:
 	POINT annotLastDownPos{ 0, 0 };
 	std::wstring forcedToolId;
 	bool mainToolUserPlaced{ false };
-	ULONGLONG lastFilterRefreshMs{ 0 };
 };

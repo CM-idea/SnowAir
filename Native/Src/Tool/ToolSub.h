@@ -215,7 +215,9 @@ private:
 	static constexpr float numberMin{ 6.f }, numberMax{ 86.f };
 	std::vector<UINT32> colors = { 0xFF272CFF, 0x00FF40FF, 0x1677FFFF, 0xFFCC00FF, 0x000000FF, 0xFFFFFFFF, 0xFF272CFF };
 	std::vector<Ling::Button*> numberStyleBtns;
+	std::vector<int> numberStyleVals;   // 与 numberStyleBtns 一一对应
 	std::vector<Ling::Button*> arrowHeadBtns;
+	std::vector<int> arrowHeadStyles;   // 与 arrowHeadBtns 一一对应（默认形态会换成「基础箭头」）
 	std::vector<std::pair<Ling::Button*, int>> lineKindBtns;   // 标注形态按钮（气泡/角度/波浪线/尺寸）
 	Ling::Button* bubbleKindBtn{ nullptr };
 	Ling::Button* angleKindBtn{ nullptr };
@@ -225,9 +227,11 @@ private:
 	Ling::Button* dashBtn{ nullptr };
 	Ling::Button* softBtn{ nullptr };
 	Ling::Button* markerBtn{ nullptr };
+	Ling::Button* penBaseBtn{ nullptr };   // 画笔形态默认不是常规笔时，属性栏里的「常规画笔」
 	Ling::Button* roundBtn{ nullptr };
 	// 矩形工具的形态按钮（椭圆 / 多边形 / 星形；矩形是默认态）
 	Ling::Button* ellipseBtn{ nullptr };
+	Ling::Button* rectBtn{ nullptr };   // 形态默认不是矩形时，属性栏里的「基础矩形」
 	Ling::Button* polyBtn{ nullptr };
 	Ling::Button* starBtn{ nullptr };
 	Ling::Button* angleBtn{ nullptr };

@@ -4,6 +4,8 @@
 #include "../Tip.h"
 #include "IconCodes.h"
 #include "ToolSub.h"
+#include "ToolInitialDefs.h"   // 初始属性默认形态 → 气泡图标
+#include "ToolIconCompose.h"   // 复合图标（马赛克切模糊时叠两层）
 #include "ToolbarChrome.h"
 #include "ToolbarTheme.h"
 
@@ -77,13 +79,29 @@ void ToolPicker::rebuildButtons()
 	for (auto& item : items) {
 		auto btn = row->makeChild<Ling::Button>();
 		btn->setId(item.id);
-		btn->setText(item.icon);
+		const bool sel = item.id == selectedId;
+		const uint32_t color = sel ? Icon::ColorActive : Icon::ColorNormal;
+		// 图标跟着「初始属性」里的默认形态走（文案仍是工具名）
+		const auto* def = ToolInitial::find(ToolInitial::defIdOfSlot(item.id));
+		const auto* form = def ? ToolInitial::currentForm(*def) : nullptr;
+		if (form && form->overlayGlyph) {
+			btn->setText(L"");
+			ToolIcon::overlayGlyph(btn, form->glyph, form->overlayGlyph, Icon::Size,
+				color, ToolIcon::withAlpha(color, 0x40));
+		}
+		else {
+			std::wstring icon = item.icon ? item.icon : L"";
+			if (form) {
+				const std::wstring formIcon = ToolInitial::iconForSlot(item.id);
+				if (!formIcon.empty()) icon = formIcon;
+			}
+			btn->setText(icon);
+		}
 		btn->setFontFamily(Icon::Family);
 		btn->setFontSize(Icon::Size);
-		const bool sel = item.id == selectedId;
 		btn->setBg(0);
-		btn->setColor(sel ? Icon::ColorActive : Icon::ColorNormal);
-		btn->setHoverColor(sel ? Icon::ColorActive : Icon::ColorNormal);
+		btn->setColor(color);
+		btn->setHoverColor(color);
 		btn->setSize(ToolbarTheme::propIconInner, ToolbarTheme::propIconInner);
 		btn->setMargin(marginH, marginV, marginH, marginV);
 		btn->setFlexGrow(0.f);

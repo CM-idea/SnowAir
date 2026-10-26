@@ -7,10 +7,10 @@
 namespace ToolIcon {
 	inline uint32_t withAlpha(uint32_t rgba, uint32_t a) { return (rgba & 0xFFFFFF00u) | (a & 0xFFu); }
 
-	inline void overlayGlyph(Ling::Node* host, const wchar_t* base, const wchar_t* top,
+	inline Ling::Node* overlayGlyph(Ling::Node* host, const wchar_t* base, const wchar_t* top,
 		float fontSize, uint32_t baseColor, uint32_t topColor)
 	{
-		if (!host) return;
+		if (!host) return nullptr;
 		auto* stack = host->makeChild<Ling::Node>();
 		stack->setPositionType(Ling::Position::Absolute);
 		stack->setPosition(Ling::Edge::Left, 0.f);
@@ -33,5 +33,6 @@ namespace ToolIcon {
 		};
 		addGlyph(base, baseColor);
 		addGlyph(top, topColor);
+		return stack;
 	}
 }

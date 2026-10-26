@@ -7,6 +7,7 @@ class ShapeMosaic : public ShapeArea
 public:
 	ShapeMosaic(AnnotHost* win);
 	void paint(ID2D1DeviceContext* ctx) override;
+	void paintHint(ID2D1DeviceContext* ctx) override;
 	void applyStyle();
 	float stylePrimarySize() const override { return strokeWidth; }
 	// 重新采样并生成效果位图：下面的标注被移动/改样式后必须调用，

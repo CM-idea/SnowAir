@@ -10,6 +10,7 @@
 #include "../Tip.h"
 #include "ToolSub.h"
 #include "ToolCap.h"
+#include "ToolInitialDefs.h"
 #include "ToolColorPanel.h"
 #include "ToolNestedPanel.h"
 #include "IconCodes.h"
@@ -53,6 +54,39 @@ namespace {
 	{
 		auto* s = Setting::get();
 		return s ? s->getToolDesignInt(tool, key, def) : def;
+	}
+
+	// 属性栏要显示的形态：按「初始属性」里配置的顺序排，并去掉被设为工具栏默认的那一款
+	// （默认形态已经在工具栏按钮上，属性栏里不再重复）
+	std::vector<ToolInitial::InitialChoice> orderedFormsFor(const wchar_t* defId, int defaultForm)
+	{
+		std::vector<ToolInitial::InitialChoice> out;
+		const auto* def = ToolInitial::find(defId);
+		if (!def || !def->forms) return out;
+		out = *def->forms;
+		auto* s = Setting::get();
+		const std::wstring order = s ? s->getToolDesignStr(def->designId, L"order", L"") : L"";
+		if (!order.empty()) {
+			std::vector<ToolInitial::InitialChoice> sorted;
+			std::vector<bool> used(out.size(), false);
+			size_t pos = 0;
+			while (pos < order.size()) {
+				const size_t comma = order.find(L',', pos);
+				const std::wstring tok = order.substr(pos, comma == std::wstring::npos ? std::wstring::npos : comma - pos);
+				const int v = tok.empty() ? -1 : _wtoi(tok.c_str());
+				for (size_t i = 0; i < out.size(); ++i) {
+					if (!used[i] && out[i].value == v) { used[i] = true; sorted.push_back(out[i]); break; }
+				}
+				if (comma == std::wstring::npos) break;
+				pos = comma + 1;
+			}
+			for (size_t i = 0; i < out.size(); ++i) if (!used[i]) sorted.push_back(out[i]);
+			out.swap(sorted);
+		}
+		std::vector<ToolInitial::InitialChoice> shown;
+		shown.reserve(out.size());
+		for (const auto& c : out) if (c.value != defaultForm) shown.push_back(c);
+		return shown;
 	}
 
 	// 线迹标注类工具的默认宽度由「其他外观 → 标注默认值」决定（默认 4）
@@ -178,7 +212,21 @@ void ToolSub::beginTool(const std::wstring& id)
 	sizeExtraW = 0.f;
 	numberStyleBtns.clear();
 	arrowHeadBtns.clear();
+	arrowHeadStyles.clear();
 	lineKindBtns.clear();
+	// 形态按钮每栏重建：先清空旧指针，避免某形态被设为默认后不再创建却留下悬空引用
+	dashBtn = nullptr;
+	softBtn = nullptr;
+	markerBtn = nullptr;
+	penBaseBtn = nullptr;
+	ellipseBtn = nullptr;
+	rectBtn = nullptr;
+	polyBtn = nullptr;
+	starBtn = nullptr;
+	bubbleKindBtn = nullptr;
+	angleKindBtn = nullptr;
+	waveKindBtn = nullptr;
+	dimKindBtn = nullptr;
 	curToolId = id;
 	auto cfg = findSliderCfg(id);
 	if (!cfg) return;
@@ -214,9 +262,11 @@ void ToolSub::showRectTools()
 	if (curToolId == L"rect" && hasTools) return;
 	beginTool(L"rect");
 	// 初始属性：默认形态（0 矩形 / 1 椭圆 / 2 多边形 / 3 星形）+ 边数 / 角数
+	int defaultForm = 0;
 	{
 		const int form = designInt(L"rect", L"form", -1);
 		if (form >= 0) {
+			defaultForm = std::clamp(form, 0, 3);
 			isEllipse = (form == 1);
 			rectKind = (form == 2) ? PolygonShape : (form == 3) ? StarShape : RectShape;
 		}
@@ -226,19 +276,7 @@ void ToolSub::showRectTools()
 		if (pts >= 0) starPoints = std::clamp(pts, 3, 20);
 	}
 	if (isRectFill && isRectDash) isRectDash = false;
-	initSize(6, true);   // 椭圆 | 多边形 | 星形 | 填充 | 虚线 | 圆角
-	ellipseBtn = makeToggleBtn(Icon::Ellipse, &isEllipse, L"tool.ellipse", L"ellipse");
-	ellipseBtn->onClick.add([this](Ling::Button*) {
-		if (isEllipse) {
-			// 椭圆与多边形/星形互斥
-			rectKind = RectShape;
-			refreshRectKindBtns();
-			if (nestedPanel && nestedPanel->isOpen()
-				&& nestedPanel->kind() == ToolNestedPanel::Kind::ShapeSides)
-				closeNestedPanel();
-		}
-		refreshNestedTrigger();
-	});
+	initSize(6, true);   // 三个形态 + 填充 | 虚线 | 圆角
 	// 多边形 / 星形：点开 = 选中并弹出"边数/角数"滑条；再点同一个 = 回矩形
 	auto mkShapeKindBtn = [this](const wchar_t* icon, const wchar_t* tipKey, int kind) {
 		auto b = contentNode->makeChild<Ling::Button>();
@@ -266,8 +304,50 @@ void ToolSub::showRectTools()
 		});
 		return b;
 	};
-	polyBtn = mkShapeKindBtn(Icon::Polygon, L"tool.polygon", PolygonShape);
-	starBtn = mkShapeKindBtn(Icon::Star, L"tool.star", StarShape);
+	// 形态顺序跟随「初始属性」；默认形态已在工具栏，属性栏里不再重复
+	for (const auto& c : orderedFormsFor(L"rect", defaultForm)) {
+		if (c.value == 1) {
+			ellipseBtn = makeToggleBtn(c.glyph ? c.glyph : Icon::Ellipse,
+				&isEllipse, c.tipKey ? c.tipKey : L"tool.ellipse", L"ellipse");
+			ellipseBtn->onClick.add([this](Ling::Button*) {
+				if (isEllipse) {
+					// 椭圆与多边形/星形互斥
+					rectKind = RectShape;
+					refreshRectKindBtns();
+					if (nestedPanel && nestedPanel->isOpen()
+						&& nestedPanel->kind() == ToolNestedPanel::Kind::ShapeSides)
+						closeNestedPanel();
+				}
+				refreshNestedTrigger();
+			});
+		}
+		else if (c.value == 2 || c.value == 3) {
+			auto* b = mkShapeKindBtn(c.glyph ? c.glyph : Icon::Polygon,
+				c.tipKey ? c.tipKey : L"tool.polygon", c.value == 2 ? PolygonShape : StarShape);
+			if (c.value == 2) polyBtn = b; else starBtn = b;
+		}
+		else {
+			// 形态默认不是矩形时，栏里保留「矩形」入口，点一下回到基础形态
+			rectBtn = contentNode->makeChild<Ling::Button>();
+			rectBtn->setText(c.glyph ? c.glyph : Icon::Rect);
+			styleToolbarBtn(rectBtn);
+			rectBtn->setFontFamily(Icon::Family);
+			rectBtn->setFontSize(Icon::Size);
+			applyToggleStyle(rectBtn, !isEllipse && rectKind == RectShape);
+			tip->bind(rectBtn, Lang::get(c.tipKey ? c.tipKey : L"tool.rectDefault"));
+			rectBtn->onClick.add([this](Ling::Button*) {
+				closeColorPanel();
+				isEllipse = false;
+				rectKind = RectShape;
+				refreshRectKindBtns();
+				refreshNestedTrigger();
+				if (nestedPanel && nestedPanel->isOpen()
+					&& nestedPanel->kind() == ToolNestedPanel::Kind::ShapeSides)
+					closeNestedPanel();
+				win->onToolStyleChanged();
+			});
+		}
+	}
 	makeRectStyleBtns();
 	initColorTrigger();
 	initSlider();
@@ -275,6 +355,7 @@ void ToolSub::showRectTools()
 
 void ToolSub::refreshRectKindBtns()
 {
+	if (rectBtn) applyToggleStyle(rectBtn, !isEllipse && rectKind == RectShape);
 	if (polyBtn) applyToggleStyle(polyBtn, rectKind == PolygonShape && !isEllipse);
 	if (starBtn) applyToggleStyle(starBtn, rectKind == StarShape && !isEllipse);
 	refreshRoundBtnStyle();
@@ -340,12 +421,14 @@ void ToolSub::showArrowTools()
 		const int dw = designSetting->getToolDesignInt(L"arrow", L"width", -1);
 		if (dw > 0) sliderVal = std::clamp((float)dw, sliderMin, sliderMax);
 	}
+	// 被提为工具栏默认形态的那一款已从属性栏移走（工具栏按钮就是它），其余形态按
+	// 「初始属性」里配置的顺序排列；基础箭头不在默认位时自然留在属性栏里
+	const int defaultHead = arrowDesign ? arrowHead : (int)ArrowDefault;
 	initSize(6, true); // 4 个箭头样式 + 虚线 + 圆头，再加色块与滑条
-	// 顺序：大箭头 | 趣味箭头 | 双箭头 | 标注箭头 | 虚线 | 圆头
-	makeArrowHeadBtn(Icon::ArrowBig, ArrowBig, L"tool.arrowBig");
-	makeArrowHeadBtn(Icon::FunArrow, ArrowFun, L"tool.arrowFun");
-	makeArrowHeadBtn(Icon::ArrowBoth, ArrowBoth, L"tool.arrowBoth");
-	makeArrowHeadBtn(Icon::AnnotBoth, ArrowAnnot, L"tool.arrowAnnot");
+	for (const auto& c : orderedFormsFor(L"arrow", defaultHead)) {
+		makeArrowHeadBtn(c.glyph ? c.glyph : Icon::Arrow, c.value,
+			c.tipKey ? c.tipKey : L"tool.arrowDefault");
+	}
 	refreshArrowHeadBtns();
 	makeToggleBtn(Icon::Dash, &isArrowDash, L"tool.dash", L"dash");
 	makeToggleBtn(Icon::RoundCap, &isArrowRound, L"tool.roundCap", L"round");
@@ -392,9 +475,10 @@ void ToolSub::showLineTools()
 	isLine = true;
 	loadStrokeSlider(L"arrow");
 	// 初始属性：标注自己的默认形态（0 直线 / 1 波浪 / 2 气泡 / 3 角度 / 4 尺寸）与默认粗细
+	int defaultLine = LineStraight;
 	{
 		const int form = designInt(L"line", L"form", -1);
-		if (form >= LineStraight && form <= LineDimension) lineKind = form;
+		if (form >= LineStraight && form <= LineDimension) { lineKind = form; defaultLine = form; }
 		const int lw = designInt(L"line", L"width", -1);
 		if (lw >= 0) sliderVal = std::clamp((float)lw, sliderMin, sliderMax);
 	}
@@ -420,11 +504,15 @@ void ToolSub::showLineTools()
 		lineKindBtns.push_back({ b, kind });
 		return b;
 	};
-	// 顺序：气泡 | 角度 | 波浪线 | 尺寸
-	bubbleKindBtn = addKindBtn(Icon::Bubble, LineBubble, L"tool.bubble");
-	angleKindBtn = addKindBtn(Icon::Angle, LineAngle, L"tool.angleAnnot");
-	waveKindBtn = addKindBtn(Icon::WaveLine, LineWave, L"tool.waveLine");
-	dimKindBtn = addKindBtn(Icon::AnnotBoth, LineDimension, L"tool.dimension");
+	// 形态顺序跟随「初始属性」；默认形态已在工具栏，属性栏里不再重复
+	for (const auto& c : orderedFormsFor(L"line", defaultLine)) {
+		auto* b = addKindBtn(c.glyph ? c.glyph : Icon::Line, c.value,
+			c.tipKey ? c.tipKey : L"tool.lineDefault");
+		if (c.value == LineBubble) bubbleKindBtn = b;
+		else if (c.value == LineAngle) angleKindBtn = b;
+		else if (c.value == LineWave) waveKindBtn = b;
+		else if (c.value == LineDimension) dimKindBtn = b;
+	}
 	makeToggleBtn(Icon::Dash, &isArrowDash, L"tool.dash", L"dash");
 	makeToggleBtn(Icon::RoundCap, &isArrowRound, L"tool.roundCap", L"round");
 	refreshLineKindBtns();
@@ -456,8 +544,10 @@ void ToolSub::showPenTools()
 {
 	beginTool(L"pen");
 	// 初始属性：0 普通 / 1 软笔 / 2 虚线 / 3 荧光笔（渐隐画笔不参与）
+	int defaultPen = 0;
 	if (!isPenFade) {
 		const int form = designInt(L"pen", L"form", -1);
+		if (form == 0 || form == 1 || form == 3) defaultPen = form;
 		if (form == 3) {
 			isPenMarker = true;
 			isPenSoft = false;
@@ -479,39 +569,74 @@ void ToolSub::showPenTools()
 	initSize(isPenFade ? 0 : 3, true);
 
 	if (!isPenFade) {
-	// 荧光笔：与普通画笔一致，只是更宽、半透明；单击打开「透明度」二级气泡（与水印角度同一套外壳）
-	markerBtn = contentNode->makeChild<Ling::Button>();
-	markerBtn->setText(Icon::Marker);
-	styleToolbarBtn(markerBtn);
-	markerBtn->setFontFamily(Icon::Family);
-	markerBtn->setFontSize(Icon::Size);
-	applyToggleStyle(markerBtn, isPenMarker);
-	tip->bind(markerBtn, Lang::get(L"tool.marker"));
-	markerBtn->onClick.add([this](Ling::Button* b) {
-		const bool next = !isPenMarker;
-		applyPenMarkerState(next);
-		win->onToolStyleChanged();
-		if (next) nestedPanel->openPenOpacity(workAreaRect(), b);
-	});
-
-	softBtn = contentNode->makeChild<Ling::Button>();
-	softBtn->setText(Icon::SoftPen);
-	styleToolbarBtn(softBtn);
-	softBtn->setFontFamily(Icon::Family);
-	softBtn->setFontSize(Icon::Size);
-	applyToggleStyle(softBtn, isPenSoft);
-	tip->bind(softBtn, Lang::get(L"tool.softPen"));
-	softBtn->onClick.add([this](Ling::Button*) {
-		isPenSoft = !isPenSoft;
-		if (isPenSoft) {
-			isPenFade = false;
-			isPenDash = false;
-			if (dashBtn) applyToggleStyle(dashBtn, false);
-			applyPenMarkerState(false);
+	auto refreshPenForms = [this]() {
+		if (penBaseBtn) applyToggleStyle(penBaseBtn, !isPenMarker && !isPenSoft);
+		if (markerBtn) applyToggleStyle(markerBtn, isPenMarker);
+		if (softBtn) applyToggleStyle(softBtn, isPenSoft);
+	};
+	// 形态顺序跟随「初始属性」；默认形态已在工具栏，属性栏里不再重复
+	for (const auto& c : orderedFormsFor(L"pen", defaultPen)) {
+		if (c.value == 3) {
+			// 荧光笔：与普通画笔一致，只是更宽、半透明；单击打开「透明度」二级气泡（与水印角度同一套外壳）
+			markerBtn = contentNode->makeChild<Ling::Button>();
+			markerBtn->setText(c.glyph ? c.glyph : Icon::Marker);
+			styleToolbarBtn(markerBtn);
+			markerBtn->setFontFamily(Icon::Family);
+			markerBtn->setFontSize(Icon::Size);
+			applyToggleStyle(markerBtn, isPenMarker);
+			tip->bind(markerBtn, Lang::get(c.tipKey ? c.tipKey : L"tool.marker"));
+			markerBtn->onClick.add([this, refreshPenForms](Ling::Button* b) {
+				const bool next = !isPenMarker;
+				applyPenMarkerState(next);
+				refreshPenForms();
+				win->onToolStyleChanged();
+				if (next) nestedPanel->openPenOpacity(workAreaRect(), b);
+			});
 		}
-		applyToggleStyle(softBtn, isPenSoft);
-		win->onToolStyleChanged();
-	});
+		else if (c.value == 1) {
+			softBtn = contentNode->makeChild<Ling::Button>();
+			softBtn->setText(c.glyph ? c.glyph : Icon::SoftPen);
+			styleToolbarBtn(softBtn);
+			softBtn->setFontFamily(Icon::Family);
+			softBtn->setFontSize(Icon::Size);
+			applyToggleStyle(softBtn, isPenSoft);
+			tip->bind(softBtn, Lang::get(c.tipKey ? c.tipKey : L"tool.softPen"));
+			softBtn->onClick.add([this, refreshPenForms](Ling::Button*) {
+				isPenSoft = !isPenSoft;
+				if (isPenSoft) {
+					isPenFade = false;
+					isPenDash = false;
+					if (dashBtn) applyToggleStyle(dashBtn, false);
+					applyPenMarkerState(false);
+				}
+				refreshPenForms();
+				win->onToolStyleChanged();
+			});
+		}
+		else {
+			// 形态默认不是常规笔时，栏里保留「常规画笔」入口
+			penBaseBtn = contentNode->makeChild<Ling::Button>();
+			penBaseBtn->setText(c.glyph ? c.glyph : Icon::Pen);
+			styleToolbarBtn(penBaseBtn);
+			penBaseBtn->setFontFamily(Icon::Family);
+			penBaseBtn->setFontSize(Icon::Size);
+			applyToggleStyle(penBaseBtn, !isPenMarker && !isPenSoft);
+			tip->bind(penBaseBtn, Lang::get(c.tipKey ? c.tipKey : L"tool.penDefault"));
+			penBaseBtn->onClick.add([this, refreshPenForms](Ling::Button*) {
+				isPenFade = false;
+				isPenMarker = false;
+				isPenSoft = false;
+				isPenDash = false;
+				if (dashBtn) applyToggleStyle(dashBtn, false);
+				refreshPenForms();
+				if (nestedPanel && nestedPanel->isOpen()
+					&& nestedPanel->kind() == ToolNestedPanel::Kind::PenOpacity)
+					closeNestedPanel();
+				win->onToolStyleChanged();
+			});
+		}
+	}
+	refreshPenForms();
 
 	dashBtn = contentNode->makeChild<Ling::Button>();
 	dashBtn->setText(Icon::Dash);
@@ -539,13 +664,17 @@ void ToolSub::showPenTools()
 
 void ToolSub::showNumberTools()
 {
+	// 同一栏因点击重建时不要再套用初始属性，否则刚选的样式会被默认形态顶回去
+	const bool fresh = (curToolId != L"number" || !hasTools);
 	beginTool(L"number");
 	isNumberFill = true;
 	// 初始属性：默认序号类型（0 数字 / 1 字母 / 2 Emoji）
+	int defaultNum = NumberDigit;
 	{
 		const int form = designInt(L"number", L"form", -1);
-		if (form >= NumberDigit && form <= NumberEmoji) numberStyle = form;
+		if (form >= NumberDigit && form <= NumberEmoji) defaultNum = form;
 	}
+	if (fresh) numberStyle = defaultNum;
 	if (numberStyle < NumberDigit || numberStyle > NumberEmoji) numberStyle = NumberDigit;
 	if (serialEmoji.empty()) serialEmoji = SerialEmoji::Default;
 
@@ -590,13 +719,36 @@ void ToolSub::showMosaicTools()
 {
 	beginTool(L"mosaic");
 	// 初始属性：0 马赛克 / 1 模糊
+	int defaultMosaic = 0;
 	{
 		const int form = designInt(L"mosaic", L"form", -1);
-		if (form >= 0) isMosaicBlur = (form == 1);
+		if (form >= 0) {
+			defaultMosaic = (form == 1) ? 1 : 0;
+			isMosaicBlur = (defaultMosaic == 1);
+		}
 	}
 	initSize(1, false, true);
-	// 模糊：复合图标 = 模糊2 全不透明 + 模糊1 @25%
-	overlayBtn = makeOverlayToggleBtn(Icon::Blur2, Icon::Blur, 0.25f, &isMosaicBlur, L"tool.blur");
+	// 属性栏只放非默认形态；默认形态已经在工具栏按钮上
+	for (const auto& c : orderedFormsFor(L"mosaic", defaultMosaic)) {
+		if (c.value == 1) {
+			// 模糊：复合图标 = 模糊2 全不透明 + 模糊1 @25%
+			overlayBtn = makeOverlayToggleBtn(Icon::Blur2, Icon::Blur, 0.25f, &isMosaicBlur, L"tool.blur");
+		}
+		else {
+			overlayBtn = contentNode->makeChild<Ling::Button>();
+			overlayBtn->setText(c.glyph ? c.glyph : Icon::Mosaic);
+			styleToolbarBtn(overlayBtn);
+			overlayBtn->setFontFamily(Icon::Family);
+			overlayBtn->setFontSize(Icon::Size);
+			applyToggleStyle(overlayBtn, !isMosaicBlur);
+			tip->bind(overlayBtn, Lang::get(c.tipKey ? c.tipKey : L"tool.mosaic"));
+			overlayBtn->onClick.add([this](Ling::Button*) {
+				isMosaicBlur = false;
+				if (overlayBtn) applyToggleStyle(overlayBtn, true);
+				win->onToolStyleChanged();
+			});
+		}
+	}
 	initSlider();
 }
 
@@ -716,14 +868,38 @@ void ToolSub::showHighlightTools()
 {
 	beginTool(L"highlight");
 	// 初始属性：0 矩形 / 1 椭圆；边框开关单独存
+	int defaultHi = 0;
 	{
 		const int form = designInt(L"highlight", L"form", -1);
-		if (form >= 0) isHighlightEllipse = (form == 1);
+		if (form >= 0) {
+			defaultHi = (form == 1) ? 1 : 0;
+			isHighlightEllipse = (form == 1);
+		}
 		const int border = designInt(L"highlight", L"border", -1);
 		if (border >= 0) isHighlightBorder = (border == 1);
 	}
 	initSize(2, true, true);
-	makeToggleBtn(Icon::Ellipse, &isHighlightEllipse, L"tool.highlightEllipse", L"ellipse");
+	// 属性栏只放非默认形态；默认形态已经在工具栏按钮上
+	for (const auto& c : orderedFormsFor(L"highlight", defaultHi)) {
+		if (c.value == 1) {
+			makeToggleBtn(c.glyph ? c.glyph : Icon::Ellipse, &isHighlightEllipse,
+				c.tipKey ? c.tipKey : L"tool.highlightEllipse", L"ellipse");
+		}
+		else {
+			auto* b = contentNode->makeChild<Ling::Button>();
+			b->setText(c.glyph ? c.glyph : Icon::Rect);
+			styleToolbarBtn(b);
+			b->setFontFamily(Icon::Family);
+			b->setFontSize(Icon::Size);
+			applyToggleStyle(b, !isHighlightEllipse);
+			tip->bind(b, Lang::get(c.tipKey ? c.tipKey : L"tool.highlightRect"));
+			b->onClick.add([this, b](Ling::Button*) {
+				isHighlightEllipse = false;
+				applyToggleStyle(b, true);
+				win->onToolStyleChanged();
+			});
+		}
+	}
 	makeToggleBtn(Icon::DashRect, &isHighlightBorder, L"tool.highlightBorder", L"border");
 	initColorTrigger();
 	initSlider();
@@ -1332,26 +1508,36 @@ void ToolSub::applyOverlayToggleStyle(bool selected)
 void ToolSub::makeNumberStyleBtns()
 {
 	numberStyleBtns.clear();
+	numberStyleVals.clear();
 	emojiTrigger = nullptr;
 	numberInput = nullptr;
-	// 默认就是数字序号，属性栏只放字母 / Emoji；再点同一项回到数字
-	auto addStyleBtn = [this](const wchar_t* icon, int style, const wchar_t* tipKey) {
+	int defaultNum = NumberDigit;
+	{
+		const int form = designInt(L"number", L"form", -1);
+		if (form >= NumberDigit && form <= NumberEmoji) defaultNum = form;
+	}
+	// 再点同一项回到默认形态
+	auto addStyleBtn = [this, defaultNum](const wchar_t* icon, int style, const wchar_t* tipKey) {
 		auto btn = contentNode->makeChild<Ling::Button>();
 		btn->setText(icon);
 		styleToolbarBtn(btn);
 		btn->setFontFamily(Icon::Family);
 		btn->setFontSize(Icon::Size);
 		tip->bind(btn, Lang::get(tipKey));
-		btn->onClick.add([this, style](Ling::Button*) {
-			numberStyle = (numberStyle == style) ? NumberDigit : style;
+		btn->onClick.add([this, style, defaultNum](Ling::Button*) {
+			numberStyle = (numberStyle == style) ? defaultNum : style;
 			showNumberTools(); // 重建：Emoji 模式多出表情入口 / 滑条范围
 			win->onToolStyleChanged();
 		});
 		numberStyleBtns.push_back(btn);
+		numberStyleVals.push_back(style);
 	};
 
-	addStyleBtn(Icon::NumberLetter, NumberLetter, L"tool.numberLetter");
-	// 输入框位置：数字 / 字母模式放序号输入框；Emoji 模式换成表情入口（位于 Emoji 按钮左侧）
+	// 形态顺序跟随「初始属性」；默认形态已在工具栏，属性栏里不再重复
+	for (const auto& c : orderedFormsFor(L"number", defaultNum)) {
+		addStyleBtn(c.glyph ? c.glyph : Icon::Number, c.value,
+			c.tipKey ? c.tipKey : L"tool.numberDefault");
+	}
 	if (numberStyle == NumberEmoji) {
 		emojiTrigger = contentNode->makeChild<Ling::Button>();
 		styleToolbarBtn(emojiTrigger);
@@ -1369,7 +1555,6 @@ void ToolSub::makeNumberStyleBtns()
 		});
 	}
 	else buildNumberInput();
-	addStyleBtn(Icon::NumberEmoji, NumberEmoji, L"tool.numberEmoji");
 	refreshNumberStyleBtns();
 }
 
@@ -1527,10 +1712,8 @@ void ToolSub::updateEmojiTriggerGlyph()
 
 void ToolSub::refreshNumberStyleBtns()
 {
-	const int styles[] = { NumberLetter, NumberEmoji };
-	for (size_t i = 0; i < numberStyleBtns.size() && i < 2; i++) {
-		applyToggleStyle(numberStyleBtns[i], numberStyle == styles[i]);
-	}
+	for (size_t i = 0; i < numberStyleBtns.size() && i < numberStyleVals.size(); i++)
+		applyToggleStyle(numberStyleBtns[i], numberStyle == numberStyleVals[i]);
 	if (emojiTrigger) {
 		const bool on = nestedPanel && nestedPanel->isOpen()
 			&& nestedPanel->kind() == ToolNestedPanel::Kind::Emoji;
@@ -1619,11 +1802,13 @@ void ToolSub::makeArrowHeadBtn(const wchar_t* icon, int style, const wchar_t* ti
 		win->onToolStyleChanged();
 	});
 	arrowHeadBtns.push_back(btn);
+	arrowHeadStyles.push_back(style);
 }
 
 void ToolSub::makeArrowHeadBtns()
 {
 	arrowHeadBtns.clear();
+	arrowHeadStyles.clear();
 	makeArrowHeadBtn(Icon::ArrowBig, ArrowBig, L"tool.arrowBig");
 	makeArrowHeadBtn(Icon::FunArrow, ArrowFun, L"tool.arrowFun");
 	makeArrowHeadBtn(Icon::ArrowBoth, ArrowBoth, L"tool.arrowBoth");
@@ -1633,10 +1818,8 @@ void ToolSub::makeArrowHeadBtns()
 
 void ToolSub::refreshArrowHeadBtns()
 {
-	const int styles[] = { ArrowBig, ArrowFun, ArrowBoth, ArrowAnnot };
-	for (size_t i = 0; i < arrowHeadBtns.size() && i < ARRAYSIZE(styles); i++) {
-		applyToggleStyle(arrowHeadBtns[i], arrowHead == styles[i]);
-	}
+	for (size_t i = 0; i < arrowHeadBtns.size() && i < arrowHeadStyles.size(); i++)
+		applyToggleStyle(arrowHeadBtns[i], arrowHead == arrowHeadStyles[i]);
 }
 
 void ToolSub::loadStrokeSlider(const std::wstring& toolId)
@@ -1785,6 +1968,7 @@ void ToolSub::hideTools()
 	hasTools = false;
 	numberStyleBtns.clear();
 	arrowHeadBtns.clear();
+	arrowHeadStyles.clear();
 	lineKindBtns.clear();
 	bubbleKindBtn = nullptr;
 	angleKindBtn = nullptr;

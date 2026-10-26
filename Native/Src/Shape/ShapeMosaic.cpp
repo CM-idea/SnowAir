@@ -64,11 +64,7 @@ void ShapeMosaic::paint(ID2D1DeviceContext* ctx)
 	auto geo = makeAreaGeometry(false);
 	if (!geo) return;
 
-	if (!mosaicBrush) {
-		// 占位色块：直接填旋转后的几何，跟着选框一起转/移
-		ctx->FillGeometry(geo.Get(), brush.Get());
-		return;
-	}
+	if (!mosaicBrush) return;   // 效果还没生成：临时提示由控件层 paintHint 画，不算标注内容
 
 	// 只旋转滤镜窗口（裁剪），贴图像素保持轴对齐，不跟着拧
 	ComPtr<ID2D1Layer> layer;
@@ -82,6 +78,16 @@ void ShapeMosaic::paint(ID2D1DeviceContext* ctx)
 	const auto fill = (mosaicSample.right > mosaicSample.left) ? mosaicSample : rect;
 	ctx->FillRectangle(fill, mosaicBrush.Get());
 	if (layer) ctx->PopLayer();
+}
+
+void ShapeMosaic::paintHint(ID2D1DeviceContext* ctx)
+{
+	// 效果还没生成（新建 / 拖动中）才画临时范围提示：属于控件层，不是标注内容。
+	// 只画半透明绿；它画在标注之上，所以不会被下面的模糊/马赛克处理到。
+	if (!ctx || mosaicBrush) return;
+	auto geo = makeAreaGeometry(false);
+	if (!geo) return;
+	ctx->FillGeometry(geo.Get(), brush.Get());
 }
 
 void ShapeMosaic::onGeometryChanged()

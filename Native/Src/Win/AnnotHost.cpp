@@ -80,14 +80,6 @@ void AnnotHost::refreshFiltersAbove(ShapeBase* changed)
 	}
 }
 
-void AnnotHost::refreshFiltersAboveThrottled(ShapeBase* changed)
-{
-	const ULONGLONG now = GetTickCount64();
-	if (now - lastFilterRefreshMs < 66) return; // 拖动中约 15fps，抬手时会精确重算
-	lastFilterRefreshMs = now;
-	refreshFiltersAbove(changed);
-}
-
 void AnnotHost::setMainBarAnchorId(const std::wstring& id)
 {
 	if (toolCap) toolCap->setAnchorId(id);
@@ -374,6 +366,8 @@ void AnnotHost::paintShapes(ID2D1DeviceContext* ctx, bool withChrome, bool skipE
 	}
 	ShapeHighlight::paintMerged(ctx, this, highlights);
 	if (!withChrome) return;
+	// 临时范围提示属于控件层：画在标注之上，导出（withChrome=false）时不带
+	if (shapeHover) shapeHover->paintHint(ctx);
 	// 共用：仅「已选中且非落笔、非文字编辑」时画控点
 	if (shouldPaintAnnotHandles())
 		shapeHover->paintDragger(ctx);
@@ -1343,8 +1337,8 @@ void AnnotHost::annotMove(POINT pos)
 			// 角度：ShapeLine::mouseDrag 里已经调 updateAngleLabel()
 			// 拖动中也要刷起点提示点（连线时它跟着箭头起点沿边缘滑）
 			updateLinkHints(imgPos, tool);
-			// 拖的若是下层标注，上层盖着的模糊/马赛克要跟着重新取样（实时，限流）
-			refreshFiltersAboveThrottled(shapeHover);
+			// 拖动中不重算上层的模糊/马赛克：每次重算都要回读像素 + 模糊，层数一多会明显卡顿。
+			// 抬手时（mouseUp）会有一次精确重算，拖动期间上层保持上一帧即可。
 			refresh();
 			applyAnnotCursor();
 		}

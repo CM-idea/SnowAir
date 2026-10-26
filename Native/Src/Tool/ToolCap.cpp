@@ -480,7 +480,15 @@ void ToolCap::updateSlotButton(const std::wstring& slot)
 		if (!subs) break;
 		for (const auto& item : *subs) {
 			if (item.id != eff) continue;
-			b->setText(item.icon);
+			// 图标跟着「初始属性」的默认形态走；复合图标由 setSlotIcon 统一铺（会先清掉旧叠层）
+			std::wstring icon = item.icon ? item.icon : L"";
+			const auto* def = ToolInitial::find(ToolInitial::defIdOfSlot(item.id));
+			if (def) {
+				const std::wstring formIcon = ToolInitial::iconForSlot(item.id);
+				if (!formIcon.empty()) icon = formIcon;
+			}
+			setSlotIcon(b, item.id, icon,
+				curId == slot ? ToolbarTheme::iconActive : ToolbarTheme::iconNormal);
 			if (item.tipKey) bindTip(b, Lang::get(item.tipKey), item.id);
 			break;
 		}
@@ -823,16 +831,12 @@ void ToolCap::onCreated()
 			// 唯一例外：马赛克切到「模糊」时图标与文案一起变成模糊）
 			const std::wstring storeId = storeIdOfRuntime(id);
 			const std::wstring formIcon = ToolInitial::iconForSlot(storeId);
-			btn->setText(formIcon.empty() ? btnCodes[i] : formIcon);
+			setSlotIcon(btn, storeId, formIcon.empty() ? std::wstring(btnCodes[i]) : formIcon,
+				ToolbarTheme::iconNormal);
 			styleToolbarBtn(btn);
 			btn->setFontFamily(Icon::Family);
 			btn->setFontSize(Icon::Size);
 			applyActionColors(btn);
-			if (ToolInitial::isMosaicBlur() && ToolInitial::defIdOfSlot(storeId) == L"mosaic") {
-				btn->setText(L"");
-				ToolIcon::overlayGlyph(btn, Icon::Blur2, Icon::Blur, Icon::Size,
-					ToolbarTheme::iconNormal, ToolIcon::withAlpha(ToolbarTheme::iconNormal, 0x40));
-			}
 			btn->onClick.add([this](Ling::Button* btn) { onClick(btn); });
 			if (winPin && id == L"close") {
 				tip->bind(btn, Lang::get(L"pin.cancelEdit"));
@@ -1080,6 +1084,40 @@ void ToolCap::bindTip(Ling::Button* btn, const std::wstring& text, const std::ws
 	tip->bind(btn, full);
 }
 
+// 换槽位图标：只摘掉我们自己加的复合图标叠层，Button 自带的文字子节点不能动
+void ToolCap::setSlotIcon(Ling::Button* btn, const std::wstring& toolId,
+	const std::wstring& fallback, uint32_t color)
+{
+	if (!btn) return;
+	for (auto it = slotOverlays.begin(); it != slotOverlays.end(); ++it) {
+		if (it->first != btn) continue;
+		if (it->second) btn->removeChild(it->second);
+		slotOverlays.erase(it);
+		break;
+	}
+	const auto* def = ToolInitial::find(ToolInitial::defIdOfSlot(toolId));
+	const auto* form = def ? ToolInitial::currentForm(*def) : nullptr;
+	if (form && form->overlayGlyph) {
+		btn->setText(L"");
+		if (auto* stack = ToolIcon::overlayGlyph(btn, form->glyph, form->overlayGlyph, Icon::Size,
+			color, ToolIcon::withAlpha(color, 0x40u)))
+			slotOverlays.push_back({ btn, stack });
+	}
+	else {
+		btn->setText(fallback);
+	}
+}
+
+// 复合图标跟着选中态换色；普通图标的颜色由按钮文字自己跟
+void ToolCap::restyleSlotOverlay(Ling::Button* btn, const std::wstring& toolId, uint32_t color)
+{
+	if (!btn) return;
+	const auto* def = ToolInitial::find(ToolInitial::defIdOfSlot(toolId));
+	const auto* form = def ? ToolInitial::currentForm(*def) : nullptr;
+	if (!form || !form->overlayGlyph) return;
+	setSlotIcon(btn, toolId, L"", color);
+}
+
 void ToolCap::styleToolbarBtn(Ling::Button* btn)
 {
 	const float inner{ btnSize - hoverInset * 2.f };
@@ -1114,6 +1152,7 @@ void ToolCap::applyNormalStyle(Ling::Button* btn)
 	btn->setBg(0);
 	btn->setHoverBg(ToolbarTheme::hoverBg);
 	applyActionColors(btn);
+	restyleSlotOverlay(btn, resolveToolId(btn->id), ToolbarTheme::iconNormal);
 }
 
 void ToolCap::applySelectedStyle(Ling::Button* btn)
@@ -1122,6 +1161,7 @@ void ToolCap::applySelectedStyle(Ling::Button* btn)
 	btn->setHoverBg(ToolbarTheme::hoverBg);
 	btn->setColor(ToolbarTheme::iconActive);      // 选中（主题色槽 4：accent）
 	btn->setHoverColor(ToolbarTheme::iconActive);
+	restyleSlotOverlay(btn, resolveToolId(btn->id), ToolbarTheme::iconActive);
 }
 
 void ToolCap::cancelSelect(bool dropFilters)
