@@ -889,7 +889,7 @@ void ToolOcr::rebuildEditors()
 				if (c >= 0xD800 && c <= 0xDBFF && k + 1 < text.size()) stacked += text[++k];   // 代理对
 				++cells;
 			}
-			// 字号按**列宽**定（与参考仓库一致：字大小跟着线宽走，不跟列高走），
+			// 字号按**列宽**定（字大小跟着线宽走，不跟列高走），
 			// 再用 boxH/n 兜底防止字多放不下。系数取 0.70：识别框比字形宽 0.15×列宽
 			// （见 OcrEngine 的外扩），0.75 算出来会比原图略大一圈。
 			const float cell = std::min(boxW * 0.70f, boxH / (float)std::max(1, cells));

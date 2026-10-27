@@ -40,6 +40,23 @@ std::array<int, 3> Util::getAppVersion()
 	return result;
 }
 
+std::wstring Util::parseGithubReleaseTag(const std::wstring& atom)
+{
+	// 只取第一个 <entry> 里的 releases/tag/ 链接，避免把正文里的旧版本链接当成最新版
+	const std::wstring key = L"releases/tag/";
+	auto entry = atom.find(L"<entry");
+	auto start = entry == std::wstring::npos ? 0 : entry;
+	auto p = atom.find(key, start);
+	if (p == std::wstring::npos) return {};
+	p += key.size();
+	auto e = atom.find_first_of(L"\"'<", p);
+	if (e == std::wstring::npos) e = atom.size();
+	std::wstring tag = atom.substr(p, e - p);
+	auto cut = tag.find_first_of(L"?#");
+	if (cut != std::wstring::npos) tag.resize(cut);
+	return tag;
+}
+
 bool Util::isElevated()
 {
 	HANDLE token = nullptr;
@@ -882,6 +899,9 @@ bool Util::renderSvgText(const std::wstring& svg, int maxDim, int& w, int& h, st
 	if (FAILED(readback->Map(D2D1_MAP_OPTIONS_READ, &map))) return false;
 	pixels.resize((size_t)ow * oh * 4);
 	bool anyInk = false;
+	// 同时算实际墨迹的包围盒：SVG 的 viewBox / root width-height 与实际图形常不重合，
+	// 直接整张画布给卡片时，图标会落在缩略图的左上/任意位置；按墨迹裁紧后由图框居中
+	int inkL = ow, inkT = oh, inkR = -1, inkB = -1;
 	for (int y = 0; y < oh; ++y) {
 		BYTE* dst = pixels.data() + (size_t)y * ow * 4;
 		memcpy(dst, map.bits + (size_t)y * map.pitch, (size_t)ow * 4);
@@ -890,6 +910,10 @@ bool Util::renderSvgText(const std::wstring& svg, int maxDim, int& w, int& h, st
 			const int a = dst[x * 4 + 3];
 			if (a > 0) {
 				anyInk = true;
+				if (x < inkL) inkL = x;
+				if (x > inkR) inkR = x;
+				if (y < inkT) inkT = y;
+				if (y > inkB) inkB = y;
 				if (a < 255) {
 					for (int c = 0; c < 3; ++c)
 						dst[x * 4 + c] = (BYTE)(std::min)(255, (int)dst[x * 4 + c] * 255 / a);
@@ -900,8 +924,20 @@ bool Util::renderSvgText(const std::wstring& svg, int maxDim, int& w, int& h, st
 	readback->Unmap();
 	// 什么都没画出来（不支持的语法 / 空文档）当失败处理，让调用方回退成文字
 	if (!anyInk) return false;
-	w = ow;
-	h = oh;
+	// 裁掉四周透明留白：卡片里 ImageBox 会把位图居中，裁紧后图标就真正居中了
+	const int cw = inkR - inkL + 1;
+	const int ch = inkB - inkT + 1;
+	if (cw != ow || ch != oh) {
+		std::vector<BYTE> cropped((size_t)cw * ch * 4);
+		for (int y = 0; y < ch; ++y) {
+			memcpy(cropped.data() + (size_t)y * cw * 4,
+				pixels.data() + (size_t)(inkT + y) * ow * 4 + (size_t)inkL * 4,
+				(size_t)cw * 4);
+		}
+		pixels.swap(cropped);
+	}
+	w = cw;
+	h = ch;
 	return true;
 }
 

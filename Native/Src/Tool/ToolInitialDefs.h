@@ -40,13 +40,14 @@ namespace ToolInitial {
 		{ 2, Icon::ArrowBoth, L"tool.arrowBoth",    true },   // ArrowBoth
 		{ 3, Icon::AnnotBoth, L"tool.arrowAnnot",   true },   // ArrowAnnot
 	};
-	// 标注：默认形态是「直线」（表首项即未设置时的默认），其余按属性栏顺序：气泡 / 角度 / 波浪线 / 尺寸
+	// 标注：默认形态是「尺寸」（表首项），其余：气泡 / 爆裂 / 角度 / 波浪线。
+	// 直线不在标注里：它是箭头属性栏的「线段」临时开关。
 	inline const std::vector<InitialChoice> kLineForms = {
-		{ 0, Icon::Line,      L"tool.lineDefault", true },   // LineStraight
-		{ 2, Icon::Bubble,    L"tool.bubble",      true },   // LineBubble
-		{ 3, Icon::Angle,     L"tool.angleAnnot",  true },   // LineAngle
-		{ 1, Icon::WaveLine,  L"tool.waveLine",    true },   // LineWave
-		{ 4, Icon::AnnotBoth, L"tool.dimension",   true },   // LineDimension
+		{ 4, Icon::Dimension,      L"tool.dimension",   true },   // LineDimension
+		{ 2, Icon::Bubble,         L"tool.bubble",      true },   // LineBubble
+		{ 5, Icon::ExplosionCloud, L"tool.burst",       true },   // LineBurst
+		{ 3, Icon::Angle,          L"tool.angleAnnot",  true },   // LineAngle
+		{ 1, Icon::WaveLine,       L"tool.waveLine",    true },   // LineWave
 	};
 	inline const std::vector<InitialChoice> kRectForms = {
 		{ 0, Icon::Rect,    L"tool.rectDefault", true },   // 方形

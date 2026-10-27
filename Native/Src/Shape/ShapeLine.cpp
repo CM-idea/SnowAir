@@ -267,11 +267,15 @@ ComPtr<ID2D1PathGeometry> ShapeLine::buildWavePath()
 	const float pi = 3.14159265358979323846f;
 	// 柔和但不至于太平：幅度略收于默认值，半波长拉长（波峰更圆润、起伏不锯齿）
 	const float amp = std::min(strokeWidth * 1.2f, len * 0.13f);
-	// 「全波浪」：按整数个半波铺满整段，起止都落在零相位（端点不动），中间始终是满幅
-	const float wantHalf = std::max(24.f * win->dpi, strokeWidth * 4.5f);
-	const int halfPeriods = std::max(1, (int)std::lround(len / wantHalf));
+	// 固定波长 + 两端平滑收幅：不再把"半波数量"按长度取整。取整会让波形在拖拽过程中
+	// 不断重组（多/少半个波），视觉上就是抖动。固定波长后波峰间距稳定，长度变化只连续拉伸。
+	const float halfWave = std::max(24.f * win->dpi, strokeWidth * 4.5f);
+	const float period = halfWave * 2.f;
 	// 采样密一点：小幅度波形靠折线也要看不出棱角
-	const int steps = std::max(12, (int)(len / (1.5f * win->dpi)));
+	const int steps = std::max(24, (int)(len / std::max(1.f, period / 24.f)));
+	// 只在两端很短的一段做平滑收幅，中间保持等幅；不要把整条线做成
+	// "两头平、中间鼓"的包络——那样看起来不像均匀波浪。
+	const float ramp = std::min(len * 0.18f, halfWave * 0.5f);
 	ComPtr<ID2D1PathGeometry> path;
 	Ling::D2D::get()->d2dFactory->CreatePathGeometry(path.GetAddressOf());
 	if (!path) return nullptr;
@@ -280,7 +284,13 @@ ComPtr<ID2D1PathGeometry> ShapeLine::buildWavePath()
 	sink->BeginFigure(a, D2D1_FIGURE_BEGIN_HOLLOW);
 	for (int i = 1; i <= steps; ++i) {
 		const float s = len * (float)i / (float)steps;
-		const float off = amp * std::sin(pi * (float)halfPeriods * s / len);
+		float envelope = 1.f;
+		if (ramp > 0.5f) {
+			const float edge = std::min(s, len - s);
+			const float t = std::clamp(edge / ramp, 0.f, 1.f);
+			envelope = t * t * (3.f - 2.f * t);   // smoothstep：端点 0，进入主体后 1
+		}
+		const float off = amp * std::sin(2.f * pi * s / period) * envelope;
 		sink->AddLine(D2D1::Point2F(a.x + ux * s + nx * off, a.y + uy * s + ny * off));
 	}
 	sink->EndFigure(D2D1_FIGURE_END_OPEN);

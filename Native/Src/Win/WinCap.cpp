@@ -257,6 +257,7 @@ WinCap::WinCap() : AnnotHost()
     onMouseMove.add([this](POINT pos) { this->onMove(pos); });
     onMouseUp.add([this](POINT pos, bool isRight) { this->onUp(pos, isRight); });
     onKeyDown.add([this](UINT key) { this->onKey(key); });
+    onChar.add([this](UINT ch) { annotChar(ch); });
     onTimer.add([this](UINT id) {
 		// 未框选时 Ctrl+C 只取色：提示显示完后退出截图（期间用户开始框选/按下则取消）
 		if (id == colorCopyCloseTimerId) {
@@ -1498,6 +1499,14 @@ void WinCap::layout()
     }
     // 演示画布：白板背景先于标注绘制（PPT 模式不画，露出下面放映窗口）
     if (demoMode) paintDemoBoard(ctx);
+    // 压暗先画：标注绘制会切换 transform/clip（尤其文字/滤镜），若压暗后画会被这些状态裁掉。
+    // 标注阶段压暗必须常驻，不再受 stage/isPress 的悬停分区影响。
+    const bool predim = annotLive && !demoMode && !chrome_ && stage != CapStage::Long;
+    if (predim && cutMask) {
+        const bool recording = pendingRecord || stage == CapStage::Video;
+        cutMask->showDim = !recording;
+        cutMask->paintDimLayer(ctx);
+    }
     // 标注在底图上、暗色遮罩下：选区外被压暗，洞内正常显示（与「全屏纸+导出裁切」一致）
     // 长图选区大图由 CapLong 后画，标注需叠在其上
     if (annotLive || (stage == CapStage::Video && hasAnnotShapes())) {
@@ -1523,7 +1532,7 @@ void WinCap::layout()
 			&& (stage == CapStage::Adjust || videoCanAdjust());
 		cutMask->showBorder = true;
         cutMask->drawQrcodeFill = (toolQrcode != nullptr);
-        cutMask->paint(ctx);
+        cutMask->paint(ctx, !predim);
     }
     if (capLong) capLong->paint(ctx);
     if (stage == CapStage::Long && (annotLive || hasAnnotShapes()) && capLong) {
@@ -2010,7 +2019,7 @@ unsigned WinCap::currentSurface() const
 // 硬编码分支一致；该组在设置页为只读行 —— 不可改绑，但照旧派发。
 bool WinCap::commandKey(UINT key)
 {
-	// 正在编辑标注文字：键盘归输入框，任何命令键都不许抢
+	// 正在编辑标注文字：键盘交给文字编辑器，命令键不得抢占
 	if (editingText) return false;
 	const std::wstring id = CommandKeys::actionForKey(key, currentSurface());
 	return id.empty() ? false : runCommand(id);
@@ -2130,7 +2139,7 @@ bool WinCap::runCommand(const std::wstring& id)
 	if (id == L"cmd_undo") { if (annotLive && history) history->undo(); return true; }
 	if (id == L"cmd_redo") { if (annotLive && history) history->redo(); return true; }
 	// 下面两条工具栏上**没有对应按钮**，只有命令键能触发
-	if (id == L"cmd_clear") { if (history) history->clearAll(); return true; }
+	if (id == L"cmd_clear") { clearAllShapes(); return true; }
 	if (id == L"cmd_toggle_toolbar") {
 		toolHidden = !toolHidden;
 		if (toolCap) { if (toolHidden) toolCap->hide(); else toolCap->show(); }
@@ -2179,6 +2188,8 @@ void WinCap::syncGlobalCommandKeys(unsigned surface)
 
 void WinCap::onKey(UINT key)
 {
+    // 自带文字编辑：所有按键先给标注文字（字符走 onChar），不让命令表/选区抢
+    if (editingText) { annotKey(key); return; }
     // 演示画布 + 白板：PgUp/PgDn 翻页（多图）或转发给 PPT 放映
     if (demoMode && demoBoardActive() && (key == VK_PRIOR || key == VK_NEXT)) {
         demoBoardStepPage(key == VK_NEXT ? 1 : -1);
@@ -2384,6 +2395,15 @@ void WinCap::onWheel(POINT pos, float space)
 
 	if (annotLive) {
 		const auto img = toImgPos(pos);
+		// 还没二次选中、但刚画完的标注：滚轮改它的粗细（角数/边数只走滑条）
+		if (!shapeHover && !editingText) {
+			if (auto* s = liveStyleShape(); s && !s->isViewportFilter()) {
+				s->mouseWheel((float)img.x, (float)img.y,
+					dir > 0 ? (short)WHEEL_DELTA : (short)-WHEEL_DELTA);
+				refreshFiltersAbove(s);
+				return;
+			}
+		}
 		// 单选标注：改该标注粗细
 		if (shapeHover && !shapeHover->isViewportFilter()) {
 			shapeHover->mouseWheel((float)img.x, (float)img.y,

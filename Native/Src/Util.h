@@ -61,6 +61,9 @@ public:
 	// （自升级拷贝、重新构建等），同一进程里先后两次调用就会拿到不同的值，
 	// 表现为设置页左下角版本号对、而「关于」页（每次打开都重新读）对不上。
 	static std::array<int, 3> getAppVersion();
+	// GitHub Releases Atom feed 里提取最新 tag（如 v0.1.12-lite）。
+	// Atom 不受未认证 API 的 60 次/小时限流影响。
+	static std::wstring parseGithubReleaseTag(const std::wstring& atom);
 
 	// —— 管理员 / 提权判定 ——
 	// 当前登录账户是否为内置 Administrator（域内 SID 的 RID == 500）。该账户默认不受 UAC 过滤，

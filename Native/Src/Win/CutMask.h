@@ -62,7 +62,10 @@ public:
 	// 才换得过去（见 CapVideo::reachableMonitors）。由宿主注入，且**每次现取**：采集侧一旦在某块屏上
 	// 换失败（混合显卡常见），随后即可把该屏排除，避免选区先移过去再被回退。未注入时一律按可跨屏处理。
 	std::function<bool(const RECT&)> canSwitchToMonitor;
-	void paint(ID2D1DeviceContext* ctx);
+	// withDim=false：只画描边/控点/标签（压暗已提前单独画过，避免被标注绘制状态影响）
+	void paint(ID2D1DeviceContext* ctx, bool withDim = true);
+	// 只画四周压暗，供"先压暗、再画标注"的顺序使用
+	void paintDimLayer(ID2D1DeviceContext* ctx);
 	// 录制期用：只画选框描边/尺寸标签（不画压暗），由"排除捕获"的选框层窗口调用。
 	// borderOutside=true 时描边整条画在选区外侧：桌面复制不认 WDA_EXCLUDEFROMCAPTURE，
 	// 画在里侧的描边会被录进视频。

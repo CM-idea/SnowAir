@@ -126,6 +126,7 @@ WinPin::WinPin(int x, int y, int w, int h, const std::vector<BYTE>* data, const 
 	});
 	onTimer.add([this](UINT id) { this->onTimerCB(id); });
 	onKeyDown.add([this](UINT key) { this->onKey(key); });
+	onChar.add([this](UINT ch) { annotChar(ch); });
 	// 点击/激活会把贴图抬到置顶组最前，识别浮层就被压住了（看起来像"点了空白就只剩原图"）：
 	// 激活后立刻把浮层抬回来。
 	onFocus.add([this]() { this->raiseOcrPanel(); });

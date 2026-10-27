@@ -17,6 +17,15 @@ public:
 	virtual void forwardKey(UINT key);
 	Ling::TextBox* getTextBox();
 	void setEditingText(ShapeText* shape);
+	// 属性滑条实时作用的形状：优先二次选中的；否则是刚画完、且仍属于当前工具的标注
+	ShapeBase* liveStyleShape();
+	// 新建文字气泡：等这次 mouseUp/annotUp 整条事件走完，再进文本编辑（避免输入框抢在
+	// 形状这一帧提交前被 focus/合成，盖住标注和四周遮罩）
+	void requestEditText(ShapeText* shape);
+	// 自带文字编辑器：插入符定时刷新 + 字符/按键输入（不经过 TextBox 画布）
+	void beginTextEdit();
+	void endTextEdit();
+	void annotChar(UINT ch);
 	void onToolStyleChanged();
 	// 贴图「画面不透明度」（百分比）。仅 WinPin 有意义；ToolSub 的「透明度」属性栏通过它读写。
 	// 基类默认无操作，非贴图宿主（截图等）调用不会有效果。
@@ -26,7 +35,10 @@ public:
 	// changed 传 nullptr 表示"全部滤镜都重算"。z 序后面的才是盖在上面的。
 	void refreshFiltersAbove(ShapeBase* changed);
 	void syncViewportFilters();
-	void setSizePreviewHold(bool hold);
+	// shapePreview：预览形状本身（多边形边数、星形角数、圆角），否则预览笔迹粗细
+	void setSizePreviewHold(bool hold, bool shapePreview = false);
+	// 二次选中了"当前工具"的标注：改滑条会直接体现在本体上，不再画额外的画布预览
+	bool sizePreviewSuppressed() const;
 	// shapePreview：预览形状本身（多边形边数、星形角数、圆角），否则预览笔迹粗细
 	void pulseSizePreview(bool shapePreview = false);
 	bool hasSelectedAnnot() const;
@@ -87,6 +99,8 @@ public:
 	std::unique_ptr<ToolSub> toolSub;
 	ShapeBase* shapeHover{ nullptr };
 	ShapeBase* newShape{ nullptr };
+	// 刚画完的标注：滑条（角数/边数/圆角）仍可继续作用在它上面
+	ShapeBase* lastCreatedShape_{ nullptr };
 	// 角度三点式：基线画完后等第三点的形状（下一次点击/拖拽继续给它）
 	ShapeLine* pendingAngle{ nullptr };
 	// 按下后锁定的控点索引；拖动全程强制使用，避免重探命中把旋转/缩放打断成移动
@@ -136,6 +150,7 @@ protected:
 protected:
 	Ling::TextBox* textBox{ nullptr };
 	ShapeText* editingText{ nullptr };
+	ShapeText* pendingEditText{ nullptr };   // 等 213 定时器到点再进编辑
 	bool annotMouseDown{ false };
 	bool prevPressCreatedShape{ false };
 	bool sizePreviewHold{ false };

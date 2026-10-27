@@ -262,8 +262,10 @@ void AnnotHost::clearAllShapes(bool keepBackground)
 	annotDragIndex = -1;
 	hasDragged = false;
 	newShape = nullptr;
+	pendingEditText = nullptr;
 	pendingAngle = nullptr;
 	shapeHover = nullptr;
+	lastCreatedShape_ = nullptr;
 	linkBtn = nullptr;        // 连线叉指向的 shape 也要先归零，别留悬垂指针
 	linkHoverTarget = nullptr;
 	linkPressTarget = nullptr;
@@ -286,6 +288,27 @@ void AnnotHost::clearAllShapes(bool keepBackground)
 bool AnnotHost::hasSelectedAnnot() const
 {
 	return shapeHover && !shapeHover->isUndo && !shapeHover->isViewportFilter();
+}
+
+ShapeBase* AnnotHost::liveStyleShape()
+{
+	if (shapeHover && !shapeHover->isUndo && !shapeHover->isViewportFilter())
+		return shapeHover;
+	if (!lastCreatedShape_ || !history) {
+		lastCreatedShape_ = nullptr;
+		return nullptr;
+	}
+	// 刚画完的形状可能已被撤销/删除：先在历史里确认指针仍有效，再判断是否仍属于当前工具
+	bool alive = false;
+	for (auto& s : history->shapes) {
+		if (s.get() == lastCreatedShape_) { alive = true; break; }
+	}
+	if (!alive || lastCreatedShape_->isUndo
+		|| toolIdOfShape(lastCreatedShape_) != getCurToolId()) {
+		lastCreatedShape_ = nullptr;
+		return nullptr;
+	}
+	return lastCreatedShape_;
 }
 
 std::wstring AnnotHost::toolIdOfShape(ShapeBase* s)
@@ -690,6 +713,34 @@ void AnnotHost::setEditingText(ShapeText* shape)
 	editingText = shape;
 }
 
+void AnnotHost::requestEditText(ShapeText* shape)
+{
+	pendingEditText = shape;
+	// 1ms：排在当前 mouseUp/annotUp 消息之后，让新建形状先按普通标注完成这一帧的绘制
+	setTimer(1, 213);
+}
+
+void AnnotHost::beginTextEdit()
+{
+	// 插入符闪烁：定时刷新画布
+	setTimer(500, 212);
+}
+
+void AnnotHost::endTextEdit()
+{
+	killTimer(212);
+}
+
+void AnnotHost::annotChar(UINT ch)
+{
+	if (!editingText) return;
+	// WM_CHAR 已经过键盘布局/IME 转换；控制字符由 annotKey 处理
+	if (ch >= 32 && ch != 0x7F) {
+		const wchar_t buf[2]{ (wchar_t)ch, 0 };
+		editingText->insertText(buf);
+	}
+}
+
 void AnnotHost::syncViewportFilters()
 {
 	ensureHistory();
@@ -835,11 +886,25 @@ void AnnotHost::applyAnnotCursor()
 	applyToolDrawCursor();
 }
 
-void AnnotHost::setSizePreviewHold(bool hold)
+void AnnotHost::setSizePreviewHold(bool hold, bool shapePreview)
 {
+	if (hold) {
+		const bool kindChanged = (sizePreviewShape != shapePreview);
+		sizePreviewShape = shapePreview;
+		if (sizePreviewHold && kindChanged) refresh(); // 两个属性栏之间移动时预览类型要当场切换
+	}
 	if (sizePreviewHold == hold) return;
 	sizePreviewHold = hold;
 	refresh();
+}
+
+// 二次选中"当前工具"的标注时，滑条/滚轮改的就是本体（粗细分、边数、圆角、字号…），
+// 画布上再画一个独立预览是多余的 —— 统一在这里判定，主栏与二级栏共用
+bool AnnotHost::sizePreviewSuppressed() const
+{
+	// 气泡/爆裂正在编辑文字时，滚轮/滑条改的是它自己的描边，直接看本体即可
+	if (editingText && editingText->isFrame()) return true;
+	return hasSelectedAnnot() && toolIdOfShape(shapeHover) == getCurToolId();
 }
 
 void AnnotHost::pulseSizePreview(bool shapePreview)
@@ -852,6 +917,26 @@ void AnnotHost::pulseSizePreview(bool shapePreview)
 
 void AnnotHost::annotTimer(UINT id)
 {
+	if (id == 212) {
+		if (editingText) {
+			refresh();
+			setTimer(500, 212);
+		}
+		else killTimer(212);
+		return;
+	}
+	if (id == 213) {
+		killTimer(213);
+		ShapeText* s = pendingEditText;
+		pendingEditText = nullptr;
+		if (!s || !history) return;
+		bool alive = false;
+		for (auto& sp : history->shapes) {
+			if (sp.get() == s && !sp->isUndo) { alive = true; break; }
+		}
+		if (alive) s->startEdit();
+		return;
+	}
 	if (id == 210) {
 		killTimer(210);
 		sizePreviewPulseUntil = 0;
@@ -897,6 +982,8 @@ void AnnotHost::paintSizePreview(ID2D1DeviceContext* ctx)
 	if (id.empty() || id == L"eraser" || id == L"mosaic" || id == L"patina"
 		|| id == L"watermark" || id == L"highlight" || id == L"number"
 		|| id == L"opacity") return;
+	// 二次选中本工具的标注：变化直接出现在本体上，不再叠预览
+	if (sizePreviewSuppressed()) return;
 
 	float cx = 0.f, cy = 0.f, half = 40.f;
 	if (!sizePreviewOrigin(cx, cy, half)) return;
@@ -938,22 +1025,42 @@ void AnnotHost::paintSizePreview(ID2D1DeviceContext* ctx)
 		return;
 	}
 
-	// 多边形/星形：只有调整边数、角数、圆角时才画形状本身，
-	// 调粗细仍然用统一的笔迹预览
-	if (id == L"rect" && toolSub->rectKind != ToolSub::RectShape && sizePreviewShape) {
-		const bool star = toolSub->rectKind == ToolSub::StarShape;
-		const int sides = star ? toolSub->starPoints : toolSub->polygonSides;
+	// 矩形系：调整边数、角数、圆角时画形状本身；调粗细仍用统一的笔迹预览
+	if (id == L"rect" && sizePreviewShape) {
+		// 刚画完的星形/多边形也在实时跟着滑条变，画布上不再叠一个重复预览
+		if (auto* live = dynamic_cast<ShapeRect*>(liveStyleShape())) {
+			const int want = toolSub->rectKind == ToolSub::StarShape ? ShapeRect::Star
+				: toolSub->rectKind == ToolSub::PolygonShape ? ShapeRect::Polygon
+				: ShapeRect::Rect;
+			if (live->kind() == want) { pop(); return; }
+		}
+		const float polyStroke = toolSub->getSliderVal();
 		const D2D1_RECT_F pr{ cx - half * 0.86f, cy - half * 0.86f, cx + half * 0.86f, cy + half * 0.86f };
-		auto geo = ShapeRect::buildPolyGeometry(pr,
-			star ? ShapeRect::Star : ShapeRect::Polygon, sides, toolSub->cornerRadius);
-		if (geo) {
-			const float polyStroke = toolSub->getSliderVal();
+		if (toolSub->rectKind == ToolSub::RectShape) {
+			const float rr = toolSub->cornerRadius / 100.f
+				* std::min(pr.right - pr.left, pr.bottom - pr.top) * 0.5f;
+			const auto rounded = D2D1::RoundedRect(pr, rr, rr);
 			if (toolSub->isRectFill) {
-				ctx->FillGeometry(geo.Get(), brush.Get());
+				ctx->FillRoundedRectangle(rounded, brush.Get());
 			}
 			else {
 				auto dash = toolSub->isRectDash ? ShapeRect::makeDashStroke(polyStroke) : nullptr;
-				ctx->DrawGeometry(geo.Get(), brush.Get(), polyStroke, dash.Get());
+				ctx->DrawRoundedRectangle(rounded, brush.Get(), polyStroke, dash.Get());
+			}
+		}
+		else {
+			const bool star = toolSub->rectKind == ToolSub::StarShape;
+			const int sides = star ? toolSub->starPoints : toolSub->polygonSides;
+			auto geo = ShapeRect::buildPolyGeometry(pr,
+				star ? ShapeRect::Star : ShapeRect::Polygon, sides, toolSub->cornerRadius);
+			if (geo) {
+				if (toolSub->isRectFill) {
+					ctx->FillGeometry(geo.Get(), brush.Get());
+				}
+				else {
+					auto dash = toolSub->isRectDash ? ShapeRect::makeDashStroke(polyStroke) : nullptr;
+					ctx->DrawGeometry(geo.Get(), brush.Get(), polyStroke, dash.Get());
+				}
 			}
 		}
 		pop();
@@ -1035,12 +1142,12 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 	ensureHistory();
 	editStepTarget = nullptr;
 	editStepBefore.clear();
-	// 编辑中点输入框外只提交退出，同一次点击不点选、不落笔
+	// 编辑中点到插入符以外：先结束编辑，但**不吞掉这次点击** ——
+	// 同一个点击继续去命中其它标注/落笔，不需要用户再点第二次。
 	if (editingText) {
-		if (textBox && textBox->isPosIn(pos)) return true;
-		editingText->finishEdit();
-		clearAnnotSelection();
-		return true;
+		const auto ip = toImgPos(pos);
+		if (editingText->hitCaretArea((float)ip.x, (float)ip.y)) return true;
+		editingText->finishEdit(false);
 	}
 	// finishEdit 可能因失焦先于本事件完成；吞掉紧随其后的点选/新建
 	if (GetTickCount64() < annotSuppressUntil) {
@@ -1294,8 +1401,7 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 	}
 
 	// 文本工具落在线段中间：把文字挂到这条箭头/线段上（之后跟着它移动，见 paintShapes）
-	// 落笔点仍用鼠标位置（普通文字工具就是这么定位的，所见即所得）：
-	// 上一版改成"以线段中点当落笔点"，结果输入框跑到线段上方，反而更糟，回退
+	// 落笔点使用鼠标位置，保持所见即所得
 	shapeHover = history->createShape(tool, imgPos.x, imgPos.y);
 	newShape = shapeHover;
 	// 落笔位置正好在线段中间：给文字开洞（线断在字两边）+ 挂到线上（始终中心对齐、一律横排）
@@ -1307,9 +1413,6 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 			if (auto* a = dynamic_cast<ShapeArrow*>(shaftHost)) { a->shaftMidPoint(mx, my); }
 			else if (auto* l = dynamic_cast<ShapeLine*>(shaftHost)) { l->shaftMidPoint(mx, my); }
 			t->setAttachPose(mx, my);   // 立刻摆正，别等下一帧
-			// createShape 可能已经把编辑开起来了（那时输入框还在鼠标落笔的位置）。
-			// 这一步才是"热区里任意位置落笔，都从线段中间开始输入"：把输入框挪到锚点
-			t->syncEditorGeometry();
 		}
 		textMidHintActive = false;
 		refresh();
@@ -1456,8 +1559,10 @@ void AnnotHost::annotUp(POINT pos, BOOL isRight)
 	}
 
 	// 共用：画完一律不立刻出控点；再次点击才选中（文字编辑靠 editingText，不靠选中态）
-	if (justCreated)
+	if (justCreated) {
+		lastCreatedShape_ = justCreated;
 		shapeHover = nullptr;
+	}
 	refresh();
 	applyAnnotCursor();
 }
@@ -1466,6 +1571,13 @@ void AnnotHost::annotKey(UINT key)
 {
 	if (editingText) {
 		if (key == VK_ESCAPE) editingText->finishEdit();
+		else if (key == VK_BACK) editingText->backspace();
+		else if (key == VK_DELETE) editingText->deleteForward();
+		else if (key == VK_LEFT) editingText->moveCaret(-1);
+		else if (key == VK_RIGHT) editingText->moveCaret(1);
+		else if (key == VK_HOME) editingText->moveCaretTo(false);
+		else if (key == VK_END) editingText->moveCaretTo(true);
+		else if (key == VK_RETURN) editingText->insertText(L"\n");
 		return;
 	}
 	if (!history) return;

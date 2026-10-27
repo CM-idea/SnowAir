@@ -16,8 +16,8 @@ public:
 	void showArrowTools();
 	// 「标注」（原线段）：从箭头属性栏独立出来，只有虚线/圆头/颜色/粗细
 	void showLineTools();
-	// 标注的形态：直线 / 波浪线 / 气泡 / 角度 / 尺寸
-	enum LineKind : int { LineStraight = 0, LineWave = 1, LineBubble = 2, LineAngle = 3, LineDimension = 4 };
+	// 标注的形态：直线 / 波浪线 / 气泡 / 角度 / 尺寸 / 爆裂
+	enum LineKind : int { LineStraight = 0, LineWave = 1, LineBubble = 2, LineAngle = 3, LineDimension = 4, LineBurst = 5 };
 	int lineKind{ LineStraight };
 	// 矩形工具形态：矩形 / 多边形 / 星形（椭圆是单独的 isEllipse 开关）
 	enum RectKind : int { RectShape = 0, PolygonShape = 1, StarShape = 2 };
@@ -226,6 +226,7 @@ private:
 	Ling::Button* fillBtn{ nullptr };
 	Ling::Button* dashBtn{ nullptr };
 	Ling::Button* softBtn{ nullptr };
+	Ling::Button* lineBtn{ nullptr };   // 箭头属性栏的「线段」临时开关
 	Ling::Button* markerBtn{ nullptr };
 	Ling::Button* penBaseBtn{ nullptr };   // 画笔形态默认不是常规笔时，属性栏里的「常规画笔」
 	Ling::Button* roundBtn{ nullptr };

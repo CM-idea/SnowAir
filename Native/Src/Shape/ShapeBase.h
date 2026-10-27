@@ -1,6 +1,7 @@
 #pragma once
 #include <include/Ling.h>
 #include <vector>
+#include <cmath>
 class AnnotHost;
 class ShapeBase
 {
@@ -75,6 +76,29 @@ protected:
 	}
 	// 四角优先、四边次之（不必精确点到控点）；返回 0–7，未命中 -1
 	int hitBoxEdgeOrCorner(float x, float y, const D2D1_RECT_F& r, float band) const;
+	// —— 选中框：所有控件统一虚线，并相对本体四周外扩 2px ——
+	static ID2D1StrokeStyle* selectionStroke();
+	D2D1_RECT_F selectionRect(const D2D1_RECT_F& r) const;
+	// 本体描边有宽度时，选中框还要让开这半个描边，才能和"看得见的轮廓"留出 2px
+	virtual float selectionExtra() const { return 0.f; }
+	// —— Shift 旋转吸附：8 个朝向 = 45° 的整数倍 ——
+	static float snapRotation8(float angleRad)
+	{
+		constexpr float kStep = 0.78539816339744830962f; // π/4
+		return std::round(angleRad / kStep) * kStep;
+	}
+	// —— 缩放（矩形/椭圆/蒙版共用）——
+	// 按下缩放柄时记录"固定对边/对角"的屏幕锚点与起始 rect；
+	// 拖动时按锚点重建 rect —— 固定边在屏幕上不动，旋转过的形状也不会漂。
+	// handle 用 hoverDraggerIndex 的 0..7；传 <0 表示新建（锚点 = 按下点）
+	void beginScale(const D2D1_RECT_F& r, float angleRad, int handle, float pressX, float pressY);
+	// keepAspect = Shift：等比缩放，固定对边（角=对角，边=对边中点）
+	D2D1_RECT_F dragScale(float x, float y, bool keepAspect) const;
+	D2D1_RECT_F scaleStartRect{};
+	D2D1_POINT_2F scaleAnchor{ 0.f, 0.f };
+	float scaleStartAngle{ 0.f };
+	int scaleHandle{ -1 };
+	bool scaleCreating{ false };
 	// —— 四角外侧旋转 ——
 	// 角上（≤6px）仍是缩放柄；角外 6–26px 那一圈才是旋转区，
 	// 于是不再需要单独画一个旋转柄。传入局部坐标（已按 angle 反旋转）与轴对齐 rect。

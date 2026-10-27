@@ -38,7 +38,7 @@
     "number": "Number",
     "numberDefault": "Number",
     "line": "Annotation",
-    "lineDefault": "Straight line",
+    "lineDefault": "Line",
     "text": "Text",
     "softPen": "Soft pen",
     "marker": "Highlighter",
@@ -88,6 +88,7 @@
     "roundCap": "Round cap",
     "waveLine": "Wave line",
     "bubble": "Bubble",
+    "burst": "Burst",
     "bubbleText": "Enter text",
     "angleAnnot": "Angle",
     "dimension": "Dimension",
@@ -212,6 +213,7 @@
     "historyTabClipboard": "Clipboard",
     "tagImage": "Image",
     "tagVideo": "Video",
+    "tagMusic": "Music",
     "tagText": "Text",
     "tagLink": "Link",
     "tagColor": "Color",
@@ -560,7 +562,11 @@
     "upToDate": "You're up to date",
     "newVersion": "New version available",
     "checkFailed": "Update check failed, try again later",
-    "justNow": "· just checked"
+    "justNow": "· just checked",
+    "checkFreqDay": "Daily",
+    "checkFreqWeek": "Weekly",
+    "checkFreqMonth": "Monthly",
+    "checkFreqNever": "Never"
   },
   "shortcut": {
     "pressKey": "Waiting for key…",

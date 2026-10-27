@@ -119,6 +119,14 @@ Microsoft::WRL::ComPtr<ID2D1PathGeometry> ShapeRect::buildPolyGeometry(
 	if (FAILED(path->Open(sink.GetAddressOf())) || !sink) return nullptr;
 	sink->SetFillMode(D2D1_FILL_MODE_WINDING);
 	const float pct = std::clamp(radiusPct, 0.f, 100.f) / 100.f;   // 100% = 顶点能倒的最大圆角
+	// 无圆角 = 纯尖角：直接连顶点（星形的尖必须是尖的，不能走倒角分支）
+	if (pct <= 0.f) {
+		sink->BeginFigure(v[0], D2D1_FIGURE_BEGIN_FILLED);
+		for (int i = 1; i < count; i++) sink->AddLine(v[(size_t)i]);
+		sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+		sink->Close();
+		return path;
+	}
 	for (int i = 0; i < count; i++) {
 		const auto cur = v[(size_t)i];
 		const auto prev = v[(size_t)((i + count - 1) % count)];
@@ -231,16 +239,17 @@ bool ShapeRect::linkEdgePoint(const float localAngle, D2D1_POINT_2F& out) const
 void ShapeRect::updateDraggers()
 {
 	const float half = draggerSize * 0.5f;
-	const float w = rect.right - rect.left;
-	const float h = rect.bottom - rect.top;
-	draggers[0] = D2D1::RectF(rect.left - half, rect.top - half, rect.left + half, rect.top + half);
-	draggers[1] = D2D1::RectF(rect.left + w * 0.5f - half, rect.top - half, rect.left + w * 0.5f + half, rect.top + half);
-	draggers[2] = D2D1::RectF(rect.right - half, rect.top - half, rect.right + half, rect.top + half);
-	draggers[3] = D2D1::RectF(rect.right - half, rect.top + h * 0.5f - half, rect.right + half, rect.top + h * 0.5f + half);
-	draggers[4] = D2D1::RectF(rect.right - half, rect.bottom - half, rect.right + half, rect.bottom + half);
-	draggers[5] = D2D1::RectF(rect.left + w * 0.5f - half, rect.bottom - half, rect.left + w * 0.5f + half, rect.bottom + half);
-	draggers[6] = D2D1::RectF(rect.left - half, rect.bottom - half, rect.left + half, rect.bottom + half);
-	draggers[7] = D2D1::RectF(rect.left - half, rect.top + h * 0.5f - half, rect.left + half, rect.top + h * 0.5f + half);
+	const D2D1_RECT_F sr = selectionRect(rect);
+	const float w = sr.right - sr.left;
+	const float h = sr.bottom - sr.top;
+	draggers[0] = D2D1::RectF(sr.left - half, sr.top - half, sr.left + half, sr.top + half);
+	draggers[1] = D2D1::RectF(sr.left + w * 0.5f - half, sr.top - half, sr.left + w * 0.5f + half, sr.top + half);
+	draggers[2] = D2D1::RectF(sr.right - half, sr.top - half, sr.right + half, sr.top + half);
+	draggers[3] = D2D1::RectF(sr.right - half, sr.top + h * 0.5f - half, sr.right + half, sr.top + h * 0.5f + half);
+	draggers[4] = D2D1::RectF(sr.right - half, sr.bottom - half, sr.right + half, sr.bottom + half);
+	draggers[5] = D2D1::RectF(sr.left + w * 0.5f - half, sr.bottom - half, sr.left + w * 0.5f + half, sr.bottom + half);
+	draggers[6] = D2D1::RectF(sr.left - half, sr.bottom - half, sr.left + half, sr.bottom + half);
+	draggers[7] = D2D1::RectF(sr.left - half, sr.top + h * 0.5f - half, sr.left + half, sr.top + h * 0.5f + half);
 }
 
 void ShapeRect::paint(ID2D1DeviceContext* ctx)
@@ -258,9 +267,7 @@ void ShapeRect::paintDragger(ID2D1DeviceContext* ctx)
 {
 	// 选框 + 四角 + 圆角点；旋转改为「角外一圈悬停」，不再有独立旋转柄
 	withRotation(ctx, [&] {
-		ctx->DrawRectangle(
-			D2D1::RectF(rect.left - 1.f, rect.top - 1.f, rect.right + 1.f, rect.bottom + 1.f),
-			brushHandleBorder.Get(), win->dpi);
+		ctx->DrawRectangle(selectionRect(rect), brushHandleBorder.Get(), win->dpi, selectionStroke());
 		static const int corners[] = { 0, 2, 4, 6 };
 		for (int i : corners) paintHandle(ctx, draggers[i]);
 		// 圆角点：四角内侧各一个（只有矩形有圆角）
@@ -334,9 +341,11 @@ void ShapeRect::mouseDrag(const float x, const float y)
 		return;
 	}
 	if (hoverDraggerIndex == 9) {
-		// 角外一圈拖动 = 旋转：按增量转，按下时形状不会突然跳角
+		// 角外一圈拖动 = 旋转：按增量转，按下时形状不会突然跳角；Shift 吸附到 8 个朝向
 		const auto c = center();
-		angle = rotateStartAngle + (std::atan2(y - c.y, x - c.x) - rotateStartAtan);
+		float next = rotateStartAngle + (std::atan2(y - c.y, x - c.x) - rotateStartAtan);
+		if (GetKeyState(VK_SHIFT) & 0x8000) next = snapRotation8(next);
+		angle = next;
 		updateDraggers();
 		return;
 	}
@@ -350,41 +359,15 @@ void ShapeRect::mouseDrag(const float x, const float y)
 		updateDraggers();
 		return;
 	}
-	float lx, ly;
-	toLocal(x, y, lx, ly);
-	if (hoverDraggerIndex == 0 || hoverDraggerIndex == 4 || hoverDraggerIndex == 2 || hoverDraggerIndex == 6) {
-		auto [left, right] = std::minmax(pressX, lx);
-		auto [top, bottom] = std::minmax(pressY, ly);
-		rect.left = left;
-		rect.right = right;
-		rect.top = top;
-		rect.bottom = bottom;
-	}
-	else if (hoverDraggerIndex == 1 || hoverDraggerIndex == 5) {
-		auto [top, bottom] = std::minmax(pressY, ly);
-		rect.top = top;
-		rect.bottom = bottom;
-	}
-	else if (hoverDraggerIndex == 3 || hoverDraggerIndex == 7) {
-		auto [left, right] = std::minmax(pressX, lx);
-		rect.left = left;
-		rect.right = right;
-	}
-	const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-	if (hoverDraggerIndex != 8 && shiftDown) {
-		const float w = rect.right - rect.left;
-		const float h = rect.bottom - rect.top;
-		if (w > h) rect.bottom = rect.top + w;
-		else rect.right = rect.left + h;
-	}
+	// 缩放：固定对边（角=对角，边=对边中点），Shift 等比
+	rect = dragScale(x, y, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
 	updateDraggers();
 }
 
 void ShapeRect::mouseDown(const float x, const float y)
 {
 	if (hoverDraggerIndex == -1) {
-		pressX = x;
-		pressY = y;
+		beginScale(rect, angle, -1, x, y);   // 新建：按下点就是固定角
 		hoverDraggerIndex = 4;
 		return;
 	}
@@ -414,16 +397,7 @@ void ShapeRect::mouseDown(const float x, const float y)
 		pressY = y - rect.top;
 		return;
 	}
-	float lx, ly;
-	toLocal(x, y, lx, ly);
-	if (hoverDraggerIndex == 0) { pressX = rect.right; pressY = rect.bottom; }
-	else if (hoverDraggerIndex == 1) { pressY = rect.bottom; }
-	else if (hoverDraggerIndex == 2) { pressX = rect.left; pressY = rect.bottom; }
-	else if (hoverDraggerIndex == 3) { pressX = rect.left; }
-	else if (hoverDraggerIndex == 4) { pressX = rect.left; pressY = rect.top; }
-	else if (hoverDraggerIndex == 5) { pressY = rect.top; }
-	else if (hoverDraggerIndex == 6) { pressX = rect.right; pressY = rect.top; }
-	else if (hoverDraggerIndex == 7) { pressX = rect.right; }
+	beginScale(rect, angle, hoverDraggerIndex, x, y);
 }
 
 void ShapeRect::mouseUp(const float x, const float y)
@@ -454,17 +428,18 @@ void ShapeRect::mouseMove(const float x, const float y)
 			return;
 		}
 	}
-	// 四角外侧一圈 = 旋转（角上仍是缩放）；只有已选中的标注才给旋转区
-	const int rotCorner = isSelected() ? hitRotateRing(lx, ly, rect) : -1;
-	if (rotCorner >= 0) {
-		hoverDraggerIndex = 9;
-		rotateCorner = rotCorner;
-		return;
-	}
+	// 命中顺序：角/边控点优先，旋转环只吃控点以外的近角区域。否则鼠标落在角柄外半圈
+	// 会被判成旋转，缩放很容易误触发。
 	const float band = std::max(8.f * win->dpi, strokeWidth * 0.5f + 4.f * win->dpi);
 	const int edge = hitBoxEdgeOrCorner(lx, ly, rect, band);
 	if (edge >= 0) {
 		hoverDraggerIndex = edge;
+		return;
+	}
+	const int rotCorner = isSelected() ? hitRotateRing(lx, ly, rect) : -1;
+	if (rotCorner >= 0) {
+		hoverDraggerIndex = 9;
+		rotateCorner = rotCorner;
 		return;
 	}
 	if (kind_ != Rect) {

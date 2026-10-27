@@ -155,7 +155,8 @@ void ToolSub::onCreated()
 			sliderHover = onSlider;
 			if (onSlider) {
 				tip->showAbove(slider, Lang::get(getSliderTipKey()));
-				win->setSizePreviewHold(true);
+				// 二次选中本工具的标注时，改的就是它本身，不再画独立的画布预览
+				if (!win->sizePreviewSuppressed()) win->setSizePreviewHold(true, false);
 			}
 			else {
 				tip->hide(slider);
@@ -182,6 +183,7 @@ void ToolSub::beginTool(const std::wstring& id)
 	fillBtn = nullptr;
 	dashBtn = nullptr;
 	softBtn = nullptr;
+	lineBtn = nullptr;
 	markerBtn = nullptr;
 	roundBtn = nullptr;
 	ellipseBtn = nullptr;
@@ -375,26 +377,27 @@ void ToolSub::refreshRoundBtnStyle()
 	applyToggleStyle(roundBtn, cornerRadius > 0.f);
 }
 
-// 滑条拖动 = 实时改"当前选中的、同一形态"的那个形状（选中的是矩形/另一种形态就不动）
+// 滑条实时作用于：优先当前选中的同形态标注，否则作用于刚画完的标注
 void ToolSub::applyShapeSidesLive(bool star, int sides)
 {
-	auto* r = dynamic_cast<ShapeRect*>(win->shapeHover);
+	auto* r = dynamic_cast<ShapeRect*>(win->liveStyleShape());
 	if (!r) return;
 	if (r->kind() != (star ? ShapeRect::Star : ShapeRect::Polygon)) return;
 	r->setSides(sides);
 }
 
-// 圆角滑条：选中的矩形（四角统一）或多边形/星形（顶点倒圆）实时跟着变
+// 圆角滑条：实时作用于选中的或刚画完的矩形/多边形/星形
 void ToolSub::applyCornerRadiusLive()
 {
-	auto* r = dynamic_cast<ShapeRect*>(win->shapeHover);
+	auto* r = dynamic_cast<ShapeRect*>(win->liveStyleShape());
 	if (!r) return;
 	r->setCornerRadius(cornerRadius);   // 0–100
 }
 
 void ToolSub::setShapePreviewHold(bool hold)
 {
-	if (win) win->setSizePreviewHold(hold);
+	// 边数/角数/圆角：预览形状本身；二次选中同工具标注时由 AnnotHost 统一抑制
+	if (win) win->setSizePreviewHold(hold && !win->sizePreviewSuppressed(), true);
 }
 
 void ToolSub::pulseShapePreview()
@@ -406,7 +409,7 @@ void ToolSub::showArrowTools()
 {
 	beginTool(L"arrow");
 	isArrowFill = true;
-	isLine = false;   // 箭头属性栏只做箭头；线段独立成「标注」
+	isLine = false;   // 默认画箭头；需要线段时点属性栏的「线段」临时开关
 	if (arrowHead < ArrowDefault || arrowHead > ArrowFun) arrowHead = ArrowDefault;
 	// 初始属性（外观 > 工具栏外观）：存过默认形态就优先用它
 	auto* designSetting = Setting::get();
@@ -424,7 +427,21 @@ void ToolSub::showArrowTools()
 	// 被提为工具栏默认形态的那一款已从属性栏移走（工具栏按钮就是它），其余形态按
 	// 「初始属性」里配置的顺序排列；基础箭头不在默认位时自然留在属性栏里
 	const int defaultHead = arrowDesign ? arrowHead : (int)ArrowDefault;
-	initSize(6, true); // 4 个箭头样式 + 虚线 + 圆头，再加色块与滑条
+	initSize(7, true); // 4 个箭头样式 + 线段 + 虚线 + 圆头，再加色块与滑条
+	// 线段：临时开关（与箭头样式互斥；切走工具后回到箭头）
+	lineBtn = contentNode->makeChild<Ling::Button>();
+	lineBtn->setText(Icon::Line);
+	styleToolbarBtn(lineBtn);
+	lineBtn->setFontFamily(Icon::Family);
+	lineBtn->setFontSize(Icon::Size);
+	applyToggleStyle(lineBtn, isLine);
+	tip->bind(lineBtn, Lang::get(L"tool.lineDefault"));
+	lineBtn->onClick.add([this](Ling::Button*) {
+		isLine = !isLine;
+		if (isLine) lineKind = LineStraight;
+		refreshArrowHeadBtns();
+		win->onToolStyleChanged();
+	});
 	for (const auto& c : orderedFormsFor(L"arrow", defaultHead)) {
 		makeArrowHeadBtn(c.glyph ? c.glyph : Icon::Arrow, c.value,
 			c.tipKey ? c.tipKey : L"tool.arrowDefault");
@@ -469,20 +486,26 @@ void ToolSub::applyPenMarkerState(bool on)
 
 void ToolSub::showLineTools()
 {
-	// 标注 = 只有轴线：形态（气泡/角度 | 直线 | 波浪线 | 尺寸）+ 虚线 / 圆头 / 颜色 / 粗细
+	// 标注 = 只有轴线：形态（尺寸 / 气泡 / 角度 / 波浪线）+ 虚线 / 圆头 / 颜色 / 粗细。
+	// 直线（线段）不在这里：它是箭头属性栏的临时开关（见 showArrowTools）。
 	beginTool(L"arrow");
 	isArrowFill = true;
 	isLine = true;
 	loadStrokeSlider(L"arrow");
-	// 初始属性：标注自己的默认形态（0 直线 / 1 波浪 / 2 气泡 / 3 角度 / 4 尺寸）与默认粗细
-	int defaultLine = LineStraight;
+	// 初始属性：标注默认形态是「尺寸」；旧配置里的 0（直线）按尺寸处理
+	int defaultLine = LineDimension;
+	lineKind = LineDimension;
 	{
 		const int form = designInt(L"line", L"form", -1);
-		if (form >= LineStraight && form <= LineDimension) { lineKind = form; defaultLine = form; }
+		if (form == LineBubble || form == LineBurst || form == LineAngle
+			|| form == LineWave || form == LineDimension) {
+			lineKind = form;
+			defaultLine = form;
+		}
 		const int lw = designInt(L"line", L"width", -1);
 		if (lw >= 0) sliderVal = std::clamp((float)lw, sliderMin, sliderMax);
 	}
-	initSize(6, true);
+	initSize(6, true);   // 4 个非默认形态 + 虚线 + 圆头，再加色块与滑条
 	lineKindBtns.clear();
 	bubbleKindBtn = nullptr;
 	angleKindBtn = nullptr;
@@ -1794,7 +1817,7 @@ void ToolSub::makeArrowHeadBtn(const wchar_t* icon, int style, const wchar_t* ti
 	tip->bind(btn, Lang::get(tipKey));
 	btn->onClick.add([this, style](Ling::Button*) {
 		arrowHead = (arrowHead == style) ? ArrowDefault : style;
-		if (arrowHead != ArrowDefault) isLine = false;
+		isLine = false;   // 选任一箭头样式 = 退出「线段」模式
 		// 记忆工具样式：记住这次选的箭头样式
 		if (Setting::get()->getRememberToolStyle())
 			Setting::get()->setLastArrowHead(arrowHead);
@@ -1819,7 +1842,8 @@ void ToolSub::makeArrowHeadBtns()
 void ToolSub::refreshArrowHeadBtns()
 {
 	for (size_t i = 0; i < arrowHeadBtns.size() && i < arrowHeadStyles.size(); i++)
-		applyToggleStyle(arrowHeadBtns[i], arrowHead == arrowHeadStyles[i]);
+		applyToggleStyle(arrowHeadBtns[i], !isLine && arrowHead == arrowHeadStyles[i]);
+	if (lineBtn) applyToggleStyle(lineBtn, isLine);
 }
 
 void ToolSub::loadStrokeSlider(const std::wstring& toolId)
@@ -1977,6 +2001,7 @@ void ToolSub::hideTools()
 	fillBtn = nullptr;
 	dashBtn = nullptr;
 	softBtn = nullptr;
+	lineBtn = nullptr;
 	markerBtn = nullptr;
 	roundBtn = nullptr;
 	if (sliderHover) {

@@ -26,6 +26,31 @@ bool ShapeBase::isInRect(const D2D1_RECT_F rect, const float x, const float y)
 		&& y > rect.top - hitPad && y < rect.bottom + hitPad);
 }
 
+// 选中框统一虚线（所有形状共用一份，避免每个形状各建一次 stroke style）
+ID2D1StrokeStyle* ShapeBase::selectionStroke()
+{
+	static Microsoft::WRL::ComPtr<ID2D1StrokeStyle> style;
+	if (!style) {
+		auto factory = Ling::D2D::get()->d2dFactory.Get();
+		if (factory) {
+			float dashes[] = { 4.f, 3.f };
+			factory->CreateStrokeStyle(
+				D2D1::StrokeStyleProperties(
+					D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT,
+					D2D1_LINE_JOIN_MITER, 10.f, D2D1_DASH_STYLE_CUSTOM, 0.f),
+				dashes, 2, style.GetAddressOf());
+		}
+	}
+	return style.Get();
+}
+
+// 控件相对标注本体四周留 2px 间隔；选框和四角/四边控点都用这个外扩后的 rect
+D2D1_RECT_F ShapeBase::selectionRect(const D2D1_RECT_F& r) const
+{
+	const float g = 2.f * win->dpi + selectionExtra();
+	return D2D1::RectF(r.left - g, r.top - g, r.right + g, r.bottom + g);
+}
+
 int ShapeBase::hitBoxEdgeOrCorner(float x, float y, const D2D1_RECT_F& r, float band) const
 {
 	const float corner = std::max(band * 1.2f, draggerSize);
@@ -140,6 +165,87 @@ void ShapeBase::paintHandle(ID2D1DeviceContext* ctx, const D2D1_RECT_F& rect)
 bool ShapeBase::isSelected() const
 {
 	return win && win->shapeHover == this;
+}
+
+// 记录"定边"锚点：四角 = 对角，四边 = 对边中点；新建时锚点就是按下点。
+// 锚点取世界坐标（按当前 angle 反旋转那个角），拖动时它始终不动。
+void ShapeBase::beginScale(const D2D1_RECT_F& r, float angleRad, int handle, float pressX, float pressY)
+{
+	scaleCreating = handle < 0;
+	scaleStartAngle = angleRad;
+	scaleHandle = scaleCreating ? 4 : handle;
+	scaleStartRect = r;
+	if (scaleCreating) {
+		scaleStartRect = D2D1::RectF(pressX, pressY, pressX, pressY);
+		scaleAnchor = D2D1::Point2F(pressX, pressY);
+		return;
+	}
+	const float cx = (r.left + r.right) * 0.5f;
+	const float cy = (r.top + r.bottom) * 0.5f;
+	D2D1_POINT_2F local{ cx, cy };
+	switch (handle) {
+	case 0: local = { r.right, r.bottom }; break; // 左上 → 右下
+	case 1: local = { cx, r.bottom }; break;      // 上边 → 下边中点
+	case 2: local = { r.left, r.bottom }; break;
+	case 3: local = { r.left, cy }; break;        // 右边 → 左边中点
+	case 4: local = { r.left, r.top }; break;
+	case 5: local = { cx, r.top }; break;
+	case 6: local = { r.right, r.top }; break;
+	case 7: local = { r.right, cy }; break;
+	default: break;
+	}
+	const float ca = std::cos(angleRad), sa = std::sin(angleRad);
+	const float dx = local.x - cx, dy = local.y - cy;
+	scaleAnchor = D2D1::Point2F(cx + dx * ca - dy * sa, cy + dx * sa + dy * ca);
+}
+
+// 按锚点重建 rect：把指针投影到形状自身的两条轴上，固定边（锚点）不动。
+// Shift 等比时以"变化更大的那条轴"为准，另一条按起始比例跟上，避免角飞出光标。
+D2D1_RECT_F ShapeBase::dragScale(float x, float y, bool keepAspect) const
+{
+	if (scaleHandle < 0) return scaleStartRect;
+	const float ca = std::cos(scaleStartAngle), sa = std::sin(scaleStartAngle);
+	const float dx = x - scaleAnchor.x, dy = y - scaleAnchor.y;
+	const float du = dx * ca + dy * sa;    // 沿形状自身 x 轴
+	const float dv = -dx * sa + dy * ca;   // 沿形状自身 y 轴
+	const float sw = std::max(0.f, scaleStartRect.right - scaleStartRect.left);
+	const float sh = std::max(0.f, scaleStartRect.bottom - scaleStartRect.top);
+	const bool corner = (scaleHandle % 2) == 0;          // 0/2/4/6
+	const bool dragW = (scaleHandle == 3 || scaleHandle == 7); // 左右边：宽度跟手
+
+	float w = 0.f, h = 0.f;    // 新宽高
+	float ox = 0.f, oy = 0.f;  // 中心相对锚点的偏移（沿两条轴）
+	if (corner) {
+		if (keepAspect) {
+			const float sx = sw > 0.001f ? std::fabs(du) / sw : 0.f;
+			const float sy = sh > 0.001f ? std::fabs(dv) / sh : 0.f;
+			const float s = std::max(sx, sy);
+			if (sw > 0.001f && sh > 0.001f) { w = sw * s; h = sh * s; }
+			else { w = h = std::max(std::fabs(du), std::fabs(dv)); } // 新建：正方形/正圆
+			ox = std::copysign(w * 0.5f, du);
+			oy = std::copysign(h * 0.5f, dv);
+		}
+		else {
+			w = std::fabs(du);
+			h = std::fabs(dv);
+			ox = du * 0.5f;
+			oy = dv * 0.5f;
+		}
+	}
+	else {
+		// 边：对边固定；等比时另一轴以对边中点为中心对称展开
+		const float driven = dragW ? du : dv;
+		const float base = dragW ? sw : sh;
+		const float other = dragW ? sh : sw;
+		const float s = (keepAspect && base > 0.001f) ? std::fabs(driven) / base : 1.f;
+		w = dragW ? std::fabs(driven) : other * s;
+		h = dragW ? other * s : std::fabs(driven);
+		ox = dragW ? driven * 0.5f : 0.f;
+		oy = dragW ? 0.f : driven * 0.5f;
+	}
+	const D2D1_POINT_2F c{ scaleAnchor.x + ca * ox - sa * oy,
+						   scaleAnchor.y + sa * ox + ca * oy };
+	return D2D1::RectF(c.x - w * 0.5f, c.y - h * 0.5f, c.x + w * 0.5f, c.y + h * 0.5f);
 }
 
 bool ShapeBase::applyUnselectedHoverCursor()

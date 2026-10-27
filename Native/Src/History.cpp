@@ -49,11 +49,22 @@ public:
 		: ShapeBase(win), target_(target), before_(std::move(before)), after_(std::move(after))
 	{
 	}
+	ShapeEditStep(AnnotHost* win, ShapeBase* target,
+		std::vector<float> before, std::vector<float> after,
+		std::wstring beforeText, std::wstring afterText)
+		: ShapeBase(win), target_(target), before_(std::move(before)), after_(std::move(after)),
+		  beforeText_(std::move(beforeText)), afterText_(std::move(afterText)), hasText_(true)
+	{
+	}
 	void paint(ID2D1DeviceContext*) override {}
 	void onUndoChanged(bool undone) override
 	{
 		if (!target_) return;
 		target_->applyEditSnapshot(undone ? before_ : after_);
+		if (hasText_) {
+			if (auto* t = dynamic_cast<ShapeText*>(target_))
+				t->applyTextFromUndo(undone ? beforeText_ : afterText_);
+		}
 		target_->syncLinks();
 		win->refresh();
 	}
@@ -62,6 +73,9 @@ private:
 	ShapeBase* target_{ nullptr };
 	std::vector<float> before_;
 	std::vector<float> after_;
+	std::wstring beforeText_;
+	std::wstring afterText_;
+	bool hasText_{ false };
 };
 
 void SetShapeUndo(ShapeBase* shape, bool undone)
@@ -120,6 +134,12 @@ ShapeBase* History::createShape(const std::wstring& state, const int& x, const i
             const int lk = win->toolSub->lineKind;
             if (lk == ToolSub::LineBubble) {
                 auto shape = std::make_unique<ShapeText>(win, true);
+                result = shape.get();
+                shapes.push_back(std::move(shape));
+            }
+            else if (lk == ToolSub::LineBurst) {
+                // 爆裂：和气泡同一套文字/编辑交互，只是外框换成尖角爆炸轮廓
+                auto shape = std::make_unique<ShapeText>(win, true, true);
                 result = shape.get();
                 shapes.push_back(std::move(shape));
             }
@@ -442,6 +462,18 @@ void History::addEditStep(ShapeBase* target, const std::vector<float>& before, c
 	// 新操作会丢弃已撤销的重做栈
 	removeUndoShape();
 	shapes.push_back(std::make_unique<ShapeEditStep>(win, target, before, after));
+	win->onHistoryChanged();
+}
+
+void History::addTextEditStep(ShapeBase* target,
+	const std::vector<float>& before, const std::vector<float>& after,
+	const std::wstring& beforeText, const std::wstring& afterText)
+{
+	if (!target) return;
+	if (before == after && beforeText == afterText) return;
+	removeUndoShape();
+	shapes.push_back(std::make_unique<ShapeEditStep>(
+		win, target, before, after, beforeText, afterText));
 	win->onHistoryChanged();
 }
 

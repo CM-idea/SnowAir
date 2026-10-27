@@ -57,6 +57,9 @@ public:
 	void removeToolKey(const std::wstring& tool, const std::wstring& key);
 	long long getUpdateCheckDay();
 	void setUpdateCheckDay(long long day);
+	// 自动检查更新的频率：0=一天 1=一周 2=一月 3=从不
+	int getUpdateCheckFreq();
+	void setUpdateCheckFreq(int v);
 
 	int getOcrEngine();
 	void setOcrEngine(int v);

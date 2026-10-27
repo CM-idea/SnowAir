@@ -271,16 +271,17 @@ void ShapePen::withRotation(ID2D1DeviceContext* ctx, const std::function<void()>
 void ShapePen::updateDraggers()
 {
 	const float half = draggerSize * 0.5f;
-	const float w = rect.right - rect.left;
-	const float h = rect.bottom - rect.top;
-	draggers[0] = D2D1::RectF(rect.left - half, rect.top - half, rect.left + half, rect.top + half);
-	draggers[1] = D2D1::RectF(rect.left + w * 0.5f - half, rect.top - half, rect.left + w * 0.5f + half, rect.top + half);
-	draggers[2] = D2D1::RectF(rect.right - half, rect.top - half, rect.right + half, rect.top + half);
-	draggers[3] = D2D1::RectF(rect.right - half, rect.top + h * 0.5f - half, rect.right + half, rect.top + h * 0.5f + half);
-	draggers[4] = D2D1::RectF(rect.right - half, rect.bottom - half, rect.right + half, rect.bottom + half);
-	draggers[5] = D2D1::RectF(rect.left + w * 0.5f - half, rect.bottom - half, rect.left + w * 0.5f + half, rect.bottom + half);
-	draggers[6] = D2D1::RectF(rect.left - half, rect.bottom - half, rect.left + half, rect.bottom + half);
-	draggers[7] = D2D1::RectF(rect.left - half, rect.top + h * 0.5f - half, rect.left + half, rect.top + h * 0.5f + half);
+	const D2D1_RECT_F sr = selectionRect(rect);
+	const float w = sr.right - sr.left;
+	const float h = sr.bottom - sr.top;
+	draggers[0] = D2D1::RectF(sr.left - half, sr.top - half, sr.left + half, sr.top + half);
+	draggers[1] = D2D1::RectF(sr.left + w * 0.5f - half, sr.top - half, sr.left + w * 0.5f + half, sr.top + half);
+	draggers[2] = D2D1::RectF(sr.right - half, sr.top - half, sr.right + half, sr.top + half);
+	draggers[3] = D2D1::RectF(sr.right - half, sr.top + h * 0.5f - half, sr.right + half, sr.top + h * 0.5f + half);
+	draggers[4] = D2D1::RectF(sr.right - half, sr.bottom - half, sr.right + half, sr.bottom + half);
+	draggers[5] = D2D1::RectF(sr.left + w * 0.5f - half, sr.bottom - half, sr.left + w * 0.5f + half, sr.bottom + half);
+	draggers[6] = D2D1::RectF(sr.left - half, sr.bottom - half, sr.left + half, sr.bottom + half);
+	draggers[7] = D2D1::RectF(sr.left - half, sr.top + h * 0.5f - half, sr.left + half, sr.top + h * 0.5f + half);
 }
 
 void ShapePen::paint(ID2D1DeviceContext* ctx)
@@ -314,9 +315,7 @@ void ShapePen::paintDragger(ID2D1DeviceContext* ctx)
 	if (isFade || !settled || pts.empty()) return;
 	// 选框 + 四角；旋转改为「角外一圈悬停」，不再画独立旋转柄
 	withRotation(ctx, [&] {
-		ctx->DrawRectangle(
-			D2D1::RectF(rect.left - 1.f, rect.top - 1.f, rect.right + 1.f, rect.bottom + 1.f),
-			brushHandleBorder.Get(), win->dpi);
+		ctx->DrawRectangle(selectionRect(rect), brushHandleBorder.Get(), win->dpi, selectionStroke());
 		static const int corners[] = { 0, 2, 4, 6 };
 		for (int i : corners) paintHandle(ctx, draggers[i]);
 	});
@@ -420,9 +419,11 @@ void ShapePen::mouseDrag(const float x, const float y)
 	}
 	if (isFade) return; // 渐隐画笔落笔即弃控点，不做变换
 	if (hoverDraggerIndex == 9) {
-		// 角外一圈拖动 = 旋转：按增量转
+		// 角外一圈拖动 = 旋转：按增量转；Shift 吸附到 8 个朝向
 		const auto c = boxCenter();
-		boxAngle = rotateStartAngle + (std::atan2(y - c.y, x - c.x) - rotateStartAtan);
+		float next = rotateStartAngle + (std::atan2(y - c.y, x - c.x) - rotateStartAtan);
+		if (GetKeyState(VK_SHIFT) & 0x8000) next = snapRotation8(next);
+		boxAngle = next;
 		updateDraggers();
 		return;
 	}
@@ -514,16 +515,16 @@ void ShapePen::mouseMove(const float x, const float y)
 	//    矩形区域都吃掉，在下一次落笔时被误判成"拖动旧图形"，区域内再也画不了新东西。
 	//  - 已选中：角外旋转 / 边框缩放 / 内部拖动，方便二次编辑。
 	if (isSelected()) {
-		// 四角外侧一圈 = 旋转（角上仍是缩放）；只有已选中的标注才给旋转区
+		// 角控点优先，旋转环只吃控点以外的近角区域，避免角柄误触发旋转
+		const int edge = hitBoxEdgeOrCorner(lx, ly, rect, std::max(8.f * win->dpi, 6.f * win->dpi));
+		if (edge == 0 || edge == 2 || edge == 4 || edge == 6) {
+			hoverDraggerIndex = edge;
+			return;
+		}
 		const int rotCorner = hitRotateRing(lx, ly, rect);
 		if (rotCorner >= 0) {
 			hoverDraggerIndex = 9;
 			rotateCorner = rotCorner;
-			return;
-		}
-		const int edge = hitBoxEdgeOrCorner(lx, ly, rect, std::max(8.f * win->dpi, 6.f * win->dpi));
-		if (edge == 0 || edge == 2 || edge == 4 || edge == 6) {
-			hoverDraggerIndex = edge;
 			return;
 		}
 		if (lx >= rect.left && lx <= rect.right && ly >= rect.top && ly <= rect.bottom) {

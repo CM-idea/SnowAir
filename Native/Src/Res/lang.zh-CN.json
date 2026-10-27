@@ -40,7 +40,7 @@
     "numberEmojiPick": "选择表情",
     "emojiSize": "表情大小",
     "line": "标注",
-    "lineDefault": "直线",
+    "lineDefault": "线段",
     "pen": "画笔",
     "penDefault": "常规画笔",
     "text": "文字",
@@ -85,6 +85,7 @@
     "roundCap": "圆头",
     "waveLine": "波浪线",
     "bubble": "气泡",
+    "burst": "爆裂",
     "bubbleText": "请输入文字",
     "angleAnnot": "角度",
     "dimension": "尺寸",
@@ -212,6 +213,7 @@
     "historyTabClipboard": "剪切板",
     "tagImage": "图片",
     "tagVideo": "视频",
+    "tagMusic": "音乐",
     "tagText": "文字",
     "tagLink": "链接",
     "tagColor": "色值",
@@ -560,7 +562,11 @@
     "upToDate": "已是最新版本",
     "newVersion": "发现新版本",
     "checkFailed": "检查失败，请稍后再试",
-    "justNow": "· 刚刚检查"
+    "justNow": "· 刚刚检查",
+    "checkFreqDay": "每天",
+    "checkFreqWeek": "每周",
+    "checkFreqMonth": "每月",
+    "checkFreqNever": "从不"
   },
   "shortcut": {
     "pressKey": "等待按键…",

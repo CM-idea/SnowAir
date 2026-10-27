@@ -8,12 +8,14 @@
 #include "RoundBox.h"
 #include "LinkGeom.h"
 #include "../Lang.h"
+#include <random>
 
 using Microsoft::WRL::ComPtr;
 
-ShapeText::ShapeText(AnnotHost* win, bool bubble) : ShapeBase(win),
+ShapeText::ShapeText(AnnotHost* win, bool bubble, bool burst) : ShapeBase(win),
 	borderPadding{ 6.f * win->dpi },
-	bubble_{ bubble },
+	bubble_{ bubble && !burst },
+	burst_{ burst },
 	draggers(4, D2D1::RectF(0, 0, 0, 0))
 {
 	setAttr();
@@ -23,16 +25,17 @@ ShapeText::ShapeText(AnnotHost* win, bool bubble) : ShapeBase(win),
 			D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_ROUND,
 			D2D1_LINE_JOIN_MITER, 10.f, D2D1_DASH_STYLE_CUSTOM, 0.f),
 		dashes, ARRAYSIZE(dashes), dashedStrokeStyle.GetAddressOf());
-	if (bubble_) {
-		// 气泡默认带一句提示文字；字号与文字工具的默认字号一致（标注滑条是线宽，不是字号），描边用标注的线宽
+	if (isFrame()) {
+		// 气泡 / 爆裂：字号与文字工具默认字号一致（标注滑条是线宽，不是字号），
+		// 描边用标注的线宽。默认不再塞「请输入文字」：空框就是空框，创建后直接进编辑显示光标
 		fontSize = 24.f * win->dpi;
 		bubbleRadius_ = 14.f * win->dpi;
 		bubbleStroke_ = std::max(1.f, win->toolSub->getSliderVal());
-		text = Lang::get(L"tool.bubbleText");
-		if (text.empty()) text = L"请输入文字";
+		updateFrameStyle();
+		if (burst_) initBurstJitter();
 		makeTextLayout();
 		syncRectFromLayout();
-		updateBubbleTail();
+		if (bubble_) updateBubbleTail();
 	}
 }
 
@@ -41,31 +44,37 @@ ShapeText::~ShapeText() {}
 void ShapeText::updateDraggers()
 {
 	const float half = draggerSize * 0.5f;
-	draggers[0] = D2D1::RectF(rect.left - half, rect.top - half, rect.left + half, rect.top + half);
-	draggers[1] = D2D1::RectF(rect.right - half, rect.top - half, rect.right + half, rect.top + half);
-	draggers[2] = D2D1::RectF(rect.left - half, rect.bottom - half, rect.left + half, rect.bottom + half);
-	draggers[3] = D2D1::RectF(rect.right - half, rect.bottom - half, rect.right + half, rect.bottom + half);
+	const D2D1_RECT_F sr = selectionRect(rect);
+	draggers[0] = D2D1::RectF(sr.left - half, sr.top - half, sr.left + half, sr.top + half);
+	draggers[1] = D2D1::RectF(sr.right - half, sr.top - half, sr.right + half, sr.top + half);
+	draggers[2] = D2D1::RectF(sr.left - half, sr.bottom - half, sr.left + half, sr.bottom + half);
+	draggers[3] = D2D1::RectF(sr.right - half, sr.bottom - half, sr.right + half, sr.bottom + half);
 }
 
 void ShapeText::syncRectFromLayout()
 {
-	if (!textLayout) return;
-	DWRITE_TEXT_METRICS m{};
-	textLayout->GetMetrics(&m);
-	if (bubble_) {
-		// 气泡：只保证装得下文字（四周留白 + 最小尺寸），不把用户拖大的框缩回去
+	float textW = 0.f, textH = 0.f;
+	if (textLayout && !text.empty()) {
+		DWRITE_TEXT_METRICS m{};
+		textLayout->GetMetrics(&m);
+		textW = m.widthIncludingTrailingWhitespace;
+		textH = m.height;
+	}
+	if (isFrame()) {
+		// 气泡/爆裂：只保证装得下文字（四周留白 + 最小尺寸），不把用户拖大的框缩回去
 		const float pad = 16.f * win->dpi;
-		const float minW = std::max(m.widthIncludingTrailingWhitespace + pad * 2.f, 120.f * win->dpi);
-		const float minH = std::max(m.height + pad * 2.f, 52.f * win->dpi);
+		const float minW = std::max(textW + pad * 2.f, 120.f * win->dpi);
+		const float minH = std::max(textH + pad * 2.f, 52.f * win->dpi);
 		if (rect.right - rect.left < minW) rect.right = rect.left + minW;
 		if (rect.bottom - rect.top < minH) rect.bottom = rect.top + minH;
-		updateBubbleTail();
+		if (bubble_) updateBubbleTail();
 		updateDraggers();
 		return;
 	}
-	rect.right = rect.left + m.widthIncludingTrailingWhitespace + borderPadding * 2.f;
+	if (!textLayout) return;
+	rect.right = rect.left + textW + borderPadding * 2.f;
 	// 线上文字（行距被压过）要把最后一行下伸的那点余量补进高度，否则洞/编辑框比字矮
-	rect.bottom = rect.top + m.height + (attachTo ? attachLineSlack : 0.f) + borderPadding * 2.f;
+	rect.bottom = rect.top + textH + (attachTo ? attachLineSlack : 0.f) + borderPadding * 2.f;
 	updateDraggers();
 }
 
@@ -130,10 +139,194 @@ ComPtr<ID2D1PathGeometry> ShapeText::buildBubbleGeometry() const
 	return path;
 }
 
+// 每个爆裂一份固定随机参数：每段 2 个系数 —— 弧度伸缩 + 沿弦法线的小偏移。
+// 顶点/端点保持模板原样，所以抖动只改变"每条弧鼓多少"，不会把尖角拉出毛刺。
+// 只在创建时生成一次，之后 resize/重绘都用同一份。
+void ShapeText::initBurstJitter()
+{
+	std::random_device rd;
+	std::mt19937 gen(rd());
+	std::uniform_real_distribution<float> dist(-1.f, 1.f);
+	burstJitter_.assign(16 * 2, 0.f);
+	for (auto& v : burstJitter_) v = dist(gen);
+}
+
+// 爆裂外框：直接采用产品给的 Vector 74.svg 路径（637×521 的 16 段三次贝塞尔），
+// 按当前 rect 等比铺满；每个实例只对"弧的鼓度"做固定随机化，顶点位置不动。
+ComPtr<ID2D1PathGeometry> ShapeText::buildBurstGeometry() const
+{
+	auto factory = Ling::D2D::get()->d2dFactory.Get();
+	const float w = rect.right - rect.left;
+	const float h = rect.bottom - rect.top;
+	if (!factory || w < 1.f || h < 1.f) return nullptr;
+	constexpr float kSvgW = 637.f, kSvgH = 521.f;
+	const float sx = w / kSvgW, sy = h / kSvgH;
+	struct Cubic {
+		float c1x, c1y, c2x, c2y, x, y;
+	};
+	// Vector 74.svg：M 182.424 1.334 + 16×C … Z
+	static const Cubic segs[] = {
+		{ 182.424f,   1.334f, 181.681f,  71.072f, 152.281f, 123.086f },
+		{ 122.880f, 175.100f,   1.567f, 163.536f,   1.567f, 163.536f },
+		{   1.567f, 163.536f,  66.912f, 196.215f,  70.179f, 251.479f },
+		{  73.445f, 306.744f,  15.953f, 346.667f,  15.953f, 346.667f },
+		{  15.953f, 346.667f, 109.368f, 322.828f, 142.035f, 371.591f },
+		{ 174.702f, 420.354f, 152.281f, 504.534f, 152.281f, 504.534f },
+		{ 152.281f, 504.534f, 223.332f, 424.424f, 318.067f, 437.428f },
+		{ 412.801f, 450.431f, 438.638f, 519.334f, 438.638f, 519.334f },
+		{ 438.638f, 519.334f, 425.335f, 429.836f, 477.423f, 399.796f },
+		{ 529.512f, 369.755f, 605.794f, 389.834f, 605.794f, 389.834f },
+		{ 605.794f, 389.834f, 549.408f, 321.063f, 552.675f, 262.548f },
+		{ 555.942f, 204.032f, 634.567f, 163.536f, 634.567f, 163.536f },
+		{ 634.567f, 163.536f, 556.908f, 179.790f, 501.374f, 134.278f },
+		{ 445.840f,  88.766f, 468.781f,   1.334f, 468.781f,   1.334f },
+		{ 468.781f,   1.334f, 441.361f,  68.162f, 333.560f,  87.667f },
+		{ 225.758f, 107.172f, 182.424f,   1.334f, 182.424f,   1.334f },
+	};
+	auto X = [&](float v) { return rect.left + v * sx; };
+	auto Y = [&](float v) { return rect.top + v * sy; };
+	const bool jittered = burstJitter_.size() >= 16 * 2;
+	// 八个尖角统一修成 45° 尖角（和星形一样），而不是让两条曲线在尖点处几乎相切：
+	// 取尖点两侧的谷点，算"向内的角平分线"，把两条切向各偏 22.5°。
+	// 这样 miter 比例只有约 2.6，尖得干净，不会像原路径的 8° cusp 那样甩长刺。
+	struct V2 { float x, y; };
+	auto vnorm = [](V2 v) { const float l = std::hypot(v.x, v.y); return l > 1e-5f ? V2{ v.x / l, v.y / l } : V2{ 1.f, 0.f }; };
+	auto vrot = [](V2 v, float a) {
+		const float c = std::cos(a), s = std::sin(a);
+		return V2{ v.x * c - v.y * s, v.x * s + v.y * c };
+	};
+	auto vdot = [](V2 a, V2 b) { return a.x * b.x + a.y * b.y; };
+	D2D1_POINT_2F c1Sharp[16]{}, c2Sharp[16]{};
+	bool hasC1[16]{}, hasC2[16]{};
+	static const int tipSegs[] = { 1, 3, 5, 7, 9, 11, 13, 15 };
+	for (int k : tipSegs) {
+		D2D1_POINT_2F tip, prev, next;
+		if (k == 15) {
+			tip = D2D1::Point2F(182.424f, 1.334f);
+			prev = D2D1::Point2F(segs[14].x, segs[14].y);
+			next = D2D1::Point2F(segs[0].x, segs[0].y);
+		}
+		else {
+			tip = D2D1::Point2F(segs[k].x, segs[k].y);
+			prev = D2D1::Point2F(segs[k - 1].x, segs[k - 1].y);
+			next = D2D1::Point2F(segs[k + 1].x, segs[k + 1].y);
+		}
+		const V2 up{ prev.x - tip.x, prev.y - tip.y };
+		const V2 un{ next.x - tip.x, next.y - tip.y };
+		const float lp = std::hypot(up.x, up.y), ln = std::hypot(un.x, un.y);
+		if (lp < 1e-3f || ln < 1e-3f) continue;
+		const V2 b = vnorm(V2{ up.x + un.x, up.y + un.y });
+		const V2 a = vrot(b, 0.39269908f);    // +22.5°
+		const V2 c = vrot(b, -0.39269908f);   // -22.5°
+		const bool aIsPrev = vdot(a, up) > vdot(c, up);
+		const V2 ePrev = aIsPrev ? a : c;
+		const V2 eNext = aIsPrev ? c : a;
+		const float L = 0.26f * std::min(lp, ln);
+		c2Sharp[k] = D2D1::Point2F(tip.x + ePrev.x * L, tip.y + ePrev.y * L);
+		hasC2[k] = true;
+		const int outSeg = (k + 1) % 16;
+		c1Sharp[outSeg] = D2D1::Point2F(tip.x + eNext.x * L, tip.y + eNext.y * L);
+		hasC1[outSeg] = true;
+	}
+	ComPtr<ID2D1PathGeometry> path;
+	if (FAILED(factory->CreatePathGeometry(path.GetAddressOf())) || !path) return nullptr;
+	ComPtr<ID2D1GeometrySink> sink;
+	if (FAILED(path->Open(sink.GetAddressOf())) || !sink) return nullptr;
+	sink->SetFillMode(D2D1_FILL_MODE_WINDING);
+	sink->BeginFigure(D2D1::Point2F(X(182.424f), Y(1.334f)), D2D1_FIGURE_BEGIN_FILLED);
+	for (size_t i = 0; i < ARRAYSIZE(segs); ++i) {
+		const auto& s = segs[i];
+		const float startX = (i == 0) ? 182.424f : segs[i - 1].x;
+		const float startY = (i == 0) ? 1.334f : segs[i - 1].y;
+		float c1x = s.c1x, c1y = s.c1y, c2x = s.c2x, c2y = s.c2y;
+		if (jittered) {
+			// 每个弧：控制点绕"弦中点"伸缩 ±12%，再沿弦法线整体平移 ±3 SVG 单位。
+			// 端点不参与，所以弧怎么变都还是接在原来的尖角上，不会多出毛刺。
+			const float* j = &burstJitter_[i * 2];
+			const float mx = (startX + s.x) * 0.5f, my = (startY + s.y) * 0.5f;
+			const float k = 1.f + j[0] * 0.12f;
+			c1x = mx + (c1x - mx) * k;
+			c1y = my + (c1y - my) * k;
+			c2x = mx + (c2x - mx) * k;
+			c2y = my + (c2y - my) * k;
+			const float dx = s.x - startX, dy = s.y - startY;
+			const float len = std::hypot(dx, dy);
+			if (len > 1e-3f) {
+				const float t = j[1] * 3.f;
+				const float nx = -dy / len * t, ny = dx / len * t;
+				c1x += nx; c1y += ny;
+				c2x += nx; c2y += ny;
+			}
+		}
+		// 尖角处的切向覆盖抖动结果：保证每个爆裂的 8 个尖都是 45°，但弧身仍各不相同
+		if (hasC1[i]) { c1x = c1Sharp[i].x; c1y = c1Sharp[i].y; }
+		if (hasC2[i]) { c2x = c2Sharp[i].x; c2y = c2Sharp[i].y; }
+		sink->AddBezier(D2D1::BezierSegment(
+			D2D1::Point2F(X(c1x), Y(c1y)),
+			D2D1::Point2F(X(c2x), Y(c2y)),
+			D2D1::Point2F(X(s.x), Y(s.y))));
+	}
+	sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+	sink->Close();
+	return path;
+}
+
+ComPtr<ID2D1PathGeometry> ShapeText::buildFrameGeometry() const
+{
+	if (burst_) return buildBurstGeometry();
+	if (bubble_) return buildBubbleGeometry();
+	return nullptr;
+}
+
+void ShapeText::updateFrameStyle()
+{
+	frameStyle_.Reset();
+	if (!isFrame() || !win || !win->toolSub) return;
+	auto factory = Ling::D2D::get()->d2dFactory.Get();
+	if (!factory) return;
+	const bool dashed = win->toolSub->isArrowDash;
+	const bool roundCap = win->toolSub->isArrowRound;
+	frameDash_ = dashed;
+	frameRound_ = roundCap;
+	const auto cap = roundCap ? D2D1_CAP_STYLE_ROUND : D2D1_CAP_STYLE_FLAT;
+	// 气泡圆角连接；爆裂保留尖角所需的 miter
+	const auto join = burst_ ? D2D1_LINE_JOIN_MITER : D2D1_LINE_JOIN_ROUND;
+	const float sw = std::max(bubbleStroke_, 1.f);
+	if (dashed) {
+		const float gap = 6.f + (roundCap ? sw : 0.f);
+		float dashes[] = { 8.f / sw, gap / sw };
+		factory->CreateStrokeStyle(
+			D2D1::StrokeStyleProperties(cap, cap, cap, join, 4.f,
+				D2D1_DASH_STYLE_CUSTOM, 0.f),
+			dashes, ARRAYSIZE(dashes), frameStyle_.GetAddressOf());
+	}
+	else {
+		factory->CreateStrokeStyle(
+			D2D1::StrokeStyleProperties(cap, cap, cap, join, 4.f),
+			nullptr, 0, frameStyle_.GetAddressOf());
+	}
+}
+
+// 爆裂命中：轮廓附近或内部都算（空框也要能单击选中 / 双击进编辑）
+bool ShapeText::hitBurstShape(float x, float y, float band) const
+{
+	auto geo = buildBurstGeometry();
+	if (!geo) return false;
+	const D2D1_POINT_2F p{ x, y };
+	BOOL inside = FALSE;
+	if (SUCCEEDED(geo->FillContainsPoint(p, nullptr, &inside)) && inside) return true;
+	inside = FALSE;
+	return SUCCEEDED(geo->StrokeContainsPoint(p, band, nullptr, nullptr, &inside)) && inside;
+}
+
 // 气泡命中（描边）：点到圆角轮廓附近才算。用"从中心沿该方向到轮廓的距离"比较，
 // 圆角和直边都统一由 LinkGeom 算，不会因为圆角大就把命中区算到框内空白里。
 bool ShapeText::hitBubbleStroke(float x, float y, float band) const
 {
+	// 空气泡没有文字可命中，整块框都要能点选，否则删掉提示语以后就"点不中"了
+	if (text.empty()
+		&& x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)
+		return true;
 	const float w = rect.right - rect.left;
 	const float h = rect.bottom - rect.top;
 	if (w < 1.f || h < 1.f) return false;
@@ -153,7 +346,7 @@ bool ShapeText::hitBubbleStroke(float x, float y, float band) const
 // 气泡命中（文字）：按文字**实际排版尺寸**判（不是整个气泡框），四周留一点余量
 bool ShapeText::hitBubbleText(float x, float y) const
 {
-	if (!textLayout) return false;
+	if (!textLayout || text.empty()) return false;
 	DWRITE_TEXT_METRICS m{};
 	textLayout->GetMetrics(&m);
 	if (m.widthIncludingTrailingWhitespace < 1.f || m.height < 1.f) return false;
@@ -184,28 +377,51 @@ void ShapeText::updateBubbleTail()
 
 void ShapeText::paint(ID2D1DeviceContext* ctx)
 {
+	if (isFrame() && win && win->toolSub
+		&& (frameDash_ != win->toolSub->isArrowDash
+			|| frameRound_ != win->toolSub->isArrowRound)) {
+		updateFrameStyle();
+	}
 	if (isEditing) {
-		// 附着在线上时不镜像输入框：洞要用"提交后那套几何"（= setAttachPose 算出的
-		// 以锚点为中心、实测文字尺寸 + 两侧间距），这样编辑中和提交后看起来是同一个洞，
-		// 不会出现"编辑时窄高、退出后正常"的跳变。非附着文字保持原来的镜像行为。
-		// 气泡例外：输入框是 autoSize 的，镜像回来会把整个气泡缩成文字大小 ——
-		// 气泡始终保持自己拖出来的框，输入框只负责在里面居中显示文字。
-		if (!attachTo && !bubble_) {
-			auto tb = win->getTextBox();
-			auto tl = win->clientToAnnotPt(tb->x, tb->y);
-			auto br = win->clientToAnnotPt(tb->x + tb->w, tb->y + tb->h);
-			rect = D2D1::RectF(tl.x, tl.y, br.x, br.y);
-		}
+		// 编辑中的文字和插入符由形状直接绘制，键盘输入由宿主转发
 		updateDraggers();
 		paintPunch(ctx);   // 编辑中也要开洞，不然文字框里还压着线
-		if (bubble_) {
-			// 编辑中保持气泡外框可见（文字由输入框显示）
-			auto geo = buildBubbleGeometry();
-			if (geo) ctx->DrawGeometry(geo.Get(), textBrush.Get(), bubbleStroke_);
+		D2D1_MATRIX_3X2_F old{};
+		ctx->GetTransform(&old);
+		if (angle != 0.f) {
+			const float cx = (rect.left + rect.right) * 0.5f;
+			const float cy = (rect.top + rect.bottom) * 0.5f;
+			ctx->SetTransform(D2D1::Matrix3x2F::Rotation(angle * 180.f / 3.14159265f, { cx, cy }) * old);
 		}
+		if (isFrame()) {
+			auto geo = buildFrameGeometry();
+			if (geo) ctx->DrawGeometry(geo.Get(), textBrush.Get(), bubbleStroke_, frameStyle_.Get());
+		}
+		if (textLayout) {
+			DWRITE_TEXT_METRICS m{};
+			textLayout->GetMetrics(&m);
+			float tx = rect.left + borderPadding;
+			float ty = rect.top + borderPadding;
+			if (isFrame()) {
+				tx = rect.left + ((rect.right - rect.left) - m.widthIncludingTrailingWhitespace) * 0.5f;
+				ty = rect.top + ((rect.bottom - rect.top) - m.height) * 0.5f;
+			}
+			if (!text.empty()) {
+				ctx->DrawTextLayout({ tx, ty }, textLayout.Get(), textBrush.Get(),
+					D2D1_DRAW_TEXT_OPTIONS_NONE);
+			}
+		}
+		// 插入符与编辑命中共用 editCaretPos；编辑定时器每 500ms 触发重绘
+		if (((GetTickCount64() / 500) & 1) == 0) {
+			float lineH = 0.f;
+			const auto p = editCaretPos(lineH);
+			ctx->DrawLine(D2D1::Point2F(p.x, p.y), D2D1::Point2F(p.x, p.y + lineH),
+				textBrush.Get(), std::max(1.f, 1.5f * win->dpi));
+		}
+		ctx->SetTransform(old);
 		return;
 	}
-	if (!textLayout) return;
+	if (!textLayout && !isFrame()) return;
 	paintPunch(ctx);
 	D2D1_MATRIX_3X2_F old{};
 	ctx->GetTransform(&old);
@@ -215,18 +431,21 @@ void ShapeText::paint(ID2D1DeviceContext* ctx)
 		const float cy = (rect.top + rect.bottom) * 0.5f;
 		ctx->SetTransform(D2D1::Matrix3x2F::Rotation(angle * 180.f / 3.14159265f, { cx, cy }) * old);
 	}
-	if (bubble_) {
-		// 气泡外框 + 文字居中
-		auto geo = buildBubbleGeometry();
-		if (geo) ctx->DrawGeometry(geo.Get(), textBrush.Get(), bubbleStroke_);
-		DWRITE_TEXT_METRICS m{};
-		textLayout->GetMetrics(&m);
-		const float tx = rect.left + ((rect.right - rect.left) - m.widthIncludingTrailingWhitespace) * 0.5f;
-		const float ty = rect.top + ((rect.bottom - rect.top) - m.height) * 0.5f;
-		ctx->DrawTextLayout({ tx, ty }, textLayout.Get(), textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+	if (isFrame()) {
+		// 气泡/爆裂外框 + 文字居中
+		auto geo = buildFrameGeometry();
+		if (geo) ctx->DrawGeometry(geo.Get(), textBrush.Get(), bubbleStroke_, frameStyle_.Get());
+		if (textLayout && !text.empty()) {
+			DWRITE_TEXT_METRICS m{};
+			textLayout->GetMetrics(&m);
+			const float tx = rect.left + ((rect.right - rect.left) - m.widthIncludingTrailingWhitespace) * 0.5f;
+			const float ty = rect.top + ((rect.bottom - rect.top) - m.height) * 0.5f;
+			ctx->DrawTextLayout({ tx, ty }, textLayout.Get(), textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+		}
 		ctx->SetTransform(old);
 		return;
 	}
+	if (!textLayout) { ctx->SetTransform(old); return; }
 	ctx->DrawTextLayout({ rect.left + borderPadding, rect.top + borderPadding },
 		textLayout.Get(), textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
 	ctx->SetTransform(old);
@@ -253,14 +472,13 @@ void ShapeText::setAttachPose(float cx, float cy)
 		h = m.height + attachLineSlack + borderPadding * 2.f;
 	}
 	if (w < 1.f || h < 1.f) {   // 还没内容：洞 = 一个字 + 两侧间距，高度就是一行
-		// （这里曾经借"一个字"跑一次真排版来量尺寸，还带上下限兜底 —— 那套已经被
-		//  syncEditorGeometry + 一行高编辑框取代了：洞的尺寸不再影响插入符位置）
+		// （这里曾经借"一个字"跑一次真排版来量尺寸，还带上下限兜底 —— 现在直接按排版
+		//  测量结果算洞的尺寸，插入符位置由排版自身决定）
 		w = fontSize + borderPadding * 2.f;
 		h = fontSize * 1.35f + borderPadding * 2.f;
 	}
 	rect = D2D1::RectF(cx - w * 0.5f, cy - h * 0.5f, cx + w * 0.5f, cy + h * 0.5f);
-	// 取整到整像素：提交后是用浮点 rect 画文字/洞，编辑中是把 rect 换算成 client 像素摆输入框，
-	// 两条路径差 0.5~1px 就是这么来的。这里统一吸附到整像素，两边就完全对齐了
+	// 统一吸附到整像素：文字与洞在提交前后使用同一套浮点几何，避免亚像素偏移
 	rect.left = std::floor(rect.left);
 	rect.top = std::floor(rect.top);
 	rect.right = std::floor(rect.right);
@@ -302,7 +520,8 @@ void ShapeText::paintDragger(ID2D1DeviceContext* ctx)
 		const float cy = (rect.top + rect.bottom) * 0.5f;
 		ctx->SetTransform(D2D1::Matrix3x2F::Rotation(angle * 180.f / 3.14159265f, { cx, cy }) * old);
 	}
-	ctx->DrawRectangle(rect, brushHandleBorder.Get(), win->dpi, dashedStrokeStyle.Get());
+	// 所有文字/气泡/爆裂都统一虚线选框（相对本体外扩 2px）
+	ctx->DrawRectangle(selectionRect(rect), brushHandleBorder.Get(), win->dpi, selectionStroke());
 	for (int i = 0; i < 4; i++) paintHandle(ctx, draggers[i]);
 	if (bubble_) {
 		// 气泡：和矩形一样 —— 只有四角 4 个控点 + 尾巴尖控点 + 四角内侧的圆角点；
@@ -370,12 +589,27 @@ void ShapeText::mouseDrag(const float x, const float y)
 		win->refresh();
 		return;
 	}
-	if (bubble_ && hoverDraggerIndex == 9) {
-		// 生成中：拖出气泡框
-		rect = D2D1::RectF(
-			std::min(pressX, x), std::min(pressY, y),
-			std::max(pressX, x), std::max(pressY, y));
-		updateBubbleTail();
+	if (isFrame() && hoverDraggerIndex == 9) {
+		// 生成中：拖出气泡/爆裂框。Shift = 标准比例（气泡 4:3，爆裂用 Vector 74 的 637:521）
+		if (GetKeyState(VK_SHIFT) & 0x8000) {
+			// 气泡标准比例横向 4:3（宽:高）；爆裂用 Vector 74 的 637:521
+			const float aspect = burst_ ? (637.f / 521.f) : (4.f / 3.f);
+			const float dx = x - pressX, dy = y - pressY;
+			float w = std::fabs(dx), h = std::fabs(dy);
+			if (w / aspect >= h) h = w / aspect;
+			else w = h * aspect;
+			const float x2 = pressX + (dx >= 0.f ? w : -w);
+			const float y2 = pressY + (dy >= 0.f ? h : -h);
+			rect = D2D1::RectF(
+				std::min(pressX, x2), std::min(pressY, y2),
+				std::max(pressX, x2), std::max(pressY, y2));
+		}
+		else {
+			rect = D2D1::RectF(
+				std::min(pressX, x), std::min(pressY, y),
+				std::max(pressX, x), std::max(pressY, y));
+		}
+		if (bubble_) updateBubbleTail();
 		updateDraggers();
 		return;
 	}
@@ -386,28 +620,12 @@ void ShapeText::mouseDrag(const float x, const float y)
 		updateDraggers();
 		return;
 	}
-	if (bubble_ && hoverDraggerIndex >= 0 && hoverDraggerIndex <= 3) {
-		// 气泡四周：和矩形一样直接改框（字号保持 16）
-		const float minW = 60.f * win->dpi;
-		const float minH = 36.f * win->dpi;
-		D2D1_RECT_F r = resizeStartRect;
-		if (hoverDraggerIndex == 0) { r.left = x; r.top = y; }
-		else if (hoverDraggerIndex == 1) { r.right = x; r.top = y; }
-		else if (hoverDraggerIndex == 2) { r.left = x; r.bottom = y; }
-		else { r.right = x; r.bottom = y; }
-		if (r.right < r.left) std::swap(r.left, r.right);
-		if (r.bottom < r.top) std::swap(r.top, r.bottom);
-		if (r.right - r.left < minW) {
-			if (hoverDraggerIndex == 1 || hoverDraggerIndex == 3) r.right = r.left + minW;
-			else r.left = r.right - minW;
-		}
-		if (r.bottom - r.top < minH) {
-			if (hoverDraggerIndex == 2 || hoverDraggerIndex == 3) r.bottom = r.top + minH;
-			else r.top = r.bottom - minH;
-		}
-		rect = r;
-		syncRectFromLayout();   // 文字装不下时再撑大
-		updateBubbleTail();
+	if (isFrame() && hoverDraggerIndex >= 0 && hoverDraggerIndex <= 3) {
+		// 旋转后按世界坐标的固定对角/固定边缩放，指针投影到形状自身两条轴上；
+		// 直接改 rect.left/right 会忽略角度，导致旋转后拖角整体漂移。
+		rect = dragScale(x, y, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
+		syncRectFromLayout();
+		if (bubble_) updateBubbleTail();
 		updateDraggers();
 		return;
 	}
@@ -448,13 +666,16 @@ void ShapeText::mouseDrag(const float x, const float y)
 	if (hoverDraggerIndex == 4) {
 		const float cx = (rect.left + rect.right) * 0.5f;
 		const float cy = (rect.top + rect.bottom) * 0.5f;
-		angle = rotateStartAngle + (std::atan2(y - cy, x - cx) - rotateStartAtan);
+		float next = rotateStartAngle + (std::atan2(y - cy, x - cx) - rotateStartAtan);
+		if (GetKeyState(VK_SHIFT) & 0x8000) next = snapRotation8(next);
+		angle = next;
 		updateDraggers();
 	}
 }
 
 void ShapeText::mouseDown(const float x, const float y)
 {
+	scaling_ = false;
 	if (bubble_ && hoverDraggerIndex == 5) {
 		// 尾巴尖控点
 		pressX = x;
@@ -475,8 +696,8 @@ void ShapeText::mouseDown(const float x, const float y)
 			startEdit();
 			return;
 		}
-		if (bubble_) {
-			// 气泡：和矩形一样拖拽生成（按下到松开就是框）
+		if (isFrame()) {
+			// 气泡/爆裂：和矩形一样拖拽生成（按下到松开就是框）
 			pressX = x;
 			pressY = y;
 			rect = D2D1::RectF(x, y, x, y);
@@ -506,6 +727,11 @@ void ShapeText::mouseDown(const float x, const float y)
 		pressY = y;
 		resizeStartFont = fontSize;
 		resizeStartRect = rect;
+		if (isFrame()) {
+			// 旋转后的缩放必须用世界锚点；scaleHandle_ 是 hitBoxEdgeOrCorner 的原始角序号
+			beginScale(rect, angle, scaleHandle_, x, y);
+			scaling_ = true;
+		}
 		return;
 	}
 	if (hoverDraggerIndex == 4) {
@@ -520,14 +746,31 @@ void ShapeText::mouseDown(const float x, const float y)
 void ShapeText::mouseUp(const float x, const float y)
 {
 	(void)x; (void)y;
-	if (bubble_ && hoverDraggerIndex == 9) {
-		// 生成结束：装不下文字就撑到最小尺寸
+	scaling_ = false;
+	if (isFrame() && hoverDraggerIndex == 9) {
+		// 生成结束：文字装不下时撑到最小尺寸；进入编辑延后到 annotUp 之后，
+		// 保证新建形状先完成本帧绘制
 		hoverDraggerIndex = -1;
 		syncRectFromLayout();
-		updateBubbleTail();
+		if (bubble_) updateBubbleTail();
+		updateDraggers();
+		win->requestEditText(this);
+		return;
 	}
 	dotPressIndex_ = -1;
 	updateDraggers();
+}
+
+void ShapeText::mouseWheel(const float /*x*/, const float /*y*/, const short delta)
+{
+	if (!isFrame()) return;
+	// 二次选中气泡/爆裂：滚轮改描边粗细，并且同步回标注属性栏的线宽滑条
+	auto next = bubbleStroke_ + (delta < 0 ? -win->dpi : win->dpi);
+	auto applied = win->toolSub->setShapeSliderVal(L"arrow", next);
+	if (applied == bubbleStroke_) return;
+	bubbleStroke_ = applied;
+	updateFrameStyle();
+	win->refresh();
 }
 
 void ShapeText::mouseMove(const float x, const float y)
@@ -557,17 +800,12 @@ void ShapeText::mouseMove(const float x, const float y)
 			return;
 		}
 	}
-	const int rotCorner = isSelected() ? hitRotateRing(lx, ly, rect) : -1;
-	if (rotCorner >= 0) {
-		hoverDraggerIndex = 4;
-		rotateCorner = rotCorner;
-		return;
-	}
 	// 四角优先；四边也可调（映射到对应角，缩放逻辑相同）。
 	// 气泡只保留四角 4 个控点：边中点不缩放，落到下面的"框内移动"
 	const float band = std::max(8.f * win->dpi, borderPadding);
 	const int z = hitBoxEdgeOrCorner(lx, ly, rect, band);
-	if (z >= 0 && !(bubble_ && (z & 1))) {
+	if (z >= 0 && !(isFrame() && (z & 1))) {
+		scaleHandle_ = z;
 		// Area 索引 → Text 四角：0=TL 2=TR 4=BR 6=BL → 0,1,3,2
 		if (z == 0 || z == 1 || z == 7) hoverDraggerIndex = 0;
 		else if (z == 2 || z == 3) hoverDraggerIndex = 1;
@@ -575,10 +813,19 @@ void ShapeText::mouseMove(const float x, const float y)
 		else hoverDraggerIndex = 2;
 		return;
 	}
+	// 控件命中之后再判旋转：角柄外半圈仍算缩放，旋转只在更外圈生效
+	const int rotCorner = isSelected() ? hitRotateRing(lx, ly, rect) : -1;
+	if (rotCorner >= 0) {
+		hoverDraggerIndex = 4;
+		rotateCorner = rotCorner;
+		return;
+	}
 	// 气泡：只有描边和文字算命中 —— 中间空白不抢点击（能点到气泡下面的东西）
-	if (bubble_) {
+	if (isFrame()) {
 		const float strokeBand = std::max(6.f * win->dpi, bubbleStroke_ * 0.5f + 4.f * win->dpi);
-		if (hitBubbleText(lx, ly) || hitBubbleStroke(lx, ly, strokeBand)) {
+		const bool onFrame = hitBubbleText(lx, ly)
+			|| (bubble_ ? hitBubbleStroke(lx, ly, strokeBand) : hitBurstShape(lx, ly, strokeBand));
+		if (onFrame) {
 			hoverDraggerIndex = isEditing ? 9 : 8;
 			return;
 		}
@@ -623,8 +870,8 @@ void ShapeText::setCursor()
 
 bool ShapeText::hitErase(const float x, const float y)
 {
-	if (bubble_) {
-		// 只有描边和文字会被擦掉；点气泡中间空白不算命中
+	if (isFrame()) {
+		// 气泡：描边和文字；爆裂：轮廓或内部
 		float lx = x, ly = y;
 		if (std::fabs(angle) > 1e-6f) {
 			const float cx = (rect.left + rect.right) * 0.5f;
@@ -635,9 +882,50 @@ bool ShapeText::hitErase(const float x, const float y)
 			ly = cy + dx * s + dy * c;
 		}
 		const float band = std::max(6.f * win->dpi, bubbleStroke_ * 0.5f + 4.f * win->dpi);
-		return hitBubbleText(lx, ly) || hitBubbleStroke(lx, ly, band);
+		return hitBubbleText(lx, ly)
+			|| (bubble_ ? hitBubbleStroke(lx, ly, band) : hitBurstShape(lx, ly, band));
 	}
 	return hitLabelBox(x, y);
+}
+
+D2D1_POINT_2F ShapeText::editCaretPos(float& lineH) const
+{
+	lineH = fontSize * 1.1f;
+	float cx = 0.f, cy = 0.f;
+	if (textLayout) {
+		DWRITE_HIT_TEST_METRICS hm{};
+		if (SUCCEEDED(textLayout->HitTestTextPosition(
+			(UINT32)std::clamp(caretIndex_, 0, (int)text.size()), FALSE, &cx, &cy, &hm))) {
+			if (hm.height > 0.5f) lineH = hm.height;
+		}
+	}
+	if (isFrame()) {
+		DWRITE_TEXT_METRICS m{};
+		if (textLayout) textLayout->GetMetrics(&m);
+		const float rw = rect.right - rect.left, rh = rect.bottom - rect.top;
+		return D2D1::Point2F(
+			rect.left + (rw - m.widthIncludingTrailingWhitespace) * 0.5f + cx,
+			rect.top + (rh - m.height) * 0.5f + cy);
+	}
+	return D2D1::Point2F(rect.left + borderPadding + cx, rect.top + borderPadding + cy);
+}
+
+bool ShapeText::hitCaretArea(float x, float y) const
+{
+	float lx = x, ly = y;
+	if (std::fabs(angle) > 1e-6f) {
+		const float cx = (rect.left + rect.right) * 0.5f;
+		const float cy = (rect.top + rect.bottom) * 0.5f;
+		const float c = std::cos(-angle), s = std::sin(-angle);
+		const float dx = x - cx, dy = y - cy;
+		lx = cx + dx * c - dy * s;
+		ly = cy + dx * s + dy * c;
+	}
+	float lineH = 0.f;
+	const auto p = editCaretPos(lineH);
+	const float pad = 4.f * win->dpi;
+	return lx >= p.x - pad && lx <= p.x + pad
+		&& ly >= p.y - pad && ly <= p.y + lineH + pad;
 }
 
 // 命中"这块文字"（含它周围一点边距）。线上文字一律横排（angle==0），普通文字可能是
@@ -660,92 +948,6 @@ bool ShapeText::hitLabelBox(const float x, const float y) const
 	const float halfW = (rect.right - rect.left) * 0.5f + half;
 	const float halfH = (rect.bottom - rect.top) * 0.5f + half;
 	return std::fabs(lx) <= halfW && std::fabs(ly) <= halfH;
-}
-
-// 把输入框摆到当前 rect 上。附着文字的 rect 是"以线段锚点为中心"算出来的，
-// 所以调用它 = 把插入符挪到线段中间（而不是落笔那个鼠标位置）
-void ShapeText::syncEditorGeometry()
-{
-	if (!isEditing || !win) return;
-	auto tb = win->getTextBox();
-	auto d = win->dpi;
-	if (bubble_) {
-		// 气泡：输入框铺在气泡内框里（让开描边留白），文字水平+垂直居中；
-		// 背景透明、关掉 autoSize —— 框是固定的，不会出现"双击文字气泡缩成一团"
-		const float pad = borderPadding;
-		auto btl = win->annotToClientPt(rect.left + pad, rect.top + pad);
-		auto bbr = win->annotToClientPt(rect.right - pad, rect.bottom - pad);
-		const float bw = std::max(1.f, bbr.x - btl.x);
-		const float bh = std::max(1.f, bbr.y - btl.y);
-		tb->setPosition(Ling::Edge::Left, btl.x / d);
-		tb->setPosition(Ling::Edge::Top, btl.y / d);
-		// 尺寸必须写进 Yoga（setSize）：只改 tb->w/h 的话，下一次布局会被上一次
-		// autoSize 存下来的"文字宽度"覆盖，编辑框缩到左上角 → 文字看起来被挪走了
-		tb->setSize(bw / d, bh / d);
-		tb->x = btl.x;
-		tb->y = btl.y;
-		tb->w = bw;
-		tb->h = bh;
-		tb->setPadding(0.f);
-		tb->setBg(0);
-		tb->setVerticalCenter(true);
-		tb->setTextAlignCenter(true);
-		tb->setLineSpacing(0.f);
-		return;
-	}
-	auto tl = win->annotToClientPt(rect.left, rect.top);
-	auto br = win->annotToClientPt(rect.right, rect.bottom);
-	tb->setPosition(Ling::Edge::Left, tl.x / d);
-	tb->setPosition(Ling::Edge::Top, tl.y / d);
-	tb->x = tl.x;
-	tb->y = tl.y;
-	tb->w = std::max(1.f, br.x - tl.x);
-	tb->h = std::max(1.f, br.y - tl.y);
-	const float visScale = (rect.right > rect.left) ? (tb->w / (rect.right - rect.left)) : win->scale;
-	tb->setPadding(attachTo ? 0.f : borderPadding * visScale / d);
-	// 附着文字：让输入框把文字**垂直居中**排在自己的框里 —— 这才是"插入符上下居中"的正解。
-	// Ling::TextBox 默认自框顶向下排布，框高大于一行时插入符会偏上 / 偏下；此前用"整体上抬
-	// borderPadding"补偿，只是把偏差换了个方向，该做法已移除。
-	// 附着文字：输入框**自身背景必须透明**。编辑时看到的"紧贴文字、两侧无间距"那道缝，
-	// 是输入框的不透明底色遮住了连线（不是选区挖洞的效果）—— 洞由 paintPunch 按 rect
-	//（文字 + 两侧间距、以锚点居中）挖出，随后被输入框底色覆盖。
-	// 同时按内容自适应尺寸：这样才能真正以锚点为中心居中文字，插入符也才会落在洞内。
-	if (attachTo) {
-		tb->setBg(0);
-		// 输入框是 autoSize 的（AnnotHost::getTextBox 建框时就开了）：框 = 文字大小，
-		// 文字从**框的左上角**开始排。所以"把框居中"≠"把文字居中" —— 文字会整体偏到右下方，
-		// 插入符也跟着跑到右边（你截图里那个贴着文字、没两边间距的缝就是它）。
-		// 正解：把框往左上挪半个**文字**尺寸，让文字自己以线段锚点为中心。
-		float tw = std::max(1.f, rect.right - rect.left - borderPadding * 2.f);
-		float th = std::max(1.f, rect.bottom - rect.top - borderPadding * 2.f);
-		if (textLayout) {
-			DWRITE_TEXT_METRICS m{};
-			textLayout->GetMetrics(&m);
-			if (m.widthIncludingTrailingWhitespace > 0.5f) tw = m.widthIncludingTrailingWhitespace;
-			// 高度同样带上行距压掉的那点（和 setAttachPose/syncRectFromLayout 一致），
-			// 输入框和落下后的文字才是同一个盒、行尾也不会被裁
-			if (m.height > 0.5f) th = m.height + attachLineSlack;
-		}
-		else {
-			// 空内容：插入符就在文字起点，把"文字宽"当 0 → 框左边正好落在锚点上，
-			// 插入符也就压在线段中点（框宽给个极小值就行，别从左边开始排导致偏左）
-			tw = 0.f;
-		}
-		const float cx = (rect.left + rect.right) * 0.5f;
-		const float cy = (rect.top + rect.bottom) * 0.5f;
-		const auto tlp = win->annotToClientPt(cx - tw * 0.5f, cy - th * 0.5f);
-		tb->x = tlp.x;
-		tb->y = tlp.y;
-		tb->w = std::max(1.f, tw * win->scale);
-		tb->h = std::max(1.f, th * win->scale);
-		tb->setPosition(Ling::Edge::Left, tlp.x / d);
-		tb->setPosition(Ling::Edge::Top, tlp.y / d);
-	}
-	tb->setVerticalCenter(false);
-	tb->setTextAlignCenter(false);   // 上一轮可能编辑过气泡（居中），普通文字恢复左对齐
-	// 行距跟着 commit 后的排版走（线上文字一行一个字，见 makeTextLayout）：
-	// 输入框里也得是同一个行距，不然打字时和落下后高度不一样
-	tb->setLineSpacing(attachTo ? attachLineStep * visScale / d : 0.f);
 }
 
 void ShapeText::initAttachedText(const std::wstring& t, float px)
@@ -774,113 +976,101 @@ void ShapeText::startEdit()
 {
 	if (isEditing) return;
 	isEditing = true;
-	// 不用 setAttr()：会把拖大的字号冲成工具条滑条值
-	auto tb = win->getTextBox();
-	auto d = win->dpi;
-	auto tl = win->annotToClientPt(rect.left, rect.top);
-	auto br = win->annotToClientPt(rect.right, rect.bottom);
-	// 挂在箭头上（还没打字）：输入框只给"一行高、以线段中点为中心"。之前给它的是"行高 +
-	// 两侧内边距"的框，输入框自己的内边距再叠上去，插入符就排到线段下方去了（截图里那根
-	// 竖线）；一行高之后它没有余量可以往下沉，插入符自然压在线上
-	if (attachTo) {
-		const float halfW = (br.x - tl.x) * 0.5f;
-		const float cx = tl.x + halfW;
-		const float cy = (tl.y + br.y) * 0.5f;
-		const float lineH = std::max(1.f, (float)(fontSize * d * 1.35));
-		tl.x = cx - halfW;
-		br.x = cx + halfW;
-		tl.y = cy - lineH * 0.5f;
-		br.y = cy + lineH * 0.5f;
-	}
-	tb->setPosition(Ling::Edge::Left, tl.x / d);
-	tb->setPosition(Ling::Edge::Top, tl.y / d);
-	tb->x = tl.x;
-	tb->y = tl.y;
-	tb->w = std::max(1.f, br.x - tl.x);
-	tb->h = std::max(1.f, br.y - tl.y);
-	tb->setColor(Ling::Color(colorValue));
-	tb->setCaretColor(Ling::Color(colorValue));
-	const float visScale = (rect.right > rect.left)
-		? (tb->w / (rect.right - rect.left)) : win->scale;
-	// 附着在箭头上的文字：编辑框**不留内边距**。框高已经是一行，再叠一份内边距，文字
-	// 就被挤到框的下半部分（= 截图里插入符沉在线段下方）。附着文字是"中心锚点 + 用同一个排版
-	// 量出的尺寸"，没有第二份留白可叠。
-	tb->setPadding(attachTo ? 0.f : borderPadding * visScale / d);
-	if (bubble_) {
-		// 气泡：框固定（不 autoSize）、文字居中、底透明 —— 双击中间文字只改内容，
-		// 气泡本身保持拖出来的大小
-		tb->setAutoSize(false);
-		tb->setBg(0);
-		tb->setTextAlignCenter(true);
-		tb->setVerticalCenter(true);
-	}
-	tb->setFontSize(fontSize * visScale / d);
-	tb->setBold(isBold);
-	tb->setItalic(isItalic);
-	tb->setText(text);
-	tb->show();
-	textChangedTok = tb->onTextChanged.add([this](Ling::TextBox*, const std::wstring& val) {
-		text = val;
-		// 线上文字：一边打字一边按"线段中点"重新居中。否则字是从左边长出来的 ——
-		// 编辑中看着偏左，提交后才"跳"到中间
-		if (attachTo) {
-			// 一边打字一边按线段锚点重新居中：重排版 → 重算锚点几何 → 输入框跟过去
-			// （和落笔时那句 syncEditorGeometry 是同一个动作，避免两份几何代码各改一半）
-			makeTextLayout();
-			setAttachPose(attachCx, attachCy);
-			syncEditorGeometry();
-		}
-		win->refresh();
-	});
-	focusTok = tb->onFocusChanged.add([this](Ling::TextBox*, bool focused) {
-		if (!focused) finishEdit();
-	});
+	caretIndex_ = (int)text.size();
+	editStartText_ = text;
+	editStartGeo_ = editSnapshot();
+	// 文字与插入符由形状直接绘制，键盘由宿主 onChar/onKey 转发
 	win->setEditingText(this);
-	tb->focus();
-	// 开编辑这条路径也要走同一套几何（syncEditorGeometry 里含"附着文字上抬"），
-	// 否则从落笔进入编辑时插入符又会沉到洞的下半部分
-	syncEditorGeometry();
-	// startEdit 只由"这一次鼠标按下"触发（落笔建文字 / 双击线上文字 / 点已有标签），而上面
-	// syncEditorGeometry 刚把输入框挪到锚点：紧接着同一次按下的 TextBox::onDown 还会跑一遍，
-	// 它用的是**挪动前**的几何 —— 空标签的框只有 1px 宽，于是被判成"点在框外"→失焦→
-	// finishEdit（空文字还会被异步删掉），表现就是"第一个箭头能打字，第二个点上去插不进光标"。
-	// 让输入框对这一次按下豁免"框外失焦"（下一次按下前会自动清掉，见 TextBox::onUp）
-	tb->holdFocusForHostPress();
+	win->beginTextEdit();
 	win->refresh();
 }
 
-void ShapeText::finishEdit()
+void ShapeText::applyTextFromUndo(const std::wstring& t)
+{
+	text = t;
+	caretIndex_ = (int)text.size();
+	isEditing = false;
+	editStartText_.clear();
+	editStartGeo_.clear();
+	makeTextLayout();
+	if (attachTo) setAttachPose(attachCx, attachCy);
+	else syncRectFromLayout();
+	win->refresh();
+}
+
+void ShapeText::insertText(const std::wstring& s)
+{
+	if (!isEditing || s.empty()) return;
+	caretIndex_ = std::clamp(caretIndex_, 0, (int)text.size());
+	text.insert((size_t)caretIndex_, s);
+	caretIndex_ += (int)s.size();
+	makeTextLayout();
+	if (attachTo) setAttachPose(attachCx, attachCy);
+	else if (!isFrame()) syncRectFromLayout();   // 普通文字随内容长；气泡保持拖出的框
+	win->refresh();
+}
+
+void ShapeText::backspace()
+{
+	if (!isEditing || text.empty()) return;
+	caretIndex_ = std::clamp(caretIndex_, 0, (int)text.size());
+	if (caretIndex_ <= 0) return;
+	text.erase((size_t)(caretIndex_ - 1), 1);
+	--caretIndex_;
+	makeTextLayout();
+	if (attachTo) setAttachPose(attachCx, attachCy);
+	else if (!isFrame()) syncRectFromLayout();
+	win->refresh();
+}
+
+void ShapeText::deleteForward()
+{
+	if (!isEditing) return;
+	caretIndex_ = std::clamp(caretIndex_, 0, (int)text.size());
+	if (caretIndex_ >= (int)text.size()) return;
+	text.erase((size_t)caretIndex_, 1);
+	makeTextLayout();
+	if (attachTo) setAttachPose(attachCx, attachCy);
+	else if (!isFrame()) syncRectFromLayout();
+	win->refresh();
+}
+
+void ShapeText::moveCaret(int delta)
+{
+	if (!isEditing) return;
+	caretIndex_ = std::clamp(caretIndex_ + delta, 0, (int)text.size());
+	win->refresh();
+}
+
+void ShapeText::moveCaretTo(bool end)
+{
+	if (!isEditing) return;
+	caretIndex_ = end ? (int)text.size() : 0;
+	win->refresh();
+}
+
+void ShapeText::finishEdit(bool suppressNextClick)
 {
 	if (!isEditing) return;
 	isEditing = false;
-	auto tb = win->getTextBox();
-	tb->onTextChanged.remove(textChangedTok);
-	tb->onFocusChanged.remove(focusTok);
-	textChangedTok = {};
-	focusTok = {};
-	text = tb->getText();
-	tb->blur();
-	tb->hide();
-	if (bubble_) {
-		// 气泡的临时排版设置还原，输入框还给其它文字工具（它们要 autoSize + 左对齐）
-		tb->setAutoSize(true);
-		tb->setTextAlignCenter(false);
-		tb->setVerticalCenter(false);
-	}
+	caretIndex_ = std::clamp(caretIndex_, 0, (int)text.size());
 	win->setEditingText(nullptr);
+	win->endTextEdit();
 	makeTextLayout();
 	syncRectFromLayout();
-	// 失焦/点空白结束后，吞掉紧随的点击，避免立刻又选中并画出控件
-	win->annotSuppressUntil = GetTickCount64() + 400;
+	// 一次编辑会话（无论打了多少字）只记一步撤销；空普通文字会被删掉，不记
+	if (win->history && text != editStartText_ && (!text.empty() || isFrame())) {
+		win->history->addTextEditStep(this, editStartGeo_, editSnapshot(),
+			editStartText_, text);
+	}
+	// 点空白结束后，吞掉紧随的点击，避免立刻又选中并画出控件；
+	// 如果本次点击本来就要继续命中其它标注，则不能吞。
+	if (suppressNextClick) win->annotSuppressUntil = GetTickCount64() + 400;
 	win->shapeHover = nullptr;
 	win->refresh();
 	if (text.empty()) {
-		if (bubble_) {
-			// 气泡不允许空文字：恢复默认提示语
-			text = Lang::get(L"tool.bubbleText");
-			if (text.empty()) text = L"请输入文字";
-			makeTextLayout();
-			syncRectFromLayout();
+		if (isFrame()) {
+			// 气泡/爆裂允许空文字：保持空框
 			win->refresh();
 			return;
 		}
@@ -894,18 +1084,17 @@ void ShapeText::applyStyle()
 {
 	setAttr();
 	// 气泡字号固定（与文字工具默认字号一致；标注滑条调的是线宽，不能拿来改字号）；线宽跟着标注滑条
-	if (bubble_) {
+	if (isFrame()) {
 		fontSize = 24.f * win->dpi;
 		if (win->getCurToolId() == L"arrow")
 			bubbleStroke_ = std::max(1.f, win->toolSub->getSliderVal());
+		updateFrameStyle();
 	}
 	if (isEditing) {
-		auto tb = win->getTextBox();
-		tb->setColor(Ling::Color(colorValue));
-		tb->setCaretColor(Ling::Color(colorValue));
-		tb->setFontSize(fontSize * win->scale / win->dpi);
-		tb->setBold(isBold);
-		tb->setItalic(isItalic);
+		// 编辑中：样式变化后重排并重绘
+		makeTextLayout();
+		if (attachTo) setAttachPose(attachCx, attachCy);
+		else if (!isFrame()) syncRectFromLayout();
 	}
 	else {
 		makeTextLayout();
@@ -925,7 +1114,7 @@ void ShapeText::makeTextLayout()
 	// 行距取**字体自己的 baseline（≈ 一个字）**：再小的话第一行的上伸就会顶出行框
 	// （被内容区裁剪切掉）；取行度量必须**两段式** —— GetLineMetrics(&lm, 1, &n) 在
 	// 多于一行的排版上会直接失败返回全 0，拿 0 当 baseline 传下去字会被顶到行框上方，
-	// 表现就是"打字时字被裁 + 上下间距不统一"（2026-09-26 踩过）
+	// 导致打字时文字被裁、上下间距不一致
 	if (attachTo) {
 		attachLineStep = 0.f;
 		attachLineSlack = 0.f;

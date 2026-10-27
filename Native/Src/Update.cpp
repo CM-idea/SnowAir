@@ -307,19 +307,16 @@ namespace {
 			winrt::Windows::Web::Http::HttpClient client{ filter };
 			client.DefaultRequestHeaders().UserAgent().TryParseAdd(L"SnowAir");
 			auto op = client.GetStringAsync(Uri{
-				L"https://api.github.com/repos/CM-idea/SnowAir/releases/latest" });
+				L"https://github.com/CM-idea/SnowAir/releases.atom" });
 			auto guard = ThreadPoolTimer::CreateTimer(
 				[op](const ThreadPoolTimer&) { op.Cancel(); }, std::chrono::seconds(8));
 			std::wstring body{ co_await op };
 			guard.Cancel();
-			JsonObject obj{ nullptr };
-			if (JsonObject::TryParse(body, obj)) {
-				const std::wstring tag{ obj.GetNamedString(L"tag_name", L"") };
-				if (!tag.empty()) {
-					const auto remote = parseTag(tag);
-					if (remote > Ling::Util::getVerNum()) {
-						ver = std::format(L"{}.{}.{}", remote[0], remote[1], remote[2]);
-					}
+			const std::wstring tag = Util::parseGithubReleaseTag(body);
+			if (!tag.empty()) {
+				const auto remote = parseTag(tag);
+				if (remote > Ling::Util::getVerNum()) {
+					ver = std::format(L"{}.{}.{}", remote[0], remote[1], remote[2]);
 				}
 			}
 		}
@@ -341,9 +338,14 @@ std::wstring Update::pendingVersion()
 
 void Update::checkLater()
 {
-	// 每天只查一次（记账在配置里，跨进程有效；失败了也不当天反复重试）
+	// 按用户设置的频率查：一天 / 一周 / 一月 / 从不；记账在配置里，跨进程有效。
+	// 失败也不反复重试，等下一个周期。
+	const int freq = Setting::get()->getUpdateCheckFreq();
+	if (freq == 3) return;   // 从不
 	const long long day = today();
-	if (Setting::get()->getUpdateCheckDay() == day) return;
+	const long long last = Setting::get()->getUpdateCheckDay();
+	const long long interval = (freq == 0) ? 1 : (freq == 1) ? 7 : 30;
+	if (last != 0 && day - last < interval) return;
 	Setting::get()->setUpdateCheckDay(day);
 	checkGithubLatest();
 }

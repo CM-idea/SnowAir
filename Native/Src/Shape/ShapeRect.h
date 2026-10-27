@@ -10,6 +10,7 @@ public:
 	ShapeRect(AnnotHost* win, int kind = Rect, int sides = 0);
 	~ShapeRect();
 	int kind() const { return kind_; }
+	int sides() const { return sides_; }
 	// 多边形边数 / 星形角数（3–20）：属性栏滑条实时改选中的形状
 	void setSides(int n);
 	// 圆角（物理像素）：属性栏滑条实时改选中的形状（矩形四角统一 / 多边形·星形顶点倒圆）

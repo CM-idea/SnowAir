@@ -196,7 +196,7 @@ void WinSettingAppearance::buildTabActions(Ling::Node* row)
         b->setBorder(1.f, SettingTheme::input);
         b->setBg(SettingTheme::cardBg);
         b->setColor(SettingTheme::textPrimary);
-        b->setHoverBg(SettingTheme::accent);
+        b->setHoverBg(SettingTheme::outlineHoverBg);
         b->setHoverColor(SettingTheme::textPrimary);
         b->setFlexDirection(Ling::FlexDirection::Row);
         b->setJustifyContent(Ling::Justify::Center);
@@ -217,15 +217,25 @@ void WinSettingAppearance::buildTabActions(Ling::Node* row)
 void WinSettingAppearance::tbRefreshActionState()
 {
     const uint32_t selBg = 0xE5E5E5FFu;   // #E5E5E5
-    auto apply = [selBg](Ling::Button* b, bool on) {
+    // 选中底是浅灰：深色主题下文字必须转深色，否则白字压在浅灰上几乎看不见
+    const uint32_t selFg = SettingTheme::isDark() ? 0x171717FFu : SettingTheme::textPrimary;
+    auto apply = [selBg, selFg](Ling::Button* b, bool on) {
         if (!b) return;
         if (on) {
+            // 选中态是浅灰实心胶囊：去掉 1px 描边。深色主题下深描边压在浅底圆角上
+            // 会露出一圈深色毛边（描边与背景各自抗锯齿），去掉后只剩填充的圆角裁剪
+            b->setBorder(0.f, 0);
             b->setBg(selBg);
             b->setHoverBg(selBg);
+            b->setColor(selFg);
+            b->setHoverColor(selFg);
         }
         else {
+            b->setBorder(1.f, SettingTheme::input);
             b->setBg(SettingTheme::cardBg);
-            b->setHoverBg(SettingTheme::accent);
+            b->setHoverBg(SettingTheme::outlineHoverBg);
+            b->setColor(SettingTheme::textPrimary);
+            b->setHoverColor(SettingTheme::textPrimary);
         }
         };
     apply(tbInitialBtn, tbInitialOpen);

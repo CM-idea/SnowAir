@@ -225,20 +225,15 @@ winrt::fire_and_forget fetchLatestTag(std::weak_ptr<bool> weak, WinSettingAbout*
 		// GitHub API 必须带 User-Agent，否则直接 403
 		client.DefaultRequestHeaders().UserAgent().TryParseAdd(L"SnowAir");
 		auto op = client.GetStringAsync(
-			winrt::Windows::Foundation::Uri{ L"https://api.github.com/repos/CM-idea/SnowAir/releases/latest" });
+			winrt::Windows::Foundation::Uri{ L"https://github.com/CM-idea/SnowAir/releases.atom" });
 		auto guard = winrt::Windows::System::Threading::ThreadPoolTimer::CreateTimer(
 			[op](const winrt::Windows::System::Threading::ThreadPoolTimer&) { op.Cancel(); },
 			std::chrono::seconds(8));
 		std::wstring body{ co_await op };
 		guard.Cancel();
-		JsonObject obj{ nullptr };
-		if (JsonObject::TryParse(body, obj)) {
-			auto t = obj.GetNamedString(L"tag_name", L"");
-			if (!t.empty()) {
-				tag = std::wstring{ t };
-				ok = true;
-			}
-		}
+		// Releases Atom 不受未认证 GitHub API 的 60 次/小时限流影响
+		tag = Util::parseGithubReleaseTag(body);
+		ok = !tag.empty();
 	}
 	catch (...) {
 		ok = false;
@@ -340,6 +335,37 @@ WinSettingAbout::WinSettingAbout(Ling::WinBase* parent) : Ling::Node(parent)
 	statusTime_->setFontSize(12.f);
 	statusTime_->setColor(SettingTheme::textTertiary);
 	statusTime_->setMarginLeft(4.f);
+
+	// 状态行尾：自动检查频率下拉（每天 / 每周 / 每月 / 从不）
+	const std::vector<std::wstring> freqOptions{
+		Lang::get(L"about.checkFreqDay"),
+		Lang::get(L"about.checkFreqWeek"),
+		Lang::get(L"about.checkFreqMonth"),
+		Lang::get(L"about.checkFreqNever"),
+	};
+	auto* freqDdl = SettingUi::selectDdl(statusRow, freqOptions,
+		Setting::get()->getUpdateCheckFreq(),
+		[](int idx, const std::wstring&) {
+			Setting::get()->setUpdateCheckFreq(idx);
+			if (idx != 3) Update::checkLater();   // 改频率后若已到期就立刻补查一次
+		}, true);
+	freqDdl->setWidth(64.f);
+	freqDdl->setHeight(20.f);
+	freqDdl->setMarginLeft(10.f);
+	freqDdl->setFlexShrink(0.f);
+	// 常态做成和「尚未检查」同一档文字：12px、三级灰、无边框/无底色；停悬才浮出浅底
+	freqDdl->setBorder(0.f, 0);
+	freqDdl->setBg(0);
+	freqDdl->setHoverBg(SettingTheme::accent);
+	freqDdl->setColor(SettingTheme::textTertiary);
+	freqDdl->setPadding(4.f, 0.f, 4.f, 0.f);
+	freqDdl->setBorderRadius(4.f);
+	for (auto& c : freqDdl->children) {
+		if (auto* lab = dynamic_cast<Ling::Label*>(c.get())) {
+			lab->setFontSize(12.f);
+			lab->setColor(SettingTheme::textTertiary);
+		}
+	}
 
 	// 每日后台检查如果已经发现新版本，进来就直接显示出来
 	if (const auto pending = Update::pendingVersion(); !pending.empty()) {

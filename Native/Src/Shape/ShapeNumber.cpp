@@ -176,13 +176,12 @@ void ShapeNumber::paintDragger(ID2D1DeviceContext* ctx)
 		for (auto& dragger : draggers) paintHandle(ctx, dragger);
 		return;
 	}
-	// 与 ShapeArea / 矩形相同：选框 + 旋转柄 + 四角（无边中点）
+	// 与 ShapeArea / 矩形相同：虚线选框 + 旋转柄 + 四角（无边中点）
 	withRotation(ctx, [&] {
-		ctx->DrawRectangle(
-			D2D1::RectF(rect.left - 1.f, rect.top - 1.f, rect.right + 1.f, rect.bottom + 1.f),
-			brushHandleBorder.Get(), win->dpi);
-		const float bx = (rect.left + rect.right) * 0.5f;
-		ctx->DrawLine(D2D1::Point2F(bx, rect.top),
+		const D2D1_RECT_F sr = selectionRect(rect);
+		ctx->DrawRectangle(sr, brushHandleBorder.Get(), win->dpi, selectionStroke());
+		const float bx = (sr.left + sr.right) * 0.5f;
+		ctx->DrawLine(D2D1::Point2F(bx, sr.top),
 			D2D1::Point2F(bx, (rotateHandle.top + rotateHandle.bottom) * 0.5f),
 			brushHandleBorder.Get(), 2.f * win->dpi);
 		static const int corners[] = { 0, 2, 4, 6 };
@@ -253,21 +252,15 @@ void ShapeNumber::mouseDrag(const float x, const float y)
 	// Emoji：矩形系拖拽
 	if (hoverDraggerIndex == 9) {
 		const auto c = boxCenter();
-		boxAngle = std::atan2(y - c.y, x - c.x) + kPi * 0.5f;
+		float next = std::atan2(y - c.y, x - c.x) + kPi * 0.5f;
+		if (GetKeyState(VK_SHIFT) & 0x8000) next = snapRotation8(next);
+		boxAngle = next;
 		updateDraggers();
 		return;
 	}
-	float lx = x, ly = y;
-	if (hoverDraggerIndex != 8) toLocal(x, y, lx, ly);
 	if (hoverDraggerIndex == 0 || hoverDraggerIndex == 4 || hoverDraggerIndex == 2 || hoverDraggerIndex == 6) {
-		auto [left, right] = std::minmax(pressX, lx);
-		auto [top, bottom] = std::minmax(pressY, ly);
-		rect = D2D1::RectF(left, top, right, bottom);
-		// Emoji 保持正方形
-		const float w = rect.right - rect.left;
-		const float h = rect.bottom - rect.top;
-		if (w > h) rect.bottom = rect.top + w;
-		else rect.right = rect.left + h;
+		// Emoji 始终正方形：按同一个"定边等比"实现，固定对角
+		rect = dragScale(x, y, true);
 		syncCenterFromRect();
 		makeTextLayout();
 	}
@@ -321,12 +314,7 @@ void ShapeNumber::mouseDown(const float x, const float y)
 		pressY = y - rect.top;
 		return;
 	}
-	float lx, ly;
-	toLocal(x, y, lx, ly);
-	if (hoverDraggerIndex == 0) { pressX = rect.right; pressY = rect.bottom; }
-	else if (hoverDraggerIndex == 2) { pressX = rect.left; pressY = rect.bottom; }
-	else if (hoverDraggerIndex == 4) { pressX = rect.left; pressY = rect.top; }
-	else if (hoverDraggerIndex == 6) { pressX = rect.right; pressY = rect.top; }
+	beginScale(rect, boxAngle, hoverDraggerIndex, x, y);
 }
 
 void ShapeNumber::mouseUp(const float x, const float y)
@@ -344,18 +332,19 @@ void ShapeNumber::updateDraggers()
 		draggers[2] = D2D1::RectF(mid.x - half, mid.y - half, mid.x + half, mid.y + half);
 		return;
 	}
-	const float w = rect.right - rect.left;
-	const float h = rect.bottom - rect.top;
-	draggers[0] = D2D1::RectF(rect.left - half, rect.top - half, rect.left + half, rect.top + half);
-	draggers[1] = D2D1::RectF(rect.left + w * 0.5f - half, rect.top - half, rect.left + w * 0.5f + half, rect.top + half);
-	draggers[2] = D2D1::RectF(rect.right - half, rect.top - half, rect.right + half, rect.top + half);
-	draggers[3] = D2D1::RectF(rect.right - half, rect.top + h * 0.5f - half, rect.right + half, rect.top + h * 0.5f + half);
-	draggers[4] = D2D1::RectF(rect.right - half, rect.bottom - half, rect.right + half, rect.bottom + half);
-	draggers[5] = D2D1::RectF(rect.left + w * 0.5f - half, rect.bottom - half, rect.left + w * 0.5f + half, rect.bottom + half);
-	draggers[6] = D2D1::RectF(rect.left - half, rect.bottom - half, rect.left + half, rect.bottom + half);
-	draggers[7] = D2D1::RectF(rect.left - half, rect.top + h * 0.5f - half, rect.left + half, rect.top + h * 0.5f + half);
-	const float rotY = rect.top - 20.f * win->dpi;
-	const float bx = (rect.left + rect.right) * 0.5f;
+	const D2D1_RECT_F sr = selectionRect(rect);
+	const float w = sr.right - sr.left;
+	const float h = sr.bottom - sr.top;
+	draggers[0] = D2D1::RectF(sr.left - half, sr.top - half, sr.left + half, sr.top + half);
+	draggers[1] = D2D1::RectF(sr.left + w * 0.5f - half, sr.top - half, sr.left + w * 0.5f + half, sr.top + half);
+	draggers[2] = D2D1::RectF(sr.right - half, sr.top - half, sr.right + half, sr.top + half);
+	draggers[3] = D2D1::RectF(sr.right - half, sr.top + h * 0.5f - half, sr.right + half, sr.top + h * 0.5f + half);
+	draggers[4] = D2D1::RectF(sr.right - half, sr.bottom - half, sr.right + half, sr.bottom + half);
+	draggers[5] = D2D1::RectF(sr.left + w * 0.5f - half, sr.bottom - half, sr.left + w * 0.5f + half, sr.bottom + half);
+	draggers[6] = D2D1::RectF(sr.left - half, sr.bottom - half, sr.left + half, sr.bottom + half);
+	draggers[7] = D2D1::RectF(sr.left - half, sr.top + h * 0.5f - half, sr.left + half, sr.top + h * 0.5f + half);
+	const float rotY = sr.top - 20.f * win->dpi;
+	const float bx = (sr.left + sr.right) * 0.5f;
 	rotateHandle = D2D1::RectF(bx - half, rotY - half, bx + half, rotY + half);
 }
 

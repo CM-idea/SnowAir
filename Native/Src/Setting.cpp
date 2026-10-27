@@ -58,7 +58,7 @@ namespace {
     // 配置文件的默认内容。空文件、坏 JSON、缺键都拿它兜底，所以这里列出的每一项
     // 都是代码里会直接按名字取的（见 getLang / getAutoStart）。
     // 全局热键**不在这里**给默认值 —— 键位统一由 getShortcutKey 的内置默认表决定（defaultShortcutOf）
-    constexpr std::wstring_view defaultConfig{ LR"""({"common":{"autoStart":false,"runAsAdmin":false,"language":"zh-CN"}})""" };
+    constexpr std::wstring_view defaultConfig{ LR"""({"common":{"autoStart":true,"runAsAdmin":false,"language":"zh-CN","updateCheckFreq":0}})""" };
 
     // 静默执行一条命令行（不弹出控制台窗口），用于 schtasks 注册/删除管理员自启任务。
     void runQuiet(std::wstring cmd)
@@ -578,7 +578,8 @@ void Setting::setAutoStart(bool autoStart)
 bool Setting::getAutoStart()
 {
     auto common = configObj.GetNamedObject(L"common", nullptr);
-    return common && common.GetNamedBoolean(L"autoStart", false);
+    // 出厂默认开启开机自启；老配置里没这一项时也按开启处理
+    return common && common.GetNamedBoolean(L"autoStart", true);
 }
 
 // 启动时调用：开了自启就确保登记项指向当前这个 exe。软件的配置落在 %AppData%（除非 exe 同目录
@@ -767,6 +768,26 @@ void Setting::setUpdateCheckDay(long long day)
     if (!common) return;
     // 这项不写进 defaultConfig：它是程序自己的记账，不是给用户改的配置
     common.SetNamedValue(L"updateCheckDay", JsonValue::CreateNumberValue(static_cast<double>(day)));
+    save();
+}
+
+int Setting::getUpdateCheckFreq()
+{
+    auto common = configObj.GetNamedObject(L"common", nullptr);
+    if (!common) return 0;
+    const int v = static_cast<int>(common.GetNamedNumber(L"updateCheckFreq", 0));
+    return std::clamp(v, 0, 3);
+}
+
+void Setting::setUpdateCheckFreq(int v)
+{
+    auto common = configObj.GetNamedObject(L"common", nullptr);
+    if (!common) {
+        common = JsonObject();
+        configObj.SetNamedValue(L"common", common);
+    }
+    common.SetNamedValue(L"updateCheckFreq",
+        JsonValue::CreateNumberValue(static_cast<double>(std::clamp(v, 0, 3))));
     save();
 }
 
@@ -966,7 +987,7 @@ void Setting::setCancelConfirmDialog(bool on) { setFeatBool(L"cancelConfirmDialo
 
 void Setting::restoreFunctionScreenshotDefaults()
 {
-	setAutoStart(false);
+	setAutoStart(true);
 	setRunAsAdmin(false);
 	setFindWindowElements(true);
 	setCancelConfirmDialog(false);
@@ -1040,7 +1061,7 @@ bool Setting::functionScreenshotAtDefaults()
 	// 内置 Administrator 账户的「以管理员身份运行」恒为开且无法关闭，故不参与判定；
 	// 否则该子页永远不会被判为默认状态，「恢复默认」按钮将始终可用
 	const bool runAsAdminDefault = Util::isBuiltinAdminAccount() || !getRunAsAdmin();
-	return !getAutoStart() && runAsAdminDefault
+	return getAutoStart() && runAsAdminDefault
 		&& getFindWindowElements() && !getCancelConfirmDialog() && !getAutoSaveAfterCapture()
 		&& !getCopyAsFile() && getSaveFormat() == L"PNG (*.png)"
 		&& getManualSaveFormat().empty() && getAutoSaveFormat().empty()

@@ -80,9 +80,7 @@ void ShapeArea::paintDragger(ID2D1DeviceContext* ctx)
 {
 	// 与 ShapeRect 同一套：选框 + 四角（无边中点、无单独旋转柄）
 	withRotation(ctx, [&] {
-		ctx->DrawRectangle(
-			D2D1::RectF(rect.left - 1.f, rect.top - 1.f, rect.right + 1.f, rect.bottom + 1.f),
-			brushHandleBorder.Get(), win->dpi);
+		ctx->DrawRectangle(selectionRect(rect), brushHandleBorder.Get(), win->dpi, selectionStroke());
 		static const int corners[] = { 0, 2, 4, 6 };
 		for (int i : corners) paintHandle(ctx, draggers[i]);
 		if (cornerDotsEnabled()) {
@@ -100,16 +98,17 @@ void ShapeArea::paintDragger(ID2D1DeviceContext* ctx)
 void ShapeArea::updateDraggers()
 {
 	const float half = draggerSize * 0.5f;
-	const float w = rect.right - rect.left;
-	const float h = rect.bottom - rect.top;
-	draggers[0] = D2D1::RectF(rect.left - half, rect.top - half, rect.left + half, rect.top + half);
-	draggers[1] = D2D1::RectF(rect.left + w * 0.5f - half, rect.top - half, rect.left + w * 0.5f + half, rect.top + half);
-	draggers[2] = D2D1::RectF(rect.right - half, rect.top - half, rect.right + half, rect.top + half);
-	draggers[3] = D2D1::RectF(rect.right - half, rect.top + h * 0.5f - half, rect.right + half, rect.top + h * 0.5f + half);
-	draggers[4] = D2D1::RectF(rect.right - half, rect.bottom - half, rect.right + half, rect.bottom + half);
-	draggers[5] = D2D1::RectF(rect.left + w * 0.5f - half, rect.bottom - half, rect.left + w * 0.5f + half, rect.bottom + half);
-	draggers[6] = D2D1::RectF(rect.left - half, rect.bottom - half, rect.left + half, rect.bottom + half);
-	draggers[7] = D2D1::RectF(rect.left - half, rect.top + h * 0.5f - half, rect.left + half, rect.top + h * 0.5f + half);
+	const D2D1_RECT_F sr = selectionRect(rect);
+	const float w = sr.right - sr.left;
+	const float h = sr.bottom - sr.top;
+	draggers[0] = D2D1::RectF(sr.left - half, sr.top - half, sr.left + half, sr.top + half);
+	draggers[1] = D2D1::RectF(sr.left + w * 0.5f - half, sr.top - half, sr.left + w * 0.5f + half, sr.top + half);
+	draggers[2] = D2D1::RectF(sr.right - half, sr.top - half, sr.right + half, sr.top + half);
+	draggers[3] = D2D1::RectF(sr.right - half, sr.top + h * 0.5f - half, sr.right + half, sr.top + h * 0.5f + half);
+	draggers[4] = D2D1::RectF(sr.right - half, sr.bottom - half, sr.right + half, sr.bottom + half);
+	draggers[5] = D2D1::RectF(sr.left + w * 0.5f - half, sr.bottom - half, sr.left + w * 0.5f + half, sr.bottom + half);
+	draggers[6] = D2D1::RectF(sr.left - half, sr.bottom - half, sr.left + half, sr.bottom + half);
+	draggers[7] = D2D1::RectF(sr.left - half, sr.top + h * 0.5f - half, sr.left + half, sr.top + h * 0.5f + half);
 }
 
 int ShapeArea::hitResizeZone(float lx, float ly) const
@@ -163,33 +162,17 @@ void ShapeArea::mouseDrag(const float x, const float y)
 		return;
 	}
 	if (hoverDraggerIndex == 9) {
-		// 角外一圈拖动 = 旋转：按增量转，按下时形状不会突然跳角
+		// 角外一圈拖动 = 旋转：按增量转，按下时形状不会突然跳角；Shift 吸附到 8 个朝向
 		const auto c = center();
-		angle = rotateStartAngle + (std::atan2(y - c.y, x - c.x) - rotateStartAtan);
+		float next = rotateStartAngle + (std::atan2(y - c.y, x - c.x) - rotateStartAtan);
+		if (GetKeyState(VK_SHIFT) & 0x8000) next = snapRotation8(next);
+		angle = next;
 		updateDraggers();
 		onGeometryChanged();
 		return;
 	}
-	const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
 	onGeometryChanged();
-	float lx = x, ly = y;
-	if (hoverDraggerIndex != 8) toLocal(x, y, lx, ly);
-	if (hoverDraggerIndex == 0 || hoverDraggerIndex == 4 || hoverDraggerIndex == 2 || hoverDraggerIndex == 6) {
-		auto [left, right] = std::minmax(pressX, lx);
-		auto [top, bottom] = std::minmax(pressY, ly);
-		rect = D2D1::RectF(left, top, right, bottom);
-	}
-	else if (hoverDraggerIndex == 1 || hoverDraggerIndex == 5) {
-		auto [top, bottom] = std::minmax(pressY, ly);
-		rect.top = top;
-		rect.bottom = bottom;
-	}
-	else if (hoverDraggerIndex == 3 || hoverDraggerIndex == 7) {
-		auto [left, right] = std::minmax(pressX, lx);
-		rect.left = left;
-		rect.right = right;
-	}
-	else if (hoverDraggerIndex == 8) {
+	if (hoverDraggerIndex == 8) {
 		const float w = rect.right - rect.left;
 		const float h = rect.bottom - rect.top;
 		rect.left = x - pressX;
@@ -197,11 +180,9 @@ void ShapeArea::mouseDrag(const float x, const float y)
 		rect.right = rect.left + w;
 		rect.bottom = rect.top + h;
 	}
-	if (hoverDraggerIndex != 8 && hoverDraggerIndex != 9 && shiftDown) {
-		const float w = rect.right - rect.left;
-		const float h = rect.bottom - rect.top;
-		if (w > h) rect.bottom = rect.top + w;
-		else rect.right = rect.left + h;
+	else {
+		// 缩放：固定对边，Shift 等比
+		rect = dragScale(x, y, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
 	}
 	updateDraggers();
 }
@@ -212,6 +193,7 @@ void ShapeArea::mouseDown(const float x, const float y)
 		pressX = x;
 		pressY = y;
 		rect = D2D1::RectF(x, y, x, y);
+		beginScale(rect, angle, -1, x, y);   // 新建：按下点就是固定角
 		hoverDraggerIndex = 4;
 		return;
 	}
@@ -236,16 +218,7 @@ void ShapeArea::mouseDown(const float x, const float y)
 		pressY = y - rect.top;
 		return;
 	}
-	float lx, ly;
-	toLocal(x, y, lx, ly);
-	if (hoverDraggerIndex == 0) { pressX = rect.right; pressY = rect.bottom; }
-	else if (hoverDraggerIndex == 1) { pressY = rect.bottom; }
-	else if (hoverDraggerIndex == 2) { pressX = rect.left; pressY = rect.bottom; }
-	else if (hoverDraggerIndex == 3) { pressX = rect.left; }
-	else if (hoverDraggerIndex == 4) { pressX = rect.left; pressY = rect.top; }
-	else if (hoverDraggerIndex == 5) { pressY = rect.top; }
-	else if (hoverDraggerIndex == 6) { pressX = rect.right; pressY = rect.top; }
-	else if (hoverDraggerIndex == 7) { pressX = rect.right; }
+	beginScale(rect, angle, hoverDraggerIndex, x, y);
 }
 
 void ShapeArea::mouseUp(const float x, const float y)
@@ -277,17 +250,16 @@ void ShapeArea::mouseMove(const float x, const float y)
 			return;
 		}
 	}
-	// 四角外侧一圈 = 旋转（角上仍是缩放）；只有已选中的标注才给旋转区
-	//（只对已选中的标注生效，未选中时不放大命中范围）
+	// 角/边控点优先，旋转环只吃控点以外的近角区域
+	const int edge = hitResizeZone(lx, ly);
+	if (edge >= 0) {
+		hoverDraggerIndex = edge;
+		return;
+	}
 	const int rotCorner = isSelected() ? hitRotateRing(lx, ly, rect) : -1;
 	if (rotCorner >= 0) {
 		hoverDraggerIndex = 9;
 		rotateCorner = rotCorner; // 光标按这个角挑字形
-		return;
-	}
-	const int edge = hitResizeZone(lx, ly);
-	if (edge >= 0) {
-		hoverDraggerIndex = edge;
 		return;
 	}
 	const float half = strokeHitPad();

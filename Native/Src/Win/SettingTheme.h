@@ -46,6 +46,8 @@ inline uint32_t muted            { zinc100 };
 inline uint32_t mutedForeground  { zinc500 };          // 次级文字
 inline uint32_t accent           { zinc100 };          // hover / focus 底色
 inline uint32_t accentForeground { zinc950 };
+// 描边按钮（取消 / 次要操作）的悬停底：浅色=更浅一档，深色=比卡片更深一档
+inline uint32_t outlineHoverBg   { zinc100 };
 inline uint32_t destructive      { 0xEF4444FF };       // red-500（注意：Color 按 RRGGBBAA 解析，勿写反成 AABBGGRR）
 inline uint32_t destructiveForeground{ zinc50 };
 inline uint32_t border           { zinc200 };
@@ -213,6 +215,7 @@ inline void applyLight()
 	secondary = zinc100; secondaryForeground = zinc950;
 	muted = zinc100; mutedForeground = zinc500;
 	accent = zinc100; accentForeground = zinc950;
+	outlineHoverBg = zinc100;   // 浅色：悬停比白底略深
 	destructive = 0xEF4444FF; destructiveForeground = zinc50;
 	border = zinc200; input = zinc200; ring = zinc950;
 	sidebar = 0xFFFFFFFF; sidebarForeground = zinc950; sidebarPrimary = zinc950;
@@ -254,6 +257,7 @@ inline void applyDark()
 	secondary = 0x262626FF; secondaryForeground = 0xFAFAFAFF;
 	muted = 0x262626FF; mutedForeground = 0xA3A3A3FF;
 	accent = 0x262626FF; accentForeground = 0xFAFAFAFF;
+	outlineHoverBg = 0x0F0F0FFF;         // 深色：悬停比卡片底 #171717 更深，不是变浅
 	destructive = 0xEF4444FF; destructiveForeground = 0xFAFAFAFF;
 	border = 0x222222FF; input = 0x222222FF; ring = 0xA3A3A3FF;
 	sidebar = 0x262626FF;                // 菜单底（锚点）

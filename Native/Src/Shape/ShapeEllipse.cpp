@@ -108,16 +108,17 @@ bool ShapeEllipse::linkEdgePoint(const float localAngle, D2D1_POINT_2F& out) con
 void ShapeEllipse::updateDraggers()
 {
 	const float half = draggerSize * 0.5f;
-	const float w = rect.right - rect.left;
-	const float h = rect.bottom - rect.top;
-	draggers[0] = D2D1::RectF(rect.left - half, rect.top - half, rect.left + half, rect.top + half);
-	draggers[1] = D2D1::RectF(rect.left + w * 0.5f - half, rect.top - half, rect.left + w * 0.5f + half, rect.top + half);
-	draggers[2] = D2D1::RectF(rect.right - half, rect.top - half, rect.right + half, rect.top + half);
-	draggers[3] = D2D1::RectF(rect.right - half, rect.top + h * 0.5f - half, rect.right + half, rect.top + h * 0.5f + half);
-	draggers[4] = D2D1::RectF(rect.right - half, rect.bottom - half, rect.right + half, rect.bottom + half);
-	draggers[5] = D2D1::RectF(rect.left + w * 0.5f - half, rect.bottom - half, rect.left + w * 0.5f + half, rect.bottom + half);
-	draggers[6] = D2D1::RectF(rect.left - half, rect.bottom - half, rect.left + half, rect.bottom + half);
-	draggers[7] = D2D1::RectF(rect.left - half, rect.top + h * 0.5f - half, rect.left + half, rect.top + h * 0.5f + half);
+	const D2D1_RECT_F sr = selectionRect(rect);
+	const float w = sr.right - sr.left;
+	const float h = sr.bottom - sr.top;
+	draggers[0] = D2D1::RectF(sr.left - half, sr.top - half, sr.left + half, sr.top + half);
+	draggers[1] = D2D1::RectF(sr.left + w * 0.5f - half, sr.top - half, sr.left + w * 0.5f + half, sr.top + half);
+	draggers[2] = D2D1::RectF(sr.right - half, sr.top - half, sr.right + half, sr.top + half);
+	draggers[3] = D2D1::RectF(sr.right - half, sr.top + h * 0.5f - half, sr.right + half, sr.top + h * 0.5f + half);
+	draggers[4] = D2D1::RectF(sr.right - half, sr.bottom - half, sr.right + half, sr.bottom + half);
+	draggers[5] = D2D1::RectF(sr.left + w * 0.5f - half, sr.bottom - half, sr.left + w * 0.5f + half, sr.bottom + half);
+	draggers[6] = D2D1::RectF(sr.left - half, sr.bottom - half, sr.left + half, sr.bottom + half);
+	draggers[7] = D2D1::RectF(sr.left - half, sr.top + h * 0.5f - half, sr.left + half, sr.top + h * 0.5f + half);
 }
 
 void ShapeEllipse::paint(ID2D1DeviceContext* ctx)
@@ -133,9 +134,7 @@ void ShapeEllipse::paintDragger(ID2D1DeviceContext* ctx)
 {
 	// 选框 + 四角；旋转改为「角外一圈悬停」，不再画独立旋转柄
 	withRotation(ctx, [&] {
-		ctx->DrawRectangle(
-			D2D1::RectF(rect.left - 1.f, rect.top - 1.f, rect.right + 1.f, rect.bottom + 1.f),
-			brushHandleBorder.Get(), win->dpi);
+		ctx->DrawRectangle(selectionRect(rect), brushHandleBorder.Get(), win->dpi, selectionStroke());
 		static const int corners[] = { 0, 2, 4, 6 };
 		for (int i : corners) paintHandle(ctx, draggers[i]);
 	});
@@ -167,9 +166,11 @@ bool ShapeEllipse::translateBy(float dx, float dy)
 void ShapeEllipse::mouseDrag(const float x, const float y)
 {
 	if (hoverDraggerIndex == 9) {
-		// 角外一圈拖动 = 旋转：按增量转，按下时形状不会突然跳角
+		// 角外一圈拖动 = 旋转：按增量转，按下时形状不会突然跳角；Shift 吸附到 8 个朝向
 		const auto c = centerPt();
-		angle = rotateStartAngle + (std::atan2(y - c.y, x - c.x) - rotateStartAtan);
+		float next = rotateStartAngle + (std::atan2(y - c.y, x - c.x) - rotateStartAtan);
+		if (GetKeyState(VK_SHIFT) & 0x8000) next = snapRotation8(next);
+		angle = next;
 		updateDraggers();
 		return;
 	}
@@ -184,40 +185,16 @@ void ShapeEllipse::mouseDrag(const float x, const float y)
 		updateDraggers();
 		return;
 	}
-	float lx, ly;
-	toLocal(x, y, lx, ly);
-	if (hoverDraggerIndex == 0 || hoverDraggerIndex == 4 || hoverDraggerIndex == 2 || hoverDraggerIndex == 6) {
-		auto [left, right] = std::minmax(pressX, lx);
-		auto [top, bottom] = std::minmax(pressY, ly);
-		rect = D2D1::RectF(left, top, right, bottom);
-	}
-	else if (hoverDraggerIndex == 1 || hoverDraggerIndex == 5) {
-		auto [top, bottom] = std::minmax(pressY, ly);
-		rect.top = top;
-		rect.bottom = bottom;
-	}
-	else if (hoverDraggerIndex == 3 || hoverDraggerIndex == 7) {
-		auto [left, right] = std::minmax(pressX, lx);
-		rect.left = left;
-		rect.right = right;
-	}
-	const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-	if (hoverDraggerIndex != 8 && shiftDown) {
-		const float w = rect.right - rect.left;
-		const float h = rect.bottom - rect.top;
-		if (w > h) rect.bottom = rect.top + w;
-		else rect.right = rect.left + h;
-	}
+	// 缩放：固定对边，Shift 等比（正方形/正圆也由同一套锚点算出来，不再事后改 ry）
+	rect = dragScale(x, y, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
 	syncEllipseFromRect();
-	if (shiftDown) ry = rx;
 	updateDraggers();
 }
 
 void ShapeEllipse::mouseDown(const float x, const float y)
 {
 	if (hoverDraggerIndex == -1) {
-		pressX = x;
-		pressY = y;
+		beginScale(rect, angle, -1, x, y);   // 新建：按下点就是固定角
 		hoverDraggerIndex = 0;
 		return;
 	}
@@ -232,16 +209,7 @@ void ShapeEllipse::mouseDown(const float x, const float y)
 		pressY = y - rect.top;
 		return;
 	}
-	float lx, ly;
-	toLocal(x, y, lx, ly);
-	if (hoverDraggerIndex == 0) { pressX = rect.right; pressY = rect.bottom; }
-	else if (hoverDraggerIndex == 1) { pressY = rect.bottom; }
-	else if (hoverDraggerIndex == 2) { pressX = rect.left; pressY = rect.bottom; }
-	else if (hoverDraggerIndex == 3) { pressX = rect.left; }
-	else if (hoverDraggerIndex == 4) { pressX = rect.left; pressY = rect.top; }
-	else if (hoverDraggerIndex == 5) { pressY = rect.top; }
-	else if (hoverDraggerIndex == 6) { pressX = rect.right; pressY = rect.top; }
-	else if (hoverDraggerIndex == 7) { pressX = rect.right; }
+	beginScale(rect, angle, hoverDraggerIndex, x, y);
 }
 
 void ShapeEllipse::mouseUp(const float x, const float y)
@@ -254,17 +222,17 @@ void ShapeEllipse::mouseMove(const float x, const float y)
 	hoverDraggerIndex = -1;
 	float lx, ly;
 	toLocal(x, y, lx, ly);
-	// 四角外侧一圈 = 旋转（角上仍是缩放）；只有已选中的标注才给旋转区
-	const int rotCorner = isSelected() ? hitRotateRing(lx, ly, rect) : -1;
-	if (rotCorner >= 0) {
-		hoverDraggerIndex = 9;
-		rotateCorner = rotCorner;
-		return;
-	}
+	// 角/边控点优先，旋转环只吃控点以外的区域，避免角柄外半圈误触发旋转
 	const float band = std::max(8.f * win->dpi, strokeWidth * 0.5f + 4.f * win->dpi);
 	const int edge = hitBoxEdgeOrCorner(lx, ly, rect, band);
 	if (edge >= 0) {
 		hoverDraggerIndex = edge;
+		return;
+	}
+	const int rotCorner = isSelected() ? hitRotateRing(lx, ly, rect) : -1;
+	if (rotCorner >= 0) {
+		hoverDraggerIndex = 9;
+		rotateCorner = rotCorner;
 		return;
 	}
 	const float half = strokeWidth * 0.5f + 4.f * win->dpi;

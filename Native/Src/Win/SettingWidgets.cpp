@@ -66,12 +66,12 @@ protected:
 void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int current,
                std::function<void(int, const std::wstring&)> onChange,
                std::function<void(const std::wstring&)> setValue = nullptr,
-               bool headerFromOptions = false)
+               bool headerFromOptions = false, bool compact = false)
 {
     // 选中值放进共享状态：展开时按「最新选中」渲染首行/排除项，选项被选中后即时更新。
     // 否则 current 是绑定那一刻的值，再次展开看到的还是初始默认项（首行恒为默认选项的 BUG）。
     auto sel = std::make_shared<int>(current);
-    btn->onClick.add([btn, options, sel, onChange, setValue, headerFromOptions](Ling::Button*) mutable {
+    btn->onClick.add([btn, options, sel, onChange, setValue, headerFromOptions, compact](Ling::Button*) mutable {
         auto* w = btn->win;
         // 开关切换：若浮层已展开且正好锚定在该按钮上，再次点击仅关闭（toggle 关），不再重开。
         // 注意顺序：全局低级鼠标钩子在消息派发前已先于按钮 onClick 运行，若它在此处关闭了浮层，
@@ -94,9 +94,9 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
         //    合成的一整块圆角面板。
         const float dpi     = (w && w->dpi > 0.f) ? w->dpi : 1.f;
         const float headerH = (btn->h > 0.f) ? btn->h / dpi : 32.f;   // 首行高度严格等于触发框
-        const float itemH   = 32.f;
-        const float itemGap = 4.f;   // 选项之间 4px 间距
-        const float pad     = 4.f;   // 选项区四周内边距
+        const float itemH   = compact ? 24.f : 32.f;
+        const float itemGap = compact ? 2.f : 4.f;   // 选项之间间距
+        const float pad     = compact ? 0.f : 4.f;   // 选项区四周内边距
 
         // 当前值已经显示在首行，列表里不再重复它；因此列表可能为空 → 补一行「无」。
         const int cur = *sel;   // 每次展开都取最新选中项
@@ -176,9 +176,19 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
         });
         {
             auto* val = head->makeChild<Ling::Label>();
-            val->setFontSize(SettingTheme::fontBase);
-            val->setColor(SettingTheme::popupFg);
+            val->setFontSize(compact ? 12.f : SettingTheme::fontBase);
+            val->setColor(compact ? SettingTheme::textTertiary : SettingTheme::popupFg);
             val->setFlexShrink(1.f);
+            if (compact) {
+                val->setPositionType(Ling::Position::Absolute);
+                val->setPosition(Ling::Edge::Left, 0.f);
+                val->setPosition(Ling::Edge::Right, 0.f);
+                val->setPosition(Ling::Edge::Top, 0.f);
+                val->setPosition(Ling::Edge::Bottom, 0.f);
+                val->setFlexDirection(Ling::FlexDirection::Row);
+                val->setJustifyContent(Ling::Justify::Center);
+                val->setAlignItems(Ling::Align::Center);
+            }
             // 首行要复刻「触发框当前显示的文字」，不能直接用 options[cur]：
             // 有些下拉的触发框会显示加过前缀的文案（如「保留 7 天」），列表项仍是「7 天」。
             std::wstring shown = (cur >= 0 && cur < (int)options.size()) ? options[cur] : L"";
@@ -186,16 +196,38 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
                 if (auto* lab = dynamic_cast<Ling::Label*>(c.get())) { shown = lab->getText(); break; }
             }
             val->setText(shown);
+            if (compact) {
+                // 首行同样只占"去掉右侧箭头区"的文字列，和触发框/选项对齐
+                val->setPositionType(Ling::Position::Absolute);
+                val->setPosition(Ling::Edge::Left, 4.f);
+                val->setPosition(Ling::Edge::Right, 22.f);
+                val->setPosition(Ling::Edge::Top, 0.f);
+                val->setPosition(Ling::Edge::Bottom, 0.f);
+                val->setFlexDirection(Ling::FlexDirection::Row);
+                val->setJustifyContent(Ling::Justify::Center);
+                val->setAlignItems(Ling::Align::Center);
+            }
             auto* spacer = head->makeChild<Ling::Node>();
-            spacer->setFlexGrow(1.f);
-            spacer->setFlexShrink(1.f);
+            if (compact) {
+                spacer->setWidth(0.f);
+                spacer->setFlexGrow(0.f);
+            }
+            else {
+                spacer->setFlexGrow(1.f);
+                spacer->setFlexShrink(1.f);
+            }
             auto* icon = head->makeChild<FlipVLabel>();   // 垂直镜像的箭头
             icon->setText(Icon::Dropdown);
             icon->setFontFamily(Icon::Family);
-            icon->setFontSize(Icon::DropSize);
-            icon->setColor(SettingTheme::textMuted);
+            icon->setFontSize(compact ? 12.f : Icon::DropSize);
+            icon->setColor(compact ? SettingTheme::textTertiary : SettingTheme::textMuted);
             icon->setFlexShrink(0.f);
-            icon->setMarginLeft(6.f);
+            icon->setMarginLeft(compact ? 4.f : 6.f);
+            if (compact) {
+                icon->setPositionType(Ling::Position::Absolute);
+                icon->setPosition(Ling::Edge::Right, 8.f);
+                icon->setPosition(Ling::Edge::Top, std::max(0.f, (headerH - 12.f) * 0.5f));
+            }
         }
         }
 
@@ -212,9 +244,10 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
             item->setHeight(itemH);
             item->setWidthPercent(100.f);
             item->setFlexDirection(Ling::FlexDirection::Row);
-            item->setJustifyContent(Ling::Justify::Start);
+            item->setJustifyContent(compact ? Ling::Justify::Center : Ling::Justify::Start);
             item->setAlignItems(Ling::Align::Center);
-            item->setPadding(8.f, 0, 8.f, 0);
+            item->setPadding(compact ? 4.f : 8.f, 0, compact ? 22.f : 8.f, 0);
+            if (compact) item->setFontSize(12.f);
             item->setBorderRadius(SettingTheme::radiusInner);   // 与外框(10)同心
             item->setColor(SettingTheme::popupFg);
             // 悬停文字必须与常态同色：Button 悬停时会用 hoverColor 覆盖 text，
@@ -288,7 +321,7 @@ Ling::Button* makeBtn(Ling::Node* parent, const std::wstring& text,
         b->setBorder(1.f, SettingTheme::border);
         b->setBg(SettingTheme::card);
         b->setColor(SettingTheme::foreground);
-        b->setHoverBg(SettingTheme::accent);
+        b->setHoverBg(SettingTheme::outlineHoverBg);   // 深色下变深，避免"悬停反而更浅"
         b->setHoverColor(SettingTheme::foreground);
         break;
     case BtnVariant::Ghost:
@@ -1202,7 +1235,8 @@ Ling::Button* toggleRow(Ling::Node* parent,
 Ling::Button* selectDdl(Ling::Node* parent,
                         const std::vector<std::wstring>& options,
                         int current,
-                        std::function<void(int, const std::wstring&)> onChange)
+                        std::function<void(int, const std::wstring&)> onChange,
+                        bool compact)
 {
     if (current < 0 || current >= (int)options.size()) current = 0;
     auto* btn = parent->makeChild<Ling::Button>();
@@ -1221,27 +1255,53 @@ Ling::Button* selectDdl(Ling::Node* parent,
 
     // 选中值（左，普通字体，宽度不足可收缩截断）
     auto* valueLab = btn->makeChild<Ling::Label>();
-    valueLab->setFontSize(SettingTheme::fontBase);
-    valueLab->setColor(SettingTheme::popupFg);
+    valueLab->setFontSize(compact ? 12.f : SettingTheme::fontBase);
+    valueLab->setColor(compact ? SettingTheme::textTertiary : SettingTheme::popupFg);
     valueLab->setFlexShrink(1.f);
+    if (compact) {
+        // 紧凑下拉：文字只在"按钮去掉右侧箭头区"的范围内居中，左右留白一致
+        valueLab->setPositionType(Ling::Position::Absolute);
+        valueLab->setPosition(Ling::Edge::Left, 4.f);
+        valueLab->setPosition(Ling::Edge::Right, 22.f);   // 右侧箭头区
+        valueLab->setPosition(Ling::Edge::Top, 0.f);
+        valueLab->setPosition(Ling::Edge::Bottom, 0.f);
+        valueLab->setFlexDirection(Ling::FlexDirection::Row);
+        valueLab->setJustifyContent(Ling::Justify::Center);
+        valueLab->setAlignItems(Ling::Align::Center);
+        btn->setText(L"");
+        btn->setJustifyContent(Ling::Justify::Start);
+        btn->setPadding(4.f, 0, 4.f, 0);
+    }
     if (!options.empty()) valueLab->setText(options[current]);
 
     // 弹性空白：把下拉图标推到按钮最右侧
     auto* spacer = btn->makeChild<Ling::Node>();
-    spacer->setFlexGrow(1.f);
-    spacer->setFlexShrink(1.f);
+    if (compact) {
+        spacer->setWidth(0.f);
+        spacer->setFlexGrow(0.f);
+    }
+    else {
+        spacer->setFlexGrow(1.f);
+        spacer->setFlexShrink(1.f);
+    }
 
     // 下拉图标（右）
     auto* iconLab = btn->makeChild<Ling::Label>();
     iconLab->setText(Icon::Dropdown);
     iconLab->setFontFamily(Icon::Family);
-    iconLab->setFontSize(Icon::DropSize);
-    iconLab->setColor(SettingTheme::textMuted);
+    iconLab->setFontSize(compact ? 12.f : Icon::DropSize);
+    iconLab->setColor(compact ? SettingTheme::textTertiary : SettingTheme::textMuted);
     iconLab->setFlexShrink(0.f);
-    iconLab->setMarginLeft(6.f);
+    iconLab->setMarginLeft(compact ? 4.f : 6.f);
+    if (compact) {
+        // 紧凑下拉：箭头不参与横向排版，文字占满整行才能真正居中
+        iconLab->setPositionType(Ling::Position::Absolute);
+        iconLab->setPosition(Ling::Edge::Right, 8.f);
+        iconLab->setPosition(Ling::Edge::Top, 4.f);
+    }
 
     bindPopup(btn, options, current, onChange,
-        [valueLab](const std::wstring& t) { valueLab->setText(t); });
+        [valueLab](const std::wstring& t) { valueLab->setText(t); }, false, compact);
     return btn;
 }
 

@@ -160,4 +160,10 @@ namespace Icon
 	inline constexpr const wchar_t* Bubble2 = L"\ue67a";            // 气泡（另一款）
 	inline constexpr const wchar_t* WaveLine = L"\ue684";           // 波浪线
 	inline constexpr const wchar_t* Marker = L"\ue685";             // 马克笔
+	// —— 新字库 5228143 追加（e67c、e67d、e67e、e67f、e686）——
+	inline constexpr const wchar_t* Dimension = L"\ue67c";          // 尺寸
+	inline constexpr const wchar_t* ExplosionCloud = L"\ue67d";     // 爆裂（标注形态）
+	inline constexpr const wchar_t* ClipLink = L"\ue67e";           // 链接（剪切板类别）
+	inline constexpr const wchar_t* ClipMusic = L"\ue67f";          // 音乐（剪切板类别）
+	inline constexpr const wchar_t* ClipVideo = L"\ue686";          // 视频（剪切板类别）
 }

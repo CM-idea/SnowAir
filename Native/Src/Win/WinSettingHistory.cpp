@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include <filesystem>
 #include <algorithm>
 #include <chrono>
@@ -353,10 +353,39 @@ namespace {
 		if (pos != std::wstring::npos) s.replace(pos, from.size(), to);
 		return s;
 	}
-	std::wstring lowerCopy(std::wstring s)
+	// 搜索命中：关键词的每个字按顺序出现即可，中间允许隔着别的字。
+	// 例：正文 "你好呀我的世界" 命中 "你好" / "呀我" / "你好世界"。
+	bool searchHit(const std::wstring& hay, const std::wstring& kw)
 	{
-		for (auto& c : s) c = (wchar_t)towlower(c);
-		return s;
+		if (kw.empty()) return true;
+		size_t k = 0;
+		for (const wchar_t c : hay) {
+			if (c != kw[k]) continue;
+			if (++k == kw.size()) return true;
+		}
+		return false;
+	}
+	// 搜索归一化：小写 + 去掉空格/标点/控制符（用 Unicode 字符分类，中文标点也覆盖）。
+	// 例："你好呀，我的世界" → "你好呀我的世界"，所以 "呀我" / "的世" 都能命中。
+	std::wstring searchNormalize(const std::wstring& s)
+	{
+		if (s.empty()) return {};
+		std::wstring out;
+		out.reserve(s.size());
+		std::vector<WORD> types(s.size());
+		if (GetStringTypeW(CT_CTYPE1, s.c_str(), (int)s.size(), types.data())) {
+			for (size_t i = 0; i < s.size(); ++i) {
+				if (types[i] & (C1_SPACE | C1_BLANK | C1_PUNCT | C1_CNTRL)) continue;
+				out.push_back((wchar_t)towlower(s[i]));
+			}
+		}
+		else {
+			for (const wchar_t c : s) {
+				if (iswspace(c) || iswpunct(c) || iswcntrl(c)) continue;
+				out.push_back((wchar_t)towlower(c));
+			}
+		}
+		return out;
 	}
 	long long nowMs()
 	{
@@ -510,11 +539,24 @@ namespace {
 	{
 		return clipExtIs(p, { L"mp4", L"mov", L"mkv", L"avi", L"wmv", L"webm", L"flv", L"m4v", L"gif", L"apng" });
 	}
+	bool clipIsAudioExt(const std::wstring& p)
+	{
+		return clipExtIs(p, { L"mp3", L"wav", L"flac", L"aac", L"m4a", L"ogg", L"oga", L"wma",
+			L"ape", L"opus", L"aiff", L"aif", L"mid", L"midi", L"amr", L"mka", L"ac3", L"dts", L"caf", L"wv" });
+	}
 	bool clipAllFiles(const std::vector<std::wstring>& files, bool image)
 	{
 		if (files.empty()) return false;
 		for (const auto& f : files) {
 			if (image ? !clipIsImageExt(f) : !clipIsVideoExt(f)) return false;
+		}
+		return true;
+	}
+	bool clipAllAudio(const std::vector<std::wstring>& files)
+	{
+		if (files.empty()) return false;
+		for (const auto& f : files) {
+			if (!clipIsAudioExt(f)) return false;
 		}
 		return true;
 	}
@@ -620,6 +662,7 @@ namespace {
 			if (clipAllDirs(it.files)) return Lang::get(L"setting.tagFolder");
 			if (clipAllFiles(it.files, true)) return Lang::get(L"setting.tagImage");
 			if (clipAllFiles(it.files, false)) return Lang::get(L"setting.tagVideo");
+			if (clipAllAudio(it.files)) return Lang::get(L"setting.tagMusic");
 			return Lang::get(L"setting.tagFile");
 		}
 		if (!it.filePath.empty()) return Lang::get(L"setting.tagImage");
@@ -678,7 +721,8 @@ namespace {
 		auto dir = Setting::get()->getClipboardDir();
 		std::error_code ec;
 		std::filesystem::create_directories(dir, ec);
-		const auto path = dir / (it.id + L".svg2.png");
+		// 缓存版本号跟着渲染逻辑走：裁掉透明留白后旧缓存不再适用，bump 一版让老记录重渲
+		const auto path = dir / (it.id + L".svg3.png");
 		if (std::filesystem::exists(path, ec)) {
 			const auto [pw, ph] = Util::imageSize(path.wstring());
 			if (pw > 0 && ph > 0) return path.wstring();
@@ -1017,27 +1061,36 @@ bool WinSettingHistory::matchFilters(const Setting::HistoryItem& it) const
 		if (!hit) return false;
 	}
 	if (!filter.keyword.empty()) {
-		const std::wstring kw = lowerCopy(filter.keyword);
-		const bool clip = (it.source == L"clipboard");
-		std::wstring hay;
-		if (clip) {
-			hay = it.text;
-			for (const auto& f : it.files) {
-				hay += L'\n';
-				hay += std::filesystem::path(f).filename().wstring();
+		const std::wstring kw = searchNormalize(filter.keyword);
+		if (!kw.empty()) {
+			const bool clip = (it.source == L"clipboard");
+			// 正文：剪切板 = 文本本体 + 文件名（文件名只对剪切板参与）；
+			// 截图/录屏的历史文件名只是时间戳，不参与关键词命中
+			bool hit = false;
+			if (clip) {
+				// SVG 记录只按类型标签「SVG」/ 自定义标签命中，本体代码不参与搜索
+				if (!Util::isSvgText(it.text)) hit = searchHit(searchNormalize(it.text), kw);
+				for (const auto& f : it.files) {
+					if (hit) break;
+					hit = searchHit(searchNormalize(std::filesystem::path(f).filename().wstring()), kw);
+				}
 			}
-		}
-		else {
-			hay = std::filesystem::path(it.filePath).filename().wstring();
-		}
-		bool hit = lowerCopy(hay).find(kw) != std::wstring::npos;
-		if (!hit) {
+			// 卡片上显示的标签：剪切板类型标签（链接 / SVG / 色值…）、历史来源标签、自定义标签
 			const auto tags = clip ? Setting::get()->getClipboardTags(it.id)
 				: Setting::get()->getHistoryTags(it.filePath);
-			for (auto& t : tags)
-				if (lowerCopy(t).find(kw) != std::wstring::npos) { hit = true; break; }
+			if (!hit && clip) hit = searchHit(searchNormalize(clipTypeTag(it)), kw);
+			if (!hit && !clip && tags.empty()) {
+				const std::wstring chip = (it.id == it.filePath)
+					? Lang::get(it.source == L"record" ? L"setting.tagVideo" : L"setting.tagImage")
+					: sourceLabel(it.source);
+				hit = searchHit(searchNormalize(chip), kw);
+			}
+			for (auto& t : tags) {
+				if (hit) break;
+				if (searchHit(searchNormalize(t), kw)) hit = true;
+			}
+			if (!hit) return false;
 		}
-		if (!hit) return false;
 	}
 	return true;
 }
@@ -2312,21 +2365,22 @@ void WinSettingHistory::refreshGrid()
 		headerRow->setAlignItems(Ling::Align::Center);
 
 		// 图标只给剪切板卡片；截图/录屏/其他只显示元信息。
-		// 类型图标：链接 =「解锁长宽比 1」、色值 =「外观设置」、单个文件夹 =「文件夹」，
-		// 多个文件夹与其余未分类（视频 / 普通文件 / 混合多选）=「插件集成」。
+		// 类型图标：链接=链接、视频=视频、音乐=音乐、色值=外观设置、单个文件夹=文件夹，
+		// 图片/SVG=图片，其余未分类（普通文件 / 混合多选）=插件集成。
 		if (clip) {
 			const wchar_t* headGlyph = Icon::Plugin;
 			if (clipSvg) headGlyph = Icon::ImageBackground;
 			else if (clipText) {
 				const auto kind = clipTextKind(it.text);
-				if (kind == ClipTextKind::Link) headGlyph = Icon::UnlockAspect;
+				if (kind == ClipTextKind::Link) headGlyph = Icon::ClipLink;
 				else if (kind == ClipTextKind::Color) headGlyph = Icon::Appearance;
 				else headGlyph = Icon::Ocr;   // 纯文字
 			}
 			else if (clipImageKind) headGlyph = Icon::ImageBackground;
 			else if (clipFiles) {
-				headGlyph = (it.files.size() == 1 && clipAllDirs(it.files))
-					? Icon::Folder : Icon::Plugin;
+				if (it.files.size() == 1 && clipAllDirs(it.files)) headGlyph = Icon::Folder;
+				else if (clipAllAudio(it.files)) headGlyph = Icon::ClipMusic;
+				else if (clipAllFiles(it.files, false)) headGlyph = Icon::ClipVideo;
 			}
 			auto* headIcon = headerRow->makeChild<Ling::Label>();
 			headIcon->setText(headGlyph);

@@ -2189,10 +2189,16 @@ void CutMask::paintInfoIcons(ID2D1DeviceContext* ctx)
 	}
 }
 
-void CutMask::paint(ID2D1DeviceContext* ctx)
+void CutMask::paintDimLayer(ID2D1DeviceContext* ctx)
 {
 	if (!hasRect()) return;
 	if (showDim) paintDim(ctx);
+}
+
+void CutMask::paint(ID2D1DeviceContext* ctx, bool withDim)
+{
+	if (!hasRect()) return;
+	if (withDim && showDim) paintDim(ctx);
 	if (showBorder) paintSelShadow(ctx);
 	if (drawQrcodeFill) {
 		ComPtr<ID2D1SolidColorBrush> fill;

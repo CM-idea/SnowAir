@@ -28,6 +28,10 @@ public:
 	void addBoardResize(int page, const D2D1_RECT_F& before, const D2D1_RECT_F& after);
 	// 拖动/缩放/旋转已有标注：作为独立一步进撤销栈
 	void addEditStep(ShapeBase* target, const std::vector<float>& before, const std::vector<float>& after);
+	// 一次文字编辑会话（可能输入很多字）作为一步撤销；同时记录文字和几何
+	void addTextEditStep(ShapeBase* target,
+		const std::vector<float>& before, const std::vector<float>& after,
+		const std::wstring& beforeText, const std::wstring& afterText);
 	// 确认编辑：丢掉已撤销的 shape，释放内存并锁定本轮结果
 	void purgeUndone();
 	std::vector<std::unique_ptr<ShapeBase>> shapes;
