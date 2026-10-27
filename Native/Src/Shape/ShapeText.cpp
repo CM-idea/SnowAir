@@ -406,23 +406,27 @@ void ShapeText::paint(ID2D1DeviceContext* ctx)
 				tx = rect.left + ((rect.right - rect.left) - m.widthIncludingTrailingWhitespace) * 0.5f;
 				ty = rect.top + ((rect.bottom - rect.top) - m.height) * 0.5f;
 			}
+			ID2D1Brush* fgBrush = textBrush.Get();
+			ComPtr<ID2D1SolidColorBrush> whiteBrush;
 			if (selectAll_ && !text.empty()) {
 				ComPtr<ID2D1SolidColorBrush> selBrush;
-				if (SUCCEEDED(ctx->CreateSolidColorBrush(color, selBrush.GetAddressOf())) && selBrush) {
-					selBrush->SetOpacity(0.24f);
+				ctx->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.47f, 0.83f, 1.f), selBrush.GetAddressOf());
+				ctx->CreateSolidColorBrush(D2D1::ColorF(1.f, 1.f, 1.f, 1.f), whiteBrush.GetAddressOf());
+				if (selBrush) {
 					const float pad = 1.f * win->dpi;
 					ctx->FillRectangle(
 						D2D1::RectF(tx - pad, ty, tx + m.widthIncludingTrailingWhitespace + pad, ty + m.height),
 						selBrush.Get());
 				}
+				if (whiteBrush) fgBrush = whiteBrush.Get();
 			}
 			if (!text.empty()) {
-				ctx->DrawTextLayout({ tx, ty }, textLayout.Get(), textBrush.Get(),
+				ctx->DrawTextLayout({ tx, ty }, textLayout.Get(), fgBrush,
 					D2D1_DRAW_TEXT_OPTIONS_NONE);
 			}
 		}
 		// 插入符与编辑命中共用 editCaretPos；编辑定时器每 500ms 触发重绘
-		if (((GetTickCount64() / 500) & 1) == 0) {
+		if (!selectAll_ && ((GetTickCount64() / 500) & 1) == 0) {
 			float lineH = 0.f;
 			const auto p = editCaretPos(lineH);
 			ctx->DrawLine(D2D1::Point2F(p.x, p.y), D2D1::Point2F(p.x, p.y + lineH),
