@@ -34,7 +34,7 @@ namespace {
 		{ L"arrow",     { L"width",     1.f, 64.f,  4.f } },
 		{ L"pen",       { L"width",     1.f, 64.f,  4.f } },
 		{ L"number",    { L"radius",    6.f, 200.f, 24.f } },
-		{ L"text",      { L"fontSize", 8.f, 200.f, 24.f } },
+		{ L"text",      { L"fontSize", 8.f, 333.f, 24.f } },
 		{ L"mosaic",    { L"width",     0.f, 100.f, 30.f } },
 		{ L"patina",    { L"width",     0.f, 100.f, 15.f } },
 		{ L"watermark", { L"fontSize", 12.f, 200.f, 25.f } },

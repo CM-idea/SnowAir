@@ -662,8 +662,8 @@ void ShapeText::mouseDrag(const float x, const float y)
 		const float dx0 = std::max(1.f, std::hypot(pressX - cx, pressY - cy));
 		const float dx1 = std::max(1.f, std::hypot(x - cx, y - cy));
 		const float minPx = 8.f * win->dpi;
-		const float maxPx = 200.f * win->dpi;
-		fontSize = std::clamp(resizeStartFont * (dx1 / dx0), minPx, maxPx);
+		// 拖角只保底，不设上限：可以继续放大到 333 以上
+		fontSize = std::max(minPx, resizeStartFont * (dx1 / dx0));
 		makeTextLayout();
 		syncRectFromLayout();
 		const float w = rect.right - rect.left;

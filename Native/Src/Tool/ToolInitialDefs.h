@@ -87,7 +87,7 @@ namespace ToolInitial {
 		{ L"width", L"setting.tbInitialWidth", 1, 64, 4 },
 	};
 	inline const std::vector<InitialNum> kNumberNums = { { L"radius", L"setting.tbInitialSize", 6, 200, 24 } };
-	inline const std::vector<InitialNum> kTextNums   = { { L"fontSize", L"setting.tbInitialSize", 8, 200, 24 } };
+	inline const std::vector<InitialNum> kTextNums   = { { L"fontSize", L"setting.tbInitialSize", 8, 333, 24 } };
 	inline const std::vector<InitialNum> kMosaicNums = { { L"width", L"setting.tbInitialSize", 0, 100, 30 } };
 	// 包浆只调强度
 	inline const std::vector<InitialNum> kPatinaNums = { { L"width", L"tool.patinaSize", 0, 100, 15 } };
