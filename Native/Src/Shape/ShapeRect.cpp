@@ -1,6 +1,5 @@
 #include "pch.h"
 #include "Win/AnnotHost.h"
-#include "Tool/ToolMain.h"
 #include "Tool/ToolSub.h"
 #include "Tool/IconCodes.h"
 #include "ShapeRect.h"
@@ -11,6 +10,25 @@
 
 namespace {
 	constexpr float kPi = 3.14159265358979323846f;
+
+	// 圆角矩形命中：四角按圆弧判定，其余按矩形判定。正方形圆角拉满后即为圆形，
+	// 此时包围盒四角不属于形状本体，不应命中选中或擦除。
+	bool hitRoundedRect(float x, float y, const D2D1_RECT_F& r, const float rad[4], float pad)
+	{
+		const float L = r.left - pad, T = r.top - pad, R = r.right + pad, B = r.bottom + pad;
+		if (x < L || x > R || y < T || y > B) return false;
+		float rr[4];
+		for (int i = 0; i < 4; i++) rr[i] = std::max(0.f, rad[i] + pad);
+		auto corner = [&](float cx, float cy, float radius) {
+			const float dx = x - cx, dy = y - cy;
+			return dx * dx + dy * dy <= radius * radius;
+		};
+		if (rr[0] > 0.f && x < L + rr[0] && y < T + rr[0]) return corner(L + rr[0], T + rr[0], rr[0]);
+		if (rr[1] > 0.f && x > R - rr[1] && y < T + rr[1]) return corner(R - rr[1], T + rr[1], rr[1]);
+		if (rr[2] > 0.f && x > R - rr[2] && y > B - rr[2]) return corner(R - rr[2], B - rr[2], rr[2]);
+		if (rr[3] > 0.f && x < L + rr[3] && y > B - rr[3]) return corner(L + rr[3], B - rr[3], rr[3]);
+		return true;
+	}
 }
 
 ShapeRect::ShapeRect(AnnotHost* win, int kind, int sides) :ShapeBase(win), draggers{
@@ -58,6 +76,46 @@ void ShapeRect::setCornerRadius(float pct)
 	win->refresh();
 }
 
+// 二次选中后修改样式时，把当前工具状态重新应用到本形状（所有标注共用同一套逻辑）。
+void ShapeRect::applyStyle()
+{
+	auto* ts = win->toolSub.get();
+	if (!ts) return;
+	strokeWidth = std::max(1.f, ts->getSliderVal());
+	isFill = ts->isRectFill;
+	isDash = ts->isRectDash && !isFill;
+	strokeStyle = isDash ? makeDashStroke(strokeWidth) : nullptr;
+	brush->SetColor(ts->getSelectedColor());
+	// 圆角仅在统一百分比模式下跟随；已单独拖动的角不被覆盖。
+	if (uniformPct_ && std::fabs(ts->cornerRadius - radiusPct_) >= 0.01f)
+		setCornerRadius(ts->cornerRadius);
+	win->refresh();
+}
+
+// 反向同步：把本形状的属性写回工具状态，供重新打开该标注的工具时展示。
+void ShapeRect::syncToolFromShape() const
+{
+	auto* ts = win->toolSub.get();
+	if (!ts) return;
+	ts->isEllipse = false;
+	ts->isRectFill = isFill;
+	ts->isRectDash = isDash;
+	ts->rectKind = kind_ == Polygon ? ToolSub::PolygonShape
+		: (kind_ == Star ? ToolSub::StarShape : ToolSub::RectShape);
+	ts->cornerRadius = std::clamp(radiusPct_, 0.f, 100.f);
+	if (ts->cornerRadius > 0.f) ts->lastCornerRadius = ts->cornerRadius;
+	if (kind_ == Polygon) ts->polygonSides = sides_;
+	else if (kind_ == Star) ts->starPoints = sides_;
+	ts->setShapeSliderVal(L"rect", strokeWidth);
+}
+
+UINT32 ShapeRect::styleColorValue() const
+{
+	D2D1_COLOR_F c{};
+	if (brush) c = brush->GetColor();
+	return ShapeBase::packColor(c);
+}
+
 // 百分比 → 矩形的像素半径：100% = 短边的一半（胶囊/椭圆状）
 float ShapeRect::pctRadiusPx() const
 {
@@ -85,10 +143,19 @@ Microsoft::WRL::ComPtr<ID2D1PathGeometry> ShapeRect::buildShape() const
 {
 	auto factory = Ling::D2D::get()->d2dFactory.Get();
 	if (!hasCornerDots()) return buildPolyPath();
-	if (!uniformPct_) return RoundBox::build(factory, rect, radius);
+	float rr[4];
+	effectiveRadii(rr);
+	return RoundBox::build(factory, rect, rr);
+}
+
+void ShapeRect::effectiveRadii(float out[4]) const
+{
+	if (!uniformPct_) {
+		for (int i = 0; i < 4; i++) out[i] = radius[i];
+		return;
+	}
 	const float rr = pctRadiusPx();
-	const float r4[4]{ rr, rr, rr, rr };
-	return RoundBox::build(factory, rect, r4);
+	for (int i = 0; i < 4; i++) out[i] = rr;
 }
 
 // 多边形/星形：在内接椭圆上均匀取点；星形外顶点与内顶点交替（内半径 0.45）。
@@ -174,35 +241,17 @@ Microsoft::WRL::ComPtr<ID2D1StrokeStyle> ShapeRect::makeDashStroke(float strokeW
 
 D2D1_POINT_2F ShapeRect::center() const
 {
-	return { (rect.left + rect.right) * 0.5f, (rect.top + rect.bottom) * 0.5f };
+	return ShapeBase::boxCenter(rect);
 }
 
 void ShapeRect::toLocal(float x, float y, float& lx, float& ly) const
 {
-	if (std::fabs(angle) < 1e-6f) {
-		lx = x;
-		ly = y;
-		return;
-	}
-	const auto c = center();
-	const float dx = x - c.x, dy = y - c.y;
-	const float ca = std::cos(-angle), sa = std::sin(-angle);
-	lx = c.x + dx * ca - dy * sa;
-	ly = c.y + dx * sa + dy * ca;
+	ShapeBase::boxToLocal(rect, angle, x, y, lx, ly);
 }
 
 void ShapeRect::withRotation(ID2D1DeviceContext* ctx, const std::function<void()>& draw)
 {
-	if (std::fabs(angle) < 1e-6f) {
-		draw();
-		return;
-	}
-	D2D1_MATRIX_3X2_F old{};
-	ctx->GetTransform(&old);
-	const auto c = center();
-	ctx->SetTransform(D2D1::Matrix3x2F::Rotation(angle * 180.f / kPi, c) * old);
-	draw();
-	ctx->SetTransform(old);
+	ShapeBase::withBoxRotation(ctx, rect, angle, draw);
 }
 
 // —— 连线（矩形这一侧）——
@@ -238,18 +287,7 @@ bool ShapeRect::linkEdgePoint(const float localAngle, D2D1_POINT_2F& out) const
 
 void ShapeRect::updateDraggers()
 {
-	const float half = draggerSize * 0.5f;
-	const D2D1_RECT_F sr = selectionRect(rect);
-	const float w = sr.right - sr.left;
-	const float h = sr.bottom - sr.top;
-	draggers[0] = D2D1::RectF(sr.left - half, sr.top - half, sr.left + half, sr.top + half);
-	draggers[1] = D2D1::RectF(sr.left + w * 0.5f - half, sr.top - half, sr.left + w * 0.5f + half, sr.top + half);
-	draggers[2] = D2D1::RectF(sr.right - half, sr.top - half, sr.right + half, sr.top + half);
-	draggers[3] = D2D1::RectF(sr.right - half, sr.top + h * 0.5f - half, sr.right + half, sr.top + h * 0.5f + half);
-	draggers[4] = D2D1::RectF(sr.right - half, sr.bottom - half, sr.right + half, sr.bottom + half);
-	draggers[5] = D2D1::RectF(sr.left + w * 0.5f - half, sr.bottom - half, sr.left + w * 0.5f + half, sr.bottom + half);
-	draggers[6] = D2D1::RectF(sr.left - half, sr.bottom - half, sr.left + half, sr.bottom + half);
-	draggers[7] = D2D1::RectF(sr.left - half, sr.top + h * 0.5f - half, sr.left + half, sr.top + h * 0.5f + half);
+	ShapeBase::layoutBoxDraggers(draggers, selectionRect(rect), draggerSize * 0.5f);
 }
 
 void ShapeRect::paint(ID2D1DeviceContext* ctx)
@@ -431,6 +469,10 @@ void ShapeRect::mouseMove(const float x, const float y)
 	// 命中顺序：角/边控点优先，旋转环只吃控点以外的近角区域。否则鼠标落在角柄外半圈
 	// 会被判成旋转，缩放很容易误触发。
 	const float band = std::max(8.f * win->dpi, strokeWidth * 0.5f + 4.f * win->dpi);
+	float eff[4];
+	effectiveRadii(eff);
+	// 未选中时，命中范围跟随实际形状：圆角切掉角部，拉满为圆形时包围盒四角不响应。
+	if (kind_ == Rect && !isSelected() && !hitRoundedRect(lx, ly, rect, eff, band)) return;
 	const int edge = hitBoxEdgeOrCorner(lx, ly, rect, band);
 	if (edge >= 0) {
 		hoverDraggerIndex = edge;
@@ -448,8 +490,7 @@ void ShapeRect::mouseMove(const float x, const float y)
 		return;
 	}
 	const float half = strokeWidth * 0.5f + 4.f * win->dpi;
-	const bool inOuter = lx >= rect.left - half && lx <= rect.right + half
-		&& ly >= rect.top - half && ly <= rect.bottom + half;
+	const bool inOuter = hitRoundedRect(lx, ly, rect, eff, half);
 	if (!inOuter) return;
 	// 填充：整块可点；描边：未选中只靠上面的边命中，选中后中空也可拖
 	if (isFill || isSelected())
@@ -521,6 +562,7 @@ bool ShapeRect::hitErase(const float x, const float y)
 		return hitShapeLocal(lx, ly, isFill);
 	}
 	const float half = strokeWidth * 0.5f + win->dpi;
-	return lx >= rect.left - half && lx <= rect.right + half
-		&& ly >= rect.top - half && ly <= rect.bottom + half;
+	float eff[4];
+	effectiveRadii(eff);
+	return hitRoundedRect(lx, ly, rect, eff, half);
 }

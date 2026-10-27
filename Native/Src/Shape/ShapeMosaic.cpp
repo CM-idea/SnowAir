@@ -23,8 +23,8 @@ ShapeMosaic::ShapeMosaic(AnnotHost* win) : ShapeArea(win)
 
 	// 演示画布（实时桌面）没有会话底图，先拍一张当取样源。
 	// ⚠ 必须趁这一刻拍：构造函数跑在鼠标按下、**本图形还没画出来**的时候，屏幕上是纯桌面。
-	//   要是拖完再拍，抓到的是合成后的屏幕 —— 里面含我们自己的全屏覆盖窗（那块绿色占位），
-	//   于是占位块会被"烘焙"进马赛克，看起来就是"临时范围提示一直不消失"。
+	//   拖动结束后再截图会包含自身的全屏覆盖窗（绿色占位），占位块被一并烘焙进
+	//   马赛克位图，导致临时范围提示残留。
 	if (!win->screenImg && win->w > 0 && win->h > 0) {
 		auto pixels = Util::captureScreen(win->x, win->y, (int)win->w, (int)win->h);
 		if (!pixels.empty())

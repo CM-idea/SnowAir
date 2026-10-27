@@ -18,7 +18,7 @@
 #include "../Win/SettingWidgets.h"
 #include "../CommandKeys.h"
 
-ToolCap::ToolCap(WinCap* capWin) : Ling::WinBase(), winCap(capWin)
+ToolCap::ToolCap(WinCap* capWin) : ToolbarWindow(), winCap(capWin)
 {
 	dpi = capWin->dpi;
 	applyStoredLayout(0);   // 套用「截图工具栏外观」里保存的槽位顺序（没存过则为内置默认）
@@ -37,26 +37,7 @@ ToolCap::ToolCap(WinCap* capWin) : Ling::WinBase(), winCap(capWin)
 	});
 }
 
-LRESULT ToolCap::onHitTest(const POINT screenPos)
-{
-	// 工具栏盖住选区边/角时，把命中穿透给 WinCap，悬停才能立刻变成 ↔
-	if (winCap && winCap->hwnd && winCap->cutMask && winCap->cutMask->hasRect()) {
-		POINT client = screenPos;
-		ScreenToClient(winCap->hwnd, &client);
-		const auto hit = winCap->cutMask->hitTest(client);
-		if (hit != MaskHit::None && hit != MaskHit::Inside)
-			return HTTRANSPARENT;
-	}
-	return HTCLIENT;
-}
-
-void ToolCap::hideHoverTip()
-{
-	if (tip) tip->hide();
-	if (picker && picker->isOpen()) picker->hidePicker();
-}
-
-ToolCap::ToolCap(WinPin* pin) : Ling::WinBase(), winPin(pin)
+ToolCap::ToolCap(WinPin* pin) : ToolbarWindow(), winPin(pin)
 {
 	dpi = pin->dpi;
 	applyStoredLayout(3);   // 套用「贴图工具栏外观」里保存的槽位顺序（没存过则为内置默认）
@@ -571,6 +552,10 @@ void ToolCap::selectAnnotTool(const std::wstring& id)
 {
 	// 标注与「识别 / 翻译」浮层可以并存：切标注工具时**不**收掉识别面板，
 	// 用户不必先取消识别再标注（浮层里只有文字块吃鼠标，其余区域穿透，仍可正常画）。
+	// 切换工具前先结束“展示选中标注属性”模式：快照按上一个工具记录，不能套用到新工具。
+	if (auto* host = annotHost(); host && host->toolSub) host->toolSub->endShapeStylePreview();
+	// 打开工具时属性栏恢复初始属性（关闭后重新打开不沿用上次的选择）。
+	if (auto* host = annotHost(); host && host->toolSub) host->toolSub->resetStyleToDefaults();
 	// 渐隐画笔 / 画笔 是同级一级槽位，底层都是 pen：先定好 isPenFade 再建属性栏
 	if (auto* host = annotHost(); host && host->toolSub) host->toolSub->setPenSlotMode(id);
 	// 包浆/水印/高亮是 mosaic 槽的子工具，工具栏按钮 id 仍是 mosaic
@@ -782,7 +767,6 @@ void ToolCap::onCreated()
 	// 槽位 id → 工具 id 显式映射，curId 可以是 laser（排他选中 / 取消选中 / 属性栏锚点按它算），
 	// 而标注引擎通过 getCurToolId() 仍然拿到 pen。
 	pickedSub[L"laser"] = L"pen";
-	tip = std::make_unique<Tip>(this);
 	picker = std::make_unique<ToolPicker>();
 	picker->onHoverChange = [this](bool inside) {
 		if (inside) cancelHidePicker();
@@ -793,22 +777,8 @@ void ToolCap::onCreated()
 		else if (id == demoEdgeTimerId) onDemoEdgeTimer();
 	});
 	body->setBg(0);
-	auto d2d = Ling::D2D::get();
-	d2d->deviceContext->CreateSolidColorBrush(
-		Ling::Color(ToolbarTheme::background).getD2DColor(), brushBg.GetAddressOf());
-	chromeCanvas = body->makeChild<Ling::Canvas>();
-	chromeCanvas->setPositionType(Ling::Position::Absolute);
-	chromeCanvas->setSizePercent(100.f, 100.f);
-	contentNode = body->makeChild<Ling::Node>();
-	contentNode->setPositionType(Ling::Position::Absolute);
-	contentNode->setPosition(Ling::Edge::Left, ToolbarTheme::shadowPad);
-	contentNode->setPosition(Ling::Edge::Top, ToolbarTheme::shadowPad);
-	contentNode->setPosition(Ling::Edge::Right, ToolbarTheme::shadowPad);
-	contentNode->setPosition(Ling::Edge::Bottom, ToolbarTheme::shadowPad);
-	contentNode->setAlignItems(Ling::Align::Center);
-	contentNode->setFlexDirection(Ling::FlexDirection::Row);
-	contentNode->setPaddingLeft(ToolbarTheme::paddingLeft);
-	contentNode->setPaddingRight(contentPadRight());
+	initChrome(ToolbarTheme::paddingLeft, contentPadRight(),
+		ToolbarTheme::shadowPad, ToolbarTheme::shadowPad, Ling::FlexDirection::Row);
 	initDragHandle();
 	const float sepMarginV = (btnSize - spliterH) * 0.5f;
 	const float sepMarginH = ToolbarTheme::splitterGap - hoverInset;
@@ -886,12 +856,6 @@ void ToolCap::initDragHandle()
 	// 拖拽手柄不给悬停提示：它只是移动工具条
 }
 
-void ToolCap::layout()
-{
-	Ling::WinBase::layout();
-	paintChrome();
-}
-
 void ToolCap::onDragDown(POINT pos, bool isRight)
 {
 	if (isRight) {
@@ -900,7 +864,7 @@ void ToolCap::onDragDown(POINT pos, bool isRight)
 		return;
 	}
 	if (!dragHandle || !dragHandle->isPosIn(pos)) return;
-	// 新一次拖动：先撤掉自动隐藏态，免得拖动途中被探测定时器拉回
+	// 开始拖动前清除自动隐藏态，避免拖拽过程中被探测定时器收回
 	demoAutoHide = false;
 	demoCollapsed = false;
 	killTimer(demoEdgeTimerId);
@@ -1055,18 +1019,24 @@ void ToolCap::onDemoEdgeTimer()
 	demoCollapseToEdge();
 }
 
-void ToolCap::paintChrome()
+void ToolCap::drawChrome(ID2D1DeviceContext* ctx)
 {
-	if (!chromeCanvas || !brushBg) return;
-	auto ctx = chromeCanvas->startPaint();
-	if (!ctx) return;
-	ctx->Clear(0);
+	if (!brushBg) return;
 	const float pad = ToolbarTheme::shadowPad * dpi;
 	const float radius = toolbarRadius * dpi;
 	const float borderW = ToolbarTheme::borderWidth * dpi;
 	const D2D1_RECT_F bar{ pad, pad, w - pad, h - pad };
 	ToolbarChrome::paintRoundBar(ctx, bar, radius, brushBg.Get(), borderW);
-	chromeCanvas->finishPaint();
+}
+
+void ToolCap::hideExtraHoverTips()
+{
+	if (picker && picker->isOpen()) picker->hidePicker();
+}
+
+WinCap* ToolCap::maskHost() const
+{
+	return winCap;
 }
 
 // 停悬气泡：按「快捷键提示」(外观设置 > 其他外观) 决定是否把该按钮当前的键位拼进文字，
@@ -1167,6 +1137,8 @@ void ToolCap::applySelectedStyle(Ling::Button* btn)
 void ToolCap::cancelSelect(bool dropFilters)
 {
 	if (curId.empty()) return;
+	// 关闭工具：还原“展示选中标注属性”期间修改过的工具状态。
+	if (auto* host = annotHost(); host && host->toolSub) host->toolSub->endShapeStylePreview();
 	for (auto b : btns)
 	{
 		if (b->id == curId) {
@@ -1258,26 +1230,9 @@ void ToolCap::onClick(Ling::Button* btn)
 	if ((btn->id == L"laser" || btn->id == L"pen")) {
 		if (auto* host = annotHost(); host && host->toolSub) host->toolSub->setPenSlotMode(btn->id);
 	}
-	// 再点已选中工具 = 取消选中；但已有选中标注时保留工具与选中，只刷新属性栏
+	// 再次点击已选中的工具即关闭该工具（选中标注保持选中，属性栏收起）。
+	// 需要查看该标注的属性时，重新打开对应工具即可（selectAnnotTool 会同步其属性到属性栏）。
 	if (!curId.empty() && btn->id == curId) {
-		auto* host = annotHost();
-		const auto eff = resolveToolId(btn->id);
-		// 已有选中标注：这里只切换属性栏显隐 —— 不动工具、不动选中。
-		// 关掉属性栏只是"我不改属性"，选中标注照样能拖/缩放/旋转/删除；
-		// 再点一下又打开（顺带把滑条同步到该标注当前尺寸）。
-		if (host && host->hasSelectedAnnot() && isAnnotationTool(eff)) {
-			auto* sub = host->toolSub.get();
-			if (sub && sub->hasContent() && sub->chromeVisible()) {
-				sub->hideTools();
-				host->layoutTools();
-			}
-			else {
-				showToolSubForEffective(eff);
-				host->presentSelectedAnnotStyle();
-				host->layoutTools();
-			}
-			return;
-		}
 		cancelSelect();
 		return;
 	}
@@ -1446,10 +1401,4 @@ void ToolCap::onClickPin(Ling::Button* btn)
 	winPin->presentSelectedAnnotStyle();
 	winPin->syncViewportFilters();
 	winPin->layoutTools();
-}
-
-void ToolCap::onMinMaxInfo(MINMAXINFO* mmi)
-{
-	mmi->ptMinTrackSize.x = 1;
-	mmi->ptMinTrackSize.y = 1;
 }

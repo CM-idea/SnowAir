@@ -7,7 +7,7 @@
 #include "ToolbarChrome.h"
 #include "ToolbarTheme.h"
 
-ToolLong::ToolLong(WinCap* win) : Ling::WinBase(), win(win)
+ToolLong::ToolLong(WinCap* win) : ToolbarWindow(), win(win)
 {
 	dpi = win->dpi;
 	refreshSize();
@@ -343,26 +343,10 @@ void ToolLong::buildBar()
 
 void ToolLong::onCreated()
 {
-	ToolbarTheme::refresh();   // 建窗时套用当前工具栏主题
-	tip = std::make_unique<Tip>(this);
-	tip->excludeFromCapture();
 	body->setBg(0);
-	auto d2d = Ling::D2D::get();
-	d2d->deviceContext->CreateSolidColorBrush(
-		Ling::Color(ToolbarTheme::background).getD2DColor(), brushBg.GetAddressOf());
-	chromeCanvas = body->makeChild<Ling::Canvas>();
-	chromeCanvas->setPositionType(Ling::Position::Absolute);
-	chromeCanvas->setSizePercent(100.f, 100.f);
-	contentNode = body->makeChild<Ling::Node>();
-	contentNode->setPositionType(Ling::Position::Absolute);
-	contentNode->setPosition(Ling::Edge::Left, ToolbarTheme::shadowPad);
-	contentNode->setPosition(Ling::Edge::Top, ToolbarTheme::shadowPad);
-	contentNode->setPosition(Ling::Edge::Right, ToolbarTheme::shadowPad);
-	contentNode->setPosition(Ling::Edge::Bottom, ToolbarTheme::shadowPad);
-	contentNode->setAlignItems(Ling::Align::Center);
-	contentNode->setFlexDirection(Ling::FlexDirection::Row);
-	contentNode->setPaddingLeft(ToolbarTheme::paddingLeft);
-	contentNode->setPaddingRight(contentPadRight());
+	initChrome(ToolbarTheme::paddingLeft, contentPadRight(),
+		ToolbarTheme::shadowPad, ToolbarTheme::shadowPad, Ling::FlexDirection::Row);
+	tip->excludeFromCapture();
 	buildBar();
 	onMouseDown.add([this](POINT pos, bool isRight) { onDragDown(pos, isRight); });
 	onMouseMove.add([this](POINT pos) { onDragMove(pos); });
@@ -370,24 +354,14 @@ void ToolLong::onCreated()
 	show();
 }
 
-void ToolLong::layout()
+void ToolLong::drawChrome(ID2D1DeviceContext* ctx)
 {
-	Ling::WinBase::layout();
-	paintChrome();
-}
-
-void ToolLong::paintChrome()
-{
-	if (!chromeCanvas || !brushBg) return;
-	auto ctx = chromeCanvas->startPaint();
-	if (!ctx) return;
-	ctx->Clear(0);
+	if (!brushBg) return;
 	const float pad = ToolbarTheme::shadowPad * dpi;
 	const float radius = toolbarRadius * dpi;
 	const float borderW = ToolbarTheme::borderWidth * dpi;
 	const D2D1_RECT_F bar{ pad, pad, w - pad, h - pad };
 	ToolbarChrome::paintRoundBar(ctx, bar, radius, brushBg.Get(), borderW);
-	chromeCanvas->finishPaint();
 }
 
 void ToolLong::onDragDown(POINT pos, bool isRight)
@@ -436,10 +410,4 @@ void ToolLong::onClick(Ling::Button* btn)
 		if (!win->longSaveToFile()) return;
 	}
 	win->close();
-}
-
-void ToolLong::onMinMaxInfo(MINMAXINFO* mmi)
-{
-	mmi->ptMinTrackSize.x = 1;
-	mmi->ptMinTrackSize.y = 1;
 }

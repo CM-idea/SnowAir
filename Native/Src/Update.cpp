@@ -30,7 +30,6 @@ namespace {
 	constexpr std::wstring_view newExeName{ L"SnowAir.update.exe" };
 
 	bool checked{ false };              //一次运行只查一次服务端，查过就不再动了
-	UINT_PTR checkTimer{ 0 };
 	UINT_PTR promptTimer{ 0 };
 	std::filesystem::path newExePath;   //已经下载好的新版 exe，空的表示还没有
 	std::wstring newVer;
@@ -257,18 +256,6 @@ namespace {
 			// 网络不通、超时、被取消、服务端返回了个错误码、磁盘写不进去：一律静默。
 			// 自动升级属后台任务，不应以弹窗打扰用户，改为次日空闲时重试
 		}
-	}
-
-	void CALLBACK onCheckTimer(HWND, UINT, UINT_PTR id, DWORD)
-	{
-		KillTimer(nullptr, id);
-		if (checkTimer == id) checkTimer = 0;
-		//这十几秒里用户又开始截图了：这次不查，下次回到空闲还会再来
-		if (!isIdle()) return;
-		checked = true;
-		//查过就记账，成没成功都算 —— 一天一次，失败了也没必要今天反复试
-		Setting::get()->setUpdateCheckDay(today());
-		doCheck();
 	}
 
 	// ── 每日静默检查（GitHub releases）──────────────────────────────────

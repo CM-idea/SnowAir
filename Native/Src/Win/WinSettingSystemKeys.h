@@ -3,6 +3,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "KeyCapture.h"
 
 // 「系统按键」页 —— 软件内**命令**的可配置按键（见 CommandKeys.h）。
 // 分组 / 行序 / 默认键位 / 只读标记全部来自命令表，本页不另抄一份清单。
@@ -18,29 +19,19 @@ public:
 	~WinSettingSystemKeys();
 private:
 	void onBtnClick(Ling::Button* btn);
-	void beginCapture(Ling::Button* btn);
-	void endCapture();
-	void onKeyDown(UINT key, UINT mods);
-	void onSpinnerTick(UINT id);
-	// 录制中的实时预览：按当前按住的修饰键刷新按钮里的文案（如 "Ctrl+Shift+"）
-	void refreshCapturePreview(UINT mods);
-	std::wstring keyToStr(UINT vkCode);
+	// 录到的组合：保留键拒绝 → 同界面撞键确认 → 落值并刷新
+	void applyChord(const std::wstring& id, const std::vector<std::wstring>& keys);
 	// 把某条命令的当前键位刷到它的键位框上（空 = 「点击设置」占位、muted 色）
 	void refreshRow(const std::wstring& id);
 	// 「恢复默认」的置灰：一条改绑都没有 → 灰字且点击不做事
 	void syncRestoreState();
 private:
 	struct Row { std::wstring id; Ling::Button* btn; };
+	KeyCapture capture_;
 	std::vector<Row> rows;          // 可录制的行（只读行不进这里）
 	Ling::Button* restoreBtn{ nullptr };
 	winrt::event_token onMouseMoveToken{};
-	Ling::Button* curBtn{ nullptr };   // 正在录制的那个框
-	std::wstring curId;                // 正在录制的命令 id
 	winrt::event_token onMouseDownToken, onKeyDownToken, onKeyUpToken, onTimerToken, onBlurToken;
-	Ling::Label* curSpinner{ nullptr };
-	Ling::Label* curLabel{ nullptr };
-	int spinIdx{ 0 };
 	// 与「全局热键」页(0x5000) / TextBox(0x4200+) 错开，避免同窗口定时器 id 冲突
 	static constexpr UINT kSpinnerTimerId{ 0x5100 };
-	static constexpr UINT kSpinnerMs{ 100 };
 };

@@ -8,6 +8,7 @@
 #include "IconCodes.h"
 #include "ToolPicker.h"
 #include "ToolbarTheme.h"
+#include "ToolbarWindow.h"
 
 class WinCap;
 class WinPin;
@@ -15,7 +16,7 @@ class Tip;
 
 // 截图统一工具条：标注 + 撤销 + 录屏/贴图/OCR/翻译/长截图/二维码 + 关闭/保存/完成。
 // 框选与框选内标注都挂在 WinCap（遮罩）owned 链上；仅桌面钉图改绑 WinPin。
-class ToolCap : public Ling::WinBase
+class ToolCap : public ToolbarWindow
 {
 public:
 	ToolCap(WinCap* winCap);
@@ -33,7 +34,6 @@ public:
 	void setDemoThroughState(bool on);
 	void setDemoBoardState(bool on);
 	void setDemoRecordState(bool on);
-	bool isDemoLayout() const { return demoLayout; }
 	float getBtnCenterX() const;
 	// 属性栏跟随的按钮（默认跟随 curId）；白板这类"不是工具"的栏需要单独指定
 	void setAnchorId(const std::wstring& id) { anchorId = id; }
@@ -48,7 +48,6 @@ public:
 	// 框选同表面标注：选中工具并打开属性栏（不移交窗口）
 	void selectAnnotTool(const std::wstring& id);
 	void bindOwner(HWND ownerHwnd);
-	void hideHoverTip();
 	void updateUndoEnabled();
 	std::wstring resolveToolId(const std::wstring& slotId) const;
 	// 内置的停悬气泡候选（未经初始属性裁剪）：设置页「初始属性」编辑气泡内容时用
@@ -60,9 +59,12 @@ public:
 private:
 	class AnnotHost* annotHost() const;
 	void onCreated() override;
-	void layout() override;
-	void onMinMaxInfo(MINMAXINFO* mmi) override;
-	LRESULT onHitTest(const POINT pos) override; // pos=屏幕坐标；选区边/角穿透给 WinCap
+	// 盖住选区边角时把命中测试穿透给遮罩宿主
+	WinCap* maskHost() const override;
+	// 工具条外形：圆角条
+	void drawChrome(ID2D1DeviceContext* ctx) override;
+	// 收起附加悬停面板（形状选择器）
+	void hideExtraHoverTips() override;
 	void onClick(Ling::Button* btn);
 	void onClickCap(Ling::Button* btn);
 	void onClickPin(Ling::Button* btn);
@@ -82,7 +84,6 @@ private:
 	void applySelectedStyle(Ling::Button* btn);
 	void applyActionColors(Ling::Button* btn);
 	void refreshSize();
-	void paintChrome();
 	void initDragHandle();
 	void onDragDown(POINT pos, bool isRight);
 	void onDragMove(POINT pos);
@@ -122,17 +123,13 @@ private:
 	static constexpr int demoPeekStripPx{ 4 };
 	static constexpr UINT demoPeekHideDelayMs{ 150 };
 	void scheduleDemoCollapse();
-	std::unique_ptr<Tip> tip;
 	std::unique_ptr<ToolPicker> picker;
 	std::map<std::wstring, std::wstring> pickedSub;
 	Ling::Button* hoverBtn{ nullptr };
 	// 点按关闭气泡后，在离开该按钮前不再因停悬重开（二次停悬才弹）
 	Ling::Button* hoverSuppress{ nullptr };
 	static constexpr UINT pickerHideTimerId{ 210 };
-	Ling::Node* contentNode{ nullptr };
 	Ling::Button* dragHandle{ nullptr };
-	Ling::Canvas* chromeCanvas{ nullptr };
-	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushBg;
 	static constexpr float btnSize{ 42.f };
 	static constexpr float toolbarRadius{ ToolbarTheme::borderRadius };
 	static constexpr float hoverRadius{ ToolbarTheme::hoverRadius };

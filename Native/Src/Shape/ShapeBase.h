@@ -1,5 +1,7 @@
 #pragma once
 #include <include/Ling.h>
+#include <algorithm>
+#include <functional>
 #include <vector>
 #include <cmath>
 class AnnotHost;
@@ -9,6 +11,20 @@ public:
 	ShapeBase(AnnotHost* win);
 	virtual ~ShapeBase();
 	virtual void paint(ID2D1DeviceContext* ctx) = 0;
+	// 二次选中后工具条样式变化：把当前工具状态重新套到本形状（默认无动作）。
+	// 所有标注共用这一条路径，不再按类型各写一套分支。
+	virtual void applyStyle() {}
+	// 反向同步：把本形状的属性写回工具属性栏，供重新打开该标注的工具时展示。
+	virtual void syncToolFromShape() const {}
+	// 当前颜色（0xRRGGBBAA），用于把色板指到该标注的颜色
+	virtual UINT32 styleColorValue() const { return 0; }
+	static UINT32 packColor(const D2D1_COLOR_F& c)
+	{
+		auto ch = [](float v) {
+			return static_cast<UINT32>(std::lround(std::clamp(v, 0.f, 1.f) * 255.f));
+		};
+		return (ch(c.r) << 24) | (ch(c.g) << 16) | (ch(c.b) << 8) | ch(c.a);
+	}
 	virtual void paintDragger(ID2D1DeviceContext* ctx) {};
 	// 临时范围提示（控件层）：画在标注之上、只出现在屏幕上，导出不带（withChrome=false）
 	virtual void paintHint(ID2D1DeviceContext* ctx) {};
@@ -74,6 +90,16 @@ protected:
 	{
 		return D2D1::RectF(r.left + dx, r.top + dy, r.right + dx, r.bottom + dy);
 	}
+	// —— 矩形容器几何：矩形/椭圆/多边形/星形/画笔/序号共用同一套 ——
+	static D2D1_POINT_2F boxCenter(const D2D1_RECT_F& r);
+	// 世界坐标 → 以 rect 中心为轴反旋转 angleRad 后的局部坐标
+	static void boxToLocal(const D2D1_RECT_F& r, float angleRad, float x, float y,
+		float& lx, float& ly);
+	// 在 rect 中心按 angleRad 旋转坐标系后执行 draw，结束后恢复原变换
+	static void withBoxRotation(ID2D1DeviceContext* ctx, const D2D1_RECT_F& r, float angleRad,
+		const std::function<void()>& draw);
+	// 8 个缩放柄（四角 + 四边中点）；selection 已按 dpi 与外扩量调整，half = draggerSize / 2
+	static void layoutBoxDraggers(std::vector<D2D1_RECT_F>& out, const D2D1_RECT_F& selection, float half);
 	// 四角优先、四边次之（不必精确点到控点）；返回 0–7，未命中 -1
 	int hitBoxEdgeOrCorner(float x, float y, const D2D1_RECT_F& r, float band) const;
 	// —— 选中框：所有控件统一虚线，并相对本体四周外扩 2px ——

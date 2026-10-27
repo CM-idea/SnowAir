@@ -1,7 +1,9 @@
 #include "pch.h"
+#include "DesignKeys.h"
 #include <commdlg.h>
 #include <cstdlib>
 #include <cwctype>
+#include "../App.h"
 #include "../Win/AnnotHost.h"
 #include "../Win/WinCap.h"
 #include "../Win/CutMask.h"
@@ -99,7 +101,7 @@ namespace {
 	}
 }
 
-ToolSub::ToolSub(AnnotHost* win) : Ling::WinBase(), win(win)
+ToolSub::ToolSub(AnnotHost* win) : ToolbarWindow(), win(win)
 {
 	dpi = win->dpi;
 	onDpiChanged.add([this]() { dpiChanged = true; });
@@ -110,9 +112,11 @@ ToolSub::ToolSub(AnnotHost* win) : Ling::WinBase(), win(win)
 		this->win->layoutTools();
 	});
 	onKeyDown.add([this](UINT key) {
-		// 水印输入框编辑中：快捷键留给 TextBox，勿转发成复制截图
-		if (wmTextBox && wmTextBox->isFocused()) {
-			if (key == VK_ESCAPE) this->win->forwardKey(key);
+		// 属性栏输入框编辑中：键盘只给输入框，不能再转发成删除标注/全局快捷键。
+		const bool wmEditing = wmTextBox && wmTextBox->isFocused();
+		const bool numberEditing = numberInput && numberInput->isFocused();
+		if (wmEditing || numberEditing) {
+			if (key == VK_ESCAPE && wmEditing) this->win->forwardKey(key);
 			return;
 		}
 		this->win->forwardKey(key);
@@ -128,25 +132,9 @@ ToolSub::~ToolSub()
 
 void ToolSub::onCreated()
 {
-	ToolbarTheme::refresh();   // 属性栏建窗时也套用当前工具栏主题
-	tip = std::make_unique<Tip>(this);
-	auto d2d = Ling::D2D::get();
-	d2d->deviceContext->CreateSolidColorBrush(
-		Ling::Color(ToolbarTheme::background).getD2DColor(), brushBg.GetAddressOf());
-	canvas = body->makeChild<Ling::Canvas>();
-	canvas->setPositionType(Ling::Position::Absolute);
-	canvas->setSizePercent(100.f, 100.f);
-	contentNode = body->makeChild<Ling::Node>();
-	contentNode->setPositionType(Ling::Position::Absolute);
-	const auto pad = ToolbarChrome::propBubbleContentPad(false);
-	contentNode->setPosition(Ling::Edge::Left, ToolbarTheme::shadowPad);
-	contentNode->setPosition(Ling::Edge::Right, ToolbarTheme::shadowPad);
-	contentNode->setPosition(Ling::Edge::Top, pad.top);
-	contentNode->setPosition(Ling::Edge::Bottom, pad.bottom);
-	contentNode->setFlexDirection(Ling::FlexDirection::Row);
-	contentNode->setAlignItems(Ling::Align::Center);
-	contentNode->setPaddingLeft(ToolbarTheme::propPad);
-	contentNode->setPaddingRight(ToolbarTheme::propPad);
+	auto pad = ToolbarChrome::propBubbleContentPad(false);
+	initChrome(ToolbarTheme::propPad, ToolbarTheme::propPad, pad.top, pad.bottom,
+		Ling::FlexDirection::Row);
 	onMouseMove.add([this](POINT pos) {
 		if (!slider) return;
 		const bool onSlider = slider->isPosIn(pos)
@@ -180,9 +168,18 @@ void ToolSub::beginTool(const std::wstring& id)
 	sliderValue = nullptr;
 	wmTextBox = nullptr;
 	numberInput = nullptr;
+	numberShowsSelected_ = false;
+	selectedNumberLabel_.clear();
 	fillBtn = nullptr;
 	dashBtn = nullptr;
 	softBtn = nullptr;
+	boldBtn = nullptr;
+	italicBtn = nullptr;
+	hiEllipseBtn = nullptr;
+	hiRectBtn = nullptr;
+	hiBorderBtn = nullptr;
+	arrowDashBtn = nullptr;
+	arrowRoundBtn = nullptr;
 	lineBtn = nullptr;
 	markerBtn = nullptr;
 	roundBtn = nullptr;
@@ -211,6 +208,7 @@ void ToolSub::beginTool(const std::wstring& id)
 	overlayBaseLabel = nullptr;
 	overlayTopLabel = nullptr;
 	overlayFlag = nullptr;
+	styleToggles.clear();
 	sizeExtraW = 0.f;
 	numberStyleBtns.clear();
 	arrowHeadBtns.clear();
@@ -266,15 +264,15 @@ void ToolSub::showRectTools()
 	// 初始属性：默认形态（0 矩形 / 1 椭圆 / 2 多边形 / 3 星形）+ 边数 / 角数
 	int defaultForm = 0;
 	{
-		const int form = designInt(L"rect", L"form", -1);
+		const int form = designInt(ToolKey::Rect, DesignKey::Form, -1);
 		if (form >= 0) {
 			defaultForm = std::clamp(form, 0, 3);
 			isEllipse = (form == 1);
 			rectKind = (form == 2) ? PolygonShape : (form == 3) ? StarShape : RectShape;
 		}
-		const int sides = designInt(L"rect", L"sides", -1);
+		const int sides = designInt(ToolKey::Rect, DesignKey::Sides, -1);
 		if (sides >= 0) polygonSides = std::clamp(sides, 3, 20);
-		const int pts = designInt(L"rect", L"points", -1);
+		const int pts = designInt(ToolKey::Rect, DesignKey::Points, -1);
 		if (pts >= 0) starPoints = std::clamp(pts, 3, 20);
 	}
 	if (isRectFill && isRectDash) isRectDash = false;
@@ -304,6 +302,11 @@ void ToolSub::showRectTools()
 			}
 			win->onToolStyleChanged();
 		});
+		registerStyleToggle([this, kind] { return !isEllipse && rectKind == kind; }, [this] {
+			const int f = designInt(ToolKey::Rect, DesignKey::Form, 0);
+			isEllipse = (f == 1);
+			rectKind = (f == 2) ? PolygonShape : (f == 3 ? StarShape : RectShape);
+		});
 		return b;
 	};
 	// 形态顺序跟随「初始属性」；默认形态已在工具栏，属性栏里不再重复
@@ -321,6 +324,11 @@ void ToolSub::showRectTools()
 						closeNestedPanel();
 				}
 				refreshNestedTrigger();
+			});
+			registerStyleToggle([this] { return isEllipse; }, [this] {
+				const int f = designInt(ToolKey::Rect, DesignKey::Form, 0);
+				isEllipse = (f == 1);
+				rectKind = (f == 2) ? PolygonShape : (f == 3 ? StarShape : RectShape);
 			});
 		}
 		else if (c.value == 2 || c.value == 3) {
@@ -347,6 +355,11 @@ void ToolSub::showRectTools()
 					&& nestedPanel->kind() == ToolNestedPanel::Kind::ShapeSides)
 					closeNestedPanel();
 				win->onToolStyleChanged();
+			});
+			registerStyleToggle([this] { return !isEllipse && rectKind == RectShape; }, [this] {
+				const int f = designInt(ToolKey::Rect, DesignKey::Form, 0);
+				isEllipse = (f == 1);
+				rectKind = (f == 2) ? PolygonShape : (f == 3 ? StarShape : RectShape);
 			});
 		}
 	}
@@ -415,13 +428,13 @@ void ToolSub::showArrowTools()
 	auto* designSetting = Setting::get();
 	const bool arrowDesign = designSetting && designSetting->hasToolDesign(L"arrow");
 	if (arrowDesign)
-		arrowHead = std::clamp(designSetting->getToolDesignInt(L"arrow", L"head", arrowHead),
+		arrowHead = std::clamp(designSetting->getToolDesignInt(ToolKey::Arrow, DesignKey::Head, arrowHead),
 			(int)ArrowDefault, (int)ArrowFun);
 	// 各种箭头共用 arrow 滑条，不因切子样式改量程
 	loadStrokeSlider(L"arrow");
 	// 初始属性里的默认粗细（没存过就沿用滑条记忆 / 全局默认）
 	if (arrowDesign) {
-		const int dw = designSetting->getToolDesignInt(L"arrow", L"width", -1);
+		const int dw = designSetting->getToolDesignInt(ToolKey::Arrow, DesignKey::Width, -1);
 		if (dw > 0) sliderVal = std::clamp((float)dw, sliderMin, sliderMax);
 	}
 	// 被提为工具栏默认形态的那一款已从属性栏移走（工具栏按钮就是它），其余形态按
@@ -447,10 +460,30 @@ void ToolSub::showArrowTools()
 			c.tipKey ? c.tipKey : L"tool.arrowDefault");
 	}
 	refreshArrowHeadBtns();
-	makeToggleBtn(Icon::Dash, &isArrowDash, L"tool.dash", L"dash");
-	makeToggleBtn(Icon::RoundCap, &isArrowRound, L"tool.roundCap", L"round");
+	arrowDashBtn = makeToggleBtn(Icon::Dash, &isArrowDash, L"tool.dash", L"dash");
+	registerStyleToggle([this] { return isArrowDash; }, [this] { isArrowDash = false; });
+	arrowRoundBtn = makeToggleBtn(Icon::RoundCap, &isArrowRound, L"tool.roundCap", L"round");
+	registerStyleToggle([this] { return isArrowRound; }, [this] { isArrowRound = false; });
 	initColorTrigger();
 	initSlider();
+}
+
+// 荧光笔 / 软笔不支持虚线：把虚线按钮置灰并强制关掉
+void ToolSub::updateDashAvailability()
+{
+	// 只服务画笔属性栏：其它工具的 dashBtn 是各自独立的按钮，不能被 isPenDash 覆盖
+	if (curToolId != L"pen" || !dashBtn) return;
+	const bool disabled = isPenMarker || isPenSoft;
+	if (disabled) isPenDash = false;
+	if (disabled) {
+		dashBtn->setBg(0);
+		dashBtn->setHoverBg(0);
+		dashBtn->setColor(Icon::ColorDisabled);
+		dashBtn->setHoverColor(Icon::ColorDisabled);
+	}
+	else {
+		applyToggleStyle(dashBtn, isPenDash);
+	}
 }
 
 void ToolSub::applyPenMarkerState(bool on)
@@ -466,9 +499,9 @@ void ToolSub::applyPenMarkerState(bool on)
 		if (softBtn) applyToggleStyle(softBtn, false);
 		if (dashBtn) applyToggleStyle(dashBtn, false);
 		// 初始属性：荧光笔自己的默认不透明度 / 默认粗细
-		const int op = designInt(L"marker", L"opacity", -1);
+		const int op = designInt(ToolKey::Marker, DesignKey::Opacity, -1);
 		if (op >= 0) penMarkerOpacity = std::clamp(op, 10, 100);
-		const int mw = designInt(L"marker", L"width", -1);
+		const int mw = designInt(ToolKey::Marker, DesignKey::Width, -1);
 		if (mw >= 0) {
 			sliderVal = std::clamp((float)mw, sliderMin, sliderMax);
 			updateSliderValueLabel();
@@ -482,6 +515,7 @@ void ToolSub::applyPenMarkerState(bool on)
 	else {
 		closeNestedPanel();
 	}
+	updateDashAvailability();
 }
 
 void ToolSub::showLineTools()
@@ -496,13 +530,13 @@ void ToolSub::showLineTools()
 	int defaultLine = LineDimension;
 	lineKind = LineDimension;
 	{
-		const int form = designInt(L"line", L"form", -1);
+		const int form = designInt(ToolKey::Line, DesignKey::Form, -1);
 		if (form == LineBubble || form == LineBurst || form == LineAngle
 			|| form == LineWave || form == LineDimension) {
 			lineKind = form;
 			defaultLine = form;
 		}
-		const int lw = designInt(L"line", L"width", -1);
+		const int lw = designInt(ToolKey::Line, DesignKey::Width, -1);
 		if (lw >= 0) sliderVal = std::clamp((float)lw, sliderMin, sliderMax);
 	}
 	initSize(6, true);   // 4 个非默认形态 + 虚线 + 圆头，再加色块与滑条
@@ -525,6 +559,9 @@ void ToolSub::showLineTools()
 			win->onToolStyleChanged();
 		});
 		lineKindBtns.push_back({ b, kind });
+		registerStyleToggle([this, kind] { return lineKind == kind; }, [this] {
+			lineKind = designInt(ToolKey::Line, DesignKey::Form, LineDimension);
+		});
 		return b;
 	};
 	// 形态顺序跟随「初始属性」；默认形态已在工具栏，属性栏里不再重复
@@ -536,8 +573,10 @@ void ToolSub::showLineTools()
 		else if (c.value == LineWave) waveKindBtn = b;
 		else if (c.value == LineDimension) dimKindBtn = b;
 	}
-	makeToggleBtn(Icon::Dash, &isArrowDash, L"tool.dash", L"dash");
-	makeToggleBtn(Icon::RoundCap, &isArrowRound, L"tool.roundCap", L"round");
+	arrowDashBtn = makeToggleBtn(Icon::Dash, &isArrowDash, L"tool.dash", L"dash");
+	registerStyleToggle([this] { return isArrowDash; }, [this] { isArrowDash = false; });
+	arrowRoundBtn = makeToggleBtn(Icon::RoundCap, &isArrowRound, L"tool.roundCap", L"round");
+	registerStyleToggle([this] { return isArrowRound; }, [this] { isArrowRound = false; });
 	refreshLineKindBtns();
 	initColorTrigger();
 	initSlider();
@@ -569,7 +608,7 @@ void ToolSub::showPenTools()
 	// 初始属性：0 普通 / 1 软笔 / 2 虚线 / 3 荧光笔（渐隐画笔不参与）
 	int defaultPen = 0;
 	if (!isPenFade) {
-		const int form = designInt(L"pen", L"form", -1);
+		const int form = designInt(ToolKey::Pen, DesignKey::Form, -1);
 		if (form == 0 || form == 1 || form == 3) defaultPen = form;
 		if (form == 3) {
 			isPenMarker = true;
@@ -615,6 +654,7 @@ void ToolSub::showPenTools()
 				win->onToolStyleChanged();
 				if (next) nestedPanel->openPenOpacity(workAreaRect(), b);
 			});
+			registerStyleToggle([this] { return isPenMarker; }, [this] { applyPenMarkerState(false); });
 		}
 		else if (c.value == 1) {
 			softBtn = contentNode->makeChild<Ling::Button>();
@@ -633,8 +673,10 @@ void ToolSub::showPenTools()
 					applyPenMarkerState(false);
 				}
 				refreshPenForms();
+				updateDashAvailability();
 				win->onToolStyleChanged();
 			});
+			registerStyleToggle([this] { return isPenSoft; }, [this] { isPenSoft = false; });
 		}
 		else {
 			// 形态默认不是常规笔时，栏里保留「常规画笔」入口
@@ -652,6 +694,7 @@ void ToolSub::showPenTools()
 				isPenDash = false;
 				if (dashBtn) applyToggleStyle(dashBtn, false);
 				refreshPenForms();
+				updateDashAvailability();
 				if (nestedPanel && nestedPanel->isOpen()
 					&& nestedPanel->kind() == ToolNestedPanel::Kind::PenOpacity)
 					closeNestedPanel();
@@ -669,6 +712,7 @@ void ToolSub::showPenTools()
 	applyToggleStyle(dashBtn, isPenDash);
 	tip->bind(dashBtn, Lang::get(L"tool.dash"));
 	dashBtn->onClick.add([this](Ling::Button*) {
+		if (isPenMarker || isPenSoft) return;   // 荧光笔/软笔不支持虚线
 		isPenDash = !isPenDash;
 		if (isPenDash) {
 			isPenFade = false;
@@ -677,8 +721,11 @@ void ToolSub::showPenTools()
 			applyPenMarkerState(false);
 		}
 		applyToggleStyle(dashBtn, isPenDash);
+		updateDashAvailability();
 		win->onToolStyleChanged();
 	});
+	registerStyleToggle([this] { return isPenDash; }, [this] { isPenDash = false; });
+	updateDashAvailability();
 	}   // !isPenFade
 
 	initColorTrigger();
@@ -694,7 +741,7 @@ void ToolSub::showNumberTools()
 	// 初始属性：默认序号类型（0 数字 / 1 字母 / 2 Emoji）
 	int defaultNum = NumberDigit;
 	{
-		const int form = designInt(L"number", L"form", -1);
+		const int form = designInt(ToolKey::Number, DesignKey::Form, -1);
 		if (form >= NumberDigit && form <= NumberEmoji) defaultNum = form;
 	}
 	if (fresh) numberStyle = defaultNum;
@@ -725,15 +772,17 @@ void ToolSub::showTextTools()
 	beginTool(L"text");
 	// 初始属性：0 常规 / 1 粗体 / 2 斜体 / 3 粗斜体
 	{
-		const int form = designInt(L"text", L"form", -1);
+		const int form = designInt(ToolKey::Text, DesignKey::Form, -1);
 		if (form >= 0) {
 			isTextBold = (form & 1) != 0;
 			isTextItalic = (form & 2) != 0;
 		}
 	}
 	initSize(2, true);
-	makeToggleBtn(Icon::Bold, &isTextBold, L"tool.bold", L"bold");
-	makeToggleBtn(Icon::Italic, &isTextItalic, L"tool.italic", L"italic");
+	boldBtn = makeToggleBtn(Icon::Bold, &isTextBold, L"tool.bold", L"bold");
+	italicBtn = makeToggleBtn(Icon::Italic, &isTextItalic, L"tool.italic", L"italic");
+	registerStyleToggle([this] { return isTextBold; }, [this] { isTextBold = false; });
+	registerStyleToggle([this] { return isTextItalic; }, [this] { isTextItalic = false; });
 	initColorTrigger();
 	initSlider();
 }
@@ -744,7 +793,7 @@ void ToolSub::showMosaicTools()
 	// 初始属性：0 马赛克 / 1 模糊
 	int defaultMosaic = 0;
 	{
-		const int form = designInt(L"mosaic", L"form", -1);
+		const int form = designInt(ToolKey::Mosaic, DesignKey::Form, -1);
 		if (form >= 0) {
 			defaultMosaic = (form == 1) ? 1 : 0;
 			isMosaicBlur = (defaultMosaic == 1);
@@ -752,8 +801,7 @@ void ToolSub::showMosaicTools()
 	}
 	initSize(1, false, true);
 	// 属性栏只放非默认形态；默认形态已经在工具栏按钮上
-	for (const auto& c : orderedFormsFor(L"mosaic", defaultMosaic)) {
-		if (c.value == 1) {
+	for (const auto& c : orderedFormsFor(L"mosaic", defaultMosaic)) {		if (c.value == 1) {
 			// 模糊：复合图标 = 模糊2 全不透明 + 模糊1 @25%
 			overlayBtn = makeOverlayToggleBtn(Icon::Blur2, Icon::Blur, 0.25f, &isMosaicBlur, L"tool.blur");
 		}
@@ -772,6 +820,8 @@ void ToolSub::showMosaicTools()
 			});
 		}
 	}
+	registerStyleToggle([this] { return isMosaicBlur != (designInt(ToolKey::Mosaic, DesignKey::Form, 0) == 1); },
+		[this] { isMosaicBlur = designInt(ToolKey::Mosaic, DesignKey::Form, 0) == 1; });
 	initSlider();
 }
 
@@ -780,7 +830,7 @@ void ToolSub::showPatinaTools()
 	beginTool(L"patina");
 	// 初始属性：按屏幕放置方案（0 右下 / 1 右下角 / 2 中下）
 	{
-		const int form = designInt(L"patina", L"form", -1);
+		const int form = designInt(ToolKey::Patina, DesignKey::Form, -1);
 		if (form >= 0) patinaPlan = std::clamp(form, 0, 2);
 	}
 	if (patinaPlan < 0 || patinaPlan > 2) patinaPlan = 0;
@@ -806,7 +856,7 @@ void ToolSub::showWatermarkTools()
 	beginTool(L"watermark");
 	// 初始属性：默认倾斜角度
 	{
-		const int angle = designInt(L"watermark", L"angle", -1);
+		const int angle = designInt(ToolKey::Watermark, DesignKey::Angle, -1);
 		if (angle >= 0) watermarkAngle = (float)std::clamp(angle, 0, 360);
 	}
 	constexpr float wmInputMinW{ 96.f };
@@ -893,23 +943,24 @@ void ToolSub::showHighlightTools()
 	// 初始属性：0 矩形 / 1 椭圆；边框开关单独存
 	int defaultHi = 0;
 	{
-		const int form = designInt(L"highlight", L"form", -1);
+		const int form = designInt(ToolKey::Highlight, DesignKey::Form, -1);
 		if (form >= 0) {
 			defaultHi = (form == 1) ? 1 : 0;
 			isHighlightEllipse = (form == 1);
 		}
-		const int border = designInt(L"highlight", L"border", -1);
+		const int border = designInt(ToolKey::Highlight, DesignKey::Border, -1);
 		if (border >= 0) isHighlightBorder = (border == 1);
 	}
 	initSize(2, true, true);
 	// 属性栏只放非默认形态；默认形态已经在工具栏按钮上
 	for (const auto& c : orderedFormsFor(L"highlight", defaultHi)) {
 		if (c.value == 1) {
-			makeToggleBtn(c.glyph ? c.glyph : Icon::Ellipse, &isHighlightEllipse,
+			hiEllipseBtn = makeToggleBtn(c.glyph ? c.glyph : Icon::Ellipse, &isHighlightEllipse,
 				c.tipKey ? c.tipKey : L"tool.highlightEllipse", L"ellipse");
 		}
 		else {
 			auto* b = contentNode->makeChild<Ling::Button>();
+			hiRectBtn = b;
 			b->setText(c.glyph ? c.glyph : Icon::Rect);
 			styleToolbarBtn(b);
 			b->setFontFamily(Icon::Family);
@@ -923,7 +974,10 @@ void ToolSub::showHighlightTools()
 			});
 		}
 	}
-	makeToggleBtn(Icon::DashRect, &isHighlightBorder, L"tool.highlightBorder", L"border");
+	registerStyleToggle([this] { return isHighlightEllipse != (designInt(ToolKey::Highlight, DesignKey::Form, 0) == 1); },
+		[this] { isHighlightEllipse = designInt(ToolKey::Highlight, DesignKey::Form, 0) == 1; });
+	hiBorderBtn = makeToggleBtn(Icon::DashRect, &isHighlightBorder, L"tool.highlightBorder", L"border");
+	registerStyleToggle([this] { return isHighlightBorder; }, [this] { isHighlightBorder = false; });
 	initColorTrigger();
 	initSlider();
 }
@@ -1251,28 +1305,16 @@ float ToolSub::setShapeSliderVal(const std::wstring& tool, float px)
 	return logical * dpi;
 }
 
-void ToolSub::layout()
-{
-	Ling::WinBase::layout();
-	if (!canvas) return;
-	auto ctx = canvas->startPaint();
-	if (!ctx) return;
-	ctx->Clear(0);
-	paintBorder(ctx);
-	canvas->finishPaint();
-	// 自定义色块的七彩渐变：与颜色面板共用同一份绘制，尺寸按当前布局重画
-	PaintCustomColorSwatch(boardCustomCanvas, dpi);
-}
-
-void ToolSub::onMinMaxInfo(MINMAXINFO* mmi)
-{
-	mmi->ptMinTrackSize.x = 1;
-	mmi->ptMinTrackSize.y = 1;
-}
-
-void ToolSub::paintBorder(ID2D1DeviceContext* ctx)
+void ToolSub::drawChrome(ID2D1DeviceContext* ctx)
 {
 	ToolbarChrome::paintPropBubble(ctx, w, h, dpi, brushBg.Get(), arrowX, tipDown_);
+}
+
+void ToolSub::layout()
+{
+	ToolbarWindow::layout();
+	// 自定义色块的七彩渐变：与颜色面板共用同一份绘制，尺寸按当前布局重画
+	PaintCustomColorSwatch(boardCustomCanvas, dpi);
 }
 
 void ToolSub::applyTipDirection(bool tipDown)
@@ -1344,6 +1386,165 @@ void ToolSub::notifyStyleChanged()
 	win->onToolStyleChanged();
 }
 
+void ToolSub::resetStyleToDefaults()
+{
+	// 关掉工具再打开 = 属性栏回到「初始属性」，不沿用上一次的选择
+	const int rf = designInt(ToolKey::Rect, DesignKey::Form, 0);
+	isEllipse = (rf == 1);
+	rectKind = (rf == 2) ? PolygonShape : (rf == 3 ? StarShape : RectShape);
+	isRectFill = false;
+	isRectDash = false;
+	cornerRadius = 0.f;
+	lastCornerRadius = 0.f;
+	isArrowDash = false;
+	isArrowRound = false;
+	arrowHead = designInt(ToolKey::Arrow, DesignKey::Head, ArrowDefault);
+	isLine = false;
+	lineKind = designInt(ToolKey::Line, DesignKey::Form, LineDimension);
+	isPenDash = false;
+	isPenSoft = false;
+	isPenMarker = false;
+	const int tf = designInt(ToolKey::Text, DesignKey::Form, 0);
+	isTextBold = (tf & 1) != 0;
+	isTextItalic = (tf & 2) != 0;
+	isHighlightBorder = designInt(ToolKey::Highlight, DesignKey::Border, 0) != 0;
+	isHighlightEllipse = designInt(ToolKey::Highlight, DesignKey::Form, 0) == 1;
+	isMosaicBlur = designInt(ToolKey::Mosaic, DesignKey::Form, 0) == 1;
+	numberStyle = designInt(ToolKey::Number, DesignKey::Form, NumberDigit);
+	// 颜色/粗细的会话记忆也清掉：重新打开按初始属性来
+	selectColorIndex = 0;
+	sliderMem.clear();
+	colorIndexMem.clear();
+	updateDashAvailability();
+}
+
+void ToolSub::beginShapeStylePreview()
+{
+	if (stylePreviewActive_) return;
+	auto& s = stylePreview_;
+	s.isEllipse = isEllipse; s.isRectFill = isRectFill; s.isRectDash = isRectDash;
+	s.isArrowDash = isArrowDash; s.isArrowRound = isArrowRound; s.isLine = isLine;
+	s.isPenDash = isPenDash; s.isPenSoft = isPenSoft; s.isPenMarker = isPenMarker;
+	s.isTextBold = isTextBold; s.isTextItalic = isTextItalic;
+	s.isHighlightBorder = isHighlightBorder; s.isHighlightEllipse = isHighlightEllipse;
+	s.isMosaicBlur = isMosaicBlur;
+	s.rectKind = rectKind; s.polygonSides = polygonSides; s.starPoints = starPoints;
+	s.arrowHead = arrowHead; s.lineKind = lineKind; s.numberStyle = numberStyle;
+	s.cornerRadius = cornerRadius; s.lastCornerRadius = lastCornerRadius;
+	s.sliderVal = sliderVal; s.sliderMin = sliderMin; s.sliderMax = sliderMax;
+	s.curSliderKey = curSliderKey;
+	s.selectColorIndex = selectColorIndex;
+	s.sessionCustomColor = sessionCustomColor;
+	s.customColor = colors[customColorIndex];
+	s.sliderMem = sliderMem;
+	s.colorIndexMem = colorIndexMem;
+	stylePreviewActive_ = true;
+}
+
+void ToolSub::endShapeStylePreview()
+{
+	if (!stylePreviewActive_) return;
+	stylePreviewActive_ = false;
+	auto& s = stylePreview_;
+	isEllipse = s.isEllipse; isRectFill = s.isRectFill; isRectDash = s.isRectDash;
+	isArrowDash = s.isArrowDash; isArrowRound = s.isArrowRound; isLine = s.isLine;
+	isPenDash = s.isPenDash; isPenSoft = s.isPenSoft; isPenMarker = s.isPenMarker;
+	isTextBold = s.isTextBold; isTextItalic = s.isTextItalic;
+	isHighlightBorder = s.isHighlightBorder; isHighlightEllipse = s.isHighlightEllipse;
+	isMosaicBlur = s.isMosaicBlur;
+	rectKind = s.rectKind; polygonSides = s.polygonSides; starPoints = s.starPoints;
+	arrowHead = s.arrowHead; lineKind = s.lineKind; numberStyle = s.numberStyle;
+	cornerRadius = s.cornerRadius; lastCornerRadius = s.lastCornerRadius;
+	sliderVal = s.sliderVal; sliderMin = s.sliderMin; sliderMax = s.sliderMax;
+	curSliderKey = s.curSliderKey;
+	selectColorIndex = s.selectColorIndex;
+	sessionCustomColor = s.sessionCustomColor;
+	colors[customColorIndex] = s.customColor;
+	sliderMem = s.sliderMem;
+	colorIndexMem = s.colorIndexMem;
+	refreshStyleToggles();
+	updateSliderValueLabel();
+	if (slider) {
+		suppressSliderStyleNotify = true;
+		slider->setValue(sliderVal);
+		suppressSliderStyleNotify = false;
+	}
+	updateColorTriggerSwatch();
+	refreshNestedTrigger();
+	if (curToolId == L"number") syncNumberInput();
+}
+
+void ToolSub::commitShapeStylePreview()
+{
+	if (!stylePreviewActive_) return;
+	stylePreviewActive_ = false;
+}
+
+void ToolSub::registerStyleToggle(std::function<bool()> active, std::function<void()> reset)
+{
+	styleToggles.push_back({ std::move(active), std::move(reset) });
+}
+
+// 属性栏里是否有开着的选项：右键分层回退时先清这些，再退工具
+bool ToolSub::hasActiveStyleOption() const
+{
+	for (const auto& t : styleToggles) {
+		if (t.active && t.active()) return true;
+	}
+	return false;
+}
+
+// 从右到左关闭一个：按登记顺序（即属性栏按钮创建顺序，左到右）倒序查找第一个仍开启的选项。
+// 不按工具硬编码顺序；属性栏调整顺序或去掉某个按钮时，此处行为自动一致。
+bool ToolSub::resetStyleOptions()
+{
+	for (auto it = styleToggles.rbegin(); it != styleToggles.rend(); ++it) {
+		if (!it->active || !it->active()) continue;
+		if (it->reset) it->reset();
+		refreshStyleToggles();
+		if (curToolId == L"number") syncNumberInput();
+		win->onToolStyleChanged();
+		return true;
+	}
+	return false;
+}
+
+// 二次选中并把标注属性写回工具状态后，刷新区间里所有开关按钮的选中态
+void ToolSub::refreshStyleToggles()
+{
+	if (!hasTools) return;
+	if (fillBtn) applyToggleStyle(fillBtn, isRectFill);
+	if (dashBtn) {
+		bool on = isArrowDash;
+		if (curToolId == L"rect") on = isRectDash;
+		else if (curToolId == L"pen") on = isPenDash;
+		applyToggleStyle(dashBtn, on);
+	}
+	if (roundBtn) applyToggleStyle(roundBtn, cornerRadius > 0.f);
+	if (ellipseBtn) applyToggleStyle(ellipseBtn, isEllipse);
+	if (lineBtn) applyToggleStyle(lineBtn, isLine);
+	if (softBtn) applyToggleStyle(softBtn, isPenSoft);
+	if (markerBtn) applyToggleStyle(markerBtn, isPenMarker);
+	if (penBaseBtn) applyToggleStyle(penBaseBtn, !isPenMarker && !isPenSoft);
+	if (boldBtn) applyToggleStyle(boldBtn, isTextBold);
+	if (italicBtn) applyToggleStyle(italicBtn, isTextItalic);
+	if (hiEllipseBtn) applyToggleStyle(hiEllipseBtn, isHighlightEllipse);
+	if (hiRectBtn) applyToggleStyle(hiRectBtn, !isHighlightEllipse);
+	if (hiBorderBtn) applyToggleStyle(hiBorderBtn, isHighlightBorder);
+	if (arrowDashBtn) applyToggleStyle(arrowDashBtn, isArrowDash);
+	if (arrowRoundBtn) applyToggleStyle(arrowRoundBtn, isArrowRound);
+	if (overlayBtn) {
+		if (overlayFlag) applyOverlayToggleStyle(*overlayFlag);
+		else applyToggleStyle(overlayBtn, !isMosaicBlur);
+	}
+	refreshRectKindBtns();
+	refreshLineKindBtns();
+	refreshArrowHeadBtns();
+	refreshNumberStyleBtns();
+	refreshNestedTrigger();
+	updateDashAvailability();
+}
+
 void ToolSub::refreshNestedTrigger()
 {
 	refreshRoundBtnStyle();
@@ -1361,6 +1562,27 @@ RECT ToolSub::workAreaRect() const
 {
 	RECT winRect{ x, y, x + static_cast<int>(w), y + static_cast<int>(h) };
 	return ToolbarChrome::workAreaNear(winRect);
+}
+
+// 将色板指向指定颜色（0xRRGGBBAA）：二次选中标注时展示其自身颜色。
+void ToolSub::selectColorByValue(UINT32 rgba)
+{
+	if (rgba == 0) return;
+	UINT idx = static_cast<UINT>(customColorIndex);
+	bool found = false;
+	for (size_t i = 0; i < colors.size(); ++i) {
+		if (colors[i] == rgba) { idx = static_cast<UINT>(i); found = true; break; }
+	}
+	if (!found) {
+		sessionCustomColor = rgba;
+		colors[customColorIndex] = rgba;
+	}
+	if (!curToolId.empty()) colorIndexMem[curToolId] = idx;
+	if (selectColorIndex != idx) {
+		selectColorIndex = idx;
+		if (colorPanel && colorPanel->isOpen()) colorPanel->refreshSelection();
+	}
+	updateColorTriggerSwatch();
 }
 
 void ToolSub::onColorPicked(size_t index)
@@ -1536,7 +1758,7 @@ void ToolSub::makeNumberStyleBtns()
 	numberInput = nullptr;
 	int defaultNum = NumberDigit;
 	{
-		const int form = designInt(L"number", L"form", -1);
+		const int form = designInt(ToolKey::Number, DesignKey::Form, -1);
 		if (form >= NumberDigit && form <= NumberEmoji) defaultNum = form;
 	}
 	// 再点同一项回到默认形态
@@ -1554,6 +1776,8 @@ void ToolSub::makeNumberStyleBtns()
 		});
 		numberStyleBtns.push_back(btn);
 		numberStyleVals.push_back(style);
+		registerStyleToggle([this, style] { return numberStyle == style; },
+			[this, defaultNum] { numberStyle = defaultNum; });
 	};
 
 	// 形态顺序跟随「初始属性」；默认形态已在工具栏，属性栏里不再重复
@@ -1612,10 +1836,44 @@ int ToolSub::autoNextNumber(int style) const
 
 std::wstring ToolSub::numberInputDisplay() const
 {
+	if (numberShowsSelected_) return selectedNumberLabel_;
 	// 手动输入的文字优先（中文等）；否则显示下一个自然序号
 	if (!numberCustomLabel.empty()) return numberCustomLabel;
 	const int val = numberStartVal > 0 ? numberStartVal : autoNextNumber(numberStyle);
 	return formatNumberLabel(numberStyle, val);
+}
+
+void ToolSub::showSelectedNumberValue(const std::wstring& text)
+{
+	numberShowsSelected_ = true;
+	selectedNumberLabel_ = text;
+	if (!numberInput) return;
+	numberInputSyncing = true;
+	numberInput->setText(text);
+	numberInputSyncing = false;
+	numberInput->setWidth(measureNumberInputW(text));
+	sizeExtraW = measureNumberInputW(text) + 8.f;
+	refreshSize();
+	win->layoutTools();
+}
+
+void ToolSub::clearSelectedNumberValue()
+{
+	if (!numberShowsSelected_) return;
+	numberShowsSelected_ = false;
+	selectedNumberLabel_.clear();
+	syncNumberInput();
+	refreshSize();
+	win->layoutTools();
+}
+
+void ToolSub::blurInputs()
+{
+	if (numberInput && numberInput->isFocused()) numberInput->blur();
+	if (wmTextBox && wmTextBox->isFocused()) wmTextBox->blur();
+	// 输入框偶发残留鼠标捕获：鼠标已经回到画布，捕获还挂在属性栏上会导致画布点不动
+	HWND cap = GetCapture();
+	if (cap && hwnd && (cap == hwnd || IsChild(hwnd, cap))) ReleaseCapture();
 }
 
 float ToolSub::measureNumberInputW(const std::wstring& text) const
@@ -1670,11 +1928,38 @@ void ToolSub::buildNumberInput()
 
 void ToolSub::applyNumberInputEdited()
 {
-	if (numberInputSyncing || !numberInput) return;
+	if (numberInputSyncing || numberApplying_ || !numberInput) return;
+	struct ApplyGuard {
+		bool& applying;
+		~ApplyGuard() { applying = false; }
+	} guard{ numberApplying_ };
+	numberApplying_ = true;
 	std::wstring text = numberInput->getText();
 	const auto isSpace = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; };
 	while (!text.empty() && isSpace(text.front())) text.erase(text.begin());
 	while (!text.empty() && isSpace(text.back())) text.pop_back();
+
+	// 二次选中序号标注：输入框改的是这个标注本身，不改变"下一次落笔"的序号
+	if (numberShowsSelected_) {
+		if (auto* num = dynamic_cast<ShapeNumber*>(win->shapeHover)) {
+			num->setDisplayLabel(text);
+			selectedNumberLabel_ = num->displayLabel();
+			numberInput->setWidth(measureNumberInputW(selectedNumberLabel_));
+			sizeExtraW = measureNumberInputW(selectedNumberLabel_) + 8.f;
+			// 文本框正在派发 onTextChanged：把属性栏重排推迟到本次输入事件之后，
+			// 避免在 TextBox 内部再次布局自身导致卡住。
+			if (auto* app = Ling::App::get()) {
+				auto* sub = this;
+				auto* w = win;
+				app->dq.TryEnqueue([sub, w]() {
+					sub->refreshSize();
+					w->layoutTools();
+				});
+			}
+			return;
+		}
+		numberShowsSelected_ = false;
+	}
 
 	bool digits = !text.empty();
 	for (auto c : text) if (c < L'0' || c > L'9') { digits = false; break; }
@@ -1715,6 +2000,9 @@ void ToolSub::syncNumberInput()
 
 int ToolSub::takeNumberValue(int style, int autoVal, std::wstring& label)
 {
+	// 开始落新的序号：退出"显示选中标注"状态，输入框回到下一个自然序号
+	numberShowsSelected_ = false;
+	selectedNumberLabel_.clear();
 	if (style == NumberEmoji) return autoVal;
 	int val = numberStartVal > 0 ? numberStartVal : autoVal;
 	if (!numberCustomLabel.empty()) {
@@ -1762,6 +2050,7 @@ void ToolSub::makeRectStyleBtns()
 		applyToggleStyle(fillBtn, isRectFill);
 		win->onToolStyleChanged();
 	});
+	registerStyleToggle([this] { return isRectFill; }, [this] { isRectFill = false; });
 
 	dashBtn = contentNode->makeChild<Ling::Button>();
 	dashBtn->setText(Icon::DashRect);
@@ -1779,6 +2068,7 @@ void ToolSub::makeRectStyleBtns()
 		applyToggleStyle(dashBtn, isRectDash);
 		win->onToolStyleChanged();
 	});
+	registerStyleToggle([this] { return isRectDash; }, [this] { isRectDash = false; });
 
 	roundBtn = contentNode->makeChild<Ling::Button>();
 	roundBtn->setText(Icon::RoundCorner);
@@ -1805,6 +2095,11 @@ void ToolSub::makeRectStyleBtns()
 		nestedPanel->openCorner(workAreaRect(), roundBtn);
 		win->onToolStyleChanged();
 	});
+	registerStyleToggle([this] { return cornerRadius > 0.f; }, [this] {
+		lastCornerRadius = cornerRadius;
+		cornerRadius = 0.f;
+		closeNestedPanel();
+	});
 }
 
 void ToolSub::makeArrowHeadBtn(const wchar_t* icon, int style, const wchar_t* tipKey)
@@ -1823,6 +2118,9 @@ void ToolSub::makeArrowHeadBtn(const wchar_t* icon, int style, const wchar_t* ti
 			Setting::get()->setLastArrowHead(arrowHead);
 		refreshArrowHeadBtns();
 		win->onToolStyleChanged();
+	});
+	registerStyleToggle([this, style] { return !isLine && arrowHead == style; }, [this] {
+		arrowHead = designInt(ToolKey::Arrow, DesignKey::Head, ArrowDefault);
 	});
 	arrowHeadBtns.push_back(btn);
 	arrowHeadStyles.push_back(style);
@@ -1889,7 +2187,9 @@ bool ToolSub::adjustPrimarySize(int dir)
 		mn = cfg->min; mx = cfg->max;
 	}
 	else return false;
-	const float step = std::max(1.f, (mx - mn) / 40.f);
+	// 滚轮步进固定为 1（逻辑值）。按量程的 1/40 计算会产生 4.6、5.2 等小数，
+	// 标签取整后呈跳跃变化。
+	const float step = 1.f;
 	const float next = std::clamp(sliderVal + dir * step, mn, mx);
 	if (next == sliderVal) return true;
 	sliderVal = next;
@@ -1989,6 +2289,8 @@ bool ToolSub::hasContent()
 
 void ToolSub::hideTools()
 {
+	// 收属性栏：先把"展示选中标注属性"期间的工具状态还原
+	endShapeStylePreview();
 	hasTools = false;
 	numberStyleBtns.clear();
 	arrowHeadBtns.clear();
@@ -2001,6 +2303,13 @@ void ToolSub::hideTools()
 	fillBtn = nullptr;
 	dashBtn = nullptr;
 	softBtn = nullptr;
+	boldBtn = nullptr;
+	italicBtn = nullptr;
+	hiEllipseBtn = nullptr;
+	hiRectBtn = nullptr;
+	hiBorderBtn = nullptr;
+	arrowDashBtn = nullptr;
+	arrowRoundBtn = nullptr;
 	lineBtn = nullptr;
 	markerBtn = nullptr;
 	roundBtn = nullptr;
@@ -2015,6 +2324,8 @@ void ToolSub::hideTools()
 	colorTriggerSwatch = nullptr;
 	wmTextBox = nullptr;
 	numberInput = nullptr;
+	numberShowsSelected_ = false;
+	selectedNumberLabel_.clear();
 	angleBtn = nullptr;
 	patinaWmBtn = nullptr;
 	emojiTrigger = nullptr;
@@ -2022,6 +2333,7 @@ void ToolSub::hideTools()
 	overlayBaseLabel = nullptr;
 	overlayTopLabel = nullptr;
 	overlayFlag = nullptr;
+	styleToggles.clear();
 	boardCustomCanvas = nullptr;
 	boardOpacityBtn = nullptr;
 	recPlayBtn = nullptr;
@@ -2063,23 +2375,14 @@ void ToolSub::bindOwner(HWND ownerHwnd)
 	SetWindowLongPtr(hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(ownerHwnd));
 }
 
-LRESULT ToolSub::onHitTest(const POINT screenPos)
+WinCap* ToolSub::maskHost() const
 {
-	// 属性栏若盖住选区边/角，穿透给 WinCap 以保持 ↔ 光标与拖边
-	auto* cap = dynamic_cast<WinCap*>(win);
-	if (cap && cap->hwnd && cap->cutMask && cap->cutMask->hasRect()) {
-		POINT client = screenPos;
-		ScreenToClient(cap->hwnd, &client);
-		const auto hit = cap->cutMask->hitTest(client);
-		if (hit != MaskHit::None && hit != MaskHit::Inside)
-			return HTTRANSPARENT;
-	}
-	return HTCLIENT;
+	// 属性栏的宿主可能是 WinCap（截图/长图）或 WinPin（钉图）
+	return dynamic_cast<WinCap*>(win);
 }
 
-void ToolSub::hideHoverTip()
+void ToolSub::hideExtraHoverTips()
 {
-	if (tip) tip->hide();
 	if (colorPanel) colorPanel->hideHoverTip();
 	if (nestedPanel) nestedPanel->hideHoverTip();
 }

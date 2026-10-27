@@ -1,6 +1,5 @@
 #include "pch.h"
 #include "Win/AnnotHost.h"
-#include "Tool/ToolMain.h"
 #include "Tool/ToolSub.h"
 #include "ShapeArrow.h"
 #include "ShapeLink.h"
@@ -31,6 +30,39 @@ ShapeArrow::ShapeArrow(AnnotHost* win, int headOverride, bool dimension) : Shape
 
 ShapeArrow::~ShapeArrow()
 {
+}
+
+// 二次选中后修改样式时，仅应用属性（线宽 / 虚线 / 圆头）。
+// 箭头形态（常规 / 大 / 趣味 / 双箭头 / 标注箭头）属于工具形态，不回写到已绘制的箭头。
+void ShapeArrow::applyStyle()
+{
+	auto* ts = win->toolSub.get();
+	if (!ts) return;
+	strokeWidth = std::max(1.f, ts->getSliderVal());
+	isDash = ts->isArrowDash;
+	isRound = ts->isArrowRound;
+	brush->SetColor(ts->getSelectedColor());
+	ensureStrokeStyle();
+	win->refresh();
+}
+
+// 反向同步：把本形状的属性写回工具状态，供重新打开该标注的工具时展示。
+void ShapeArrow::syncToolFromShape() const
+{
+	auto* ts = win->toolSub.get();
+	if (!ts) return;
+	ts->isLine = false;
+	ts->isArrowDash = isDash;
+	ts->isArrowRound = isRound;
+	if (!isDimension_) ts->arrowHead = headStyle;
+	ts->setShapeSliderVal(L"arrow", strokeWidth);
+}
+
+UINT32 ShapeArrow::styleColorValue() const
+{
+	D2D1_COLOR_F c{};
+	if (brush) c = brush->GetColor();
+	return ShapeBase::packColor(c);
 }
 
 bool ShapeArrow::isBig() const
@@ -215,8 +247,8 @@ void ShapeArrow::paint(ID2D1DeviceContext* ctx)
 	const auto endPrev = poly.pts[poly.pts.size() - 2];
 	// 趣味箭头的头部要跟着杆身走，不能按起终点连线
 	D2D1_POINT_2F funTipFrom = endPrev;
-	// 头部长度以线宽为基准，但不超过箭头的 16%：箭头画得越小，头也跟着收，
-	// 否则大头压在末端的弯曲段上，V 会显得歪向一边
+	// 头部长度以线宽为基准，且不超过箭头的 16%：箭头越短，头部同步收缩，
+	// 避免头部落在末端弯曲段上导致 V 形偏斜
 	const float baseHeadLen = 10.f + strokeWidth * 2.f;
 	const float chordLen = std::hypot(end.x - start.x, end.y - start.y);
 	const float funHeadLen = std::min(baseHeadLen * 1.3f,

@@ -26,19 +26,24 @@ bool ShapeBase::isInRect(const D2D1_RECT_F rect, const float x, const float y)
 		&& y > rect.top - hitPad && y < rect.bottom + hitPad);
 }
 
-// 选中框统一虚线（所有形状共用一份，避免每个形状各建一次 stroke style）
+// 选中框统一使用虚线（所有形状共享一份资源）。
+// 必须按当前 D2D 工厂缓存：工厂重建后旧 StrokeStyle 属于失效工厂，引用它的绘制批次会整体失败。
 ID2D1StrokeStyle* ShapeBase::selectionStroke()
 {
 	static Microsoft::WRL::ComPtr<ID2D1StrokeStyle> style;
-	if (!style) {
-		auto factory = Ling::D2D::get()->d2dFactory.Get();
-		if (factory) {
-			float dashes[] = { 4.f, 3.f };
-			factory->CreateStrokeStyle(
-				D2D1::StrokeStyleProperties(
-					D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT,
-					D2D1_LINE_JOIN_MITER, 10.f, D2D1_DASH_STYLE_CUSTOM, 0.f),
-				dashes, 2, style.GetAddressOf());
+	static ID2D1Factory1* styleFactory = nullptr;
+	auto factory = Ling::D2D::get()->d2dFactory.Get();
+	if (!factory) return nullptr;
+	if (!style || styleFactory != factory) {
+		style.Reset();
+		styleFactory = factory;
+		float dashes[] = { 4.f, 3.f };
+		if (FAILED(factory->CreateStrokeStyle(
+			D2D1::StrokeStyleProperties(
+				D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT,
+				D2D1_LINE_JOIN_MITER, 10.f, D2D1_DASH_STYLE_CUSTOM, 0.f),
+			dashes, 2, style.GetAddressOf()))) {
+			style.Reset();
 		}
 	}
 	return style.Get();
@@ -49,6 +54,61 @@ D2D1_RECT_F ShapeBase::selectionRect(const D2D1_RECT_F& r) const
 {
 	const float g = 2.f * win->dpi + selectionExtra();
 	return D2D1::RectF(r.left - g, r.top - g, r.right + g, r.bottom + g);
+}
+
+namespace
+{
+	constexpr float kPi = 3.14159265358979323846f;
+}
+
+D2D1_POINT_2F ShapeBase::boxCenter(const D2D1_RECT_F& r)
+{
+	return { (r.left + r.right) * 0.5f, (r.top + r.bottom) * 0.5f };
+}
+
+void ShapeBase::boxToLocal(const D2D1_RECT_F& r, float angleRad, float x, float y,
+	float& lx, float& ly)
+{
+	if (std::fabs(angleRad) < 1e-6f) {
+		lx = x;
+		ly = y;
+		return;
+	}
+	const auto c = boxCenter(r);
+	const float dx = x - c.x, dy = y - c.y;
+	const float ca = std::cos(-angleRad), sa = std::sin(-angleRad);
+	lx = c.x + dx * ca - dy * sa;
+	ly = c.y + dx * sa + dy * ca;
+}
+
+void ShapeBase::withBoxRotation(ID2D1DeviceContext* ctx, const D2D1_RECT_F& r, float angleRad,
+	const std::function<void()>& draw)
+{
+	if (std::fabs(angleRad) < 1e-6f) {
+		draw();
+		return;
+	}
+	D2D1_MATRIX_3X2_F old{};
+	ctx->GetTransform(&old);
+	const auto c = boxCenter(r);
+	ctx->SetTransform(D2D1::Matrix3x2F::Rotation(angleRad * 180.f / kPi, c) * old);
+	draw();
+	ctx->SetTransform(old);
+}
+
+void ShapeBase::layoutBoxDraggers(std::vector<D2D1_RECT_F>& out, const D2D1_RECT_F& selection, float half)
+{
+	const float w = selection.right - selection.left;
+	const float h = selection.bottom - selection.top;
+	if (out.size() < 8) out.resize(8);
+	out[0] = D2D1::RectF(selection.left - half, selection.top - half, selection.left + half, selection.top + half);
+	out[1] = D2D1::RectF(selection.left + w * 0.5f - half, selection.top - half, selection.left + w * 0.5f + half, selection.top + half);
+	out[2] = D2D1::RectF(selection.right - half, selection.top - half, selection.right + half, selection.top + half);
+	out[3] = D2D1::RectF(selection.right - half, selection.top + h * 0.5f - half, selection.right + half, selection.top + h * 0.5f + half);
+	out[4] = D2D1::RectF(selection.right - half, selection.bottom - half, selection.right + half, selection.bottom + half);
+	out[5] = D2D1::RectF(selection.left + w * 0.5f - half, selection.bottom - half, selection.left + w * 0.5f + half, selection.bottom + half);
+	out[6] = D2D1::RectF(selection.left - half, selection.bottom - half, selection.left + half, selection.bottom + half);
+	out[7] = D2D1::RectF(selection.left - half, selection.top + h * 0.5f - half, selection.left + half, selection.top + h * 0.5f + half);
 }
 
 int ShapeBase::hitBoxEdgeOrCorner(float x, float y, const D2D1_RECT_F& r, float band) const

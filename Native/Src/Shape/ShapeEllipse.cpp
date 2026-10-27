@@ -1,14 +1,11 @@
 #include "pch.h"
 #include "Win/AnnotHost.h"
-#include "Tool/ToolMain.h"
 #include "Tool/ToolSub.h"
 #include "ShapeEllipse.h"
 #include "LinkGeom.h"
 #include <cmath>
 
 namespace {
-	constexpr float kPiE = 3.14159265358979323846f;
-
 	Microsoft::WRL::ComPtr<ID2D1StrokeStyle> makeDashStroke(float strokeWidth)
 	{
 		Microsoft::WRL::ComPtr<ID2D1StrokeStyle> style;
@@ -46,9 +43,40 @@ ShapeEllipse::~ShapeEllipse()
 {
 }
 
+// 二次选中后修改样式时，与矩形共用同一套填充 / 虚线 / 线宽逻辑。
+void ShapeEllipse::applyStyle()
+{
+	auto* ts = win->toolSub.get();
+	if (!ts) return;
+	strokeWidth = std::max(1.f, ts->getSliderVal());
+	isFill = ts->isRectFill;
+	isDash = ts->isRectDash && !isFill;
+	strokeStyle = isDash ? makeDashStroke(strokeWidth) : nullptr;
+	brush->SetColor(ts->getSelectedColor());
+	win->refresh();
+}
+
+// 反向同步：把本形状的属性写回工具状态，供重新打开该标注的工具时展示。
+void ShapeEllipse::syncToolFromShape() const
+{
+	auto* ts = win->toolSub.get();
+	if (!ts) return;
+	ts->isEllipse = true;
+	ts->isRectFill = isFill;
+	ts->isRectDash = isDash;
+	ts->setShapeSliderVal(L"rect", strokeWidth);
+}
+
+UINT32 ShapeEllipse::styleColorValue() const
+{
+	D2D1_COLOR_F c{};
+	if (brush) c = brush->GetColor();
+	return ShapeBase::packColor(c);
+}
+
 D2D1_POINT_2F ShapeEllipse::centerPt() const
 {
-	return { cx, cy };
+	return ShapeBase::boxCenter(rect);
 }
 
 void ShapeEllipse::syncEllipseFromRect()
@@ -61,28 +89,12 @@ void ShapeEllipse::syncEllipseFromRect()
 
 void ShapeEllipse::toLocal(float x, float y, float& lx, float& ly) const
 {
-	if (std::fabs(angle) < 1e-6f) {
-		lx = x;
-		ly = y;
-		return;
-	}
-	const float dx = x - cx, dy = y - cy;
-	const float ca = std::cos(-angle), sa = std::sin(-angle);
-	lx = cx + dx * ca - dy * sa;
-	ly = cy + dx * sa + dy * ca;
+	ShapeBase::boxToLocal(rect, angle, x, y, lx, ly);
 }
 
 void ShapeEllipse::withRotation(ID2D1DeviceContext* ctx, const std::function<void()>& draw)
 {
-	if (std::fabs(angle) < 1e-6f) {
-		draw();
-		return;
-	}
-	D2D1_MATRIX_3X2_F old{};
-	ctx->GetTransform(&old);
-	ctx->SetTransform(D2D1::Matrix3x2F::Rotation(angle * 180.f / kPiE, { cx, cy }) * old);
-	draw();
-	ctx->SetTransform(old);
+	ShapeBase::withBoxRotation(ctx, rect, angle, draw);
 }
 
 // —— 连线（椭圆这一侧）——
@@ -107,18 +119,7 @@ bool ShapeEllipse::linkEdgePoint(const float localAngle, D2D1_POINT_2F& out) con
 
 void ShapeEllipse::updateDraggers()
 {
-	const float half = draggerSize * 0.5f;
-	const D2D1_RECT_F sr = selectionRect(rect);
-	const float w = sr.right - sr.left;
-	const float h = sr.bottom - sr.top;
-	draggers[0] = D2D1::RectF(sr.left - half, sr.top - half, sr.left + half, sr.top + half);
-	draggers[1] = D2D1::RectF(sr.left + w * 0.5f - half, sr.top - half, sr.left + w * 0.5f + half, sr.top + half);
-	draggers[2] = D2D1::RectF(sr.right - half, sr.top - half, sr.right + half, sr.top + half);
-	draggers[3] = D2D1::RectF(sr.right - half, sr.top + h * 0.5f - half, sr.right + half, sr.top + h * 0.5f + half);
-	draggers[4] = D2D1::RectF(sr.right - half, sr.bottom - half, sr.right + half, sr.bottom + half);
-	draggers[5] = D2D1::RectF(sr.left + w * 0.5f - half, sr.bottom - half, sr.left + w * 0.5f + half, sr.bottom + half);
-	draggers[6] = D2D1::RectF(sr.left - half, sr.bottom - half, sr.left + half, sr.bottom + half);
-	draggers[7] = D2D1::RectF(sr.left - half, sr.top + h * 0.5f - half, sr.left + half, sr.top + h * 0.5f + half);
+	ShapeBase::layoutBoxDraggers(draggers, selectionRect(rect), draggerSize * 0.5f);
 }
 
 void ShapeEllipse::paint(ID2D1DeviceContext* ctx)

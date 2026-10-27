@@ -15,6 +15,9 @@ public:
 	void setSides(int n);
 	// 圆角（物理像素）：属性栏滑条实时改选中的形状（矩形四角统一 / 多边形·星形顶点倒圆）
 	void setCornerRadius(float pct);
+	void applyStyle() override;
+	void syncToolFromShape() const override;
+	UINT32 styleColorValue() const override;
 	void paint(ID2D1DeviceContext* ctx) override;
 	void paintDragger(ID2D1DeviceContext* ctx) override;
 	void mouseDrag(const float x, const float y) override;
@@ -48,6 +51,8 @@ private:
 	bool hasCornerDots() const { return kind_ == Rect; }
 	// 圆角百分比（0–100，100 = 该形状的最大圆角）→ 矩形的像素半径
 	float pctRadiusPx() const;
+	// 当前生效的四角半径（统一百分比或四角独立），命中与绘制共用
+	void effectiveRadii(float out[4]) const;
 public:
 	// 多边形/星形路径（属性栏预览也用它，保证预览和真正创建出来的形状一致）
 	static Microsoft::WRL::ComPtr<ID2D1PathGeometry> buildPolyGeometry(

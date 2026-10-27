@@ -22,14 +22,16 @@ void App::init()
 {
     auto ptr = new App();
     app.reset(ptr);
-    // 启动阶段画托盘图标会用一次图形设备（TrayIcon::buildGlyphIcon → Ling::D2D::get()），
-    // 那一刻还没有任何窗口，用完也就没人回收 —— 于是"什么都没操作"也要常驻二十几 MB，
-    // 一直到第一次截图会话结束（窗口数归零触发 ~WinBase 里的 dispose）才降下来。
-    // 这里等启动流程走完补一刀：仍然没有窗口就把设备放掉。下次要用 D2D::get() 会自动重建。
+    // D3D11CreateDevice 会加载显卡驱动，耗时较长；放到工作线程初始化，避免阻塞 UI 线程。
+    std::thread([]() { Ling::D2D::get(); }).detach();
+    // 托盘图标只需 D2D 工厂与字体（Ling::D2D::getNoDevice()），启动阶段不创建 D3D 设备。
+    // 启动后若仍无窗口且未创建设备，则释放工厂与字体；下次调用 get() 时重建。
     SetTimer(nullptr, 0, 1500, +[](HWND, UINT, UINT_PTR id, DWORD) {
         KillTimer(nullptr, id);
         auto* lapp = Ling::App::get();
-        if (lapp && lapp->windows.empty()) Ling::D2D::dispose();
+        auto* d2d = Ling::D2D::getNoDevice();
+        if (lapp && lapp->windows.empty() && (!d2d || !d2d->deviceContext))
+            Ling::D2D::dispose();
     });
 }
 

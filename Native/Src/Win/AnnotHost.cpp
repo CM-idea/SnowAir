@@ -244,12 +244,18 @@ bool AnnotHost::nudgeSelectedAnnot(float dx, float dy)
 	return true;
 }
 
-void AnnotHost::clearAnnotSelection()
+void AnnotHost::clearAnnotSelection(bool keepStylePreview)
 {
 	if (!shapeHover) return;
 	if (auto* a = dynamic_cast<ShapeArrow*>(shapeHover)) a->resetFree();
 	else if (auto* l = dynamic_cast<ShapeLine*>(shapeHover)) l->resetFree();
 	shapeHover = nullptr;
+	styleLoadCandidate = nullptr;
+	if (toolSub) {
+		toolSub->clearSelectedNumberValue();
+	// 取消选中：属性栏还原为工具默认值；开始绘制新标注时传入 true，保留已载入的样式。
+		if (!keepStylePreview) toolSub->endShapeStylePreview();
+	}
 	refresh();
 }
 
@@ -266,6 +272,7 @@ void AnnotHost::clearAllShapes(bool keepBackground)
 	pendingAngle = nullptr;
 	shapeHover = nullptr;
 	lastCreatedShape_ = nullptr;
+	styleLoadCandidate = nullptr;
 	linkBtn = nullptr;        // 连线叉指向的 shape 也要先归零，别留悬垂指针
 	linkHoverTarget = nullptr;
 	linkPressTarget = nullptr;
@@ -319,7 +326,8 @@ std::wstring AnnotHost::toolIdOfShape(ShapeBase* s)
 		return line->isHighlighter() ? std::wstring{} : L"arrow";   // 荧光笔不回填滑条，避免宽度按倍数叠加
 	if (dynamic_cast<ShapeArrow*>(s)) return L"arrow";
 	if (dynamic_cast<ShapePen*>(s)) return L"pen";
-	if (dynamic_cast<ShapeText*>(s)) return L"text";
+	if (auto* t = dynamic_cast<ShapeText*>(s))
+		return t->isFrame() ? L"arrow" : L"text";   // 气泡/爆裂属于「标注」栏
 	if (dynamic_cast<ShapeNumber*>(s)) return L"number";
 	if (dynamic_cast<ShapeMosaic*>(s)) return L"mosaic";
 	if (dynamic_cast<ShapeHighlight*>(s)) return L"highlight";
@@ -330,21 +338,80 @@ std::wstring AnnotHost::toolIdOfShape(ShapeBase* s)
 
 void AnnotHost::presentSelectedAnnotStyle()
 {
-	if (!hasSelectedAnnot() || !toolSub) return;
+	if (!toolSub) return;
+	if (!hasSelectedAnnot() || !shapeHover) {
+		toolSub->clearSelectedNumberValue();
+		toolSub->endShapeStylePreview();
+		return;
+	}
 	const auto sid = toolIdOfShape(shapeHover);
-	if (sid.empty()) return;
 	const auto cur = getCurToolId();
-	if (cur.empty() || cur != sid) return;
-	const float sz = shapeHover->stylePrimarySize();
-	if (sz > 0.f) toolSub->setShapeSliderVal(sid, sz);
+	// 属性栏未打开，或当前工具与该标注不匹配：不展示，也不修改工具状态。
+	if (sid.empty() || cur.empty() || cur != sid || !toolSub->chromeVisible()) {
+		toolSub->clearSelectedNumberValue();
+		toolSub->endShapeStylePreview();
+		return;
+	}
+	// 展示的是该标注的属性：先快照工具状态，取消选中时整体还原，
+	// 确保标注自身的属性不会写入下一次落笔的默认值。
+	toolSub->beginShapeStylePreview();
+	shapeHover->syncToolFromShape();
+	toolSub->refreshStyleToggles();
+	toolSub->selectColorByValue(shapeHover->styleColorValue());
+	// 序号：属性栏输入框显示选中标注的实际文字，编辑时回写它
+	if (auto* num = dynamic_cast<ShapeNumber*>(shapeHover))
+		toolSub->showSelectedNumberValue(num->displayLabel());
+	else
+		toolSub->clearSelectedNumberValue();
+}
+
+// 二次选中：将该标注的属性载入工具（下一个标注沿用这些属性），属性栏打开时同步展示。
+// 仅由定时器 214 调用，避免在鼠标按下过程中重建属性栏。
+void AnnotHost::applySelectedAnnotStyleToTool()
+{
+	if (!toolSub || !shapeHover) return;
+	const auto sid = toolIdOfShape(shapeHover);
+	if (sid.empty() || getCurToolId() != sid) {
+		toolSub->endShapeStylePreview();
+		return;
+	}
+	toolSub->beginShapeStylePreview();   // 取消选中时还原成载入前的默认值
+	shapeHover->syncToolFromShape();
+	if (!toolSub->chromeVisible()) return;
+	toolSub->refreshStyleToggles();
+	toolSub->selectColorByValue(shapeHover->styleColorValue());
+	if (auto* num = dynamic_cast<ShapeNumber*>(shapeHover))
+		toolSub->showSelectedNumberValue(num->displayLabel());
+	else
+		toolSub->clearSelectedNumberValue();
 }
 
 bool AnnotHost::shouldPaintAnnotHandles() const
 {
 	if (!shapeHover || shapeHover->isUndo || shapeHover->isViewportFilter()) return false;
 	if (shapeHover == newShape) return false; // 落笔中
-	if (editingText) return false;            // 文字编辑中
+	if (editingText && editingText->isEditingNow()) return false; // 文字编辑中
 	return true;
+}
+
+// editingText 是裸指针：撤销 / 重做等路径可能让它停留在已退出编辑状态的形状上。
+// 该残留会持续抑制控点绘制（选框消失），并导致样式按钮继续修改该形状。
+void AnnotHost::dropStaleEditingText()
+{
+	if (!editingText || editingText->isEditingNow()) return;
+	editingText = nullptr;
+	endTextEdit();
+}
+
+void AnnotHost::discardDraft()
+{
+	if (newShape && history) history->removeShape(newShape);
+	newShape = nullptr;
+	shapeHover = nullptr;
+	annotMouseDown = false;
+	annotDragIndex = -1;
+	ReleaseCapture();
+	refresh();
 }
 
 void AnnotHost::lockAnnotDragFromHover()
@@ -374,6 +441,7 @@ void AnnotHost::paintShapes(ID2D1DeviceContext* ctx, bool withChrome)
 void AnnotHost::paintShapes(ID2D1DeviceContext* ctx, bool withChrome, bool skipEphemeral)
 {
 	if (!history) return;
+	dropStaleEditingText();
 	std::vector<ShapeHighlight*> highlights;
 	for (auto& shape : history->shapes) {
 		if (shape->isUndo) continue;
@@ -749,19 +817,17 @@ void AnnotHost::syncViewportFilters()
 
 void AnnotHost::onToolStyleChanged()
 {
+	dropStaleEditingText();
+	// 二次选中或编辑中的标注：统一走虚函数，把工具条当前样式应用到该形状。
+	// 此前只有文字与滤镜在此处理，矩形 / 箭头 / 画笔修改虚线时对选中标注无效。
 	if (editingText) editingText->applyStyle();
-	else if (auto* t = dynamic_cast<ShapeText*>(shapeHover)) t->applyStyle();
+	else if (shapeHover && !shapeHover->isViewportFilter()) shapeHover->applyStyle();
+	// 视口滤镜（包浆/水印）没有选中态：样式一变就整体重刷
 	if (history) {
 		for (auto& s : history->shapes) {
 			if (s->isUndo) continue;
-			if (auto* m = dynamic_cast<ShapeMosaic*>(s.get())) {
-				if (s.get() == shapeHover) m->applyStyle();
-			}
-			else if (auto* p = dynamic_cast<ShapePatina*>(s.get())) p->applyStyle();
+			if (auto* p = dynamic_cast<ShapePatina*>(s.get())) p->applyStyle();
 			else if (auto* w = dynamic_cast<ShapeWatermark*>(s.get())) w->applyStyle();
-			else if (auto* h = dynamic_cast<ShapeHighlight*>(s.get())) {
-				if (s.get() == shapeHover) h->applyStyle();
-			}
 		}
 	}
 	// 改属性的若是下层标注，上层的模糊/马赛克也要重采样
@@ -876,7 +942,9 @@ void AnnotHost::applyAnnotCursor()
 	// "没选工具 = 普通箭头"说的是**选框里的空白处**（那条走 applyEmptyToolCursor）
 	if (!annotSkipHitSelect()) {
 		if (auto* under = probeShapeUnder(ix, iy, nullptr)) {
-			if (under != shapeHover && !textToolIgnoresShape(getCurToolId(), under)) {
+			// 尺寸工具：矩形仅作为底图，不参与悬停与点选交互。
+			const bool rectIgnored = dimensionToolActive() && dynamic_cast<ShapeRect*>(under);
+			if (under != shapeHover && !textToolIgnoresShape(getCurToolId(), under) && !rectIgnored) {
 				under->setCursor();
 				return;
 			}
@@ -917,6 +985,11 @@ void AnnotHost::pulseSizePreview(bool shapePreview)
 
 void AnnotHost::annotTimer(UINT id)
 {
+	if (id == 214) {
+		killTimer(214);
+		applySelectedAnnotStyleToTool();
+		return;
+	}
 	if (id == 212) {
 		if (editingText) {
 			refresh();
@@ -1137,9 +1210,17 @@ void AnnotHost::paintSizePreview(ID2D1DeviceContext* ctx)
 	pop();
 }
 
+bool AnnotHost::dimensionToolActive() const
+{
+	if (!toolSub || getCurToolId() != L"arrow") return false;
+	return toolSub->isLine && toolSub->lineKind == ToolSub::LineDimension;
+}
+
 bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 {
 	ensureHistory();
+	dropStaleEditingText();
+	if (toolSub) toolSub->blurInputs();
 	editStepTarget = nullptr;
 	editStepBefore.clear();
 	// 编辑中点到插入符以外：先结束编辑，但**不吞掉这次点击** ——
@@ -1357,7 +1438,8 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 	bool linkFromShape = false;
 	linkPressTarget = nullptr;
 	if (tool == L"arrow" && !annotSkipHitSelect() && !textOnShaft) {
-		if (ShapeBase* t = ShapeLink::pickTarget(this, (float)imgPos.x, (float)imgPos.y)) {
+		if (ShapeBase* t = ShapeLink::pickTarget(this, (float)imgPos.x, (float)imgPos.y);
+			t && !(dimensionToolActive() && dynamic_cast<ShapeRect*>(t))) {
 			D2D1_POINT_2F dot{};
 			// 锚点热区与画出来的小圆点同口径（略放大一点便于命中）
 			if (ShapeLink::edgePointToward(t, (float)imgPos.x, (float)imgPos.y, dot)
@@ -1371,25 +1453,40 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 		if (auto* hit = hitShapeAt((float)imgPos.x, (float)imgPos.y)) {
 			// 文本工具：马赛克这类"整块铺满的背景"不抢这一下，直接往下走"落笔造文字"，
 			// 于是"先马赛克、后文字"能正常叠起来（文字压在马赛克上）。
-			if (!textToolIgnoresShape(tool, hit)) {
+			// 尺寸工具：矩形仅作为底图，不抢占此次操作，直接落笔画尺寸线。
+			const bool rectIgnored = dimensionToolActive() && dynamic_cast<ShapeRect*>(hit);
+			if (!textToolIgnoresShape(tool, hit) && !rectIgnored) {
 				newShape = nullptr;
-				if (shapeHover != hit) {
+				const bool wasSelected = (shapeHover == hit);
+				if (!wasSelected) {
 					if (auto* a = dynamic_cast<ShapeArrow*>(shapeHover)) a->resetFree();
 					else if (auto* l = dynamic_cast<ShapeLine*>(shapeHover)) l->resetFree();
 					shapeHover = hit;
+					// 记录候选：抬手且确认是点选而非拖动后，再载入属性。
+					styleLoadCandidate = hit;
 					refresh();
 				}
 				// 记录编辑前几何：本次若拖动/缩放/旋转，抬手时作为独立一步进撤销栈
 				editStepTarget = hit;
 				editStepBefore = hit->editSnapshot();
-				shapeHover->mouseDown((float)imgPos.x, (float)imgPos.y);
-				lockAnnotDragFromHover();
+				if (wasSelected) {
+					shapeHover->mouseDown((float)imgPos.x, (float)imgPos.y);
+					lockAnnotDragFromHover();
+				}
+				else {
+					// 首次点选：无论按下位置，均按整体移动处理；
+					// 拖边与缩放需在松开后重新将指针停在边缘（此时标注已选中）再次按下。
+					hit->hoverDraggerIndex = 8;
+					hit->mouseDown((float)imgPos.x, (float)imgPos.y);
+					lockAnnotDragFromHover();
+				}
 				return true;
 			}
 		}
 	}
 
-	clearAnnotSelection();
+	// 有工具时保留二次选中载入的样式供新标注使用；无工具时还原默认值。
+	clearAnnotSelection(!tool.empty());
 	newShape = nullptr;
 
 	if (tool.empty()) {
@@ -1404,6 +1501,11 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 	// 落笔点使用鼠标位置，保持所见即所得
 	shapeHover = history->createShape(tool, imgPos.x, imgPos.y);
 	newShape = shapeHover;
+	if (toolSub) {
+		// 样式已实际应用于新标注：采纳该样式，不再回退；未创建成功则还原。
+		if (shapeHover) toolSub->commitShapeStylePreview();
+		else toolSub->endShapeStylePreview();
+	}
 	// 落笔位置正好在线段中间：给文字开洞（线断在字两边）+ 挂到线上（始终中心对齐、一律横排）
 	if (shapeHover && shaftHost) {
 		if (auto* t = dynamic_cast<ShapeText*>(shapeHover)) {
@@ -1431,6 +1533,7 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 void AnnotHost::annotMove(POINT pos)
 {
 	if (!history) return;
+	if (toolSub) toolSub->blurInputs();
 	if (editingText && textBox && textBox->isPosIn(pos)) return;
 	auto imgPos = toImgPos(pos);
 	const auto tool = getCurToolId();
@@ -1563,12 +1666,21 @@ void AnnotHost::annotUp(POINT pos, BOOL isRight)
 		lastCreatedShape_ = justCreated;
 		shapeHover = nullptr;
 	}
+	// 仅纯点选（无拖动）才载入标注样式；拖动 / 缩放 / 旋转只修改几何，不影响工具默认值。
+	// 交由定时器延后一拍执行，避免在鼠标抬起消息中重排属性栏。
+	if (styleLoadCandidate && styleLoadCandidate == shapeHover
+		&& std::abs(pos.x - annotPressPos.x) <= 3
+		&& std::abs(pos.y - annotPressPos.y) <= 3) {
+		setTimer(1, 214);
+	}
+	styleLoadCandidate = nullptr;
 	refresh();
 	applyAnnotCursor();
 }
 
 void AnnotHost::annotKey(UINT key)
 {
+	dropStaleEditingText();
 	if (editingText) {
 		if (key == VK_ESCAPE) editingText->finishEdit();
 		else if (key == VK_BACK) editingText->backspace();

@@ -1,6 +1,5 @@
 #include "pch.h"
 #include "Win/AnnotHost.h"
-#include "Tool/ToolMain.h"
 #include "Tool/ToolSub.h"
 #include "ShapeLine.h"
 #include "ShapeLink.h"
@@ -54,6 +53,37 @@ ShapeLine::ShapeLine(AnnotHost* win, bool highlighter, int kind) : ShapeBase(win
 
 ShapeLine::~ShapeLine()
 {
+}
+
+// 二次选中后修改样式时，仅应用线宽 / 虚线 / 圆头（荧光笔的宽度与透明度不属于箭头属性栏，跳过）。
+void ShapeLine::applyStyle()
+{
+	auto* ts = win->toolSub.get();
+	if (!ts || highlighter) return;
+	strokeWidth = std::max(1.f, ts->getSliderVal());
+	isDash = ts->isArrowDash;
+	isRound = ts->isArrowRound;
+	brush->SetColor(ts->getSelectedColor());
+	ensureStrokeStyle();
+	win->refresh();
+}
+
+// 反向同步：把本形状的属性写回工具状态，供重新打开该标注的工具时展示。
+void ShapeLine::syncToolFromShape() const
+{
+	auto* ts = win->toolSub.get();
+	if (!ts || highlighter) return;
+	ts->isLine = true;
+	ts->isArrowDash = isDash;
+	ts->isArrowRound = isRound;
+	ts->setShapeSliderVal(L"arrow", strokeWidth);
+}
+
+UINT32 ShapeLine::styleColorValue() const
+{
+	D2D1_COLOR_F c{};
+	if (brush) c = brush->GetColor();
+	return ShapeBase::packColor(c);
 }
 
 void ShapeLine::resetFree()
@@ -273,8 +303,8 @@ ComPtr<ID2D1PathGeometry> ShapeLine::buildWavePath()
 	const float period = halfWave * 2.f;
 	// 采样密一点：小幅度波形靠折线也要看不出棱角
 	const int steps = std::max(24, (int)(len / std::max(1.f, period / 24.f)));
-	// 只在两端很短的一段做平滑收幅，中间保持等幅；不要把整条线做成
-	// "两头平、中间鼓"的包络——那样看起来不像均匀波浪。
+	// 仅两端短距离内平滑收幅，中段保持等幅；整条线不做中间鼓起的包络，
+	// 以保持均匀波浪形态
 	const float ramp = std::min(len * 0.18f, halfWave * 0.5f);
 	ComPtr<ID2D1PathGeometry> path;
 	Ling::D2D::get()->d2dFactory->CreatePathGeometry(path.GetAddressOf());

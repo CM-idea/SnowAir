@@ -27,6 +27,8 @@ public:
 	void endTextEdit();
 	void annotChar(UINT ch);
 	void onToolStyleChanged();
+	// 清理已退出编辑状态的 editingText 残留（见 .cpp 注释）
+	void dropStaleEditingText();
 	// 贴图「画面不透明度」（百分比）。仅 WinPin 有意义；ToolSub 的「透明度」属性栏通过它读写。
 	// 基类默认无操作，非贴图宿主（截图等）调用不会有效果。
 	virtual int  pinOpacityPercent() const { return 100; }
@@ -41,12 +43,14 @@ public:
 	bool sizePreviewSuppressed() const;
 	// shapePreview：预览形状本身（多边形边数、星形角数、圆角），否则预览笔迹粗细
 	void pulseSizePreview(bool shapePreview = false);
+	// 丢弃未抬手的草稿形状及其交互状态（右键分层取消的公共路径）
+	void discardDraft();
 	bool hasSelectedAnnot() const;
-	// 打开标注工具且不取消当前选中（截图 / 钉图 / 长图 / 录屏）
-	virtual void activateAnnotTool(const std::wstring& toolId) {}
 	static std::wstring toolIdOfShape(ShapeBase* s);
 	// 属性栏展示当前选中标注的主尺寸（线宽/字号等）
 	void presentSelectedAnnotStyle();
+	// 二次选中后将标注属性载入工具与属性栏（延后一拍调用，避免在鼠标按下中重建属性栏）
+	void applySelectedAnnotStyleToTool();
 	virtual void layoutTools() = 0;
 	virtual void onHistoryChanged();
 	// 属性栏锚定主工具条（截图 ToolCap / 录屏 ToolVideo）
@@ -108,6 +112,8 @@ public:
 	// 结束文字编辑后短暂吞掉下一次点选/落笔（失焦可能先于 annotDown）
 	ULONGLONG annotSuppressUntil{ 0 };
 	bool hasDragged{ false };
+	// 仅纯点选（无拖动 / 缩放 / 旋转）后载入该标注的样式；拖动几何时不影响工具默认值
+	ShapeBase* styleLoadCandidate{ nullptr };
 	std::unique_ptr<History> history;
 	Microsoft::WRL::ComPtr<ID2D1Bitmap1> screenImg;
 protected:
@@ -132,7 +138,7 @@ protected:
 	ShapeText* ensureShaftText(ShapeBase* host, const std::wstring& text, float px);
 	// 尺寸自带文字：按屏幕 DPI 把线长换算成物理尺寸（cm）；用户双击改过之后不再自动改写
 	std::wstring dimensionTextFor(ShapeBase* host) const;
-	void clearAnnotSelection();
+	void clearAnnotSelection(bool keepStylePreview = false);
 	// 清空全部标注：**必须先断开 shapeHover / newShape / editingText 这些裸指针再释放**
 	// （否则它们悬垂，下一次 hasSelectedAnnot()/paint 就会在已释放对象上做虚调用 → 闪退）
 	// keepBackground：保留「背景层」标注（白板未开启编辑背景时的重置画布）
@@ -147,6 +153,8 @@ protected:
 	virtual void annotAfterEmptyToolUp() {}
 	// 录屏等：工具启用时只落笔、不点选已有标注（避免画着被拖走）
 	virtual bool annotSkipHitSelect() const { return false; }
+	// 尺寸工具（标注栏的「尺寸」形态）：只绘制尺寸线，不点选 / 拖动 / 连线已有标注
+	bool dimensionToolActive() const;
 protected:
 	Ling::TextBox* textBox{ nullptr };
 	ShapeText* editingText{ nullptr };

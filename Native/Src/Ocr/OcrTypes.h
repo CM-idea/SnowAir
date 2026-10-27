@@ -15,8 +15,8 @@ struct OcrRegion {
 	std::wstring text;
 	std::wstring displayText;
 	float x{ 0 }, y{ 0 }, w{ 0 }, h{ 0 }; // 相对识别图左上角
-	// 竖排（日文/中文竖写）：检测框高明显大于宽时置位。叠加层要逐字竖着摆，
-	// 否则横排文字会被 54px 宽的窄框压成一条线，看起来就是空白。
+	// 竖排（日文/中文竖写）：检测框高明显大于宽时置位。叠加层需逐字竖排，
+	// 否则横排文字在 54px 宽的窄框内会被压缩成一条线。
 	bool vertical{ false };
 };
 

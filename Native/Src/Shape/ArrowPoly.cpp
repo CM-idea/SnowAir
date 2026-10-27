@@ -476,9 +476,8 @@ ComPtr<ID2D1PathGeometry> funShaftPath(
 				pts[0].x + px * cs - py * sn,
 				pts[0].y + px * sn + py * cs);
 		};
-		// 头部方向取「尖端往回 headBack 距离」的连线方向：
-		// 尖端的瞬时切线在末端弯得厉害时会让 V 看起来歪向一边，
-		// 用头部自身覆盖的那一段杆身的平均方向才视觉居中
+		// 头部方向取尖端回退 headBack 处的弦方向：末端曲率大时瞬时切线会使 V 形偏斜，
+		// 改用头部覆盖段的平均方向可保持视觉居中
 		if (tipFrom) {
 			const D2D1_POINT_2F tip = map(kFunTx, kFunTy);
 			D2D1_POINT_2F anchor = tip;

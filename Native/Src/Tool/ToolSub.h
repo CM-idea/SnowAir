@@ -1,13 +1,15 @@
 #pragma once
 #include <include/Ling.h>
+#include <functional>
 #include <unordered_map>
 #include "ToolbarTheme.h"
+#include "ToolbarWindow.h"
 
 class AnnotHost;
 class Tip;
 class ToolColorPanel;
 class ToolNestedPanel;
-class ToolSub:public Ling::WinBase
+class ToolSub : public ToolbarWindow
 {
 public:
 	ToolSub(AnnotHost* win);
@@ -69,22 +71,49 @@ public:
 	float setShapeSliderVal(const std::wstring& tool, float px);
 	static constexpr float mainGap{ 2.f };
 	void bindOwner(HWND ownerHwnd);
-	void hideHoverTip();
 	// 供 ToolColorPanel 读写色板
 	const std::vector<UINT32>& colorPalette() const { return colors; }
 	size_t customColorIdx() const { return customColorIndex; }
 	size_t selectedColorIdx() const { return selectColorIndex; }
 	void onColorPicked(size_t index);
+	// 把色板指到指定颜色（二次选中标注时同步它的颜色）；不在预设里就落到自定义色块
+	void selectColorByValue(UINT32 rgba);
 	void getColorTriggerAnchor(float& screenCenterX, float& screenBottom) const;
 	bool pickCustomColor();
 	void notifyStyleChanged();
 	void refreshNestedTrigger();
+	// 二次选中同步属性后，把各开关按钮的选中态刷成当前工具状态
+	void refreshStyleToggles();
+	// 属性栏中按创建顺序登记的可回退选项：右键时从右到左依次关闭，不按工具硬编码顺序
+	struct StyleToggle {
+		std::function<bool()> active;
+		std::function<void()> reset;
+	};
+	void registerStyleToggle(std::function<bool()> active, std::function<void()> reset);
+	// 二次选中展示标注属性：进入时快照工具状态，取消选中或关闭工具时还原。
+	// 标注自身的属性只作用于它自己，不写入下一次落笔的默认值。
+	void beginShapeStylePreview();
+	void endShapeStylePreview();
+	// 用选中的标注属性真正画了一个新标注：样式被采纳，丢弃快照（不再回退）
+	void commitShapeStylePreview();
+	bool stylePreviewActive() const { return stylePreviewActive_; }
+	// 关闭工具再打开：属性栏回到「初始属性」（形态/虚线/填充/圆角/颜色/粗细）
+	void resetStyleToDefaults();
+	// 属性栏里是否有开着的属性开关（虚线/填充/圆头/圆角/粗斜体/形态…）：右键分层回退用
+	bool hasActiveStyleOption() const;
+	// 关闭最右侧一个处于开启状态的选项（按登记顺序倒序查找）；返回是否发生改动。
+	bool resetStyleOptions();
 	void updateEmojiTriggerGlyph();
 	// 序号工具的「当前序号」：落笔时取值。autoVal = 按已有形状推算的下一个值；
 	// label 非空表示这一次直接用这段文字（支持中文）
 	int takeNumberValue(int style, int autoVal, std::wstring& label);
 	// 属性栏里的序号输入框当前应显示的文字（供外部刷新）
 	std::wstring numberInputDisplay() const;
+	// 二次选中序号标注后，输入框显示该标注当前文字；编辑时回写选中标注
+	void showSelectedNumberValue(const std::wstring& text);
+	void clearSelectedNumberValue();
+	// 鼠标进入画布前调用：让属性栏输入框失焦并释放它可能占着的鼠标捕获
+	void blurInputs();
 	RECT workAreaRect() const;
 	// 视窗内滚轮：按工具量程微调主滑条
 	bool adjustPrimarySize(int dir);
@@ -94,7 +123,14 @@ public:
 	// 「渐隐画笔 / 画笔」是同级一级槽位，底层工具同为 pen，只差 isPenFade
 	void setPenSlotMode(const std::wstring& slotId);
 private:
-	LRESULT onHitTest(const POINT pos) override; // 选区边/角穿透给底层 WinCap
+	// 盖住选区边角时把命中测试穿透给遮罩宿主；属性栏宿主可能是 WinCap 或 WinPin
+	WinCap* maskHost() const override;
+	// 属性栏外形：带尖角的气泡
+	void drawChrome(ID2D1DeviceContext* ctx) override;
+	// 收起色板与二级气泡
+	void hideExtraHoverTips() override;
+	// 外形画完后再重画自定义色块的渐变
+	void layout() override;
 public:
 	// numberStyle: 0 数字 / 1 字母 / 2 Emoji（三种序号，无中文）
 	enum NumberStyle : int { NumberDigit = 0, NumberLetter = 1, NumberEmoji = 2 };
@@ -123,9 +159,6 @@ public:
 	float lastCornerRadius{ 10.f }; // 关圆角后再开时恢复
 private:
 	void onCreated() override;
-	void layout() override;
-	void onMinMaxInfo(MINMAXINFO* mmi);
-	void paintBorder(ID2D1DeviceContext* ctx);
 	void initColorTrigger();
 	void updateColorTriggerSwatch();
 	void toggleColorPanel();
@@ -145,6 +178,8 @@ private:
 	void refreshNumberStyleBtns();
 	// 切换荧光笔（与画笔共用粗细滑条，只是画出来按倍数加宽）
 	void applyPenMarkerState(bool on);
+	// 荧光笔 / 软笔不支持虚线：把虚线按钮置灰并强制关闭
+	void updateDashAvailability();
 	// 序号输入框：日常显示下一个序号，点进去可改成数字或任意文字（含中文）
 	void buildNumberInput();
 	void syncNumberInput();
@@ -171,7 +206,6 @@ private:
 	float rememberedSlider(const std::wstring& key, float def, float mn, float mx) const;
 	void rememberSlider(const std::wstring& key, float val);
 private:
-	Ling::Node* contentNode;
 	Ling::Button* colorTrigger{ nullptr };
 	Ling::Node* colorTriggerRing{ nullptr };
 	Ling::Label* colorTriggerSwatch{ nullptr };
@@ -184,8 +218,25 @@ private:
 	Ling::TextBox* numberInput{ nullptr };
 	int numberStartVal{ 0 };              // >0 = 手动指定的起始序号（落笔后自增）
 	std::wstring numberCustomLabel;       // 非空 = 下一次落笔直接使用这段文字
+	bool numberShowsSelected_{ false };   // 输入框当前显示的是选中序号标注
+	std::wstring selectedNumberLabel_;
+	bool numberApplying_{ false };        // 防止输入回调重入
 	bool numberInputSyncing{ false };     // 程序回写输入框时屏蔽 onTextChanged
-	std::unique_ptr<Tip> tip;
+	std::vector<StyleToggle> styleToggles;   // 按属性栏创建顺序登记（左→右）
+	struct StylePreviewSnapshot {
+		bool isEllipse{}, isRectFill{}, isRectDash{}, isArrowDash{}, isArrowRound{};
+		bool isLine{}, isPenDash{}, isPenSoft{}, isPenMarker{};
+		bool isTextBold{}, isTextItalic{}, isHighlightBorder{}, isHighlightEllipse{}, isMosaicBlur{};
+		int rectKind{}, polygonSides{}, starPoints{}, arrowHead{}, lineKind{}, numberStyle{};
+		float cornerRadius{}, lastCornerRadius{}, sliderVal{}, sliderMin{}, sliderMax{};
+		std::wstring curSliderKey;
+		UINT selectColorIndex{};
+		UINT32 sessionCustomColor{}, customColor{};
+		std::unordered_map<std::wstring, float> sliderMem;
+		std::unordered_map<std::wstring, UINT> colorIndexMem;
+	};
+	bool stylePreviewActive_{ false };
+	StylePreviewSnapshot stylePreview_;
 	static constexpr float btnSize{ ToolbarTheme::propBtnSize };
 	static constexpr float hoverRadius{ ToolbarTheme::hoverRadius };
 	static constexpr float hoverInset{ 4.f };
@@ -198,8 +249,6 @@ private:
 	float arrowX{0.f};
 	bool tipDown_{ false }; // false=在主栏下方（尖朝上）；true=上方（尖朝下）
 	AnnotHost* win;
-	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushBg;
-	Ling::Canvas* canvas{ nullptr };
 	bool isVisible{ false };
 	bool hasTools{ false };
 	bool centerOnBtn{ false };
@@ -226,6 +275,13 @@ private:
 	Ling::Button* fillBtn{ nullptr };
 	Ling::Button* dashBtn{ nullptr };
 	Ling::Button* softBtn{ nullptr };
+	Ling::Button* boldBtn{ nullptr };
+	Ling::Button* italicBtn{ nullptr };
+	Ling::Button* hiEllipseBtn{ nullptr };
+	Ling::Button* hiRectBtn{ nullptr };
+	Ling::Button* hiBorderBtn{ nullptr };
+	Ling::Button* arrowDashBtn{ nullptr };
+	Ling::Button* arrowRoundBtn{ nullptr };
 	Ling::Button* lineBtn{ nullptr };   // 箭头属性栏的「线段」临时开关
 	Ling::Button* markerBtn{ nullptr };
 	Ling::Button* penBaseBtn{ nullptr };   // 画笔形态默认不是常规笔时，属性栏里的「常规画笔」

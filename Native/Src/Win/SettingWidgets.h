@@ -267,13 +267,6 @@ OptionRowRef optionRow(Ling::Node* parent,
     float ctrlH = SettingTheme::ctrlH,   // 行内控件实际高度：决定右侧内边距（与控件上下留白取齐）
     // 非空时覆盖该标签在 optionTipFor 里的通用「?」说明（同名标签在不同页面含义不同时用）
     const std::wstring& helpText = L"");
-// 简易版：只返回 row Node*，不关心 label/desc。适用于「row 内部自由布局」场景（子页自行 makeChild）。
-inline Ling::Node* optionRowSimple(Ling::Node* parent, bool chrome = false)
-{
-    auto r = optionRow(parent, L"", L"", chrome);
-    return r.row;
-}
-
 // ─── 双栏网格容器：把多个 optionRow/toggleRow/selectRow 以 2 列排布 ───
 //   视觉：每个选项 = 独立白底描边圆角卡片，两两一行（两列网格）。
 //   用法：auto* g = SettingUi::grid2(p); 然后往 g 里连续 add toggleRow/selectRow(..., chrome=true)，

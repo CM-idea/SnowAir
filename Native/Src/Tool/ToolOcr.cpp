@@ -88,24 +88,6 @@ namespace {
 		}
 	};
 
-	// 量一段文本按指定字号排成一行（不折行）时的宽度，设备像素。
-	// 字体取 TextBox 的默认族名，保证量出来的宽就是最终渲染的宽。
-	float measureTextWidth(const std::wstring& s, float fontSizeLogical, float dpi)
-	{
-		auto* d2d = Ling::D2D::get();
-		if (!d2d || !d2d->dwriteFactory || s.empty()) return 0.f;
-		auto fmt = d2d->getTextFormat(L"");
-		if (!fmt) return 0.f;
-		Microsoft::WRL::ComPtr<IDWriteTextLayout> tl;
-		if (FAILED(d2d->dwriteFactory->CreateTextLayout(s.c_str(), (UINT32)s.size(),
-			fmt, FLT_MAX, FLT_MAX, tl.GetAddressOf())) || !tl)
-			return 0.f;
-		tl->SetFontSize(fontSizeLogical * dpi, { 0, INT_MAX });
-		DWRITE_TEXT_METRICS m{};
-		if (FAILED(tl->GetMetrics(&m))) return 0.f;
-		return m.widthIncludingTrailingWhitespace > 0.f ? m.widthIncludingTrailingWhitespace : m.width;
-	}
-
 	// 量一段文本按指定宽度折行后的总高度，设备像素（折行设置与 TextBox 保持一致）。
 	float measureTextHeight(const std::wstring& s, float fontSizeLogical, float maxWidthLogical, float dpi)
 	{

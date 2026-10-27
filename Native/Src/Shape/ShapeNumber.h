@@ -19,6 +19,9 @@ public:
 	bool isValidWithoutDrag() override { return true; };
 	bool hitErase(const float x, const float y) override;
 	int style() const { return styleKind; }
+	// 当前显示文字（手动标签优先，否则按数字/字母/Emoji 格式化）
+	std::wstring displayLabel() const { return formatLabel(); }
+	void setDisplayLabel(const std::wstring& text);
 	// 序号值 / 序号样式（属性栏「当前序号」推算下一个值时要看已有形状）
 	int numberVal() const { return val; }
 	float stylePrimarySize() const override { return r; }

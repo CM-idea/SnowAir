@@ -1,5 +1,6 @@
 #include "pch.h"
 #include <include/Ling.h>
+#include "../Tool/DesignKeys.h"
 #include "WinCap.h"
 #include "WinPin.h"
 #include "CutMask.h"
@@ -23,6 +24,7 @@
 #include "HotkeyHook.h"
 #include "../History.h"
 #include "../Shape/ShapeText.h"
+#include "../Shape/ShapeRect.h"
 #include "../Tool/ToolbarTheme.h"
 #include "../Tool/ToolbarChrome.h"
 #include "SettingWidgets.h"
@@ -357,7 +359,7 @@ void WinCap::initNow(StartMode mode, std::shared_ptr<std::vector<BYTE>> grab)
     winCap.reset(ptr);
     // 初始属性：默认显示光标（每次会话开始时按设置重置）
     if (auto* s = Setting::get())
-        ptr->showCursor = s->getToolDesignInt(L"show-cursor", L"enabled", 0) != 0;
+        ptr->showCursor = s->getToolDesignInt(ToolKey::ShowCursor, DesignKey::Enabled, 0) != 0;
     ptr->cutMask = std::make_unique<CutMask>(ptr);
     // 选区挪动 → 通知录制侧把裁剪框一起平移（拖拽/鼠标跟随/方向键/滚轮全走 CutMask 这一处）
     ptr->cutMask->onRectMoved = [p = ptr]() { p->onMaskRectChanged(); };
@@ -627,6 +629,13 @@ void WinCap::demoRecFinish()
 namespace {
     constexpr float kBoardMin{ 80.f };      // 背景最小宽/高（逻辑）
     constexpr float kBoardGrab{ 10.f };     // 边缘命中带宽（逻辑）
+    // 截图选区最小边长（物理像素）：所有确认/导出路径共用这一条规则
+    constexpr float kMinCaptureSidePx{ 5.f };
+    bool captureRectTooSmall(const D2D1_RECT_F& r)
+    {
+        return (r.right - r.left) < kMinCaptureSidePx
+            || (r.bottom - r.top) < kMinCaptureSidePx;
+    }
 
     bool IsPptPath(const std::wstring& path)
     {
@@ -679,9 +688,15 @@ namespace {
         return hr == RPC_E_CALL_REJECTED || hr == RPC_E_SERVERCALL_RETRYLATER;
     }
 
-    // 排障用：把每一步的 HRESULT 落到 %TEMP%\SnowAir-ppt.log（追加，不影响功能）
+    // 排障用：把每一步的 HRESULT 落到 %TEMP%\SnowAir-ppt.log（追加，不影响功能）。
+    // 默认关闭：只有设置环境变量 SNOWAIR_PPT_LOG=1 时才写，正常使用不会往临时目录追加日志。
     void PptLog(const wchar_t* fmt, ...)
     {
+        static const bool enabled = [] {
+            wchar_t value[8]{};
+            return GetEnvironmentVariableW(L"SNOWAIR_PPT_LOG", value, _countof(value)) > 0;
+        }();
+        if (!enabled) return;
         wchar_t body[1024]{};
         va_list ap;
         va_start(ap, fmt);
@@ -1488,8 +1503,7 @@ void WinCap::onCreated()
 
 void WinCap::layout()
 {
-    Ling::WinBase::layout();
-    if (!canvas) return;
+    Ling::WinBase::layout();    if (!canvas) return;
     auto ctx = canvas->startPaint();
     if (!ctx) return;
     ctx->Clear(0);
@@ -2368,6 +2382,13 @@ void WinCap::onWheel(POINT pos, float space)
 {
 	if (space == 0.f) return;
 	const int dir = space > 0.f ? 1 : -1;
+	// 刚画完还没二次选中的标注：只让多边形、星形、气泡、爆裂跟随滚轮改属性
+	auto liveWheelShape = [](ShapeBase* s) {
+		if (auto* r = dynamic_cast<ShapeRect*>(s))
+			return r->kind() == ShapeRect::Polygon || r->kind() == ShapeRect::Star;
+		if (auto* t = dynamic_cast<ShapeText*>(s)) return t->isFrame();
+		return false;
+	};
 
 	// 长截图：预览区优先；编辑标注时其余走标注滚轮
 	if (stage == CapStage::Long) {
@@ -2397,7 +2418,7 @@ void WinCap::onWheel(POINT pos, float space)
 		const auto img = toImgPos(pos);
 		// 还没二次选中、但刚画完的标注：滚轮改它的粗细（角数/边数只走滑条）
 		if (!shapeHover && !editingText) {
-			if (auto* s = liveStyleShape(); s && !s->isViewportFilter()) {
+			if (auto* s = liveStyleShape(); s && !s->isViewportFilter() && liveWheelShape(s)) {
 				s->mouseWheel((float)img.x, (float)img.y,
 					dir > 0 ? (short)WHEEL_DELTA : (short)-WHEEL_DELTA);
 				refreshFiltersAbove(s);
@@ -2826,10 +2847,12 @@ void WinCap::onUp(POINT pos, bool isRight)
         isPress = false;
         selectDragging_ = false;
         if (!cutMask->hasRect()) return;
-        // 托盘「屏幕录制」：点一下、抖一下不算框选，别拿 1 像素选区直接开录
-        if (pendingRecord) {
-            const auto& mr = cutMask->maskRect;
-            if (mr.right - mr.left < 4.f || mr.bottom - mr.top < 4.f) return;
+        // 小于 5×5 物理像素的选区不算截图：直接丢弃，回到查找元素
+        if (captureRectTooSmall(cutMask->maskRect)) {
+            selectionFromElement_ = false;
+            cutMask->clearRect();
+            refresh();
+            return;
         }
         if (enterByArg()) return;
         if (GetKeyState(VK_CONTROL) & 0x8000) {
@@ -3230,17 +3253,16 @@ bool WinCap::handleLayerCancel(bool fromToolbar)
 				return false;
 			}
 			if (annotMouseDown && newShape && history) {
-				history->removeShape(newShape);
-				newShape = nullptr;
-				shapeHover = nullptr;
-				annotMouseDown = false;
-				annotDragIndex = -1;
-				ReleaseCapture();
-				refresh();
-				return false;
+					discardDraft();
+					return false;
 			}
 			if (shapeHover) {
 				clearAnnotSelection();
+				return false;
+			}
+			// 属性开关层级：虚线 / 填充 / 圆头 / 圆角开启时，先关闭这些开关，再退出工具
+			if (toolSub && toolSub->hasActiveStyleOption() && toolSub->resetStyleOptions()) {
+				refresh();
 				return false;
 			}
 			if (!getCurToolId().empty()) {
@@ -3261,17 +3283,16 @@ bool WinCap::handleLayerCancel(bool fromToolbar)
 			return false;
 		}
 		if (annotMouseDown && newShape && history) {
-			history->removeShape(newShape);
-			newShape = nullptr;
-			shapeHover = nullptr;
-			annotMouseDown = false;
-			annotDragIndex = -1;
-			ReleaseCapture();
-			refresh();
-			return false;
+				discardDraft();
+				return false;
 		}
 		if (shapeHover) {
 			clearAnnotSelection();
+			return false;
+		}
+		// 属性开关层级：虚线 / 填充 / 圆头 / 圆角开启时，先关闭这些开关，再退出工具
+		if (toolSub && toolSub->hasActiveStyleOption() && toolSub->resetStyleOptions()) {
+			refresh();
 			return false;
 		}
 		if (!getCurToolId().empty()) {
@@ -3295,21 +3316,20 @@ bool WinCap::handleLayerCancel(bool fromToolbar)
 	}
 	// 2) 落笔草稿未抬起 → 丢掉
 	if (annotMouseDown && newShape && history) {
-		history->removeShape(newShape);
-		newShape = nullptr;
-		shapeHover = nullptr;
-		annotMouseDown = false;
-		annotDragIndex = -1;
-		ReleaseCapture();
-		refresh();
-		return false;
+			discardDraft();
+			return false;
 	}
 	// 3) 选中标注 → 取消选中（先于取消工具）
 	if (shapeHover) {
 		clearAnnotSelection();
 		return false;
 	}
-	// 4) 有标注工具 → 取消工具
+	// 4) 属性开关层级：虚线 / 填充 / 圆头 / 圆角 / 粗斜体开启时，先关闭这些开关，再退出工具
+	if (toolSub && toolSub->hasActiveStyleOption() && toolSub->resetStyleOptions()) {
+		refresh();
+		return false;
+	}
+	// 5) 有标注工具 → 取消工具
 	if (toolCap && !toolCap->curId.empty()) {
 		toolCap->cancelSelect();   // 白板属性栏会保留，等后面的层级再收
 		refresh();
@@ -3469,17 +3489,8 @@ bool WinCap::queryMainBarAnchor(MainBarAnchor& out) const
 	return AnnotHost::queryMainBarAnchor(out);
 }
 
-void WinCap::startVideoAnnotate(const std::wstring& toolId)
+void WinCap::showAnnotToolBar(const std::wstring& toolId)
 {
-	if (stage != CapStage::Video || toolId.empty()) return;
-	setMouseTransparent(false);
-	ensureHistory();
-	if (toolSub) toolSub->bindOwner(hwnd);
-	// 属性栏是独立顶层窗：录制中才创建/显示时也要排除，否则会出现在录制画面里
-	if (toolSub && toolSub->hwnd) App::excludeFromCapture(toolSub->hwnd);
-	annotLive = true;
-	// 保留已选标注：点所属工具应出属性栏，不应取消选中
-	setForcedToolId(toolId);
 	if (!toolSub) return;
 	if (toolId == L"rect") toolSub->showRectTools();
 	else if (toolId == L"arrow") {
@@ -3495,6 +3506,20 @@ void WinCap::startVideoAnnotate(const std::wstring& toolId)
 	presentSelectedAnnotStyle();
 	layoutTools();
 	refresh();
+}
+
+void WinCap::startVideoAnnotate(const std::wstring& toolId)
+{
+	if (stage != CapStage::Video || toolId.empty()) return;
+	setMouseTransparent(false);
+	ensureHistory();
+	if (toolSub) toolSub->bindOwner(hwnd);
+	// 属性栏是独立顶层窗：录制中才创建/显示时也要排除，否则会出现在录制画面里
+	if (toolSub && toolSub->hwnd) App::excludeFromCapture(toolSub->hwnd);
+	annotLive = true;
+	// 保留已选标注：点所属工具应出属性栏，不应取消选中
+	setForcedToolId(toolId);
+	showAnnotToolBar(toolId);
 }
 
 void WinCap::clearVideoAnnotTool()
@@ -3535,21 +3560,7 @@ void WinCap::startLongAnnotate(const std::wstring& toolId)
 	annotLive = true;
 	// 保留已选标注：点所属工具应出属性栏，不应取消选中
 	setForcedToolId(toolId);
-	if (!toolSub) return;
-	if (toolId == L"rect") toolSub->showRectTools();
-	else if (toolId == L"arrow") {
-		if (toolSub->isLine) toolSub->showLineTools();
-		else toolSub->showArrowTools();
-	}
-	else if (toolId == L"pen") toolSub->showPenTools();
-	else if (toolId == L"text") toolSub->showTextTools();
-	else if (toolId == L"number") toolSub->showNumberTools();
-	else if (toolId == L"mosaic") toolSub->showMosaicTools();
-	else if (toolId == L"eraser") toolSub->showEraserTools();
-	else toolSub->hideTools();
-	presentSelectedAnnotStyle();
-	layoutTools();
-	refresh();
+	showAnnotToolBar(toolId);
 }
 
 void WinCap::clearLongAnnotTool()
@@ -4357,6 +4368,8 @@ bool WinCap::exportSelection(std::vector<BYTE>& pixels, int& cw, int& ch, bool i
     bool applyEffects)
 {
     if (!cutMask->hasRect() || !screenImg) return false;
+    // 小于 5×5 物理像素的选区不产生截图
+    if (captureRectTooSmall(cutMask->maskRect)) return false;
     // 选框与导出共用同一份像素矩形，光标合成也按它的原点算，避免亚像素误差
     const D2D1_RECT_U cropRect = pixelAlignedRect(cutMask->maskRect);
     D2D1_SIZE_U size{};

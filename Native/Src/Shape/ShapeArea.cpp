@@ -7,42 +7,23 @@
 namespace {
 	constexpr float kPiA = 3.14159265358979323846f;
 }
-
 ShapeArea::ShapeArea(AnnotHost* win) :ShapeBase(win), draggers(8, D2D1::RectF(0,0,0,0))
 {
 }
 
 D2D1_POINT_2F ShapeArea::center() const
 {
-	return { (rect.left + rect.right) * 0.5f, (rect.top + rect.bottom) * 0.5f };
+	return ShapeBase::boxCenter(rect);
 }
 
 void ShapeArea::toLocal(float x, float y, float& lx, float& ly) const
 {
-	if (std::fabs(angle) < 1e-6f) {
-		lx = x;
-		ly = y;
-		return;
-	}
-	const auto c = center();
-	const float dx = x - c.x, dy = y - c.y;
-	const float ca = std::cos(-angle), sa = std::sin(-angle);
-	lx = c.x + dx * ca - dy * sa;
-	ly = c.y + dx * sa + dy * ca;
+	ShapeBase::boxToLocal(rect, angle, x, y, lx, ly);
 }
 
 void ShapeArea::withRotation(ID2D1DeviceContext* ctx, const std::function<void()>& draw)
 {
-	if (std::fabs(angle) < 1e-6f) {
-		draw();
-		return;
-	}
-	D2D1_MATRIX_3X2_F old{};
-	ctx->GetTransform(&old);
-	const auto c = center();
-	ctx->SetTransform(D2D1::Matrix3x2F::Rotation(angle * 180.f / kPiA, c) * old);
-	draw();
-	ctx->SetTransform(old);
+	ShapeBase::withBoxRotation(ctx, rect, angle, draw);
 }
 
 Microsoft::WRL::ComPtr<ID2D1Geometry> ShapeArea::makeAreaGeometry(bool asEllipse) const
@@ -97,18 +78,7 @@ void ShapeArea::paintDragger(ID2D1DeviceContext* ctx)
 
 void ShapeArea::updateDraggers()
 {
-	const float half = draggerSize * 0.5f;
-	const D2D1_RECT_F sr = selectionRect(rect);
-	const float w = sr.right - sr.left;
-	const float h = sr.bottom - sr.top;
-	draggers[0] = D2D1::RectF(sr.left - half, sr.top - half, sr.left + half, sr.top + half);
-	draggers[1] = D2D1::RectF(sr.left + w * 0.5f - half, sr.top - half, sr.left + w * 0.5f + half, sr.top + half);
-	draggers[2] = D2D1::RectF(sr.right - half, sr.top - half, sr.right + half, sr.top + half);
-	draggers[3] = D2D1::RectF(sr.right - half, sr.top + h * 0.5f - half, sr.right + half, sr.top + h * 0.5f + half);
-	draggers[4] = D2D1::RectF(sr.right - half, sr.bottom - half, sr.right + half, sr.bottom + half);
-	draggers[5] = D2D1::RectF(sr.left + w * 0.5f - half, sr.bottom - half, sr.left + w * 0.5f + half, sr.bottom + half);
-	draggers[6] = D2D1::RectF(sr.left - half, sr.bottom - half, sr.left + half, sr.bottom + half);
-	draggers[7] = D2D1::RectF(sr.left - half, sr.top + h * 0.5f - half, sr.left + half, sr.top + h * 0.5f + half);
+	ShapeBase::layoutBoxDraggers(draggers, selectionRect(rect), draggerSize * 0.5f);
 }
 
 int ShapeArea::hitResizeZone(float lx, float ly) const

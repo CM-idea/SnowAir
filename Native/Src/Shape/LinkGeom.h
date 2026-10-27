@@ -5,7 +5,7 @@
 #include <cmath>
 
 // 连线的**纯几何**：形状中心 → 某方向的边缘交点、点是否在形状里。
-// 单独一个头文件是为了能脱离 Ling/窗口直接编探针（_layout_probe/linkgeom_probe.cpp）。
+// 单独成头文件，便于脱离 Ling/窗口单独编译与验证。
 // 所有函数都在"形状自己的局部坐标系"里算（矩形轴对齐、椭圆轴对齐），
 // 旋转由调用方（ShapeRect/ShapeEllipse）自己换算。
 namespace LinkGeom

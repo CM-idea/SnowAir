@@ -216,6 +216,7 @@
     <ClCompile Include="History.cpp" />
     <ClCompile Include="Lang.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="SelfTest.cpp" />
     <ClCompile Include="Net\HttpClient.cpp" />
     <ClCompile Include="Ocr\OcrModelManager.cpp" />
     <ClCompile Include="Ocr\OcrRuntimeManager.cpp" />
@@ -252,11 +253,11 @@
     <ClCompile Include="Tip.cpp" />
     <ClCompile Include="Tool\PropSlider.cpp" />
     <ClCompile Include="Tool\ToolbarChrome.cpp" />
+    <ClCompile Include="Tool\ToolbarWindow.cpp" />
     <ClCompile Include="Tool\ToolbarStore.cpp" />
     <ClCompile Include="Tool\ToolCap.cpp" />
     <ClCompile Include="Tool\ToolColorPanel.cpp" />
     <ClCompile Include="Tool\ToolLong.cpp" />
-    <ClCompile Include="Tool\ToolMain.cpp" />
     <ClCompile Include="Tool\ToolNestedPanel.cpp" />
     <ClCompile Include="Tool\ToolOcr.cpp" />
     <ClCompile Include="Tool\ToolOcrCompare.cpp" />
@@ -282,6 +283,7 @@
     <ClCompile Include="Win\CapVideo.cpp" />
     <ClCompile Include="Win\CutMask.cpp" />
     <ClCompile Include="Win\HotkeyHook.cpp" />
+    <ClCompile Include="Win\KeyCapture.cpp" />
     <ClCompile Include="Win\ScreenCapture.cpp" />
     <ClCompile Include="Win\SettingWidgets.cpp" />
     <ClCompile Include="Win\WinCap.cpp" />
@@ -335,6 +337,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="App.h" />
+    <ClInclude Include="SelfTest.h" />
     <ClInclude Include="CommandKeys.h" />
     <ClInclude Include="compat\CComPtr.h" />
     <ClInclude Include="History.h" />
@@ -382,10 +385,11 @@
     <ClInclude Include="Tool\ToolbarChrome.h" />
     <ClInclude Include="Tool\ToolbarStore.h" />
     <ClInclude Include="Tool\ToolbarTheme.h" />
+    <ClInclude Include="Tool\DesignKeys.h" />
+    <ClInclude Include="Tool\ToolbarWindow.h" />
     <ClInclude Include="Tool\ToolCap.h" />
     <ClInclude Include="Tool\ToolColorPanel.h" />
     <ClInclude Include="Tool\ToolLong.h" />
-    <ClInclude Include="Tool\ToolMain.h" />
     <ClInclude Include="Tool\ToolNestedPanel.h" />
     <ClInclude Include="Tool\ToolOcr.h" />
     <ClInclude Include="Tool\ToolOcrCompare.h" />
@@ -414,7 +418,9 @@
     <ClInclude Include="Win\cgif\cgif.h" />
     <ClInclude Include="Win\cgif\cgif_raw.h" />
     <ClInclude Include="Win\CutMask.h" />
+    <ClInclude Include="Win\DibUtil.h" />
     <ClInclude Include="Win\HotkeyHook.h" />
+    <ClInclude Include="Win\KeyCapture.h" />
     <ClInclude Include="Win\ScreenCapture.h" />
     <ClInclude Include="Win\SettingTheme.h" />
     <ClInclude Include="Win\SettingWidgets.h" />

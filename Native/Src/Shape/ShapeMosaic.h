@@ -10,8 +10,7 @@ public:
 	void paintHint(ID2D1DeviceContext* ctx) override;
 	void applyStyle();
 	float stylePrimarySize() const override { return strokeWidth; }
-	// 重新采样并生成效果位图：下面的标注被移动/改样式后必须调用，
-	// 否则滤镜里还留着旧内容（表现为"下层标注移走了，模糊没跟着动"）
+	// 重新采样并生成效果位图：下层标注移动或改样式后必须调用，否则滤镜中仍是旧内容
 	void rebuildEffect() { buildEffectBitmap(); }
 protected:
 	void onGeometryChanged() override;

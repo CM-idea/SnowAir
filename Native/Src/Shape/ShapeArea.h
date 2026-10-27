@@ -17,7 +17,6 @@ public:
 	void setCursor() override;
 	bool hitErase(const float x, const float y) override;
 	bool translateBy(float dx, float dy) override;
-	float rotation() const { return angle; }
 	// 带旋转的区几何（高亮并集挖洞/描边）
 	Microsoft::WRL::ComPtr<ID2D1Geometry> makeAreaGeometry(bool asEllipse) const;
 protected:

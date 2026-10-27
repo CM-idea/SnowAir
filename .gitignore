@@ -57,5 +57,5 @@ Tauri2/DEV.md
 # VS 璧勬簮缂撳瓨
 *.aps
 
-# 关于页配图：构建时由 images/About.png 拷到 Res/ 打包资源，产物不入库
+# 鍏充簬椤甸厤鍥撅細鏋勫缓鏃剁敱 images/About.png 鎷峰埌 Res/ 鎵撳寘璧勬簮锛屼骇鐗╀笉鍏ュ簱
 Native/Src/Res/About.png

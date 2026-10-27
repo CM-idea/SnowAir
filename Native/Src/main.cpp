@@ -1,8 +1,12 @@
 #include "pch.h"
 #include "App.h"
+#include "SelfTest.h"
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPTSTR lpCmdLine, _In_ int nCmdShow)
 {
+    // 无窗口自检：不初始化 App / 图形设备
+    if (std::wstring(GetCommandLineW()).find(L"--selftest") != std::wstring::npos)
+        return RunSelfTest();
     App::init();
     // 启动后不主动建任何窗口：只挂托盘待命（见 App::App 里的启动分支）。
     // 截图 / 设置中心分别由托盘图标单击（按设置）、全局热键或再次运行 exe 触发。

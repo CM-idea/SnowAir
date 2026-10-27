@@ -9,22 +9,6 @@
 // 从 Tray.cpp 抽出，避免两套菜单各自维护一份配色。
 namespace MenuTheme
 {
-	inline uint32_t fromColorRef(COLORREF c)
-	{
-		return (uint32_t)((GetRValue(c) << 24) | (GetGValue(c) << 16) | (GetBValue(c) << 8) | 0xFF);
-	}
-
-	inline uint32_t themeColor(int part, int state, int prop, COLORREF fallback)
-	{
-		HTHEME theme = OpenThemeData(nullptr, L"Menu");
-		COLORREF c = fallback;
-		if (theme) {
-			if (FAILED(GetThemeColor(theme, part, state, prop, &c))) c = fallback;
-			CloseThemeData(theme);
-		}
-		return fromColorRef(c);
-	}
-
 	struct Palette { uint32_t bg, border, fg, hover, hoverFg, sep; };
 
 	// 菜单配色随「软件外观 → 软件主题」：跟随系统(0) 读系统 / 浅色(1) / 深色(2)。

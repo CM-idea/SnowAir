@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include "../Lang.h"
+#include "../Tool/DesignKeys.h"
 #include "../Setting.h"
 #include "WinSetting.h"
 #include "WinSettingAppearance.h"
@@ -1509,11 +1510,11 @@ void WinSettingAppearance::tbRefreshInitialEditor()
 		lb->setMarginRight(10.f);
 		auto* sw = row->makeChild<Ling::Button>();
 		sw->setFlexShrink(0.f);
-		SettingUi::styleToggle(sw, s->getToolDesignInt(L"show-cursor", L"enabled", 0) != 0);
+		SettingUi::styleToggle(sw, s->getToolDesignInt(ToolKey::ShowCursor, DesignKey::Enabled, 0) != 0);
 		sw->onClick.add([this, sw](Ling::Button*) {
 			auto* st = Setting::get();
-			const bool next = st->getToolDesignInt(L"show-cursor", L"enabled", 0) == 0;
-			st->setToolDesignInt(L"show-cursor", L"enabled", next ? 1 : 0);
+			const bool next = st->getToolDesignInt(ToolKey::ShowCursor, DesignKey::Enabled, 0) == 0;
+			st->setToolDesignInt(ToolKey::ShowCursor, DesignKey::Enabled, next ? 1 : 0);
 			SettingUi::styleToggle(sw, next);
 			this->tbRefreshRestore();
 			this->win->refresh();

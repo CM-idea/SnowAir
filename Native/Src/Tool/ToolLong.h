@@ -2,11 +2,11 @@
 #include <include/Ling.h>
 #include "IconCodes.h"
 #include "ToolbarTheme.h"
+#include "ToolbarWindow.h"
 
 class WinCap;
-class Tip;
 // 长截图底栏：默认在选区底部右对齐；编辑态切成标注栏（无「显示边框」）
-class ToolLong : public Ling::WinBase
+class ToolLong : public ToolbarWindow
 {
 public:
 	ToolLong(WinCap* win);
@@ -22,10 +22,8 @@ public:
 	float getBtnCenterX() const;
 private:
 	void onCreated() override;
-	void layout() override;
-	void onMinMaxInfo(MINMAXINFO* mmi) override;
+	void drawChrome(ID2D1DeviceContext* ctx) override;
 	void refreshSize();
-	void paintChrome();
 	void buildBar();
 	void applyLongBtnStyle();
 	void bindLongTip();
@@ -49,9 +47,6 @@ private:
 	bool draggingBar{ false };
 	POINT dragMouseScreen{};
 	int dragWinX{ 0 }, dragWinY{ 0 };
-	Ling::Node* contentNode{ nullptr };
-	Ling::Canvas* chromeCanvas{ nullptr };
-	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushBg;
 	Ling::Button* dragHandle{ nullptr };
 	Ling::Button* btnLong{ nullptr };
 	Ling::Button* btnEdit{ nullptr };
@@ -67,5 +62,4 @@ private:
 	static constexpr float hoverInset{ 4.f };
 	static constexpr float spliterH{ 18.f };
 	static constexpr float spliterW{ 1.f };
-	std::unique_ptr<Tip> tip;
 };

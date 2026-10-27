@@ -20,9 +20,6 @@ namespace OcrPack {
 		return v == 1 ? OcrPackVariant::Small : OcrPackVariant::Tiny;
 	}
 
-	// 旧配置里的 engine id → 档位。老用户装的是 small 包，映射到 Small。
-	inline OcrPackVariant fromEngineId(int) { return OcrPackVariant::Small; }
-
 	// 目录名：Small 沿用老目录 ppocr-v6（已装用户不用重下），Tiny 单独一个目录
 	inline const wchar_t* folderName(OcrPackVariant v)
 	{
@@ -53,10 +50,4 @@ namespace OcrPack {
 			? L"lw.PPOCR.C-1.2.0-ppocrv6-small-runtime.zip"
 			: L"lw.PPOCR.C-1.2.0-ppocrv6-tiny-runtime.zip";
 	}
-
-	// 介绍用：大致下载体积（MB，实测 zip：轻量 6.9MB / 标准 30.6MB）
-	inline int approxMB(OcrPackVariant v) { return v == OcrPackVariant::Small ? 31 : 7; }
-
-	// 只有标准档的字典含假名，能识别日文
-	inline bool supportsJapanese(OcrPackVariant v) { return v == OcrPackVariant::Small; }
 }

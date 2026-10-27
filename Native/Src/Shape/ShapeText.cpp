@@ -31,7 +31,9 @@ ShapeText::ShapeText(AnnotHost* win, bool bubble, bool burst) : ShapeBase(win),
 		fontSize = 24.f * win->dpi;
 		bubbleRadius_ = 14.f * win->dpi;
 		bubbleStroke_ = std::max(1.f, win->toolSub->getSliderVal());
-		updateFrameStyle();
+		frameDash_ = win->toolSub->isArrowDash;
+		frameRound_ = win->toolSub->isArrowRound;
+		updateFrameStyle();   // 落笔这一刻取工具条当前的虚线/圆头状态
 		if (burst_) initBurstJitter();
 		makeTextLayout();
 		syncRectFromLayout();
@@ -284,10 +286,9 @@ void ShapeText::updateFrameStyle()
 	if (!isFrame() || !win || !win->toolSub) return;
 	auto factory = Ling::D2D::get()->d2dFactory.Get();
 	if (!factory) return;
-	const bool dashed = win->toolSub->isArrowDash;
-	const bool roundCap = win->toolSub->isArrowRound;
-	frameDash_ = dashed;
-	frameRound_ = roundCap;
+	// 只在落笔与二次选中修改样式时调用（见 applyStyle）；绘制路径不做逐帧同步。
+	const bool dashed = frameDash_;
+	const bool roundCap = frameRound_;
 	const auto cap = roundCap ? D2D1_CAP_STYLE_ROUND : D2D1_CAP_STYLE_FLAT;
 	// 气泡圆角连接；爆裂保留尖角所需的 miter
 	const auto join = burst_ ? D2D1_LINE_JOIN_MITER : D2D1_LINE_JOIN_ROUND;
@@ -377,15 +378,10 @@ void ShapeText::updateBubbleTail()
 
 void ShapeText::paint(ID2D1DeviceContext* ctx)
 {
-	if (isFrame() && win && win->toolSub
-		&& (frameDash_ != win->toolSub->isArrowDash
-			|| frameRound_ != win->toolSub->isArrowRound)) {
-		updateFrameStyle();
-	}
 	if (isEditing) {
 		// 编辑中的文字和插入符由形状直接绘制，键盘输入由宿主转发
 		updateDraggers();
-		paintPunch(ctx);   // 编辑中也要开洞，不然文字框里还压着线
+		paintPunch(ctx);   // 编辑态同样需要开洞，否则线段会压在文字框上
 		D2D1_MATRIX_3X2_F old{};
 		ctx->GetTransform(&old);
 		if (angle != 0.f) {
@@ -481,8 +477,8 @@ void ShapeText::setAttachPose(float cx, float cy)
 		DWRITE_TEXT_METRICS m{};
 		textLayout->GetMetrics(&m);
 		w = m.widthIncludingTrailingWhitespace + borderPadding * 2.f;
-		// 行距压掉的那点余量要补回来（最后一行的下伸在排版高度之外），
-		// 不然洞会比字矮一截、线从那行的尾巴上压过去
+		// 补回行距压缩的余量（最后一行下伸部分在排版高度之外），
+		// 否则开洞高度小于字高，线段会穿过最后一行
 		h = m.height + attachLineSlack + borderPadding * 2.f;
 	}
 	if (w < 1.f || h < 1.f) {   // 还没内容：洞 = 一个字 + 两侧间距，高度就是一行
@@ -507,7 +503,7 @@ void ShapeText::paintPunch(ID2D1DeviceContext* ctx){
 	// 洞在编辑中就是提交后那个洞，不会再出现"编辑时挖歪"
 	if (!punchBg || !win || !win->screenImg || !ctx) return;
 	if (rect.right - rect.left < 1.f || rect.bottom - rect.top < 1.f) return;
-	// 洞贴着字就行：别用 borderPadding（那是编辑框的留白），不然洞比字宽一圈
+	// 开洞按文字实际边界计算，不使用 borderPadding（编辑框留白），否则洞宽大于字宽
 	const float pad = 2.f * (win ? win->dpi : 1.f);
 	const D2D1_RECT_F r = D2D1::RectF(rect.left - pad, rect.top - pad, rect.right + pad, rect.bottom + pad);
 	// 线上文字一律横排（angle==0），洞就是轴对齐的一块：多行文字（用户自己回车的竖列）
@@ -942,9 +938,9 @@ bool ShapeText::hitCaretArea(float x, float y) const
 		&& ly >= p.y - pad && ly <= p.y + lineH + pad;
 }
 
-// 命中"这块文字"（含它周围一点边距）。线上文字一律横排（angle==0），普通文字可能是
-// 用户自己转过角度的：那就先把点转回文字自己的坐标系再判，否则"两端点不到、左右误命中"
-// （双击线上文字进编辑、橡皮擦擦文字都靠它）
+// 命中文字区域（含周围少量边距）。线上文字恒为横排（angle==0），普通文字可能带旋转，
+// 需先将点变换到文字自身坐标系再判定，否则命中区域会错位。
+// 双击线上文字进入编辑、橡皮擦擦除文字均依赖此函数。
 bool ShapeText::hitLabelBox(const float x, const float y) const
 {
 	const float half = borderPadding / 2.f + (win ? win->dpi : 1.f);
@@ -1005,7 +1001,14 @@ void ShapeText::applyTextFromUndo(const std::wstring& t)
 	text = t;
 	caretIndex_ = (int)text.size();
 	selectAll_ = false;
+	const bool wasEditing = isEditing;
 	isEditing = false;
+	// 编辑中撤销 / 重做：必须同步清除宿主的 editingText。否则它会继续指向已退出编辑状态
+	// 的形状，导致控点不再绘制（选框消失），样式按钮也会继续修改该形状。
+	if (wasEditing) {
+		win->setEditingText(nullptr);
+		win->endTextEdit();
+	}
 	editStartText_.clear();
 	editStartGeo_.clear();
 	makeTextLayout();
@@ -1133,6 +1136,8 @@ void ShapeText::applyStyle()
 		fontSize = 24.f * win->dpi;
 		if (win->getCurToolId() == L"arrow")
 			bubbleStroke_ = std::max(1.f, win->toolSub->getSliderVal());
+		frameDash_ = win->toolSub->isArrowDash;
+		frameRound_ = win->toolSub->isArrowRound;
 		updateFrameStyle();
 	}
 	if (isEditing) {
@@ -1146,6 +1151,24 @@ void ShapeText::applyStyle()
 		syncRectFromLayout();
 	}
 	win->refresh();
+}
+
+// 反向同步：把文字 / 气泡的属性写回工具状态，供重新打开该标注的工具时展示。
+void ShapeText::syncToolFromShape() const
+{
+	auto* ts = win->toolSub.get();
+	if (!ts) return;
+	if (isFrame()) {
+		ts->isLine = true;   // 气泡/爆裂属于「标注」栏
+		ts->lineKind = burst_ ? ToolSub::LineBurst : ToolSub::LineBubble;
+		ts->isArrowDash = frameDash_;
+		ts->isArrowRound = frameRound_;
+		ts->setShapeSliderVal(L"arrow", bubbleStroke_);
+		return;
+	}
+	ts->isTextBold = isBold;
+	ts->isTextItalic = isItalic;
+	ts->setShapeSliderVal(L"text", fontSize);
 }
 
 void ShapeText::makeTextLayout()

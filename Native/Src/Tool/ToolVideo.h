@@ -1,12 +1,12 @@
 #pragma once
 #include <include/Ling.h>
 #include "ToolbarTheme.h"
+#include "ToolbarWindow.h"
 
 class WinCap;
-class Tip;
 // 录屏工具条（单一布局）：
 // 拖拽 | 穿透 | 播放/暂停 | 时间 | 音频 | 麦 | 矩形…橡皮 | 撤销 | GIF | 保存 | 取消 | 完成
-class ToolVideo : public Ling::WinBase
+class ToolVideo : public ToolbarWindow
 {
 public:
 	ToolVideo(WinCap* win);
@@ -29,8 +29,7 @@ public:
 	const std::wstring& curAnnotId() const { return curAnnotId_; }
 private:
 	void onCreated() override;
-	void layout() override;
-	void onMinMaxInfo(MINMAXINFO* mmi) override;
+	void drawChrome(ID2D1DeviceContext* ctx) override;
 	void buildBar();
 	void makeSlot(const std::wstring& id);          // 按槽位 id 建一个控件（分隔符走 makeSpliter）
 	std::vector<std::wstring> resolveSlots() const; // 运行时槽位顺序（自定义布局优先）
@@ -49,7 +48,6 @@ private:
 	void onAnnotClick(const std::wstring& id);
 	void onGifClick();
 	void updateAudioButtons();
-	void paintChrome();
 	Ling::Button* makeIconBtn(const std::wstring& code, const std::wstring& id = L"");
 	Ling::Node* makeSpliter();
 	float iconSideInset() const;
@@ -80,10 +78,6 @@ private:
 	POINT dragMouseScreen{};
 	int dragWinX{ 0 }, dragWinY{ 0 };
 
-	std::unique_ptr<Tip> tip;
-	Ling::Node* contentNode{ nullptr };
-	Ling::Canvas* chromeCanvas{ nullptr };
-	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushBg;
 	Ling::Button* dragHandle{ nullptr };
 	Ling::Button* btnPierce{ nullptr };
 	Ling::Button* btnPlay{ nullptr };

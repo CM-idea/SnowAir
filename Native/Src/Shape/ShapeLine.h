@@ -32,6 +32,9 @@ public:
 	~ShapeLine();
 	void paint(ID2D1DeviceContext* ctx) override;
 	void paintDragger(ID2D1DeviceContext* ctx) override;
+	void applyStyle() override;
+	void syncToolFromShape() const override;
+	UINT32 styleColorValue() const override;
 	void mouseDrag(const float x, const float y) override;
 	void mouseDown(const float x, const float y) override;
 	void mouseUp(const float x, const float y) override;

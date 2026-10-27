@@ -26,9 +26,7 @@ public:
 	void finishEditing(bool apply);
 	void toggleBorderVisible();
 	bool isEditing() const { return editing; }
-	bool isLocked() const { return locked; }
 	bool isBorderVisible() const { return borderVisible; }
-	bool isThumbnail() const { return thumbnail; }
 	int getOpacityPercent() const { return opacityPercent; }
 	// 编辑工具栏「透明度」按钮回写入口
 	void setOpacityPercent(int percent);

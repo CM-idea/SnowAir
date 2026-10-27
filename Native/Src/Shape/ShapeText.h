@@ -22,7 +22,13 @@ public:
 	bool isValidWithoutDrag() override { return !isFrame(); };   // 气泡/爆裂和矩形一样：必须拖出框
 	bool hitErase(const float x, const float y) override;
 	void finishEdit(bool suppressNextClick = true);
+	// 是否确实处于编辑状态。宿主中的 editingText 是裸指针，撤销等路径可能让它停留在
+	// 已退出编辑的形状上；绘制与样式判定一律以此标志为准。
+	bool isEditingNow() const { return isEditing; }
 	void applyStyle();
+	// 反向同步：把文字 / 气泡的属性写回属性栏
+	void syncToolFromShape() const override;
+	uint32_t styleColorValue() const override { return colorValue; }
 	// selectAll：双击已有文字进入编辑时全选，方便直接整体替换
 	void startEdit(bool selectAll = false);
 	// 撤销/重做恢复文字内容，并同步重排和气泡/文字框尺寸
@@ -82,6 +88,7 @@ private:
 	// 气泡/爆裂描边：跟随标注的虚线/圆头/线宽
 	void updateFrameStyle();
 	Microsoft::WRL::ComPtr<ID2D1StrokeStyle> frameStyle_;
+	// 气泡 / 爆裂的虚线与圆头属于属性：落笔时记录，之后仅由 applyStyle 更新
 	bool frameDash_{ false }, frameRound_{ false };
 	// 气泡命中：只有描边附近 / 文字上算命中（中间空白不抢点击）
 	bool hitBubbleStroke(float x, float y, float band) const;

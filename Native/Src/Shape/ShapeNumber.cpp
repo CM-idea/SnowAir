@@ -1,7 +1,6 @@
 #include "pch.h"
 #include "App.h"
 #include "Win/AnnotHost.h"
-#include "Tool/ToolMain.h"
 #include "Tool/ToolSub.h"
 #include "Tool/SerialEmoji.h"
 #include "History.h"
@@ -76,6 +75,13 @@ std::wstring ShapeNumber::formatLabel() const
 	return std::to_wstring(val);
 }
 
+void ShapeNumber::setDisplayLabel(const std::wstring& text)
+{
+	labelText = text;
+	makeTextLayout();
+	win->refresh();
+}
+
 ShapeNumber::~ShapeNumber()
 {
 }
@@ -102,7 +108,7 @@ void ShapeNumber::makeTextLayout()
 
 D2D1_POINT_2F ShapeNumber::boxCenter() const
 {
-	return { (rect.left + rect.right) * 0.5f, (rect.top + rect.bottom) * 0.5f };
+	return ShapeBase::boxCenter(rect);
 }
 
 void ShapeNumber::syncRectFromCenter()
@@ -127,30 +133,12 @@ void ShapeNumber::syncCenterFromRect()
 
 void ShapeNumber::toLocal(float x, float y, float& lx, float& ly) const
 {
-	if (std::fabs(boxAngle) < 1e-6f) {
-		lx = x;
-		ly = y;
-		return;
-	}
-	const auto c = boxCenter();
-	const float dx = x - c.x, dy = y - c.y;
-	const float ca = std::cos(-boxAngle), sa = std::sin(-boxAngle);
-	lx = c.x + dx * ca - dy * sa;
-	ly = c.y + dx * sa + dy * ca;
+	ShapeBase::boxToLocal(rect, boxAngle, x, y, lx, ly);
 }
 
 void ShapeNumber::withRotation(ID2D1DeviceContext* ctx, const std::function<void()>& draw)
 {
-	if (std::fabs(boxAngle) < 1e-6f) {
-		draw();
-		return;
-	}
-	D2D1_MATRIX_3X2_F old{};
-	ctx->GetTransform(&old);
-	const auto c = boxCenter();
-	ctx->SetTransform(D2D1::Matrix3x2F::Rotation(boxAngle * 180.f / kPi, c) * old);
-	draw();
-	ctx->SetTransform(old);
+	ShapeBase::withBoxRotation(ctx, rect, boxAngle, draw);
 }
 
 void ShapeNumber::paint(ID2D1DeviceContext* ctx)
@@ -287,9 +275,9 @@ void ShapeNumber::mouseDown(const float x, const float y)
 		if (isEmoji()) {
 			syncRectFromCenter();
 			hoverDraggerIndex = 8;
-			// 记的是「抓取偏移」而不是按下点的绝对坐标：mouseDrag 的移动分支算的是
-			// rect.left = x - pressX。之前存绝对坐标，只要按下时鼠标动 1px（hasDragged），
-			// Emoji 就会被甩到 (x-pressX, y-pressY)（≈ 画布左上角）→ 看着像"点了没落上"
+			// 记录的是相对形状的抓取偏移，而非按下点的绝对坐标：mouseDrag 按
+			// rect.left = x - pressX 计算。若存绝对坐标，按下后移动 1px 即触发拖动，
+			// 形状会被平移到画布左上角附近
 			pressX = x - rect.left;
 			pressY = y - rect.top;
 			makeTextLayout();
@@ -333,16 +321,7 @@ void ShapeNumber::updateDraggers()
 		return;
 	}
 	const D2D1_RECT_F sr = selectionRect(rect);
-	const float w = sr.right - sr.left;
-	const float h = sr.bottom - sr.top;
-	draggers[0] = D2D1::RectF(sr.left - half, sr.top - half, sr.left + half, sr.top + half);
-	draggers[1] = D2D1::RectF(sr.left + w * 0.5f - half, sr.top - half, sr.left + w * 0.5f + half, sr.top + half);
-	draggers[2] = D2D1::RectF(sr.right - half, sr.top - half, sr.right + half, sr.top + half);
-	draggers[3] = D2D1::RectF(sr.right - half, sr.top + h * 0.5f - half, sr.right + half, sr.top + h * 0.5f + half);
-	draggers[4] = D2D1::RectF(sr.right - half, sr.bottom - half, sr.right + half, sr.bottom + half);
-	draggers[5] = D2D1::RectF(sr.left + w * 0.5f - half, sr.bottom - half, sr.left + w * 0.5f + half, sr.bottom + half);
-	draggers[6] = D2D1::RectF(sr.left - half, sr.bottom - half, sr.left + half, sr.bottom + half);
-	draggers[7] = D2D1::RectF(sr.left - half, sr.top + h * 0.5f - half, sr.left + half, sr.top + h * 0.5f + half);
+	ShapeBase::layoutBoxDraggers(draggers, sr, half);
 	const float rotY = sr.top - 20.f * win->dpi;
 	const float bx = (sr.left + sr.right) * 0.5f;
 	rotateHandle = D2D1::RectF(bx - half, rotY - half, bx + half, rotY + half);

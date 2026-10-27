@@ -8,8 +8,6 @@
 using Microsoft::WRL::ComPtr;
 
 namespace {
-	constexpr float kPi = 3.14159265358979323846f;
-
 	// 8 方向吸附门槛：|dy| <= |dx|*tan(22.5°) 视为水平，反之垂直，其余吸附到 45°
 	constexpr float kShiftTan22_5 = 0.41421356f;
 
@@ -49,6 +47,36 @@ ShapePen::ShapePen(AnnotHost* win) : ShapeBase(win),
 
 ShapePen::~ShapePen()
 {
+}
+
+// 二次选中后修改样式时，仅应用属性（线宽 / 虚线）。
+// 软笔与荧光笔属于画笔形态（与常规画笔并列），不属于属性，不能回写到已有笔迹。
+void ShapePen::applyStyle()
+{
+	auto* ts = win->toolSub.get();
+	if (!ts || isFade) return;
+	strokeWidth = std::max(1.f, ts->getSliderVal());
+	isDash = ts->isPenDash;
+	brush->SetColor(ts->getSelectedColor());
+	ensureStrokeStyle();
+	rebuildPath();
+	win->refresh();
+}
+
+// 反向同步：把本形状的属性写回工具状态，供重新打开该标注的工具时展示。
+void ShapePen::syncToolFromShape() const
+{
+	auto* ts = win->toolSub.get();
+	if (!ts || isFade) return;
+	ts->isPenDash = isDash;
+	ts->setShapeSliderVal(L"pen", strokeWidth);
+}
+
+UINT32 ShapePen::styleColorValue() const
+{
+	D2D1_COLOR_F c{};
+	if (brush) c = brush->GetColor();
+	return ShapeBase::packColor(c);
 }
 
 int64_t ShapePen::nowMs() const
@@ -237,51 +265,22 @@ void ShapePen::scalePtsToRect(const D2D1_RECT_F& oldR, const D2D1_RECT_F& newR)
 
 D2D1_POINT_2F ShapePen::boxCenter() const
 {
-	return { (rect.left + rect.right) * 0.5f, (rect.top + rect.bottom) * 0.5f };
+	return ShapeBase::boxCenter(rect);
 }
 
 void ShapePen::toLocal(float x, float y, float& lx, float& ly) const
 {
-	if (std::fabs(boxAngle) < 1e-6f) {
-		lx = x;
-		ly = y;
-		return;
-	}
-	const auto c = boxCenter();
-	const float dx = x - c.x, dy = y - c.y;
-	const float ca = std::cos(-boxAngle), sa = std::sin(-boxAngle);
-	lx = c.x + dx * ca - dy * sa;
-	ly = c.y + dx * sa + dy * ca;
+	ShapeBase::boxToLocal(rect, boxAngle, x, y, lx, ly);
 }
 
 void ShapePen::withRotation(ID2D1DeviceContext* ctx, const std::function<void()>& draw)
 {
-	if (std::fabs(boxAngle) < 1e-6f) {
-		draw();
-		return;
-	}
-	D2D1_MATRIX_3X2_F old{};
-	ctx->GetTransform(&old);
-	const auto c = boxCenter();
-	ctx->SetTransform(D2D1::Matrix3x2F::Rotation(boxAngle * 180.f / kPi, c) * old);
-	draw();
-	ctx->SetTransform(old);
+	ShapeBase::withBoxRotation(ctx, rect, boxAngle, draw);
 }
 
 void ShapePen::updateDraggers()
 {
-	const float half = draggerSize * 0.5f;
-	const D2D1_RECT_F sr = selectionRect(rect);
-	const float w = sr.right - sr.left;
-	const float h = sr.bottom - sr.top;
-	draggers[0] = D2D1::RectF(sr.left - half, sr.top - half, sr.left + half, sr.top + half);
-	draggers[1] = D2D1::RectF(sr.left + w * 0.5f - half, sr.top - half, sr.left + w * 0.5f + half, sr.top + half);
-	draggers[2] = D2D1::RectF(sr.right - half, sr.top - half, sr.right + half, sr.top + half);
-	draggers[3] = D2D1::RectF(sr.right - half, sr.top + h * 0.5f - half, sr.right + half, sr.top + h * 0.5f + half);
-	draggers[4] = D2D1::RectF(sr.right - half, sr.bottom - half, sr.right + half, sr.bottom + half);
-	draggers[5] = D2D1::RectF(sr.left + w * 0.5f - half, sr.bottom - half, sr.left + w * 0.5f + half, sr.bottom + half);
-	draggers[6] = D2D1::RectF(sr.left - half, sr.bottom - half, sr.left + half, sr.bottom + half);
-	draggers[7] = D2D1::RectF(sr.left - half, sr.top + h * 0.5f - half, sr.left + half, sr.top + h * 0.5f + half);
+	ShapeBase::layoutBoxDraggers(draggers, selectionRect(rect), draggerSize * 0.5f);
 }
 
 void ShapePen::paint(ID2D1DeviceContext* ctx)
@@ -470,7 +469,7 @@ void ShapePen::mouseUp(const float x, const float y)
 			win->requestFadeTick();
 			return;
 		}
-		// Shift 直线段收笔：再算一次约束端点（而不是把原始点直接补进去，免得末尾多一个折角）
+		// Shift 直线段收笔：重新计算约束端点，不直接追加原始点，避免末尾出现折角
 		if (shiftStraight) applyShiftStraight(x, y);
 		else appendSample(x, y, true);
 		settled = true;
@@ -510,9 +509,9 @@ void ShapePen::mouseMove(const float x, const float y)
 	}
 	float lx, ly;
 	toLocal(x, y, lx, ly);
-	// 命中规则按"选中态"分开，和矩形/箭头保持一致：
-	//  - 未选中：只有线迹本身可命中。包围盒内部不是画笔的"身体"——否则一条弯曲线会把整块
-	//    矩形区域都吃掉，在下一次落笔时被误判成"拖动旧图形"，区域内再也画不了新东西。
+	// 命中规则按选中态区分，与矩形/箭头一致：
+	//  - 未选中：仅线迹本身可命中。包围盒内部不属于笔迹本体，否则弯曲笔迹会把整个
+	//    包围盒都算作可命中，后续落笔会被误判为拖动已有图形。
 	//  - 已选中：角外旋转 / 边框缩放 / 内部拖动，方便二次编辑。
 	if (isSelected()) {
 		// 角控点优先，旋转环只吃控点以外的近角区域，避免角柄误触发旋转

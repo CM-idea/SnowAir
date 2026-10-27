@@ -148,6 +148,8 @@ public:
 	void clearVideoAnnotTool();
 	void toggleLongEdit();
 	void startLongAnnotate(const std::wstring& toolId);
+	// 截图 / 长图 / 录屏共用：按工具 id 打开属性栏并刷新布局
+	void showAnnotToolBar(const std::wstring& toolId);
 	void clearLongAnnotTool();
 	// 右键分层退出；fromToolbar=true 时最多退到未选工具。
 	// 返回 true 表示应退出截图（由调用方在右键抬起后再 close，避免桌面再吃一次右键）

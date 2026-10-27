@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "Win/DibUtil.h"
 #include <wincodec.h>
 #include <unordered_map>
 #include <vector>
@@ -36,31 +37,6 @@ bool sysIsLight()
 }
 
 // BGRA 像素（自上而下）→ 32bpp DIB（HICON 用非预乘 alpha，掩码全 0）
-HBITMAP makeColorDib(int size, const std::vector<BYTE>& bgra)
-{
-	BITMAPV5HEADER bi{};
-	bi.bV5Size = sizeof(bi);
-	bi.bV5Width = size;
-	bi.bV5Height = -size;
-	bi.bV5Planes = 1;
-	bi.bV5BitCount = 32;
-	bi.bV5Compression = BI_BITFIELDS;
-	bi.bV5RedMask = 0x00FF0000;
-	bi.bV5GreenMask = 0x0000FF00;
-	bi.bV5BlueMask = 0x000000FF;
-	bi.bV5AlphaMask = 0xFF000000;
-	void* bits = nullptr;
-	HDC screen = GetDC(nullptr);
-	HBITMAP bmp = CreateDIBSection(screen, reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS, &bits, nullptr, 0);
-	ReleaseDC(nullptr, screen);
-	if (!bmp || !bits) {
-		if (bmp) DeleteObject(bmp);
-		return nullptr;
-	}
-	memcpy(bits, bgra.data(), bgra.size());
-	return bmp;
-}
-
 HICON dibToIcon(HBITMAP color, int size)
 {
 	if (!color) return nullptr;
@@ -82,7 +58,7 @@ HICON dibToIcon(HBITMAP color, int size)
 // 做法：先在放大位图上渲染，取墨迹包围盒，再等比缩放填满目标尺寸。
 HICON buildGlyphIcon(uint32_t tint, int size)
 {
-	auto d2d = Ling::D2D::get();
+	auto d2d = Ling::D2D::getNoDevice();
 	if (!d2d || !d2d->dwriteFactory || !d2d->d2dFactory) return nullptr;
 
 	const int big = (std::max)(size * 3, 96);
