@@ -1212,7 +1212,7 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 		if (dblText) {
 			shapeHover = dblText;
 			setEditingText(dblText);
-			dblText->startEdit();
+			dblText->startEdit(true);
 			annotMouseDown = false;
 			return true;
 		}
@@ -1228,7 +1228,7 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 		if (auto* hit = hitShapeAt(dx, dy)) {
 			if (auto* txt = dynamic_cast<ShapeText*>(hit)) {
 				shapeHover = txt;
-				txt->startEdit();
+				txt->startEdit(true);
 				annotMouseDown = false;
 				return true;
 			}

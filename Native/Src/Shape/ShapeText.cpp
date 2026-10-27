@@ -982,11 +982,11 @@ void ShapeText::setAutoText(const std::wstring& t)
 	win->refresh();
 }
 
-void ShapeText::startEdit()
+void ShapeText::startEdit(bool selectAll)
 {
 	if (isEditing) return;
 	isEditing = true;
-	selectAll_ = !autoText_.empty() && text == autoText_;
+	selectAll_ = selectAll && !text.empty();
 	caretIndex_ = (int)text.size();
 	editStartText_ = text;
 	editStartGeo_ = editSnapshot();

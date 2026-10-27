@@ -23,7 +23,8 @@ public:
 	bool hitErase(const float x, const float y) override;
 	void finishEdit(bool suppressNextClick = true);
 	void applyStyle();
-	void startEdit();
+	// selectAll：双击已有文字进入编辑时全选，方便直接整体替换
+	void startEdit(bool selectAll = false);
 	// 撤销/重做恢复文字内容，并同步重排和气泡/文字框尺寸
 	void applyTextFromUndo(const std::wstring& t);
 	// 标注文字编辑：直接维护 text / caretIndex
