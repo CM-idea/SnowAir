@@ -52,6 +52,8 @@ public:
 public:
 	bool isEditing{ false };
 	int caretIndex_{ 0 };
+	// 双击尺寸/角度自动文字进入编辑时默认全选，直接输入即可整体替换
+	bool selectAll_{ false };
 	// 一次文字编辑会话的起点：结束时作为一步撤销
 	std::wstring editStartText_;
 	std::vector<float> editStartGeo_;

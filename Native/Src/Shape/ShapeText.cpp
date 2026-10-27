@@ -406,6 +406,16 @@ void ShapeText::paint(ID2D1DeviceContext* ctx)
 				tx = rect.left + ((rect.right - rect.left) - m.widthIncludingTrailingWhitespace) * 0.5f;
 				ty = rect.top + ((rect.bottom - rect.top) - m.height) * 0.5f;
 			}
+			if (selectAll_ && !text.empty()) {
+				ComPtr<ID2D1SolidColorBrush> selBrush;
+				if (SUCCEEDED(ctx->CreateSolidColorBrush(color, selBrush.GetAddressOf())) && selBrush) {
+					selBrush->SetOpacity(0.24f);
+					const float pad = 1.f * win->dpi;
+					ctx->FillRectangle(
+						D2D1::RectF(tx - pad, ty, tx + m.widthIncludingTrailingWhitespace + pad, ty + m.height),
+						selBrush.Get());
+				}
+			}
 			if (!text.empty()) {
 				ctx->DrawTextLayout({ tx, ty }, textLayout.Get(), textBrush.Get(),
 					D2D1_DRAW_TEXT_OPTIONS_NONE);
@@ -976,6 +986,7 @@ void ShapeText::startEdit()
 {
 	if (isEditing) return;
 	isEditing = true;
+	selectAll_ = !autoText_.empty() && text == autoText_;
 	caretIndex_ = (int)text.size();
 	editStartText_ = text;
 	editStartGeo_ = editSnapshot();
@@ -989,6 +1000,7 @@ void ShapeText::applyTextFromUndo(const std::wstring& t)
 {
 	text = t;
 	caretIndex_ = (int)text.size();
+	selectAll_ = false;
 	isEditing = false;
 	editStartText_.clear();
 	editStartGeo_.clear();
@@ -1001,6 +1013,11 @@ void ShapeText::applyTextFromUndo(const std::wstring& t)
 void ShapeText::insertText(const std::wstring& s)
 {
 	if (!isEditing || s.empty()) return;
+	if (selectAll_) {
+		text.clear();
+		caretIndex_ = 0;
+		selectAll_ = false;
+	}
 	caretIndex_ = std::clamp(caretIndex_, 0, (int)text.size());
 	text.insert((size_t)caretIndex_, s);
 	caretIndex_ += (int)s.size();
@@ -1013,6 +1030,16 @@ void ShapeText::insertText(const std::wstring& s)
 void ShapeText::backspace()
 {
 	if (!isEditing || text.empty()) return;
+	if (selectAll_) {
+		text.clear();
+		caretIndex_ = 0;
+		selectAll_ = false;
+		makeTextLayout();
+		if (attachTo) setAttachPose(attachCx, attachCy);
+		else if (!isFrame()) syncRectFromLayout();
+		win->refresh();
+		return;
+	}
 	caretIndex_ = std::clamp(caretIndex_, 0, (int)text.size());
 	if (caretIndex_ <= 0) return;
 	text.erase((size_t)(caretIndex_ - 1), 1);
@@ -1026,6 +1053,17 @@ void ShapeText::backspace()
 void ShapeText::deleteForward()
 {
 	if (!isEditing) return;
+	if (selectAll_) {
+		text.clear();
+		caretIndex_ = 0;
+		selectAll_ = false;
+		makeTextLayout();
+		if (attachTo) setAttachPose(attachCx, attachCy);
+		else if (!isFrame()) syncRectFromLayout();
+		win->refresh();
+		return;
+	}
+	selectAll_ = false;
 	caretIndex_ = std::clamp(caretIndex_, 0, (int)text.size());
 	if (caretIndex_ >= (int)text.size()) return;
 	text.erase((size_t)caretIndex_, 1);
@@ -1038,6 +1076,7 @@ void ShapeText::deleteForward()
 void ShapeText::moveCaret(int delta)
 {
 	if (!isEditing) return;
+	selectAll_ = false;
 	caretIndex_ = std::clamp(caretIndex_ + delta, 0, (int)text.size());
 	win->refresh();
 }
@@ -1045,6 +1084,7 @@ void ShapeText::moveCaret(int delta)
 void ShapeText::moveCaretTo(bool end)
 {
 	if (!isEditing) return;
+	selectAll_ = false;
 	caretIndex_ = end ? (int)text.size() : 0;
 	win->refresh();
 }
@@ -1053,6 +1093,7 @@ void ShapeText::finishEdit(bool suppressNextClick)
 {
 	if (!isEditing) return;
 	isEditing = false;
+	selectAll_ = false;
 	caretIndex_ = std::clamp(caretIndex_, 0, (int)text.size());
 	win->setEditingText(nullptr);
 	win->endTextEdit();
