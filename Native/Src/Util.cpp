@@ -4,7 +4,6 @@
 #include <shobjidl.h>
 #include <shellapi.h>
 #include <winver.h>
-#include <format>
 #include <fstream>
 #include <cwctype>
 #include <cwchar>
@@ -392,8 +391,8 @@ std::wstring Util::createFileName(const std::wstring& ext)
 {
 	SYSTEMTIME st;
 	GetLocalTime(&st);
-	return std::format(L"{:04d}{:02d}{:02d}{:02d}{:02d}{:02d}{:03d}.{}",
-		st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, ext);
+	return wfmt(L"%04d%02d%02d%02d%02d%02d%03d.%s",
+		st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, ext.c_str());
 }
 
 std::vector<BYTE> Util::captureScreen(const int x, const int y, const int w, const int h)
@@ -527,7 +526,7 @@ bool Util::openWithImageReader(const int w, const int h, BYTE* data)
 	auto imgPath = Setting::get()->getDataPath().append(L"ocr_" + createFileName(L"png")).wstring();
 	if (!saveToFile(imgPath, w, h, data)) return false;
 	// --del-image=true：插件读完自己把缓存图删掉，免得在数据目录里越攒越多
-	auto cmd = std::format(L"\"{}\" --image-path=\"{}\" --del-image=true", exePath.wstring(), imgPath);
+	auto cmd = wfmt(L"\"%s\" --image-path=\"%s\" --del-image=true", exePath.wstring().c_str(), imgPath.c_str());
 	// 工作目录设成插件所在目录，它才找得到自己身边的依赖
 	auto workDir = exePath.parent_path().wstring();
 	STARTUPINFO si{ .cb = sizeof(STARTUPINFO) };
@@ -973,7 +972,7 @@ namespace {
 		SYSTEMTIME st{};
 		GetLocalTime(&st);
 		const std::wstring app = focusAppName.empty() ? L"Unknown" : focusAppName;
-		auto num = [](int v) { return std::format(L"{:02d}", v); };
+		auto num = [](int v) { return wfmt(L"%02d", v); };
 		std::wstring out;
 		out.reserve(format.size());
 		size_t i = 0;

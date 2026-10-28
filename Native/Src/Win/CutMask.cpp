@@ -1574,8 +1574,8 @@ void CutMask::makeLayout()
 	layoutPos.Reset();
 	layoutSize.Reset();
 	auto d2d = Ling::D2D::get();
-	layoutPos = d2d->makeTextLayout(std::format(L"X:{}  Y:{}", ix, iy), ToolbarTheme::infoFontSize * win->dpi);
-	layoutSize = d2d->makeTextLayout(std::format(L"{}×{} px", iw, ih), ToolbarTheme::infoFontSize * win->dpi);
+	layoutPos = d2d->makeTextLayout(wfmt(L"X:%d  Y:%d", (int)ix, (int)iy), ToolbarTheme::infoFontSize * win->dpi);
+	layoutSize = d2d->makeTextLayout(wfmt(L"%d×%d px", (int)iw, (int)ih), ToolbarTheme::infoFontSize * win->dpi);
 	if (!layoutPos || !layoutSize) return;
 	DWRITE_TEXT_METRICS pm{}, sm{};
 	layoutPos->GetMetrics(&pm);
@@ -1666,7 +1666,7 @@ void CutMask::rebuildRadiusValueLayout()
 	if (selRadius_ <= 0.f) return;
 	auto d2d = Ling::D2D::get();
 	radiusValueLayout = d2d->makeTextLayout(
-		std::format(L"{}", static_cast<int>(std::round(selRadius_))),
+		wfmt(L"%d", static_cast<int>(std::round(selRadius_))),
 		ToolbarTheme::infoFontSize * win->dpi);
 	if (!radiusValueLayout) return;
 	DWRITE_TEXT_METRICS tm{};

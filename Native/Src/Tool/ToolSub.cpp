@@ -1190,7 +1190,7 @@ void ToolSub::refreshDemoRecState()
 	}
 	if (recTimerLabel) {
 		const int sec = running ? cap->demoRecElapsed() : 0;
-		recTimerLabel->setText(std::format(L"{:02d}:{:02d}", sec / 60, sec % 60));
+		recTimerLabel->setText(wfmt(L"%02d:%02d", (int)(sec / 60), (int)(sec % 60)));
 	}
 	// 音频 / 麦克风：动图模式与录制中都不可改（GIF 无音轨）
 	if (recAudioBtn) {
@@ -2210,7 +2210,7 @@ bool ToolSub::adjustPrimarySize(int dir)
 void ToolSub::updateSliderValueLabel()
 {
 	if (!sliderValue) return;
-	sliderValue->setText(std::format(L"{}", static_cast<int>(std::round(sliderVal))));
+	sliderValue->setText(wfmt(L"%d", static_cast<int>(std::round(sliderVal))));
 }
 
 std::wstring ToolSub::getSliderTipKey() const

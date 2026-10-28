@@ -227,7 +227,7 @@ void WinPin::applyScale(float newScale, POINT anchor)
 	applyWinSize();
 	setPosition(x + anchor.x - static_cast<int>(std::lround(imgX * scale)),
 		y + anchor.y - static_cast<int>(std::lround(imgY * scale)));
-	scaleTip = Ling::D2D::get()->makeTextLayout(std::format(L"{}%", static_cast<int>(std::lround(scale * 100.f))), 12.f * dpi);
+	scaleTip = Ling::D2D::get()->makeTextLayout(wfmt(L"%d%%", static_cast<int>(std::lround(scale * 100.f))), 12.f * dpi);
 	setTimer(800, 101);
 	if (editing) layoutTools();
 	refresh();

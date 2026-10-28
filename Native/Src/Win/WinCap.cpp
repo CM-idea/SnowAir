@@ -1914,14 +1914,14 @@ std::wstring WinCap::pixColorText() const
 {
     const int r = GetRValue(pixColor_), g = GetGValue(pixColor_), b = GetBValue(pixColor_);
     // RGB 模式不写前缀：行的标签已经变成「RGB」，信息区也窄，只留分量
-    return pixColorRgb_ ? std::format(L"{},{},{}", r, g, b)
-                        : std::format(L"#{:02X}{:02X}{:02X}", r, g, b);
+    return pixColorRgb_ ? wfmt(L"%d,%d,%d", (int)r, (int)g, (int)b)
+                        : wfmt(L"#%02X%02X%02X", (int)r, (int)g, (int)b);
 }
 
 std::wstring WinCap::pixColorCopyText() const
 {
     if (!pixColorRgb_) return pixColorText();
-    return std::format(L"rgb({},{},{})",
+    return wfmt(L"rgb(%d,%d,%d)",
         GetRValue(pixColor_), GetGValue(pixColor_), GetBValue(pixColor_));
 }
 
@@ -1978,7 +1978,7 @@ void WinCap::paintPix(ID2D1DeviceContext* ctx)
 	// 色值从底图取样（避免 GetPixel 同步读屏拖垮帧率）
 	samplePixColor();
 	const auto colorText = pixColorText();
-	const auto posText = std::format(L"{}, {}", pixFocus.x, pixFocus.y);
+	const auto posText = wfmt(L"%ld, %ld", pixFocus.x, pixFocus.y);
 
 	const float metaLeft = x0 + pad + 2.f * dpi;
 	const float metaW = canvas - 4.f * dpi;

@@ -30,10 +30,10 @@ PropSlider::Pair PropSlider::mount(Ling::Node* parent, float minV, float maxV, f
 	out.value->setJustifyContent(Ling::Justify::Center);
 	out.value->setFontSize(12.f);
 	out.value->setColor(Icon::ColorNormal);
-	out.value->setText(std::format(L"{}", static_cast<int>(std::round(val))));
+	out.value->setText(wfmt(L"%d", static_cast<int>(std::round(val))));
 
 	out.slider->onValueChanged.add([onChange, label = out.value](Ling::Slider*, float v) {
-		if (label) label->setText(std::format(L"{}", static_cast<int>(std::round(v))));
+		if (label) label->setText(wfmt(L"%d", static_cast<int>(std::round(v))));
 		if (onChange) onChange(v);
 	});
 	return out;

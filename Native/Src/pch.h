@@ -4,4 +4,5 @@
 #include <shellapi.h>
 #include <winrt/Windows.Data.Json.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include "TextFmt.h"
 

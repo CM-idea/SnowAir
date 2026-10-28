@@ -206,7 +206,7 @@ void ToolColorPanel::rebuildBtns()
 		btn->setJustifyContent(Ling::Justify::Center);
 		btn->onClick.add([this](Ling::Button* b) { onSwatchClick(b); });
 		if (i < ARRAYSIZE(colorNames))
-			tip->bind(btn, Lang::get(std::format(L"color.{}", colorNames[i])));
+			tip->bind(btn, Lang::get(wfmt(L"color.%s", colorNames[i])));
 		btns.push_back(btn);
 
 		auto ring = btn->makeChild<Ling::Node>();

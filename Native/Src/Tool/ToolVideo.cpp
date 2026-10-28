@@ -631,7 +631,7 @@ void ToolVideo::updateTimerText()
 		timerLabel->setText(selectIndex == 1 ? L"10.00" : L"00.00");
 		return;
 	}
-	timerLabel->setText(std::format(L"{:02d}.{:02d}", totalSeconds / 60, totalSeconds % 60));
+	timerLabel->setText(wfmt(L"%02d.%02d", (int)(totalSeconds / 60), (int)(totalSeconds % 60)));
 }
 
 void ToolVideo::onTimerCB(UINT id)

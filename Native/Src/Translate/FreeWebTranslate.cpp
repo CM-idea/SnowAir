@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "FreeWebTranslate.h"
 #include "../Net/HttpClient.h"
-#include <regex>
+#include <cstring>
 #include <thread>
 #include <mutex>
 #include <wincrypt.h>
@@ -42,6 +42,76 @@ std::wstring urlEncode(const std::wstring& s)
 {
 	return utf8ToW(urlEncodeUtf8(s));
 }
+
+// ---- 从网页里取凭证 ------------------------------------------------------
+// 原来用 4 条 std::regex，但都是"找到某个标记，跳过空白，遇到分隔符和引号，
+// 读一段值"这一种形状。手写等价扫描：同一个标记在页面里可能出现多次（IG、
+// IID 这类短词尤其容易），所以一次匹配失败要继续往后找，而不是直接放弃。
+bool findQuotedAfter(const std::string& web, const char* marker, char sep, std::string& out)
+{
+	const size_t mLen = std::strlen(marker);
+	for (size_t from = 0;;) {
+		size_t p = web.find(marker, from);
+		if (p == std::string::npos) return false;
+		p += mLen;
+		auto skipWs = [&web, &p]() {
+			while (p < web.size() && (web[p] == ' ' || web[p] == '\t' || web[p] == '\r' || web[p] == '\n')) ++p;
+		};
+		skipWs();
+		if (p < web.size() && web[p] == sep) {
+			++p;
+			skipWs();
+			if (p < web.size() && web[p] == '"') {
+				const size_t end = web.find('"', p + 1);
+				if (end != std::string::npos && end > p + 1) {
+					out.assign(web, p + 1, end - p - 1);
+					return true;
+				}
+			}
+		}
+		from = p + 1;
+	}
+}
+
+// params_AbusePreventionHelper = [ <毫秒时间戳> , "<token>" ]
+bool readAbuseHelper(const std::string& web, std::string& key, std::string& token)
+{
+	static const char* kMarker = "params_AbusePreventionHelper";
+	const size_t mLen = std::strlen(kMarker);
+	for (size_t from = 0;;) {
+		size_t p = web.find(kMarker, from);
+		if (p == std::string::npos) return false;
+		p += mLen;
+		auto skipWs = [&web, &p]() {
+			while (p < web.size() && (web[p] == ' ' || web[p] == '\t' || web[p] == '\r' || web[p] == '\n')) ++p;
+		};
+		skipWs();
+		if (p < web.size() && web[p] == '=') { ++p; skipWs(); }
+		if (p < web.size() && web[p] == '[') {
+			++p;
+			skipWs();
+			const size_t digitStart = p;
+			while (p < web.size() && web[p] >= '0' && web[p] <= '9') ++p;
+			if (p > digitStart) {
+				key.assign(web, digitStart, p - digitStart);
+				skipWs();
+				if (p < web.size() && web[p] == ',') {
+					++p;
+					skipWs();
+					if (p < web.size() && web[p] == '"') {
+						const size_t end = web.find('"', p + 1);
+						if (end != std::string::npos && end > p + 1) {
+							token.assign(web, p + 1, end - p - 1);
+							return true;
+						}
+					}
+				}
+			}
+		}
+		from = p + 1;
+	}
+}
+
 std::wstring normalizeLang(std::wstring lang)
 {
 	if (lang.empty() || _wcsicmp(lang.c_str(), L"auto") == 0) return L"auto";
@@ -165,33 +235,26 @@ bool fetchBingCreds(const std::wstring& base, BingCreds& out, std::wstring& err)
 		return false;
 	}
 	const std::string& web = resp.body;
-	std::smatch m;
 	BingCreds c;
-	std::regex abuse(R"(params_AbusePreventionHelper\s*=\s*\[\s*(\d+)\s*,\s*\"([^\"]+)\")");
-	if (!std::regex_search(web, m, abuse)) {
+	std::string key, token;
+	if (!readAbuseHelper(web, key, token)) {
 		err = L"无法解析 Bing 页面凭证（页面结构可能已变更）";
 		return false;
 	}
-	c.key = utf8ToW(m[1]);
-	c.token = utf8ToW(m[2]);
-	std::regex igRe(R"(IG\s*:\s*\"([^\"]+)\")");
-	if (!std::regex_search(web, m, igRe)) {
+	c.key = utf8ToW(key);
+	c.token = utf8ToW(token);
+	std::string ig;
+	if (!findQuotedAfter(web, "IG", ':', ig)) {
 		err = L"无法解析 Bing 页面 IG";
 		return false;
 	}
-	c.ig = utf8ToW(m[1]);
-	std::regex iidRe(R"(data-iid\s*=\s*\"([^\"]+)\")");
-	if (std::regex_search(web, m, iidRe)) {
-		c.iid = utf8ToW(m[1]);
+	c.ig = utf8ToW(ig);
+	std::string iid;
+	if (!findQuotedAfter(web, "data-iid", '=', iid) && !findQuotedAfter(web, "IID", ':', iid)) {
+		err = L"无法解析 Bing 页面 IID";
+		return false;
 	}
-	else {
-		std::regex iid2(R"(IID\s*:\s*\"([^\"]+)\")");
-		if (!std::regex_search(web, m, iid2)) {
-			err = L"无法解析 Bing 页面 IID";
-			return false;
-		}
-		c.iid = utf8ToW(m[1]);
-	}
+	c.iid = utf8ToW(iid);
 	c.host = originOf(resp.finalUrl, base);   // 跟随重定向：凭证属于真正的站点
 	out = c;
 	return true;

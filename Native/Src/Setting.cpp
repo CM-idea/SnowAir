@@ -67,7 +67,7 @@ namespace {
         si.dwFlags = STARTF_USESHOWWINDOW;
         si.wShowWindow = SW_HIDE;
         PROCESS_INFORMATION pi{};
-        std::wstring full = std::format(L"cmd.exe /c {}", cmd);
+        std::wstring full = wfmt(L"cmd.exe /c %s", cmd.c_str());
         std::vector<wchar_t> buf(full.begin(), full.end());
         buf.push_back(0);
         if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE,
@@ -468,7 +468,7 @@ bool Setting::getLastCaptureRect(int& x, int& y, int& w, int& h)
 void Setting::setLastCaptureRect(int x, int y, int w, int h)
 {
     if (w <= 0 || h <= 0) return;
-    setFeatStr(L"lastCaptureRect", std::format(L"{},{},{},{}", x, y, w, h));
+    setFeatStr(L"lastCaptureRect", wfmt(L"%d,%d,%d,%d", x, y, w, h));
 }
 
 // 旧版本写入的 AI 相关配置：AI 对话（模型 / 新建会话 / 对话 API 配置）、AI 视觉 OCR
@@ -545,13 +545,13 @@ void Setting::setAutoStart(bool autoStart)
         GetModuleFileName(nullptr, buffer, MAX_PATH);
         auto curPath = std::filesystem::path(buffer);
         selfPath = curPath.wstring();
-        std::wstring commandLine = std::format(L"\"{}\" --auto-start", curPath.wstring());
+        std::wstring commandLine = wfmt(L"\"%s\" --auto-start", curPath.wstring().c_str());
 
         if (getRunAsAdmin() && !Util::isBuiltinAdminAccount()) {
             // 需要静默提权（普通管理员账户 + UAC 过滤）：用计划任务（最高权限）在登录时启动。
             // 计划任务不会出现在「启动项」里，这是系统的取舍。
-            runQuiet(std::format(
-                L"schtasks /Create /TN \"SnowAir\" /SC ONLOGON /RL HIGHEST /F /TR \"{}\"", commandLine));
+            runQuiet(wfmt(
+                L"schtasks /Create /TN \"SnowAir\" /SC ONLOGON /RL HIGHEST /F /TR \"%s\"", commandLine.c_str()));
         }
         else {
             // 普通自启，或内置 Administrator 账户（天然提权，无需计划任务）：写当前用户 Run 键，
@@ -1915,7 +1915,7 @@ std::wstring Setting::addHistoryFile(const std::wstring& filePath, int width, in
     const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 
     HistoryItem it;
-    it.id = std::format(L"h{}-{}", nowMs, ++seq);
+    it.id = wfmt(L"h%lld-%d", (long long)nowMs, (int)++seq);
     it.filePath = filePath;
     it.source = source.empty() ? L"capture" : source;
     it.width = width;
@@ -1946,7 +1946,7 @@ std::wstring Setting::addHistoryMedia(const std::wstring& mediaPath, int width, 
     static UINT64 seq = 0;
     const auto now = std::chrono::system_clock::now();
     const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-    it.id = std::format(L"h{}-{}", nowMs, ++seq);
+    it.id = wfmt(L"h%lld-%d", (long long)nowMs, (int)++seq);
     it.source = source.empty() ? L"record" : source;
     it.width = width;
     it.height = height;
@@ -2269,7 +2269,7 @@ void Setting::addClipboardText(const std::wstring& text)
 
     static unsigned long long seq = 0;
     ClipboardItem it;
-    it.id = std::format(L"c{}-{}", nowMs, ++seq);
+    it.id = wfmt(L"c%lld-%d", (long long)nowMs, (int)++seq);
     it.type = L"text";
     it.text = std::move(s);
     it.createdAt = (long long)nowMs;
@@ -2295,7 +2295,7 @@ void Setting::addClipboardImage(int w, int h, const std::vector<BYTE>& bgra)
 
     static unsigned long long seq = 0;
     ClipboardItem it;
-    it.id = std::format(L"c{}-{}", nowMs, ++seq);
+    it.id = wfmt(L"c%lld-%d", (long long)nowMs, (int)++seq);
     it.type = L"image";
     it.filePath = (getClipboardDir() / (it.id + L".png")).wstring();
     it.width = w;
@@ -2337,7 +2337,7 @@ void Setting::addClipboardFiles(const std::vector<std::wstring>& files)
 
     static unsigned long long seq = 0;
     ClipboardItem it;
-    it.id = std::format(L"c{}-{}", nowMs, ++seq);
+    it.id = wfmt(L"c%lld-%d", (long long)nowMs, (int)++seq);
     it.type = L"files";
     it.files = files;
     it.createdAt = (long long)nowMs;

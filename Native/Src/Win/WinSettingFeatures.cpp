@@ -34,7 +34,7 @@ namespace {
 	// 色号文本（#RRGGBB）：高亮色块旁显示用
 	std::wstring colorCode(UINT32 rgba)
 	{
-		return std::format(L"#{:02X}{:02X}{:02X}",
+		return wfmt(L"#%02X%02X%02X",
 			(rgba >> 24) & 0xFFu, (rgba >> 16) & 0xFFu, (rgba >> 8) & 0xFFu);
 	}
 

@@ -275,7 +275,7 @@ void WinSetting::onCreated()
 	// ③ 底部：版本号（zinc-400 弱文字）。数字从当前 exe 的内存版本资源取，与「关于」页同源；后缀带 Lite 版本标记。
 	auto versionLabel = sideNav->makeChild<Ling::Label>();
 	const auto appVer = Util::getAppVersion();
-	versionLabel->setText(std::format(L"V{}.{}.{}{}", appVer[0], appVer[1], appVer[2], SettingUi::kEditionTag));
+	versionLabel->setText(wfmt(L"V%d.%d.%d%s", appVer[0], appVer[1], appVer[2], SettingUi::kEditionTag));
 	versionLabel->setFontSize(SettingTheme::fontXs);
 	versionLabel->setColor(SettingTheme::textTertiary);
 

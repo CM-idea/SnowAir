@@ -3,7 +3,6 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <thread>
 #include <winrt/Windows.Web.Http.h>
@@ -278,7 +277,7 @@ WinSettingAbout::WinSettingAbout(Ling::WinBase* parent) : Ling::Node(parent)
 	auto* metaRow = centerRow(this);
 	metaRow->setMarginTop(18.f);
 	const auto ver = Util::getAppVersion();
-	badge(metaRow, std::format(L"v{}.{}.{}", ver[0], ver[1], ver[2]), false);
+	badge(metaRow, wfmt(L"v%d.%d.%d", ver[0], ver[1], ver[2]), false);
 	auto* edition = badge(metaRow, L"Lite beta", true);
 	edition->setMarginLeft(9.f);
 
@@ -543,7 +542,7 @@ void WinSettingAbout::onCheckFinished(int seq, bool ok, const std::wstring& remo
 	const auto remote = parseVersionTag(remoteTag);
 	const auto local = Util::getAppVersion();
 	if (remote > local) {
-		const auto verStr = std::format(L"{}.{}.{}", remote[0], remote[1], remote[2]);
+		const auto verStr = wfmt(L"%d.%d.%d", remote[0], remote[1], remote[2]);
 		setStatus(Lang::get(L"about.newVersion") + L" " + verStr, L"", SettingTheme::success);
 		// 有新版本：直接打开 releases 页面（原本按钮就是这个行为）
 		ShellExecuteW(nullptr, L"open", L"https://github.com/CM-idea/SnowAir/releases",

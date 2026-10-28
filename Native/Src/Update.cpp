@@ -3,7 +3,6 @@
 #include <fstream>
 #include <chrono>
 #include <array>
-#include <format>
 #include <winrt/Windows.Web.Http.h>
 #include <winrt/Windows.Web.Http.Filters.h>
 #include <winrt/Windows.Web.Http.Headers.h>
@@ -138,7 +137,7 @@ namespace {
 	void promptRestart()
 	{
 		auto title = Lang::get(L"about.sysTip");
-		auto text = std::format(L"{} {}\n\n{}", Lang::get(L"update.found"), newVer, Lang::get(L"update.tip"));
+		auto text = wfmt(L"%s %s\n\n%s", Lang::get(L"update.found").c_str(), newVer.c_str(), Lang::get(L"update.tip").c_str());
 		auto btnId = MessageBox(nullptr, text.data(), title.data(),
 			MB_OKCANCEL | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
 		//不升就把下载的文件删掉，别占着地方。明天空闲时还会再查一次、再问一次
@@ -161,7 +160,7 @@ namespace {
 	{
 		if (!isIdle()) return;
 		auto title = Lang::get(L"about.sysTip");
-		auto text = std::format(L"{} {}\n\n{}", Lang::get(L"update.found"), verStr, Lang::get(L"update.noPermission"));
+		auto text = wfmt(L"%s %s\n\n%s", Lang::get(L"update.found").c_str(), verStr.c_str(), Lang::get(L"update.noPermission").c_str());
 		auto btnId = MessageBox(nullptr, text.data(), title.data(), MB_OKCANCEL | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
 		if (btnId != IDOK) return;
 		ShellExecute(nullptr, L"open", releaseUrl.data(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -221,7 +220,7 @@ namespace {
 			}
 			//std::array 的比较就是逐个元素比下去，正好是版本号的比法
 			if (remote <= Ling::Util::getVerNum()) co_return;
-			auto verStr = std::format(L"{}.{}.{}", remote[0], remote[1], remote[2]);
+			auto verStr = wfmt(L"%d.%d.%d", remote[0], remote[1], remote[2]);
 			if (!canWrite(exePath.parent_path())) {
 				Ling::App::get()->dq.TryEnqueue([verStr]() { promptNoPermission(verStr); });
 				co_return;
@@ -303,7 +302,7 @@ namespace {
 			if (!tag.empty()) {
 				const auto remote = parseTag(tag);
 				if (remote > Ling::Util::getVerNum()) {
-					ver = std::format(L"{}.{}.{}", remote[0], remote[1], remote[2]);
+					ver = wfmt(L"%d.%d.%d", remote[0], remote[1], remote[2]);
 				}
 			}
 		}
