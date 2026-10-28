@@ -13,7 +13,6 @@
 #include "Lang.h"
 #include "Setting.h"
 #include "Win/WinPin.h"
-#include "quirc/quirc.h"
 #include "ReadBarcode.h"
 
 using Microsoft::WRL::ComPtr;
@@ -192,25 +191,6 @@ namespace {
 			result = std::filesystem::path(buf).stem().wstring();
 		CloseHandle(h);
 		return result;
-	}
-
-	// quirc 交出来的是裸字节流：BYTE 类型的二维码现实中基本都是 UTF-8（微信、支付宝
-	// 生成的都是），Kanji 类型按 ISO 18004 规定是 Shift-JIS。所以先按 UTF-8 严格解，
-	// 解不通再退回对应的本地代码页，避免把中文变成一堆问号
-	std::wstring qrPayloadToWStr(const uint8_t* payload, const int len, const int dataType)
-	{
-		if (len <= 0) return L"";
-		auto convert = [payload, len](UINT codePage, DWORD flags) {
-			auto str = (const char*)payload;
-			auto count = MultiByteToWideChar(codePage, flags, str, len, nullptr, 0);
-			if (count <= 0) return std::wstring();
-			std::wstring result(count, 0);
-			MultiByteToWideChar(codePage, flags, str, len, result.data(), count);
-			return result;
-		};
-		auto result = convert(CP_UTF8, MB_ERR_INVALID_CHARS);
-		if (!result.empty()) return result;
-		return convert(dataType == QUIRC_DATA_TYPE_KANJI ? 932 : CP_ACP, 0);
 	}
 
 	// 插件的查找顺序：先本 exe 同目录（绿色包一起解压的情况），
@@ -594,39 +574,6 @@ std::wstring Util::decodeQrCode(const int w, const int h, BYTE* data)
 	}
 	catch (...) {
 	}
-
-	// quirc 兜底（仅 QR）
-	auto qr = quirc_new();
-	if (!qr) return result;
-	if (quirc_resize(qr, w, h) < 0) {
-		quirc_destroy(qr);
-		return result;
-	}
-	int bufW{ 0 }, bufH{ 0 };
-	auto buffer = quirc_begin(qr, &bufW, &bufH);
-	const size_t count = (size_t)w * h;
-	for (size_t i = 0; i < count; i++) {
-		auto px = data + i * 4;
-		buffer[i] = (uint8_t)((px[2] * 77 + px[1] * 150 + px[0] * 29) >> 8);
-	}
-	quirc_end(qr);
-	auto codeCount = quirc_count(qr);
-	for (int i = 0; i < codeCount; i++) {
-		quirc_code code{};
-		quirc_data qrData{};
-		quirc_extract(qr, i, &code);
-		auto err = quirc_decode(&code, &qrData);
-		if (err == QUIRC_ERROR_DATA_ECC) {
-			quirc_flip(&code);
-			err = quirc_decode(&code, &qrData);
-		}
-		if (err != QUIRC_SUCCESS) continue;
-		auto text = qrPayloadToWStr(qrData.payload, qrData.payload_len, qrData.data_type);
-		if (text.empty()) continue;
-		if (!result.empty()) result += L"\n";
-		result += text;
-	}
-	quirc_destroy(qr);
 	return result;
 }
 

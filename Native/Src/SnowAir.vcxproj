@@ -88,10 +88,10 @@
       <SDLCheck>true</SDLCheck>
       <Optimization>Disabled</Optimization>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
-      <PreprocessorDefinitions>_DEBUG;_UNICODE;UNICODE;NOMINMAX;WIN32_LEAN_AND_MEAN;QUIRC_MAX_REGIONS=65534;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_UNICODE;UNICODE;NOMINMAX;WIN32_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(RepoRoot);$(RepoRoot)deps\Ling;$(RepoRoot)deps\libwebp\src;$(RepoRoot)deps\zxing-cpp\core\src;$(RepoRoot)deps\zxing-cpp\build\core;$(RepoRoot)Src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(RepoRoot);$(RepoRoot)deps\Ling;$(RepoRoot)deps\libwebp\src;$(RepoRoot)deps\zxing-cpp-311\core\src;$(RepoRoot)deps\zxing-cpp-311\build\core;$(RepoRoot)Src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
@@ -101,7 +101,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(RepoRoot)$(Platform)\$(Configuration);$(RepoRoot)deps\zxing-cpp\build\core\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(RepoRoot)$(Platform)\$(Configuration);$(RepoRoot)deps\zxing-cpp-311\build\core\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>dwmapi.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;libwebp.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
@@ -118,10 +118,10 @@
       <SDLCheck>true</SDLCheck>
       <Optimization>Disabled</Optimization>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
-      <PreprocessorDefinitions>_DEBUG;_UNICODE;UNICODE;NOMINMAX;WIN32_LEAN_AND_MEAN;QUIRC_MAX_REGIONS=65534;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_UNICODE;UNICODE;NOMINMAX;WIN32_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(RepoRoot);$(RepoRoot)deps\Ling;$(RepoRoot)deps\libwebp\src;$(RepoRoot)deps\zxing-cpp\core\src;$(RepoRoot)deps\zxing-cpp\build\core;$(RepoRoot)Src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(RepoRoot);$(RepoRoot)deps\Ling;$(RepoRoot)deps\libwebp\src;$(RepoRoot)deps\zxing-cpp-311\core\src;$(RepoRoot)deps\zxing-cpp-311\build\core;$(RepoRoot)Src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
@@ -131,7 +131,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(RepoRoot)$(Platform)\$(Configuration);$(RepoRoot)deps\zxing-cpp\build\core\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(RepoRoot)$(Platform)\$(Configuration);$(RepoRoot)deps\zxing-cpp-311\build\core\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>dwmapi.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;libwebp.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
@@ -149,10 +149,10 @@
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>NDEBUG;_UNICODE;UNICODE;NOMINMAX;WIN32_LEAN_AND_MEAN;QUIRC_MAX_REGIONS=65534;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_UNICODE;UNICODE;NOMINMAX;WIN32_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(RepoRoot);$(RepoRoot)deps\Ling;$(RepoRoot)deps\libwebp\src;$(RepoRoot)deps\zxing-cpp\core\src;$(RepoRoot)deps\zxing-cpp\build\core;$(RepoRoot)Src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(RepoRoot);$(RepoRoot)deps\Ling;$(RepoRoot)deps\libwebp\src;$(RepoRoot)deps\zxing-cpp-311\core\src;$(RepoRoot)deps\zxing-cpp-311\build\core;$(RepoRoot)Src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
@@ -162,7 +162,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(RepoRoot)$(Platform)\$(Configuration);$(RepoRoot)deps\zxing-cpp\build\core\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(RepoRoot)$(Platform)\$(Configuration);$(RepoRoot)deps\zxing-cpp-311\build\core\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>dwmapi.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;libwebp.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OptimizeReferences>true</OptimizeReferences>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
@@ -183,10 +183,10 @@
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>NDEBUG;_UNICODE;UNICODE;NOMINMAX;WIN32_LEAN_AND_MEAN;QUIRC_MAX_REGIONS=65534;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_UNICODE;UNICODE;NOMINMAX;WIN32_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(RepoRoot);$(RepoRoot)deps\Ling;$(RepoRoot)deps\libwebp\src;$(RepoRoot)deps\zxing-cpp\core\src;$(RepoRoot)deps\zxing-cpp\build\core;$(RepoRoot)Src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(RepoRoot);$(RepoRoot)deps\Ling;$(RepoRoot)deps\libwebp\src;$(RepoRoot)deps\zxing-cpp-311\core\src;$(RepoRoot)deps\zxing-cpp-311\build\core;$(RepoRoot)Src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
@@ -196,7 +196,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(RepoRoot)$(Platform)\$(Configuration);$(RepoRoot)deps\zxing-cpp\build\core\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(RepoRoot)$(Platform)\$(Configuration);$(RepoRoot)deps\zxing-cpp-311\build\core\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>dwmapi.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;libwebp.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OptimizeReferences>true</OptimizeReferences>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
@@ -299,24 +299,6 @@
     <ClCompile Include="Win\WinSettingSystemKeys.cpp" />
     <ClCompile Include="Win\WinSettingPlugins.cpp" />
     <ClCompile Include="Win\WinSettingQuickTranslate.cpp" />
-    <ClCompile Include="quirc\decode.c">
-      <CompileAs>CompileAsC</CompileAs>
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-    </ClCompile>
-    <ClCompile Include="quirc\identify.c">
-      <CompileAs>CompileAsC</CompileAs>
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <!-- 第三方 C 源码：符号比较告警（C4018）不改 vendored 代码，就地屏蔽 -->
-      <DisableSpecificWarnings>4018</DisableSpecificWarnings>
-    </ClCompile>
-    <ClCompile Include="quirc\quirc.c">
-      <CompileAs>CompileAsC</CompileAs>
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-    </ClCompile>
-    <ClCompile Include="quirc\version_db.c">
-      <CompileAs>CompileAsC</CompileAs>
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-    </ClCompile>
     <ClCompile Include="Win\cgif\cgif.c">
       <CompileAs>CompileAsC</CompileAs>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -354,8 +336,6 @@
     <ClInclude Include="Ocr\OcrPackFetch.h" />
     <ClInclude Include="Ocr\SystemOcr.h" />
     <ClInclude Include="pch.h" />
-    <ClInclude Include="quirc\quirc.h" />
-    <ClInclude Include="quirc\quirc_internal.h" />
     <ClInclude Include="Setting.h" />
     <ClInclude Include="Shape\AnnotCursor.h" />
     <ClInclude Include="Shape\ArrowPoly.h" />
