@@ -45,7 +45,7 @@ public:
 	// 同目录找，再找 %appdata%\SnowAir\plugin，都找不到就用默认浏览器打开它的
 	// release 页面让用户自己下。缓存图由插件读完后自己删。
 	static bool openWithImageReader(const int w, const int h, BYTE* data);
-	// 用 ZXing 识别二维码与常见一维条码（Code128/EAN/UPC 等）；失败时退回 quirc 仅扫 QR。
+	// 用 ZXing 识别二维码与常见一维条码（Code128/EAN/UPC 等）。
 	// 图里有多个码时用换行拼在一起
 	static std::wstring decodeQrCode(const int w, const int h, BYTE* data);
 

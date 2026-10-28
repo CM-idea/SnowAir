@@ -87,7 +87,7 @@ namespace
 		{ L"cmd_video_record",    kGrpCapture, L"cmdkey.videoRecord",    Scope::Session, Scene::Capture, kCapture, true, false, L"" },
 		{ L"cmd_pin",             kGrpCapture, L"cmdkey.pin",            Scope::Session, Scene::Capture, kCapture, true, false, L"" },
 		{ L"cmd_ocr",             kGrpCapture, L"cmdkey.ocr",            Scope::Session, Scene::Capture, kCapture, true, false, L"W" },
-		// Native 有 quirc（真实解码），所以这条是实装的（QT6 那边仍是纯桩）
+		// Native 用 ZXing（真实解码），所以这条是实装的（QT6 那边仍是纯桩）
 		{ L"cmd_scan_qrcode",     kGrpCapture, L"cmdkey.scanQrcode",     Scope::Session, Scene::Capture, kCapture, true, false, L"Q" },
 		{ L"cmd_translate",       kGrpCapture, L"cmdkey.translate",      Scope::Session, Scene::Capture, kCapture, true, false, L"F" },
 		{ L"cmd_scroll_capture",  kGrpCapture, L"cmdkey.scrollCapture",  Scope::Session, Scene::Capture, kCapture, true, false, L"" },
