@@ -2425,8 +2425,8 @@ void WinSettingHistory::refreshGrid()
 		// 顶部多一行，内容区相应减高：整张卡高度保持一致
 		thumbHost->setHeight(kThumbH - kHeaderH - kHeaderGap);
 		thumbHost->setFlexShrink(0.f);
-		// 历史与剪切板统一使用截图历史的深色缩略图底。
-		thumbHost->setBg(0x111111FFu);
+		// 缩略图底跟随主题：浅色用浅灰，深色保留深色画布。
+		thumbHost->setBg(SettingTheme::isDark() ? 0x111111FFu : SettingTheme::secondary);
 		thumbHost->setBorderRadius(SettingTheme::radiusMd);
 		thumbHost->setPositionType(Ling::Position::Relative);
 
