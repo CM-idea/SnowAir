@@ -7,6 +7,8 @@
 #include "WinSetting.h"
 #include "WinSettingAppearance.h"
 #include "SettingTheme.h"
+#include "../Plugin/PluginHost.h"
+#include "../Ocr/PluginPaths.h"
 #include "SettingWidgets.h"
 #include "../Tool/IconCodes.h"
 #include "../Tool/ToolbarTheme.h"   // 预览条镜像实际工具栏用的同一套常量
@@ -98,6 +100,7 @@ WinSettingAppearance::WinSettingAppearance(Ling::WinBase* parent) :Ling::Node(pa
     tabs[2] = tabHost->makeChild<Ling::Node>();
     tabs[2]->setFlexGrow(1.f); tabs[2]->setWidthPercent(100.f);
     buildToolbarTab(tabs[0]);
+    buildRackTab(tabs[0]);
     buildAppTab(tabs[1]);
     buildOtherTab(tabs[2]);
     showTab(0);
@@ -175,6 +178,7 @@ WinSettingAppearance::WinSettingAppearance(Ling::WinBase* parent) :Ling::Node(pa
 
 WinSettingAppearance::~WinSettingAppearance()
 {
+    PluginHost::instance().setRackPreview(false);
     selectPopup.reset();
     tbKindPopup.reset();
     win->onMouseDown.remove(tbInitDownTok);
@@ -247,15 +251,20 @@ void WinSettingAppearance::tbRefreshActionState()
 void WinSettingAppearance::showTab(int index)
 {
     if (index < 0 || index > 2) return;
+    if (index != 0 || tbKind != 4) {
+        PluginHost::instance().setRackPreview(false);
+    } else {
+        PluginHost::instance().setRackPreview(true);
+    }
     tabIndex = index;
     // 同步胶囊选中态（不触发 onChange，避免点击后递归）
     segHighlight(index);
-    // 「预览效果」只属于工具栏外观页：切到软件/其他外观时隐藏
+    // 「预览效果」只属于工具栏外观页：切到软件/其他外观或晾衣架时隐藏
     if (tbPreviewBtn) {
-        if (index == 0) tbPreviewBtn->show(); else tbPreviewBtn->hide();
+        if (index == 0 && tbKind != 4) tbPreviewBtn->show(); else tbPreviewBtn->hide();
     }
     if (tbInitialBtn) {
-        if (index == 0) tbInitialBtn->show();
+        if (index == 0 && tbKind != 4) tbInitialBtn->show();
         else {
             tbInitialBtn->hide();
             // 离开工具栏页时收起编辑器，回来保持收起状态
@@ -382,6 +391,11 @@ void WinSettingAppearance::segHighlight(int index)
 void WinSettingAppearance::tbUpdateKindTitle()
 {
     if (!seg0TitleBtn) return;
+    if (tbKind == 4) {
+        seg0TitleBtn->setText(Lang::get(L"setting.tbKind4") +
+                              Lang::get(L"setting.tbKindAppend"));
+        return;
+    }
     std::wstring key = L"setting.tbKind" + std::to_wstring(tbKind);
     seg0TitleBtn->setText(Lang::get(key) + Lang::get(L"setting.tbKindAppend"));
 }
@@ -393,7 +407,8 @@ void WinSettingAppearance::tbShowKindMenu()
     SettingUi::closePopup(win);
     std::vector<std::wstring> options = {
         Lang::get(L"setting.tbKind0"), Lang::get(L"setting.tbKind1"),
-        Lang::get(L"setting.tbKind2"), Lang::get(L"setting.tbKind3")
+        Lang::get(L"setting.tbKind2"), Lang::get(L"setting.tbKind3"),
+        Lang::get(L"setting.tbKind4")
     };
     const float itemH = 32.f;
     const float itemGap = 4.f;   // 选项之间 4px 间距
@@ -509,6 +524,166 @@ void WinSettingAppearance::buildToolbarTab(Ling::Node* host)
     tbRebuildZones();
 }
 
+void WinSettingAppearance::buildRackTab(Ling::Node* host)
+{
+    rackTab = host->makeChild<Ling::Node>();
+    rackTab->setWidthPercent(100.f);
+    rackTab->setFlexGrow(1.f);
+    rackTab->setFlexDirection(Ling::FlexDirection::Column);
+    rackTab->hide();
+
+    SettingUi::groupLabel(rackTab, Lang::get(L"setting.rackThemeGroup"));
+    static const wchar_t* kNames[4] = {
+        L"setting.rackTheme0", L"setting.rackTheme1",
+        L"setting.rackTheme2", L"setting.rackTheme3"
+    };
+    auto* themeGrid = SettingUi::grid2(rackTab);
+    std::array<Ling::Node*, 4> themeCells{};
+    for (int idx = 0; idx < 4; ++idx) {
+        auto* cell = themeGrid->makeChild<Ling::Button>();
+        themeCells[idx] = cell;
+        cell->setText(L"");
+        cell->setWidthPercent(100.f);
+        cell->setFlexDirection(Ling::FlexDirection::Row);
+        cell->setAlignItems(Ling::Align::Center);
+        cell->setJustifyContent(Ling::Justify::Start);
+        cell->setBg(SettingTheme::card);
+        cell->setHoverBg(SettingTheme::card);
+        cell->setBorder(1.f, SettingTheme::border);
+        cell->setBorderRadius(SettingTheme::radiusRow);
+        cell->setPadding(SettingTheme::sp2, 0, SettingTheme::sp4, 0);
+        cell->onClick.add([this, idx](Ling::Button*) { this->setRackTheme(idx); });
+
+        auto* preview = cell->makeChild<Ling::ImageBox>();
+        preview->setSize(116.f, 52.f);
+        preview->setFlexShrink(0.f);
+        preview->setMarginRight(SettingTheme::sp3);
+        preview->setBorderRadius(0.f);
+        const std::wstring previewPath =
+            (PluginPaths::root() / L"rack" / L"assets" /
+             (L"theme_" + std::to_wstring(idx) + L".png")).wstring();
+        preview->loadImg(previewPath, 232.f * win->dpi, 104.f * win->dpi);
+
+        auto* name = cell->makeChild<Ling::Label>();
+        name->setText(Lang::get(kNames[idx]));
+        name->setFontSize(SettingTheme::fontBase);
+        name->setColor(SettingTheme::textPrimary);
+        name->setFlexGrow(1.f);
+        name->setFlexShrink(1.f);
+
+        auto* radio = cell->makeChild<Ling::Button>();
+        radio->setSize(16.f, 16.f);
+        radio->setBorderRadius(SettingTheme::radiusFull);
+        radio->setBorderWidth(0.f);
+        radio->setBg(SettingTheme::input);
+        radio->setHoverBg(SettingTheme::input);
+        radio->setAlignItems(Ling::Align::Center);
+        radio->setJustifyContent(Ling::Justify::Center);
+        radio->setFlexShrink(0.f);
+        radio->setMarginLeft(SettingTheme::sp3);
+        auto* hole = radio->makeChild<Ling::Node>();
+        hole->setSize(12.f, 12.f);
+        hole->setBorderRadius(SettingTheme::radiusFull);
+        hole->setBg(SettingTheme::card);
+        hole->setAlignItems(Ling::Align::Center);
+        hole->setJustifyContent(Ling::Justify::Center);
+        hole->setFlexShrink(0.f);
+        auto* dot = hole->makeChild<Ling::Node>();
+        dot->setSize(6.f, 6.f);
+        dot->setBorderRadius(SettingTheme::radiusFull);
+        dot->setBg(0);
+        dot->setFlexShrink(0.f);
+        rackThemeRadios[idx] = radio;
+        rackThemeDots[idx] = dot;
+        radio->onClick.add([this, idx](Ling::Button*) { this->setRackTheme(idx); });
+    }
+    SettingUi::grid2Cells(themeGrid);
+    for (auto* cell : themeCells) {
+        if (cell) cell->setHeight(72.f);
+    }
+    styleRackThemeButtons();
+
+    SettingUi::groupLabel(rackTab, Lang::get(L"setting.rackCollectGroup"));
+    auto* collectGrid = SettingUi::grid2(rackTab);
+    auto* s = Setting::get();
+    SettingUi::toggleRow(collectGrid, Lang::get(L"setting.rackCollectImages"),
+        s->getRackFlag(L"rack.collect_images", true),
+        [](bool on) {
+            Setting::get()->setRackFlag(L"rack.collect_images", on);
+            PluginHost::instance().onSettingChanged(L"rack.collect_images");
+        }, true);
+    SettingUi::toggleRow(collectGrid, Lang::get(L"setting.rackCollectClipboard"),
+        s->getRackFlag(L"rack.collect_clipboard", true),
+        [](bool on) {
+            Setting::get()->setRackFlag(L"rack.collect_clipboard", on);
+            PluginHost::instance().onSettingChanged(L"rack.collect_clipboard");
+        }, true);
+    SettingUi::toggleRow(collectGrid, Lang::get(L"setting.rackAutoCapture"),
+        s->getRackFlag(L"rack.auto_capture", true),
+        [](bool on) {
+            Setting::get()->setRackFlag(L"rack.auto_capture", on);
+            PluginHost::instance().onSettingChanged(L"rack.auto_capture");
+        }, true);
+    SettingUi::toggleRow(collectGrid, Lang::get(L"setting.rackQuickPinHang"),
+        s->getRackFlag(L"rack.quick_pin_hang", false),
+        [](bool on) {
+            Setting::get()->setRackFlag(L"rack.quick_pin_hang", on);
+        }, true);
+    SettingUi::grid2Cells(collectGrid);
+
+    // 收起行为与衣架尺寸：同一行左右两栏，继续沿用常规组的双栏卡片排布。
+    auto* behaviorGrid = SettingUi::grid2(rackTab);
+    behaviorGrid->setMarginTop(SettingTheme::optionGap);
+    // 点击时以 Setting 当前值为准，避免「恢复默认」程序化改写后仍按旧的
+    // 捕获状态取反（与「其他外观」页的 mkStateToggle 同一做法）。
+    auto autoRetractRow = SettingUi::optionRow(
+        behaviorGrid, Lang::get(L"setting.rackAutoRetract"), L"", true,
+        SettingUi::kToggleH, Lang::get(L"setting.rackAutoRetractTip"));
+    rackAutoRetractSw = autoRetractRow.ctrlBox->makeChild<Ling::Button>();
+    SettingUi::styleToggle(rackAutoRetractSw,
+        s->getRackFlag(L"rack.auto_retract", true));
+    rackAutoRetractSw->onClick.add([sw = rackAutoRetractSw](Ling::Button*) {
+        auto* st = Setting::get();
+        const bool on = !st->getRackFlag(L"rack.auto_retract", true);
+        st->setRackFlag(L"rack.auto_retract", on);
+        SettingUi::styleToggle(sw, on);
+        PluginHost::instance().onSettingChanged(L"rack.auto_retract");
+    });
+    SettingUi::selectRow(behaviorGrid, Lang::get(L"setting.rackSize"),
+        { Lang::get(L"setting.rackSizeSmall"), Lang::get(L"setting.rackSizeMedium"),
+          Lang::get(L"setting.rackSizeLarge") },
+        std::clamp(s->getRackInt(L"rack.size", 1), 0, 2),
+        [](int i, const std::wstring&) {
+            Setting::get()->setRackInt(L"rack.size", std::clamp(i, 0, 2));
+            PluginHost::instance().onSettingChanged(L"rack.size");
+        }, true);
+    SettingUi::grid2Cells(behaviorGrid);
+}
+
+void WinSettingAppearance::setRackTheme(int theme)
+{
+    theme = std::clamp(theme, 0, 3);
+    if (auto* s = Setting::get()) s->setRackInt(L"rack.theme", theme);
+    PluginHost::instance().applyRackTheme(theme);
+    styleRackThemeButtons();
+    tbRefreshRestore();
+}
+
+void WinSettingAppearance::styleRackThemeButtons()
+{
+    constexpr uint32_t kGreen = 0x34C759FFu;
+    const int current = Setting::get() ? Setting::get()->getRackInt(L"rack.theme", 0) : 0;
+    for (int i = 0; i < 4; ++i) {
+        auto* radio = rackThemeRadios[i];
+        if (!radio) continue;
+        const bool on = i == current;
+        const uint32_t ring = on ? kGreen : SettingTheme::input;
+        radio->setBg(ring);
+        radio->setHoverBg(ring);
+        if (rackThemeDots[i]) rackThemeDots[i]->setBg(on ? kGreen : 0u);
+    }
+}
+
 void WinSettingAppearance::buildAppTab(Ling::Node* host)
 {
     // 内容滚动容器：软件外观控件超出窗口高度时可滚动
@@ -569,7 +744,10 @@ void WinSettingAppearance::buildOtherTab(Ling::Node* host)
     // 悬停预览：历史记录 / 剪切板卡片停悬时弹出大图或文字卡（默认关闭，避免误触打扰）
     otherHoverPreviewBtn = mkStateToggle(L"setting.hoverPreview",
         [] { return Setting::get()->getHoverPreview(); },
-        [](bool on) { Setting::get()->setHoverPreview(on); }, {},
+        [](bool on) {
+            Setting::get()->setHoverPreview(on);
+            PluginHost::instance().onSettingChanged(L"hoverPreview");
+        }, {},
         L"setting.hoverPreviewTip");
     // 记忆工具样式：记住上次标注工具样式（如大箭头），下次截图自动复用；默认关闭
     otherRememberStyleBtn = mkStateToggle(L"setting.rememberToolStyle",
@@ -1152,7 +1330,23 @@ void WinSettingAppearance::showSelectBox(Ling::Button* btn)
 
 void WinSettingAppearance::tbSetKind(int kind)
 {
-    if (kind < 0 || kind > ToolbarStore::kindCount - 1 || kind == tbKind) return;
+    if (kind < 0 || kind > ToolbarStore::kindCount) return;
+    if (kind == 4) {
+        tbKind = 4;
+        if (tbScroller) tbScroller->hide();
+        if (rackTab) rackTab->show();
+        if (tbPreviewBtn) tbPreviewBtn->hide();
+        if (tbInitialBtn) tbInitialBtn->hide();
+        PluginHost::instance().setRackPreview(true);
+        return;
+    }
+    if (tbKind == 4) {
+        if (tbScroller) tbScroller->show();
+        if (rackTab) rackTab->hide();
+        if (tabIndex == 0 && tbPreviewBtn) tbPreviewBtn->show();
+        PluginHost::instance().setRackPreview(false);
+    }
+    if (kind == tbKind) return;
     tbKind = kind;
     auto st = ToolbarStore::loadLayout(kind);
     tbActive = st.active;
@@ -1190,6 +1384,10 @@ bool WinSettingAppearance::appearanceAtDefaults() const
         return s->getFeatureTips() && !s->getHotkeyTip()
             && !s->getRememberToolStyle() && !s->getHoverPreview();
     }
+    if (tabIndex == 0 && tbKind == 4) {
+        return s->getRackInt(L"rack.theme", 0) == 0 &&
+               s->getRackFlag(L"rack.auto_retract", true);
+    }
     // 「工具栏外观」页：布局与初始属性都为默认值
     auto def = ToolbarStore::defaultLayout(tbKind);
     return !s->hasAnyToolDesign() && tbActive == def.active && tbInactive == def.inactive;
@@ -1207,6 +1405,15 @@ void WinSettingAppearance::tbRestoreDefaults()
 {
     // 已是默认值：按钮置灰，点击不产生任何改动（三个子页规则一致）
     if (appearanceAtDefaults()) return;
+    if (tabIndex == 0 && tbKind == 4) {
+        setRackTheme(0);
+        auto* s = Setting::get();
+        s->setRackFlag(L"rack.auto_retract", true);
+        if (rackAutoRetractSw) SettingUi::styleToggle(rackAutoRetractSw, true);
+        PluginHost::instance().onSettingChanged(L"rack.auto_retract");
+        tbRefreshRestore();
+        return;
+    }
     // 「软件外观」页：恢复贴图边框与托盘图标到默认值，并回写控件显示
     if (tabIndex == 1) {
         auto* s = Setting::get();

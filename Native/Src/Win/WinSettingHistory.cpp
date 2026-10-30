@@ -2186,6 +2186,18 @@ void WinSettingHistory::showTagDialogFor(const std::wstring& key, std::vector<st
 std::vector<Setting::HistoryItem> WinSettingHistory::collectItems(bool forceRescan)
 {
 	auto list = Setting::get()->getHistoryItemsForUi(forceRescan);
+	// 建「我们自己产出的文件 → 封面」表：剪贴板里复制本软件录的屏时，卡片直接用媒体历史的封面，
+	// 不再显示文件名。媒体历史条目本身在「录屏」页照旧显示，两边各自独立。
+	ourMediaCover_.clear();
+	for (const auto& m : list) {
+		if (m.source != L"record" || m.filePath.empty()) continue;
+		const auto cover = (Setting::get()->getHistoryThumbDir() / (m.id + L".png")).wstring();
+		std::error_code ec;
+		if (!std::filesystem::exists(cover, ec)) continue;   // 封面被保留策略清掉了：回退到文件名
+		std::wstring key = m.filePath;
+		for (auto& ch : key) ch = (wchar_t)towlower(ch);
+		ourMediaCover_[std::move(key)] = cover;
+	}
 	// 「全部」和「剪切板」页要把剪切板条目并进来（「全部」里是否显示由 matchSourceTab 决定）
 	if (sourceTab == 0 || sourceTab == 4) {
 		for (auto& c : Setting::get()->getClipboardItems()) {
@@ -2195,6 +2207,11 @@ std::vector<Setting::HistoryItem> WinSettingHistory::collectItems(bool forceResc
 			it.filePath = (c.type == L"image") ? c.filePath : L"";
 			it.width = c.width;
 			it.height = c.height;
+			// 剪贴板里的「图片文件」老条目没存宽高：这里补读一次文件头，渲染路径就不必改
+			if (it.width <= 0 && c.files.size() == 1 && clipIsImageExt(c.files.front())) {
+				const auto wh = Util::imageSize(c.files.front());
+				if (wh.first > 0) { it.width = wh.first; it.height = wh.second; }
+			}
 			it.createdAt = c.createdAt;
 			it.text = c.text;
 			it.files = c.files;
@@ -2409,9 +2426,8 @@ void WinSettingHistory::refreshGrid()
 		// 顶部多一行，内容区相应减高：整张卡高度保持一致
 		thumbHost->setHeight(kThumbH - kHeaderH - kHeaderGap);
 		thumbHost->setFlexShrink(0.f);
-		// 剪切板卡片里是文字/文件名预览，底要走主题色（浅色下深底会让深色文字看不见）；
-		// 截图/录屏都是图片铺满，保留深底当图片留白的衬底。
-		thumbHost->setBg(clip ? SettingTheme::secondary : 0x111111FFu);
+		// 历史与剪切板统一使用截图历史的深色缩略图底。
+		thumbHost->setBg(0x111111FFu);
 		thumbHost->setBorderRadius(SettingTheme::radiusMd);
 		thumbHost->setPositionType(Ling::Position::Relative);
 
@@ -2425,6 +2441,13 @@ void WinSettingHistory::refreshGrid()
 		}
 		else if (clipFiles) {
 			if (clipImageKind) thumbPath = it.files.front();
+			else {
+				// 本软件自己产出的文件（录屏/动图）：复用媒体历史的封面，不再显示文件名
+				std::wstring key = it.files.front();
+				for (auto& ch : key) ch = (wchar_t)towlower(ch);
+				auto hit = ourMediaCover_.find(key);
+				if (hit != ourMediaCover_.end()) thumbPath = hit->second;
+			}
 		}
 		else if (!clipText) {
 			thumbPath = it.filePath;

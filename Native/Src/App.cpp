@@ -10,12 +10,14 @@
 #include "./Win/WinPin.h"
 #include "./Win/WinSetting.h"
 #include "./Win/ScreenCapture.h"
+#include "Plugin/PluginHost.h"
 
 std::unique_ptr<App> app;
 
 
 App::~App()
 {
+    PluginHost::instance().shutdown();
 }
 
 void App::init()
@@ -142,6 +144,7 @@ void App::captureFullScreenSilent()
 
 	if (Setting::get()->getCopyAsFile() && saved) Util::addFileToClipboard(path);
 	else Util::saveToClipboard(sw, sh, pixels.data());
+	Setting::get()->setLastCaptureRect(sx, sy, sw, sh);
 	if (saved) Setting::get()->addHistoryFile(path, sw, sh, L"fullscreen");
 }
 
@@ -178,6 +181,7 @@ void App::captureFocusedWindowSilent()
 
 	if (Setting::get()->getCopyAsFile() && saved) Util::addFileToClipboard(path);
 	else Util::saveToClipboard(w, h, pixels.data());
+	Setting::get()->setLastCaptureRect(rc.left, rc.top, w, h);
 	if (saved) Setting::get()->addHistoryFile(path, w, h, L"focused");
 }
 
@@ -216,6 +220,7 @@ App::App()
     app->onBeforeQuit.add([]() { WinCap::stopIfRecording(); });
     Setting::init();
     Lang::init();
+    PluginHost::instance().init();
 
     // 用 find 读，别用 operator[]：后者会把没传的键以空值插进 args，
     // 后面重建命令行时会混进 --elevated= / --auto-quit= 这类空值噪声。

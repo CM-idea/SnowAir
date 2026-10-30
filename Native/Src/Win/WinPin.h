@@ -57,6 +57,9 @@ private:
 	void applyScale(float newScale, POINT anchor);
 	void paintScaleTip(ID2D1DeviceContext* ctx);
 	void paintHoverChrome(ID2D1DeviceContext* ctx);
+	// 悬停图标与缩放提示的字号/布局都乘了 dpi，是「建时定格」的资源：换屏后必须重建
+	void refreshDpiResources();
+	void refreshScaleTip();
 	void paintHoverBtn(ID2D1DeviceContext* ctx, const D2D1_RECT_F& r, IDWriteTextLayout* icon, uint32_t iconColor, bool hovered);
 	D2D1_RECT_F lockBtnRect() const;
 	D2D1_RECT_F closeBtnRect() const;

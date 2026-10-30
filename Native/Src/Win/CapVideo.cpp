@@ -15,6 +15,7 @@ using namespace Microsoft::WRL;
 #include "VideoGif.hpp"
 #include <algorithm>
 #include <vector>
+#include <mftransform.h>   // MFTEnumEx：探测本机有没有 H.265 编码器
 
 namespace {
     // 录制临时文件名直接用「视频文件名格式」的末段。
@@ -226,6 +227,28 @@ std::vector<RECT> CapVideo::reachableMonitors(const RECT& targetDesk)
     return out;
 }
 
+// 只查一次：MFT 列表在一次会话里不会变，重复探测只是白花时间（magic static 自带线程安全）。
+// MFTEnumEx 要求 MF 平台已启动 —— 采集线程里本来就 MFStartup 过，这里再起一次只是加引用计数。
+bool CapVideo::hasHevcEncoder()
+{
+    static const bool available = []() {
+        const bool started = SUCCEEDED(MFStartup(MF_VERSION));
+        bool found = false;
+        MFT_REGISTER_TYPE_INFO outInfo{ MFMediaType_Video, MFVideoFormat_HEVC };
+        IMFActivate** acts = nullptr;
+        UINT32 count = 0;
+        if (SUCCEEDED(MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ALL,
+                nullptr, &outInfo, &acts, &count))) {
+            found = count > 0;
+            for (UINT32 i = 0; i < count; ++i) if (acts[i]) acts[i]->Release();
+            CoTaskMemFree(acts);
+        }
+        if (started) MFShutdown();
+        return found;
+    }();
+    return available;
+}
+
 bool CapVideo::canSwitchToMonitor(const RECT& mon) const
 {
     if (gifParam || !mp4Param) return true;   // 动图走 GDI / 还没开录：不设限
@@ -286,13 +309,31 @@ void CapVideo::startMp4(bool useSpeaker, bool useMic)
     // 质量档（0~100）：录屏走 Quality 模式 —— 静止画面只花很少码率，动态画面优先保画质。
     // ★ 必须显式设 vbrm=2，否则 VideoMp4 里"按 vbrq 定质量"的分支不会执行，
     //   编码器会走驱动默认码控（经常是 CBR），体积既大又不听这个选项的。
-    static const int kBitrate[]{ 2500, 6000, 12000 };   // 平均码率目标（部分 MFT 需要）
-    static const int kQuality[]{ 40, 50, 60 };
+    // ★ 质量值按「屏幕内容」定：文字边缘对量化最敏感，原来的 40/50/60 太软，实测 80 起步才不糊。
+    static const int kQuality[]{ 80, 88, 95 };
     const int speed = std::clamp(st->getEncodeSpeed(), 0, 2);
-    mp4Param->BR = kBitrate[speed];
+    // 码率是**唯一一定能到达编码器**的旋钮：它写在媒体类型上（MF_MT_AVG_BITRATE），
+    // 不像 ICodecAPI 那套质量参数会被硬件 MFT 静默忽略。
+    // 它同时是 Quality 模式的**硬上限**（见 VideoMp4 里的 AVEncCommonMaxBitRate），
+    // 所以这里算出来的就是"每秒最多花多少比特"，直接决定文件大小。
+    // 系数按"屏幕内容"标定：0.10/0.18/0.30 分别约等于 1080p30 的 6.2/11.2/18.7 Mbps。
+    // 实测 0.05 这档在白底黑字的网页上已经有可见块状伪影，往上一档就干净了。
+    // 注意它按像素线性缩放：录很小的区域时文件会很小（448x320@24「高」仅 1.3 MB/10 秒），
+    // 录满屏 1080p60 时「高」会很大（约 25 MB/10 秒）—— 大画幅建议用低/中档。
+    // 系数按 A/B 实测标定（同一段 1088x608@24 素材，VBR+max+mean）：
+    //   2.5 Mbps 与 3.8 Mbps 的画面差异要在 3 倍放大下才看得出（仅白字边缘轻微振铃），
+    //   所以「中」取 0.16 —— 该画幅约 2.5 Mbps / 3.0 MB per 10s，比 0.22 省三分之一。
+    // 按像素线性缩放：录小区域文件很小，录满屏 1080p60「高」约 30 MB/10 秒，大画幅请用低/中档。
+    static const double kBitsPerPixel[]{ 0.09, 0.16, 0.26 };
+    const double bits = kBitsPerPixel[speed] * (double)rcW * (double)rcH * (double)mp4Param->fps;
+    mp4Param->BR = (int)std::clamp(bits / 1000.0, 400.0, 50000.0);   // kbps，400~50000
+    // 实测（同一段素材重编对比）：Quality 模式**只认质量分**，MaxBitRate / MeanBitRate
+    // 都被忽略，实际只花掉预算的 25% —— 这就是"有预算却还是糊"的根因。
+    // 换成 UnconstrainedVBR 后它才认 mean/max，实测能用到目标的 91%，
+    // 且静止画面照样省（不像 CBR 那样恒定烧码率）。
     mp4Param->vbrq = kQuality[speed];
-    mp4Param->vbrm = 2;                                  // 质量优先
-    mp4Param->Qu = 50;
+    mp4Param->vbrm = 1;                                  // UnconstrainedVBR（会用 mean/max）
+    mp4Param->Qu = 0;                                    // 0 = 编码器尽量做慢做细
     mp4Param->HwTransforms = st->getHwAccel();
     mp4Param->MustEnd = false;
     // 麦克风：设置为「关闭」时，无视工具条上的麦克风开关
@@ -308,7 +349,11 @@ void CapVideo::startMp4(bool useSpeaker, bool useMic)
     // 文案在这里先取出来按值带进线程：langObj 是 WinRT 对象，不往采集线程里带
     auto errText = Lang::get(L"video.recordFailed");
     auto errTitle = Lang::get(L"about.sysTip");
-    captureThread = std::jthread([this, errText, errTitle, codecs](std::stop_token st2) {
+    auto hevcText = Lang::get(L"video.hevcUnavailable");
+    // 用户点名只要 H.265：失败时值得单独解释一句（本机没有这个编码器），别让他对着
+    // 笼统的「录屏失败」去猜。自动模式退到 H.264 属于设计行为，不打扰。
+    const bool hevcOnly = codecs.size() == 1 && codecs[0] == MFVideoFormat_HEVC;
+    captureThread = std::jthread([this, errText, errTitle, hevcText, hevcOnly, codecs](std::stop_token st2) {
         HRESULT hr = MFStartup(MF_VERSION);
         if (FAILED(hr)) {
             showRecordError(errText, errTitle);
@@ -348,7 +393,8 @@ void CapVideo::startMp4(bool useSpeaker, bool useMic)
             // 只有这两个码是"这台机器认不了这个编码器"，换编码器才有意义
             if (code != -5 && code != -10) break;
         }
-        if (code != 0) showRecordError(errText, errTitle);
+        if (code != 0)
+            showRecordError((hevcOnly && !hasHevcEncoder()) ? hevcText : errText, errTitle);
         CoUninitialize();
         MFShutdown();
     });

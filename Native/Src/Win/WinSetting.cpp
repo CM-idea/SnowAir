@@ -9,6 +9,7 @@
 #include "../App.h"
 #include "../Lang.h"
 #include "../Setting.h"
+#include "../Plugin/PluginHost.h"
 #include "../Update.h"
 #include "../Util.h"
 #include "WinSetting.h"
@@ -465,6 +466,7 @@ void WinSetting::scheduleLoadPage(int index)
 // 与 onMenuItemClick 的区别是"目标页就是当前页"时直接返回，不重建页面。
 void WinSetting::showPage(int index)
 {
+	PluginHost::instance().setRackPreview(false);
 	if (menus.empty() || gMenuData.empty()) return;
 	if (index < 0) index = 0;
 	if (index > (int)menus.size() - 1) index = (int)menus.size() - 1;
@@ -483,7 +485,7 @@ void WinSetting::loadPage(int index)
 {
 	if (!content) return;
 
-	// 若上一页是「直挂视口容器」的页（QuickTranslate / History / About）：它们不经 contentScroll，
+	// 若上一页是「直挂视口容器」的页（QuickTranslate / History / Plugins / About）：它们不经 contentScroll，
 	// 切走前必须先把 contentScroll 恢复显示、并把页面从 cardNode 摘除，
 	// 否则页面残留为 cardNode 子节点、contentScroll 被 display:none 钉死。
 	contentScroll->show();
@@ -498,6 +500,10 @@ void WinSetting::loadPage(int index)
 	if (pageAbout) {
 		cardNode->removeChild(pageAbout);
 		pageAbout = nullptr;
+	}
+	if (pagePlugins) {
+		cardNode->removeChild(pagePlugins);
+		pagePlugins = nullptr;
 	}
 
 	// 清理旧子页：先手动置空指针（避免访问悬空），再清空 content 的所有子节点
@@ -589,8 +595,14 @@ void WinSetting::loadPage(int index)
 			SettingTheme::contentPadX, SettingTheme::contentPadY);
 		break;
 	case 6:
+		// 插件集成页：底部工具栏需始终贴住视口底部，与截图历史页同策略。
+		// 切走时由 loadPage 开头的 pagePlugins 清理分支摘除。
+		contentScroll->hide();
 		pagePlugins = new WinSettingPlugins(this);
-		adopt(pagePlugins); makeFullFill(pagePlugins);
+		SettingUi::adoptChild(cardNode, pagePlugins);
+		makeFullFill(pagePlugins);
+		pagePlugins->setPadding(SettingTheme::contentPadX, SettingTheme::contentPadY,
+			SettingTheme::contentPadX, SettingTheme::contentPadY);
 		break;
 	case 7:
 		// 关于页：设计稿要求分隔线与目录信息贴卡片底 → 页面高度必须恒等于卡片高度。

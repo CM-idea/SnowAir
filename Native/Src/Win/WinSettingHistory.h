@@ -121,6 +121,9 @@ private:
 	std::unique_ptr<ShotPreviewWindow> preview_;   // 停悬大图预览（懒创建）
 	int previewIndex_{ -1 };                 // 当前弹出预览的卡片下标（-1 = 没弹）
 	std::wstring pendingReorderId_;          // 等待置顶的剪切板条目 id
+	// 「我们自己产出的文件」→ 封面图路径（小写路径为键）。剪贴板里复制本软件的录屏时，
+	// 卡片直接复用媒体历史的封面，不再显示文件名。collectItems 时重建。
+	std::unordered_map<std::wstring, std::wstring> ourMediaCover_;
 	std::unique_ptr<Tip> tip;                // 三个图标按钮的停悬提示（系统 tooltip，同截图工具栏）
 	winrt::event_token wheelTok{}, moveTok{}, sizeTok{}, timerTok{}, focusTok{}, mouseDownTok{}, keyTok{}, modalKeyTok{}, cursorTok{}, blurTok{};
 	bool modalKeyBound{ false };

@@ -26,5 +26,8 @@ struct OcrResult {
 	OcrEngineKind engineUsed{ OcrEngineKind::System };
 	std::wstring error;
 	bool fellBack{ false };
+	// 引擎自己起不来（文件损坏 / 初始化失败 / 推理报错），而不是「跑通了但没认出字」。
+	// 只有前者才该换下一个引擎；后者是结论，换引擎只会让同一张图的结果时好时坏。
+	bool engineUnavailable{ false };
 	std::vector<OcrRegion> regions;
 };

@@ -76,7 +76,18 @@ WinPin::WinPin(int x, int y, int w, int h, const std::vector<BYTE>* data, const 
 	editing = false;
 	opacityPercent = Setting::get()->getPinOpacity();
 	onMoved.add([this]() { if (editing) layoutTools(); refreshOcrPanel(); });
-	onDpiChanged.add([this]() { dpiChanged = true; });
+	onDpiChanged.add([this]() {
+		dpiChanged = true;
+		// 图标布局按创建时的 dpi 定格（宽高 32*dpi、字号 18*dpi，见 makeHoverIcon），
+		// 而按钮底座每次按当前 dpi 算（见 lockBtnRect）。跨屏后只更新 dpi 不重建图标，
+		// 底座缩小、图标仍居在旧尺寸的布局里，就向右下偏出圆圈。换 dpi 必须重建再重画。
+		refreshDpiResources();
+		refresh();
+		if (toolOcr && toolOcr->hwnd) {
+			refreshOcrPanel();
+			toolOcr->repaintChrome();   // 控件由识别浮层镜像绘制，也要跟着重画
+		}
+	});
 	onSizeChanged.add([this]() {
 		if (dpiChanged) {
 			dpiChanged = false;
@@ -227,7 +238,7 @@ void WinPin::applyScale(float newScale, POINT anchor)
 	applyWinSize();
 	setPosition(x + anchor.x - static_cast<int>(std::lround(imgX * scale)),
 		y + anchor.y - static_cast<int>(std::lround(imgY * scale)));
-	scaleTip = Ling::D2D::get()->makeTextLayout(wfmt(L"%d%%", static_cast<int>(std::lround(scale * 100.f))), 12.f * dpi);
+	refreshScaleTip();
 	setTimer(800, 101);
 	if (editing) layoutTools();
 	refresh();
@@ -469,6 +480,24 @@ Microsoft::WRL::ComPtr<IDWriteTextLayout> WinPin::makeHoverIcon(const wchar_t* c
 	return out;
 }
 
+// 图标与缩放提示里都带着 dpi（布局边长 + 字号），只能在对应 dpi 下用。
+// 贴图跨屏后由 WinBase 更新 dpi，这里必须按新 dpi 重建一次；否则它们仍是旧 dpi 的尺寸，
+// 与按新 dpi 计算的按钮底座对不上（图标偏出圆圈、右下角错位）。
+void WinPin::refreshDpiResources()
+{
+	iconLock = makeHoverIcon(Icon::Lock);
+	iconUnlock = makeHoverIcon(Icon::Unlock);
+	iconEdit = makeHoverIcon(Icon::Pen);
+	iconClose = makeHoverIcon(Icon::Cancel);
+	if (scaleTip) refreshScaleTip();   // 没显示过缩放提示就不必建
+}
+
+void WinPin::refreshScaleTip()
+{
+	scaleTip = Ling::D2D::get()->makeTextLayout(
+		wfmt(L"%d%%", static_cast<int>(std::lround(scale * 100.f))), 12.f * dpi);
+}
+
 void WinPin::onCreated()
 {
 	disableBorderRadius();
@@ -484,10 +513,7 @@ void WinPin::onCreated()
 	d2d->deviceContext->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), brushTipText.GetAddressOf());
 	d2d->deviceContext->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 0.45f), hoverBtnBg.GetAddressOf());
 	d2d->deviceContext->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), hoverIconBrush.GetAddressOf());
-	iconLock = makeHoverIcon(Icon::Lock);
-	iconUnlock = makeHoverIcon(Icon::Unlock);
-	iconEdit = makeHoverIcon(Icon::Pen);
-	iconClose = makeHoverIcon(Icon::Cancel);
+	refreshDpiResources();
 	// 功能设置 · 贴图：自动缩放窗口 —— 图比工作区大时等比缩到工作区内（只缩不放）
 	if (Setting::get()->getPinAutoFit()) {
 		const auto imgSz = getImgSize();

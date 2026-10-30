@@ -102,11 +102,13 @@ OcrResult recognize(int w, int h, const BYTE* bgra)
 		auto engine = tryCreateEngine();
 		if (!engine) {
 			r.error = L"未安装可用的 OCR 语言包（可在系统设置中添加中文）";
+			r.engineUnavailable = true;
 			return r;
 		}
 		auto result = engine.RecognizeAsync(bmp).get();
 		if (!result) {
 			r.error = L"系统 OCR 识别失败";
+			r.engineUnavailable = true;
 			return r;
 		}
 		std::wstring plain;
@@ -153,9 +155,11 @@ OcrResult recognize(int w, int h, const BYTE* bgra)
 	}
 	catch (winrt::hresult_error const& e) {
 		r.error = e.message().c_str();
+		r.engineUnavailable = true;
 	}
 	catch (...) {
 		r.error = L"系统 OCR 识别失败";
+		r.engineUnavailable = true;
 	}
 	return r;
 }

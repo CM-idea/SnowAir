@@ -13,6 +13,7 @@
 #include "../Ocr/LwPpOcrEngine.h"
 #include "../Translate/TranslateTypes.h"
 #include "WinSetting.h"
+#include "CapVideo.h"
 #include <shobjidl.h>
 #include <commdlg.h>
 
@@ -540,9 +541,14 @@ void WinSettingFeatures::buildRecord(Ling::Node* p)
 	SettingUi::selectRow(g, Lang::get(L"setting.fnRecMic"),
 		{ Lang::get(L"setting.fnRecMicDefault"), Lang::get(L"setting.fnRecMicOff") }, s->getRecordMic(),
 		[](int i, const std::wstring&) { Setting::get()->setRecordMic(i); }, true);
-	SettingUi::selectRow(g, Lang::get(L"setting.fnRecEncoder"),
-		{ Lang::get(L"setting.fnRecEncoderAuto"), L"H.264", L"H.265" }, s->getVideoEncoder(),
-		[](int i, const std::wstring&) { Setting::get()->setVideoEncoder(i); }, true);
+	{
+		// 本机拿不到 H.265 编码器时把这个选项标出来：选了它录制必然失败，别让用户自己去撞
+		std::vector<std::wstring> encOpts{
+			Lang::get(L"setting.fnRecEncoderAuto"), L"H.264", L"H.265" };
+		if (!CapVideo::hasHevcEncoder()) encOpts[2] += Lang::get(L"setting.fnRecHevcUnavailable");
+		SettingUi::selectRow(g, Lang::get(L"setting.fnRecEncoder"), encOpts, s->getVideoEncoder(),
+			[](int i, const std::wstring&) { Setting::get()->setVideoEncoder(i); }, true);
+	}
 	SettingUi::selectRow(g, Lang::get(L"setting.fnRecBitrate"),
 		{ Lang::get(L"setting.fnRecBitrateLow"), Lang::get(L"setting.fnRecBitrateMid"), Lang::get(L"setting.fnRecBitrateHigh") }, s->getEncodeSpeed(),
 		[](int i, const std::wstring&) { Setting::get()->setEncodeSpeed(i); }, true);

@@ -2,6 +2,8 @@
 #include <include/Ling.h>
 #include <wincodec.h>
 #include <chrono>
+#include <fstream>
+#include <mutex>
 // 快速贴屏要读「资源管理器当前选中项」（Shell COM）与「前台窗口里拖选的文字」（UIA）
 #include <servprov.h>
 #include <shlguid.h>
@@ -10,6 +12,7 @@
 #include <oleacc.h>
 #include <UIAutomationClient.h>
 #include "Setting.h"
+#include "Plugin/PluginHost.h"
 #include "Util.h"
 #include "Lang.h"
 #include "Win/WinCap.h"
@@ -40,6 +43,8 @@ namespace {
         { L"open_history",           108 },
         { L"capture_repeat",         109 },
         { L"quick_pin",              110 },
+        { L"rack_quick_hang",        111 },
+        { L"rack_toggle",            112 },
     };
     bool isGlobalHotkeyId(const std::wstring& id)
     {
@@ -80,11 +85,82 @@ namespace {
 }
 
 
+// —— config.json 的读取与落盘 ——
+namespace {
+    // 读配置文件。返回 false = 读不出来（被占用 / 没权限 / IO 错误），与「文件是空的」区分开。
+    // 旧实现直接用 readFileText：读失败也返回空串，于是启动时会把读不到的配置当成空文件、
+    // 立刻写回默认值 —— 一次临时的读取失败（杀软扫描、另一个实例正在保存）就会清空用户的
+    // 全部设置，连带 OCR 档位与插件目录，表现成「OCR 说运行时未安装」「设置自己变回去了」。
+    bool readConfigContent(const std::filesystem::path& path, std::wstring& out)
+    {
+        out.clear();
+        std::ifstream in{ path, std::ios::binary };
+        if (!in) return false;
+        std::string bytes{ std::istreambuf_iterator<char>{ in }, std::istreambuf_iterator<char>{} };
+        if (in.bad()) return false;
+        out = Ling::Util::readTextFromBytes(bytes.data(), bytes.size());
+        return true;
+    }
+
+    // 只有空白 / BOM：老版本写盘中断留下的空文件，按「首次运行」处理
+    bool isBlankConfig(const std::wstring& s)
+    {
+        for (wchar_t c : s)
+            if (c != L' ' && c != L'\t' && c != L'\r' && c != L'\n' && c != 0xFEFF) return false;
+        return true;
+    }
+
+    // 原子写：先写同目录临时文件，成功后再整体替换目标。
+    // 旧实现 CreateFile(CREATE_ALWAYS) 直接截断目标文件，写到一半崩溃 / 被杀就留下半截 JSON，
+    // 下次启动解析失败 —— 用户看到的「配置文件读取错误」就是这么来的。
+    bool writeConfigAtomic(const std::filesystem::path& dst, const std::wstring& text)
+    {
+        const std::wstring tmp = dst.wstring() + L".tmp";
+        HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return false;
+        const WORD bom = 0xFEFF;
+        const DWORD bytes = static_cast<DWORD>(text.size() * sizeof(wchar_t));
+        DWORD written = 0;
+        bool ok = WriteFile(h, &bom, sizeof(bom), &written, nullptr) && written == sizeof(bom)
+            && WriteFile(h, text.data(), bytes, &written, nullptr) && written == bytes
+            && FlushFileBuffers(h);
+        CloseHandle(h);
+        if (!ok) {
+            DeleteFileW(tmp.c_str());
+            return false;
+        }
+        if (!MoveFileExW(tmp.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+            DeleteFileW(tmp.c_str());
+            return false;
+        }
+        return true;
+    }
+
+    std::filesystem::path siblingOf(const std::filesystem::path& p, const wchar_t* suffix)
+    {
+        return std::filesystem::path{ p.wstring() + suffix };
+    }
+}
+
+
 Setting::Setting() :dataPath{ initDataPath() }, configPath{ initConfigPath() }
 {
     if (std::filesystem::exists(configPath)) {
-        auto content = Ling::Util::readFileText(configPath);
-        if (content.empty() || content.find_first_not_of(L" \t\r\n") == std::wstring::npos) {
+        std::wstring content;
+        if (!readConfigContent(configPath, content)) {
+            // 读不到 ≠ 空文件：原文件保持原样，本次先用内存里的默认值，绝不回写覆盖
+            configReadOnly = true;
+            configObj = JsonObject::Parse(defaultConfig);
+            MessageBox(nullptr,
+                L"config.json 读取失败（文件被占用或没有权限）。\n"
+                L"本次使用默认设置，原文件已保留、不会被覆盖。\n\n"
+                L"Could not read config.json. The file was left untouched.",
+                L"SnowAir", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        if (isBlankConfig(content)) {
+            // 真空文件（首次安装 / 上次写到一半）：补一份默认配置
             configObj = JsonObject::Parse(defaultConfig);
             save();
             return;
@@ -92,11 +168,54 @@ Setting::Setting() :dataPath{ initDataPath() }, configPath{ initConfigPath() }
         JsonObject obj{ nullptr };
         if (JsonObject::TryParse(content, obj)) {
             configObj = obj;
+            // 留一份可用配置：下次真解析失败时用它恢复，而不是把设置清成默认值
+            backupConfigFile();
             return;
         }
-        MessageBox(nullptr, L"config.json parse error，use default config", L"SnowAir", MB_OK | MB_ICONWARNING);
+        // 解析失败：先留存现场，再尝试上一份可用配置，都没有才回落默认值。
+        // 旧实现只把内存换成默认值、坏文件原地不动：用户每启动一次丢一次设置。
+        preserveBrokenConfig();
+        if (restoreFromBackup()) return;
+        configObj = JsonObject::Parse(defaultConfig);
+        MessageBox(nullptr,
+            L"config.json 格式错误，已备份为 config.json.bad，本次使用默认设置。\n\n"
+            L"config.json is malformed; a backup was kept as config.json.bad.",
+            L"SnowAir", MB_OK | MB_ICONWARNING);
+        return;
     }
-    configObj = JsonObject::Parse(defaultConfig); 
+    // 没有 config.json：真正的首次运行（或用户主动删掉想恢复默认），按默认值初始化。
+    // 不从 .bak 复活：删文件是最直观的「恢复默认」，不能让它把旧设置又拉回来。
+    configObj = JsonObject::Parse(defaultConfig);
+}
+
+// 启动读成功时留一份好的副本，供 restoreFromBackup 回退（只在启动时写，运行期不多写盘）
+void Setting::backupConfigFile()
+{
+    if (configPath.empty()) return;
+    std::wstring text;
+    if (!readConfigContent(configPath, text)) return;
+    writeConfigAtomic(siblingOf(configPath, L".bak"), text);
+}
+
+// 解析失败后的兜底：用上一份可用配置重建主文件
+bool Setting::restoreFromBackup()
+{
+    std::wstring text;
+    if (!readConfigContent(siblingOf(configPath, L".bak"), text) || isBlankConfig(text)) return false;
+    JsonObject obj{ nullptr };
+    if (!JsonObject::TryParse(text, obj)) return false;
+    configObj = obj;
+    save();
+    return true;
+}
+
+// 坏档留一份现场（覆盖上一份 .bad），方便用户/排查找回原内容
+void Setting::preserveBrokenConfig()
+{
+    if (configPath.empty()) return;
+    std::error_code ec;
+    std::filesystem::copy_file(configPath, siblingOf(configPath, L".bad"),
+        std::filesystem::copy_options::overwrite_existing, ec);
 }
 
 
@@ -327,7 +446,7 @@ namespace {
             // 兜底轮询（800ms）：WM_CLIPBOARDUPDATE 偶发收不到时也能接住
             SetTimer(g_clipWnd, kClipPollTimer, kClipPollMs, nullptr);
             // 启动时先把当前剪贴板里的内容记一条，用户打开「剪切板」页不至于空空如也
-            captureClipboardNow(true);
+            g_lastClipSeq = GetClipboardSequenceNumber();   // no capture on startup
         }
     }
 
@@ -656,8 +775,14 @@ std::filesystem::path Setting::initConfigPath()
 
 void Setting::save()
 {
-    std::wstring str{ configObj.Stringify() };
-    Ling::Util::saveFile(configPath.wstring(), str);
+    // 这次启动没读出配置：只读运行，避免默认值把用户的原文件冲掉
+    if (configReadOnly) return;
+    // 设置项会从多个线程改（下载回调、剪贴板监听、热键线程），串行化落盘，
+    // 免得两处同时写临时文件/替换目标。原子性本身由 writeConfigAtomic 保证。
+    static std::mutex saveMutex;
+    const std::wstring str{ configObj.Stringify() };
+    std::lock_guard<std::mutex> lock(saveMutex);
+    writeConfigAtomic(configPath, str);
 }
 
 std::wstring Setting::getLang()
@@ -974,6 +1099,10 @@ void Setting::setRememberToolStyle(bool on) { setFeatBool(L"rememberToolStyle", 
 // 悬停预览：历史记录 / 剪切板卡片停悬时弹出大图或文字卡（默认关闭）
 bool Setting::getHoverPreview() { return featBool(L"hoverPreview", false); }
 void Setting::setHoverPreview(bool on) { setFeatBool(L"hoverPreview", on); }
+bool Setting::getRackFlag(const wchar_t* key, bool def) { return featBool(key, def); }
+void Setting::setRackFlag(const wchar_t* key, bool on) { setFeatBool(key, on); }
+int Setting::getRackInt(const wchar_t* key, int def) { return featInt(key, def); }
+void Setting::setRackInt(const wchar_t* key, int value) { setFeatInt(key, value); }
 int Setting::getLastArrowHead() { return featInt(L"lastArrowHead", 0); }
 void Setting::setLastArrowHead(int v) { setFeatInt(L"lastArrowHead", v); }
 bool Setting::getAutoSaveAfterCapture() { return featBool(L"autoSaveAfterCapture", false); }
@@ -1207,9 +1336,28 @@ namespace {
     }
 
     // 图片贴到工作区中央（与历史页「贴图」按钮同一套落点）
-    void quickPinImage(int w, int h, std::vector<BYTE>& px)
+    void quickPinImage(int w, int h, std::vector<BYTE>& px,
+                       const std::wstring& sourcePath = L"")
     {
         if (w <= 0 || h <= 0 || px.empty()) return;
+        auto* s = Setting::get();
+        if (s && s->getRackFlag(L"rack.quick_pin_hang", false)) {
+            std::wstring hangPath = sourcePath;
+            if (hangPath.empty()) {
+                auto dir = s->getDataPath() / L"RackQuick";
+                std::error_code ec;
+                std::filesystem::create_directories(dir, ec);
+                hangPath = (dir / wfmt(L"quick-%llu.png", GetTickCount64())).wstring();
+                if (!Util::saveToFile(hangPath, w, h, px.data())) hangPath.clear();
+            }
+            if (!hangPath.empty() && PluginHost::instance().loaded()) {
+                // "上绳" means the image goes to the rack, not also to a
+                // separate pin window on the desktop.
+                PluginHost::instance().hangQuickPin(hangPath);
+                return;
+            }
+        }
+
         RECT rc{};
         SystemParametersInfo(SPI_GETWORKAREA, 0, &rc, 0);
         const int areaW = (int)rc.right - (int)rc.left;
@@ -1224,7 +1372,10 @@ namespace {
         if (paths.empty()) return;
         if (paths.size() == 1 && quickPinIsImagePath(paths.front())) {
             auto [w, h, px] = Util::loadImagePixels(paths.front());
-            if (w > 0 && h > 0 && !px.empty()) { quickPinImage(w, h, px); return; }
+            if (w > 0 && h > 0 && !px.empty()) {
+                quickPinImage(w, h, px, paths.front());
+                return;
+            }
         }
         ClipPin::showFiles(paths);
     }
@@ -1490,6 +1641,8 @@ void Setting::runHotkeyAction(const std::wstring& id)
     if (id == L"record") { WinCap::beginRecordPick(); return; }
     if (id == L"show_main") { WinSetting::toggle(); return; }
     if (id == L"quick_pin") { quickPinFromContext(); return; }
+    if (id == L"rack_quick_hang") { PluginHost::instance().quickHang(); return; }
+    if (id == L"rack_toggle") { PluginHost::instance().toggleRack(); return; }
     if (id == L"toggle_pins") { WinPin::toggleAllHidden(); return; }
     if (id == L"open_history") { if (!getDisableCaptureHistory()) WinSetting::togglePage(5); return; }
     if (id == L"open_screenshot_dir") {
@@ -1934,6 +2087,7 @@ std::wstring Setting::addHistoryFile(const std::wstring& filePath, int width, in
     store.SetNamedValue(L"items", arr);
     features.SetNamedValue(L"history", store);
     save();
+    PluginHost::instance().onCapture(filePath);
     return it.id;
 }
 

@@ -151,7 +151,7 @@ namespace VideoGif {
         fwrite(cb, 1, 4, f);
     }
 
-    // 用 WIC 把一帧 RGB(24bppBGR, top-down) 编成 PNG，取出 IHDR（仅首帧需要）与拼接后的 IDAT 负载
+    // 用 WIC 把一帧 RGB(top-down) 编成 PNG，取出 IHDR（仅首帧需要）与拼接后的 IDAT 负载
     inline bool encodePngFrame(const unsigned char* rgb, int w, int h,
         std::vector<unsigned char>& ihdrOut, std::vector<unsigned char>& idatOut, IWICImagingFactory* factory)
     {
@@ -169,8 +169,18 @@ namespace VideoGif {
             if (FAILED(frame->SetSize((UINT)w, (UINT)h))) break;
             WICPixelFormatGUID fmt = GUID_WICPixelFormat24bppBGR;
             if (FAILED(frame->SetPixelFormat(&fmt)) || !IsEqualGUID(fmt, GUID_WICPixelFormat24bppBGR)) break;
+            // ★ 24bppBGR 的字节序是 B,G,R，而调用方（bgraToRgbScaled）给的是 R,G,B。
+            //   原样写进去会把红蓝对调 —— APNG 输出"严重偏色"就是这么来的。
+            //   这里换一次通道再写，声明不用动（PNG 编码器对 24bppBGR 的支持是稳定的，
+            //   改成 24bppRGB 反而可能被 SetPixelFormat 回调成别的格式而整条链路失败）。
+            std::vector<unsigned char> bgr((size_t)w * (size_t)h * 3);
+            for (size_t i = 0, n = bgr.size(); i + 2 < n; i += 3) {
+                bgr[i + 0] = rgb[i + 2];
+                bgr[i + 1] = rgb[i + 1];
+                bgr[i + 2] = rgb[i + 0];
+            }
             const UINT stride = (UINT)w * 3;
-            if (FAILED(frame->WritePixels((UINT)h, stride, stride * (UINT)h, (BYTE*)rgb))) break;
+            if (FAILED(frame->WritePixels((UINT)h, stride, stride * (UINT)h, bgr.data()))) break;
             if (FAILED(frame->Commit())) break;
             if (FAILED(enc->Commit())) break;
             ok = true;

@@ -13,12 +13,18 @@ namespace PluginPaths {
 	{
 		auto* s = Setting::get();
 		if (!s) return std::filesystem::path{ L"plugin" };
+		std::error_code ec;
 		auto custom = s->getPluginDir();
-		if (!custom.empty()) return std::filesystem::path{ custom };
+		if (!custom.empty()) {
+			const std::filesystem::path customPath{ custom };
+			// 配置里记的目录还在（用户明确选过）就听它的；已经不在了（换盘符 / 被删 /
+			// 配置被外部改坏）就不能死认 —— 否则组件明明装在标准位置，也会报
+			// 「PP-OCRv6 运行时未安装」、已安装组件计数变成 0。
+			if (std::filesystem::is_directory(customPath, ec)) return customPath;
+		}
 		wchar_t buf[MAX_PATH]{};
 		if (GetModuleFileNameW(nullptr, buf, MAX_PATH) > 0) {
 			auto portable = std::filesystem::path{ buf }.parent_path() / L"plugin";
-			std::error_code ec;
 			if (std::filesystem::is_directory(portable, ec)) return portable;
 		}
 		return s->getDataPath() / L"plugin";

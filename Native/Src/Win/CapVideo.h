@@ -36,6 +36,10 @@ public:
 	// 录屏期间「选区能跨过去的那几块屏」（虚拟桌面坐标）：只有与 targetDesk 所在屏挂在**同一个
 	// DXGI 适配器**上的屏，采集侧才换得过去（见 VideoMp4 的换屏跟随）。
 	static std::vector<RECT> reachableMonitors(const RECT& targetDesk);
+	// 本机有没有能输出 H.265 的编码器 MFT（只查注册列表，不建实例，结果缓存一次）。
+	// 「编码模式」选「仅 H.265」而这里为 false 时录制必然失败：设置页据此标注该项，
+	// 采集侧据此给出明确原因，而不是笼统的「录屏失败」。
+	static bool hasHevcEncoder();
 	// 选区能不能被挪到这块屏上继续录：同适配器、且采集侧没在它上面换失败过。
 	// 动图那条走 GDI 抓屏，覆盖整块虚拟桌面，不受显卡分组限制。
 	bool canSwitchToMonitor(const RECT& mon) const;

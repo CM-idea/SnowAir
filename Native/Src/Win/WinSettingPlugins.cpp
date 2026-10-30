@@ -4,6 +4,7 @@
 #include <shobjidl.h>
 #include <wrl/client.h>
 #include "WinSettingPlugins.h"
+#include "../Plugin/PluginHost.h"
 #include "SettingWidgets.h"
 #include "SettingTheme.h"
 #include "../Ocr/OcrModelManager.h"
@@ -314,8 +315,14 @@ void WinSettingPlugins::refreshStatus()
 
 	// —— 悬停状态（下载/删除按钮本身由 updateHover 控制显隐）——
 	if (cards.size() >= 3) {
+		const bool rackOk = PluginHost::instance().rackInstalled() ||
+		                    PluginHost::instance().loaded();
+		setBadges(rackBadgeRow, rackOk ? std::vector<std::wstring>{ L"晾衣架 v1.0" }
+		                               : std::vector<std::wstring>{});
 		cards[CardOcr].installed = ocrOk;
 		cards[CardTr].installed = trOk;
+		cards[CardRack].installed = rackOk;
+		cards[CardRack].offer = true;   // 下载按钮始终保留，但置灰、不可下载
 		cards[CardGh].installed = false;   // 果核看图是外链，不提供删除
 		cards[CardOcr].offer = !ocrOk && !cards[CardOcr].busy;
 		cards[CardTr].offer = !trOk && !cards[CardTr].busy;
@@ -346,8 +353,19 @@ void WinSettingPlugins::build()
 	SettingUi::sectionHeader(this, Lang::get(L"setting.plugins"),
 		Lang::get(L"setting.pluginsDesc"), Lang::get(L"setting.pluginsTip"));
 
+	// 卡片放进可伸缩的滚动区，底部「自定义插件目录 / 打开组件目录」这一行
+	// 才会像历史记录页的「打开历史目录」一样始终贴底。
+	auto* listScroll = makeChild<Ling::ScrollerBox>();
+	listScroll->setWidthPercent(100.f);
+	listScroll->setFlexGrow(1.f);
+	listScroll->setFlexShrink(1.f);
+	listScroll->setScrollBarVisible(false);
+	listScroll->content->setFlexDirection(Ling::FlexDirection::Column);
+	listScroll->content->setWidthPercent(100.f);
+	auto* cardsHost = listScroll->content;
+
 	// —— 离线文字识别（标题行内嵌模型档位下拉，选中项决定下载目标与安装态）——
-	auto ocr = makePack(this, Lang::get(L"setting.plugOcrTitle"), Lang::get(L"setting.plugOcrDesc"));
+	auto ocr = makePack(cardsHost, Lang::get(L"setting.plugOcrTitle"), Lang::get(L"setting.plugOcrDesc"));
 	ocrBadgeRow = ocr.badgeRow;
 	ocrProgress = ocr.progress;
 	ocrVariantIdx = Setting::get() ? Setting::get()->getOcrPackVariant() : 0;
@@ -377,7 +395,7 @@ void WinSettingPlugins::build()
 	cards.push_back({ ocr.card, ocr.dlBtn, ocr.delBtn, false, false, false });
 
 	// —— 离线翻译（标题行内嵌语言包下拉，选中项决定下载目标与安装态）——
-	auto tr = makePack(this, Lang::get(L"setting.plugTransTitle"), Lang::get(L"setting.plugTransDesc"));
+	auto tr = makePack(cardsHost, Lang::get(L"setting.plugTransTitle"), Lang::get(L"setting.plugTransDesc"));
 	trBadgeRow = tr.badgeRow;
 	trProgress = tr.progress;
 	{
@@ -405,8 +423,21 @@ void WinSettingPlugins::build()
 	tr.delBtn->onClick.add([this](Ling::Button*) { this->deleteCard(CardTr); });
 	cards.push_back({ tr.card, tr.dlBtn, tr.delBtn, false, false, false });
 
+	// —— 轻雪晾衣架（施工中）：入口先占位，下载按钮常驻但置灰 ——
+	auto rack = makePack(cardsHost, Lang::get(L"setting.plugRackTitle"),
+		Lang::get(L"setting.plugRackDesc"));
+	const bool darkRack = SettingTheme::isDark();
+	rack.dlBtn->setBg(darkRack ? 0x1A1A1AFF : 0xF0F0F0FF);
+	rack.dlBtn->setHoverBg(darkRack ? 0x1A1A1AFF : 0xF0F0F0FF);
+	rack.dlBtn->setColor(SettingTheme::disabledForeground);
+	rack.dlBtn->setHoverColor(SettingTheme::disabledForeground);
+	rack.dlBtn->onClick.add([](Ling::Button*) {});   // 施工中：不提供下载
+	rackBadgeRow = rack.badgeRow;
+	// 和其它卡片一样：鼠标停在卡片上才显示，只是按钮置灰、点击无操作。
+	cards.push_back({ rack.card, rack.dlBtn, rack.delBtn, false, true, false });
+
 	// —— 果核看图（作者推荐，外链，不内置下载）——
-	auto gh = makePack(this, Lang::get(L"setting.plugGhTitle"), Lang::get(L"setting.plugGhDesc"));
+	auto gh = makePack(cardsHost, Lang::get(L"setting.plugGhTitle"), Lang::get(L"setting.plugGhDesc"));
 	// 「?」说明：走统一的设置项问号（圆形按钮 + 停悬气泡，受「功能提示」总开关控制）
 	SettingUi::helpTipButton(gh.titleRow, Lang::get(L"setting.plugGhTip"));
 	gh.dlBtn->onClick.add([](Ling::Button*) {
@@ -421,6 +452,7 @@ void WinSettingPlugins::build()
 	row->setFlexDirection(Ling::FlexDirection::Row);
 	row->setWidthPercent(100.f);
 	row->setAlignItems(Ling::Align::Center);
+	row->setMarginTop(SettingTheme::blockGap);
 
 	// 方形文件夹按钮：悬停提示「自定义插件目录」，点击后选目录并迁移已下载的组件。
 	// 直接复用 btnOutline 工厂，高度与旁边「打开组件目录」完全一致（同一个 ctrlH），
@@ -712,6 +744,7 @@ void WinSettingPlugins::deleteCard(int idx)
 	std::wstring msg;
 	if (idx == CardOcr) msg = Lang::get(L"setting.plugDelOcrConfirm");
 	else if (idx == CardTr) msg = Lang::get(L"setting.plugDelTrConfirm");
+	else if (idx == CardRack) msg = Lang::get(L"setting.plugDelRackConfirm");
 	else return;   // 果核看图是外链，不提供删除
 	auto weak = getWeakThis();
 	SettingUi::ConfirmDialog::ask(win, msg, [this, weak, idx](bool ok) {
@@ -726,6 +759,9 @@ void WinSettingPlugins::deleteCard(int idx)
 		}
 		else if (idx == CardTr) {
 			TranslateModelManager::instance().uninstallPack(kLangPacks[trPackIdx].id);
+		}
+		else if (idx == CardRack) {
+			PluginHost::instance().uninstallRack();
 		}
 		refreshStatus();
 		POINT pt{}; GetCursorPos(&pt); ScreenToClient(win->hwnd, &pt);

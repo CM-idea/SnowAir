@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -212,6 +212,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="App.cpp" />
+    <ClCompile Include="Plugin\PluginHost.cpp" />
     <ClCompile Include="CommandKeys.cpp" />
     <ClCompile Include="History.cpp" />
     <ClCompile Include="Lang.cpp" />
@@ -417,6 +418,8 @@
     <ClInclude Include="Win\WinSettingHotkeys.h" />
     <ClInclude Include="Win\WinSettingSystemKeys.h" />
     <ClInclude Include="Win\WinSettingPlugins.h" />
+    <ClInclude Include="Plugin\PluginHost.h" />
+    <ClInclude Include="Plugin\SnowAirPlugin.h" />
     <ClInclude Include="Win\WinSettingQuickTranslate.h" />
   </ItemGroup>
   <ItemGroup>

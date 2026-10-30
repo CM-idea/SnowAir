@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "../Lang.h"
 #include "../Setting.h"
+#include "../Plugin/PluginHost.h"
 #include "WinSetting.h"
 #include "WinSettingHotkeys.h"
 #include "SettingTheme.h"
@@ -153,7 +154,7 @@ WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
     // 4 分组 14 项（AI 对话组已随 AI 功能一并移除）
     // 注：滚动已由外层 WinSetting 的内容 ScrollerBox 统一管理，本页不再自建滚动容器。
     struct Group { std::wstring title; std::vector<std::pair<std::wstring, std::wstring>> items; };
-    const Group groups[] = {
+    std::vector<Group> groups = {
         // 0 截图组 6 项
         {Lang::get(L"setting.hotkeyGrpCapture"),{
             { L"capture",               Lang::get(L"shortcut.capture") },
@@ -181,6 +182,12 @@ WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
             { L"toggle_pins",           Lang::get(L"shortcut.toggle_pins") },
         }},
     };
+    if (PluginHost::instance().loaded()) {
+        groups.insert(groups.begin() + 2,
+            Group{ Lang::get(L"setting.hotkeyGrpRack"),
+                   { { L"rack_quick_hang", Lang::get(L"shortcut.rack_quick_hang") },
+                     { L"rack_toggle", Lang::get(L"shortcut.rack_toggle") } } });
+    }
 
     // 「停用截图历史」开启时，隐藏「打开截图历史」这一行的键位设置
     for (const auto& g : groups) {

@@ -40,7 +40,7 @@ private:
 		bool offer{ false };     // 是否提供下载（未安装且不在下载中）
 		bool installed{ false }; // 已安装（悬停显示删除）
 	};
-	enum CardIndex { CardOcr = 0, CardTr = 1, CardGh = 2 };
+	enum CardIndex { CardOcr = 0, CardTr = 1, CardRack = 2, CardGh = 3 };
 
 	void build();
 	void refreshStatus();
@@ -73,9 +73,10 @@ private:
 	Ling::Label* ocrProgress{ nullptr };
 	Ling::Node* trBadgeRow{ nullptr };
 	Ling::Label* trProgress{ nullptr };
+	Ling::Node* rackBadgeRow{ nullptr };
 	int trPackIdx{ 0 };            // 离线翻译当前选中的语言包下标
 	int ocrVariantIdx{ 0 };        // 离线文字识别当前选中的模型档位（0=轻量 1=标准）
-	std::vector<CardSlot> cards;   // [0]=OCR [1]=翻译 [2]=果核看图
+	std::vector<CardSlot> cards;   // [0]=OCR [1]=翻译 [2]=晾衣架 [3]=果核看图
 	winrt::event_token hoverTok{};
 	winrt::event_token timerTok{};
 	// 省略号动画状态（同一时刻只服务一个进度行）

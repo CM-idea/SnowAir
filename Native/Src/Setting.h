@@ -123,6 +123,11 @@ public:
 	// 悬停预览：历史记录 / 剪切板卡片停悬时弹出预览（默认关闭）
 	bool getHoverPreview();
 	void setHoverPreview(bool on);
+	// Rack plugin config lives under features.rack.<key>.
+	bool getRackFlag(const wchar_t* key, bool def);
+	void setRackFlag(const wchar_t* key, bool on);
+	int getRackInt(const wchar_t* key, int def);
+	void setRackInt(const wchar_t* key, int value);
 	int getLastArrowHead();
 	void setLastArrowHead(int v);
 	bool getAutoSaveAfterCapture();
@@ -331,6 +336,10 @@ private:
 	std::filesystem::path initDataPath();
 	std::filesystem::path initConfigPath();
 	void save();
+	// config.json 的兜底：读失败不覆盖、解析失败留现场并回退到上一份可用配置
+	void backupConfigFile();
+	bool restoreFromBackup();
+	void preserveBrokenConfig();
 	bool featBool(const wchar_t* key, bool def);
 	void setFeatBool(const wchar_t* key, bool v);
 	int featInt(const wchar_t* key, int def);
@@ -343,6 +352,8 @@ private:
 	const std::filesystem::path dataPath;
 	const std::filesystem::path configPath;
 	JsonObject configObj;
+	// config.json 这一次没读出来：本次会话只读不写，别拿默认值把用户的文件覆盖掉
+	bool configReadOnly{ false };
 	UINT_PTR hotkeyRetryTimer{ 0 };
 	int hotkeyRetryTick{ 0 };
 };

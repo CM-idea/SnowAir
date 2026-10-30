@@ -283,8 +283,11 @@ OcrResult LwPpOcrEngine::recognize(int w, int h, const BYTE* bgra)
 	std::wstring err;
 	if (!ensureEngine(err)) {
 		r.error = err;
+		r.engineUnavailable = true;   // 未安装 / 初始化失败：可以交给兜底引擎
 		return r;
 	}
+	// 推理层面的失败（运行时报错、容量上限）同样是「引擎不可用」，与「没认出字」分开记
+	bool engineFailed = false;
 
 	// 原始识别行（原图坐标，尚未做置信度过滤）
 	struct RawLine {
@@ -317,6 +320,7 @@ OcrResult LwPpOcrEngine::recognize(int w, int h, const BYTE* bgra)
 				&res, &e);
 			if (st != LW_STATUS_OK) {
 				error = L"PP-OCRv6 识别失败：" + errText(st, e);
+				engineFailed = true;
 				return {};
 			}
 			// 容量不够（比如行数比预估多）：按报出来的需求扩一次再跑
@@ -328,6 +332,7 @@ OcrResult LwPpOcrEngine::recognize(int w, int h, const BYTE* bgra)
 					continue;
 				}
 				error = L"PP-OCRv6 结果超出容量上限";
+				engineFailed = true;
 				return {};
 			}
 
@@ -437,6 +442,14 @@ OcrResult LwPpOcrEngine::recognize(int w, int h, const BYTE* bgra)
 	// 不会放大，细窄的竖列容易漏检/漏字（实测 539×730 会丢掉最左一列）。这里先把长边补到
 	// 960 再送，一次就够用；整屏大图不缩放。
 	// 只对**竖长/方图**补：这个问题来自竖排整列，横向小窗（如 800×600）放大既没必要也变慢。
+
+	// 收尾：把「引擎不可用」这个信号一并带出去（与「跑通了但没认出字」区分开）
+	auto finishWith = [&](std::vector<RawLine> lines) {
+		OcrResult out = Finish(lines, w, h, err);
+		out.engineUnavailable = engineFailed;
+		return out;
+	};
+
 	std::vector<BYTE> scaled;
 	const int longSide = (std::max)(w, h);
 	if (longSide < 960 && h >= w) {
@@ -446,15 +459,11 @@ OcrResult LwPpOcrEngine::recognize(int w, int h, const BYTE* bgra)
 		if ((int64_t)nw * nh <= 4'000'000) {
 			scaled = Util::scaleBGRA(bgra, w, h, nw, nh);
 			if (!scaled.empty()) {
-				std::vector<RawLine> lines = runOnce(scaled.data(), nw, nh, 1.f / f, err);
-				return Finish(lines, w, h, err);
+				return finishWith(runOnce(scaled.data(), nw, nh, 1.f / f, err));
 			}
 		}
 	}
-	{
-		std::vector<RawLine> lines = runOnce(bgra, w, h, 1.f, err);
-		return Finish(lines, w, h, err);
-	}
+	return finishWith(runOnce(bgra, w, h, 1.f, err));
 }
 
 void LwPpOcrEngine::release()

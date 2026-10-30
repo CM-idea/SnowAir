@@ -1682,6 +1682,17 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
         MFSetAttributeRatio(pMediaTypeOutVideo, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
         pMediaTypeOutVideo->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
 
+        // 色彩口径显式声明。输入是 RGB32（全范围），RGB→YUV 由 SinkWriter 的 Color Converter 做；
+        // 不声明 MF_MT_YUV_MATRIX 时它默认按 BT.601 转，而高清编码器写 VUI 通常按 BT.709 ——
+        // 两边对不上，颜色会偏（饱和度、肤色最明显）。这里按分辨率选，与播放器的通行约定一致。
+        const UINT32 yuvMatrix = (encH >= 720) ? MFVideoTransferMatrix_BT709
+                                              : MFVideoTransferMatrix_BT601;
+        pMediaTypeOutVideo->SetUINT32(MF_MT_YUV_MATRIX, yuvMatrix);
+        if (encH >= 720) {
+            pMediaTypeOutVideo->SetUINT32(MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
+            pMediaTypeOutVideo->SetUINT32(MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);
+        }
+
 
         if (dp.VIDEO_ENCODING_FORMAT == MFVideoFormat_H265 || dp.VIDEO_ENCODING_FORMAT == MFVideoFormat_HEVC || dp.VIDEO_ENCODING_FORMAT == MFVideoFormat_HEVC_ES)
             pMediaTypeOutVideo->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_Normal);
@@ -1884,6 +1895,9 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
     MFSetAttributeSize(pMediaTypeVideoIn, MF_MT_FRAME_SIZE, encW, encH);
     MFSetAttributeRatio(pMediaTypeVideoIn, MF_MT_FRAME_RATE, dp.fps, 1);
     MFSetAttributeRatio(pMediaTypeVideoIn, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+    // 部分硬件编码器的 SetInputMediaType 会因为输入类型缺这个属性而拒绝（MF_E_INVALIDMEDIATYPE），
+    // 之后悄悄退回软件编码。补上，避免莫名其妙地掉到软编。
+    pMediaTypeVideoIn->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
 
 
 
@@ -1991,6 +2005,18 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
                     v7.vt = VT_UI4;
                     v7.ulVal = dp.vbrq;
                     ca->SetValue(&CODECAPI_AVEncCommonQuality, &v7);
+
+                    // 实测（同素材重编对比）：Quality 模式不看码率参数，只花掉预算的 25%。
+                    // 上限与平均目标一起压进去，让编码器把这段预算用掉；
+                    // 注意只有在 VBR/CBR 下它们才生效（CapVideo 里已把 vbrm 设为 UnconstrainedVBR）。
+                    VARIANT vmax = {};
+                    vmax.vt = VT_UI4;
+                    vmax.ulVal = (ULONG)dp.BR * 1000u;   // bps
+                    ca->SetValue(&CODECAPI_AVEncCommonMaxBitRate, &vmax);
+                    VARIANT vmean = {};
+                    vmean.vt = VT_UI4;
+                    vmean.ulVal = (ULONG)dp.BR * 1000u;
+                    ca->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &vmean);
                 }
             }
         }
