@@ -159,11 +159,12 @@ protected:
 	}
 
 private:
-	// 浅色主题：浅底黑字；深色主题：深底白字。
-	static uint32_t bubbleBg() { return SettingTheme::isDark() ? 0x262626FF : 0xE5E5E5FF; }
-	static uint32_t bubbleFg() { return SettingTheme::isDark() ? 0xFFFFFFFF : 0x262626FF; }
-	// 气泡内的次要文字（来源目录）：跟着气泡底色走，不能用主题的 textTertiary
-	static uint32_t bubbleFgDim() { return SettingTheme::isDark() ? 0xA3A3A3FF : 0x6B6B6BFF; }
+	// 文字气泡的配色：与设置页「?」悬停气泡一致（浅色模式深底白字，深色模式浅底深字）
+	static uint32_t bubbleBg() { return SettingTheme::isDark() ? 0xE5E5E5FF : 0x262626FF; }
+	static uint32_t bubbleFg() { return SettingTheme::isDark() ? 0x262626FF : 0xFFFFFFFF; }
+	// 气泡内的次要文字（来源目录）：必须跟着气泡底色走，不能用主题的 textTertiary，
+	// 否则深色模式下浅底配浅灰字几乎看不清
+	static uint32_t bubbleFgDim() { return SettingTheme::isDark() ? 0x6B6B6BFF : 0xA3A3A3FF; }
 
 	// 图片：只显示图片本身
 	void applyImageChrome()
