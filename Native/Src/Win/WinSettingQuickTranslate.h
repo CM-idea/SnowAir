@@ -30,12 +30,17 @@ private:
 	void doTranslate(const std::wstring& text);
 	Ling::Node* appendBubble(const std::wstring& role, const std::wstring& text);
 	void updateBubble(Ling::Node* bubble, const std::wstring& text);   // 回填某一条译文气泡
+	void appendCopyButton(Ling::Node* bubble, const std::wstring& text);   // 在译文气泡右侧加复制按钮
 	// —— 字典模式（单击译文英文单词，于该条下方展开释义）——
 	bool dictModeOn() const;
 	void buildResultContent(Ling::Node* bubble, Ling::Node* block, const std::wstring& text);   // 词元流 + 隐藏释义卡
-	void onDictWordClicked(Ling::Node* block, Ling::Button* btn, const std::wstring& word, int index);
+	Ling::Label* makeSelectableText(Ling::Node* parent, const std::wstring& text,
+		float fontSize, uint32_t color);
+	void onDictTextClicked(Ling::Node* block, Ling::Label* box, int textIndex);
+	void onDictWordClicked(Ling::Node* block, Ling::Label* box,
+		int start, int end, const std::wstring& word, int index);
 	Ling::Node* makeDictCard(Ling::Node* block);   // 在该条消息下方新建释义卡
-	void setWordActive(Ling::Button* btn, bool active);   // 选中的词：加粗 + 绿色
+	void setWordActive(Ling::Label* box, int start, int end, bool active);   // 选中的词变绿
 	void fillDictCard(Ling::Node* card, const DictEntry& e);
 	void resetDictState();                // 消息列表重建时清掉选中态
 	void scrollToBottom();
@@ -82,6 +87,7 @@ private:
 	Ling::Node* histList{ nullptr };
 	winrt::event_token timerTok;          // onTimer 订阅（仅注册一次）
 	winrt::event_token mouseDownTok;      // 窗口内点击：点侧栏外空白处收起历史侧栏
+	winrt::event_token mouseMoveTok;      // 鼠标移动：停悬结果时显示复制按钮
 	bool histAnimRunning{ false };
 	float histAnimW{ 0.f };
 	bool histOpen{ false };
@@ -110,9 +116,33 @@ private:
 	int nextReqId{ 1 };
 	bool providerBusy(const std::wstring& provider) const;
 	bool anyBusy() const { return !pending.empty(); }
+	// —— 结果复制按钮 ——
+	// 复制按钮默认隐藏，鼠标停悬到该条译文所在行时才显示（行内包含气泡与按钮之间的间距）。
+	// 每次重建气泡都会生成新按钮，旧记录靠 weak 指针在下次鼠标移动时清掉。
+	struct CopyHost {
+		Ling::Node* bubble{ nullptr };
+		Ling::Button* btn{ nullptr };
+		std::weak_ptr<bool> bubbleAlive;
+		std::weak_ptr<bool> btnAlive;
+	};
+	std::vector<CopyHost> copyHosts;
 	// —— 字典模式 ——
 	Ling::Node* dictCard{ nullptr };        // 当前显示的释义卡（同一时刻只显示一张）
-	Ling::Button* dictActiveBtn{ nullptr }; // 当前选中的词按钮
+	struct DictWordRange {
+		int start{ 0 };
+		int end{ 0 };
+		int index{ 0 };
+		std::wstring word;
+	};
+	struct DictTextView {
+		Ling::Node* block{ nullptr };
+		Ling::Label* box{ nullptr };
+		std::vector<DictWordRange> words;
+	};
+	std::vector<DictTextView> dictViews;    // 每条译文的词位置表
+	Ling::Label* dictActiveBox{ nullptr };
+	int dictActiveStart{ 0 };
+	int dictActiveEnd{ 0 };
 	std::wstring dictActiveWord;            // 当前展开的词
 	int dictActiveIndex{ -1 };              // 词在译文里的序号（再点同词 = 收起）
 };

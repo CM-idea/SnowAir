@@ -1,10 +1,12 @@
 #include "pch.h"
 #include <filesystem>
 #include <cstdio>
+#include <thread>
 #include <shobjidl.h>
 #include <wrl/client.h>
 #include "WinSettingPlugins.h"
 #include "../Plugin/PluginHost.h"
+#include "../Net/HttpClient.h"
 #include "SettingWidgets.h"
 #include "SettingTheme.h"
 #include "../Ocr/OcrModelManager.h"
@@ -14,6 +16,7 @@
 #include "../Ocr/PluginPaths.h"
 #include "../Translate/TranslateModelManager.h"
 #include "../Translate/BergamotEngine.h"
+#include "../Update.h"
 #include "../Lang.h"
 #include "../Setting.h"
 #include "../Tool/IconCodes.h"
@@ -26,6 +29,90 @@ namespace {
 		if (!std::filesystem::is_directory(p, ec)) return false;
 		auto it = std::filesystem::directory_iterator(p, ec);
 		return !ec && it != std::filesystem::directory_iterator();
+	}
+
+	// 晾衣架插件包：版本与下载地址（与 SnowAir-Rack 的 release 资源同名）
+	constexpr wchar_t kRackVersion[] = L"0.1.0";
+	std::wstring rackDownloadUrl(const std::wstring& version)
+	{
+		return L"https://github.com/CM-idea/SnowAir-Rack/releases/download/v" + version
+			+ L"/SnowAir-Rack-v" + version + L".zip";
+	}
+
+	// 启动隐藏进程跑一条命令（解压 zip 用；避免弹出 PowerShell 窗口）
+	bool runHidden(const std::wstring& cmd)
+	{
+		STARTUPINFOW si{ sizeof(si) };
+		si.dwFlags = STARTF_USESHOWWINDOW;
+		si.wShowWindow = SW_HIDE;
+		PROCESS_INFORMATION pi{};
+		std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+		buf.push_back(0);
+		if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE,
+			CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
+			return false;
+		WaitForSingleObject(pi.hProcess, INFINITE);
+		DWORD code = 1;
+		GetExitCodeProcess(pi.hProcess, &code);
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
+		return code == 0;
+	}
+
+	std::wstring psQuote(const std::wstring& s)
+	{
+		std::wstring out = L"'";
+		for (wchar_t c : s) {
+			if (c == L'\'') out += L"''";
+			else out += c;
+		}
+		out += L"'";
+		return out;
+	}
+
+	// 把插件 zip 解到 stage 目录，校验 rack/rack.dll 确实存在
+	bool extractRackPackage(const std::filesystem::path& zip, const std::filesystem::path& stage)
+	{
+		std::error_code ec;
+		std::filesystem::remove_all(stage, ec);
+		std::filesystem::create_directories(stage, ec);
+		if (ec) return false;
+		std::wstring cmd = L"powershell -NoProfile -ExecutionPolicy Bypass -Command \"Expand-Archive -LiteralPath ";
+		cmd += psQuote(zip.wstring());
+		cmd += L" -DestinationPath ";
+		cmd += psQuote(stage.wstring());
+		cmd += L" -Force\"";
+		if (!runHidden(cmd)) return false;
+		const auto dll = stage / L"rack" / L"rack.dll";
+		return std::filesystem::is_regular_file(dll, ec)
+			&& std::filesystem::file_size(dll, ec) > 100ull * 1024;
+	}
+
+	// 递归复制 stage/rack → 插件目录；保留旧的 data（用户晾衣架内容）不动
+	bool copyRackTree(const std::filesystem::path& from, const std::filesystem::path& to)
+	{
+		std::error_code ec;
+		std::filesystem::create_directories(to, ec);
+		if (ec) return false;
+		for (auto it = std::filesystem::recursive_directory_iterator(from, ec);
+			!ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+			const auto rel = std::filesystem::relative(it->path(), from, ec);
+			if (ec) break;
+			// 用户数据（rack_items.json 等）只属于本地，绝不能被安装包覆盖
+			const std::wstring relStr = rel.wstring();
+			if (relStr == L"data" || relStr.rfind(L"data\\", 0) == 0) continue;
+			const auto target = to / rel;
+			if (it->is_directory(ec)) {
+				std::filesystem::create_directories(target, ec);
+			}
+			else if (it->is_regular_file(ec)) {
+				std::filesystem::create_directories(target.parent_path(), ec);
+				if (!ec) std::filesystem::copy_file(it->path(), target,
+					std::filesystem::copy_options::overwrite_existing, ec);
+			}
+			if (ec) break;
+		}
+		return !ec;
 	}
 
 	// 语言文案里的 %1 替换
@@ -140,6 +227,13 @@ WinSettingPlugins::WinSettingPlugins(Ling::WinBase* parent) : Ling::Node(parent)
 		this->dotsPhase = (this->dotsPhase + 1) % 4;
 		this->applyDots();
 		});
+	// 后台/关于页查到晾衣架新版本时，插件卡片要立刻从红色删除钮换成绿色更新钮
+	rackUpdateTok = Update::onRackUpdateChanged().add([this, weakThis]() {
+		if (!weakThis.lock()) return;
+		this->refreshStatus();
+		POINT pt{}; GetCursorPos(&pt); ScreenToClient(win->hwnd, &pt);
+		this->updateHover(pt);
+		});
 }
 
 WinSettingPlugins::~WinSettingPlugins()
@@ -147,6 +241,7 @@ WinSettingPlugins::~WinSettingPlugins()
 	stopDots();
 	win->onMouseMove.remove(hoverTok);
 	win->onTimer.remove(timerTok);
+	Update::onRackUpdateChanged().remove(rackUpdateTok);
 }
 
 // 生成一张插件卡片：卡片容器 + 顶部行（左说明列 / 右方形图标按钮）+ 徽章行
@@ -314,15 +409,39 @@ void WinSettingPlugins::refreshStatus()
 	const bool trOk = trMgr.isDllInstalled() && trMgr.isPackInstalled(trPackId);
 
 	// —— 悬停状态（下载/删除按钮本身由 updateHover 控制显隐）——
-	if (cards.size() >= 3) {
+	if (cards.size() >= 4) {
 		const bool rackOk = PluginHost::instance().rackInstalled() ||
 		                    PluginHost::instance().loaded();
-		setBadges(rackBadgeRow, rackOk ? std::vector<std::wstring>{ L"晾衣架 v1.0" }
-		                               : std::vector<std::wstring>{});
+		std::wstring rackVer = PluginHost::instance().rackVersion();
+		if (rackVer.empty()) rackVer = kRackVersion;
+		setBadges(rackBadgeRow, rackOk
+			? std::vector<std::wstring>{ L"晾衣架 v" + rackVer }
+			: std::vector<std::wstring>{});
+		// 有插件新版本：已安装卡片的删除按钮改成绿色刷新图标，点击直接更新
+		const bool rackUpdate = rackOk && Update::rackUpdateAvailable();
+		cards[CardRack].update = rackUpdate;
+		if (auto* del = cards[CardRack].delBtn) {
+			del->setFontFamily(Icon::Family);
+			del->setFontSize(18.f);
+			if (rackUpdate) {
+				del->setText(Icon::Refresh);
+				del->setBg(0x34C75933);        // 绿色 20% 底
+				del->setHoverBg(0x34C75933);
+				del->setColor(0x34C759FF);
+				del->setHoverColor(0x34C759FF);
+			}
+			else {
+				del->setText(Icon::Remove);
+				del->setBg(0xFF383C33);        // 红色 20% 底
+				del->setHoverBg(0xFF383C33);
+				del->setColor(0xFF383CFF);
+				del->setHoverColor(0xFF383CFF);
+			}
+		}
 		cards[CardOcr].installed = ocrOk;
 		cards[CardTr].installed = trOk;
 		cards[CardRack].installed = rackOk;
-		cards[CardRack].offer = true;   // 下载按钮始终保留，但置灰、不可下载
+		cards[CardRack].offer = !rackOk && !cards[CardRack].busy;
 		cards[CardGh].installed = false;   // 果核看图是外链，不提供删除
 		cards[CardOcr].offer = !ocrOk && !cards[CardOcr].busy;
 		cards[CardTr].offer = !trOk && !cards[CardTr].busy;
@@ -339,6 +458,7 @@ void WinSettingPlugins::refreshStatus()
 	int n = 0;
 	if (dirNonEmpty(PluginPaths::ocrModels()) || dirNonEmpty(PluginPaths::ocrBin())) ++n;
 	if (dirNonEmpty(PluginPaths::translateRoot())) ++n;
+	if (dirNonEmpty(PluginPaths::root() / L"rack")) ++n;
 	if (summary) {
 		std::wstring t = Lang::get(L"setting.pluginsSummary");
 		auto pos = t.find(L"%1");
@@ -423,18 +543,18 @@ void WinSettingPlugins::build()
 	tr.delBtn->onClick.add([this](Ling::Button*) { this->deleteCard(CardTr); });
 	cards.push_back({ tr.card, tr.dlBtn, tr.delBtn, false, false, false });
 
-	// —— 轻雪晾衣架（施工中）：入口先占位，下载按钮常驻但置灰 ——
+	// —— SnowAir 晾衣架（Beta）：可从插件库下载/更新，安装后由 PluginHost 常驻加载 ——
 	auto rack = makePack(cardsHost, Lang::get(L"setting.plugRackTitle"),
 		Lang::get(L"setting.plugRackDesc"));
-	const bool darkRack = SettingTheme::isDark();
-	rack.dlBtn->setBg(darkRack ? 0x1A1A1AFF : 0xF0F0F0FF);
-	rack.dlBtn->setHoverBg(darkRack ? 0x1A1A1AFF : 0xF0F0F0FF);
-	rack.dlBtn->setColor(SettingTheme::disabledForeground);
-	rack.dlBtn->setHoverColor(SettingTheme::disabledForeground);
-	rack.dlBtn->onClick.add([](Ling::Button*) {});   // 施工中：不提供下载
+	rackProgress = rack.progress;
 	rackBadgeRow = rack.badgeRow;
-	// 和其它卡片一样：鼠标停在卡片上才显示，只是按钮置灰、点击无操作。
-	cards.push_back({ rack.card, rack.dlBtn, rack.delBtn, false, true, false });
+	rack.dlBtn->onClick.add([this](Ling::Button*) { this->startRackDownload(); });
+	rack.delBtn->onClick.add([this](Ling::Button*) {
+		// 有更新时这个位置是绿色刷新钮：点击直接更新；否则仍是删除
+		if (cards.size() > CardRack && cards[CardRack].update) this->startRackDownload();
+		else this->deleteCard(CardRack);
+	});
+	cards.push_back({ rack.card, rack.dlBtn, rack.delBtn, false, false, false });
 
 	// —— 果核看图（作者推荐，外链，不内置下载）——
 	auto gh = makePack(cardsHost, Lang::get(L"setting.plugGhTitle"), Lang::get(L"setting.plugGhDesc"));
@@ -539,12 +659,14 @@ void WinSettingPlugins::choosePluginDir()
 		}
 	}
 
-	// 先解除引擎对 DLL 的占用（否则旧目录里的 dll 删不掉）
+	// 先解除引擎/插件对 DLL 的占用（否则旧目录里的 dll 删不掉）
 	LwPpOcrEngine::release();
 	BergamotEngine::release();
+	PluginHost::instance().shutdown();
 
 	const std::wstring failed = copyPluginComponents(oldRoot, newRoot);
 	if (!failed.empty()) {
+		PluginHost::instance().init();   // 迁移失败：插件仍从旧目录加载
 		SettingUi::ConfirmDialog::ask(win,
 			fillArg(Lang::get(L"setting.pluginsDirMoveFailed"), failed), nullptr,
 			Lang::get(L"setting.confirm"), L"", true);
@@ -553,6 +675,7 @@ void WinSettingPlugins::choosePluginDir()
 
 	s->setPluginDir(newRoot.wstring());
 	removePluginComponents(oldRoot);
+	PluginHost::instance().init();       // 从新目录重新加载晾衣架
 	refreshStatus();
 }
 
@@ -727,7 +850,10 @@ void WinSettingPlugins::finishDownload(int idx, const std::wstring& err)
 		c.dlBtn->setText(Icon::Download);
 		c.dlBtn->hide();
 	}
-	Ling::Label* lab = (idx == CardOcr) ? ocrProgress : (idx == CardTr) ? trProgress : nullptr;
+	Ling::Label* lab = (idx == CardOcr) ? ocrProgress
+		: (idx == CardTr) ? trProgress
+		: (idx == CardRack) ? rackProgress
+		: nullptr;
 	if (lab) {
 		if (err.empty()) lab->hide();
 		else { lab->setText(err); lab->show(); }   // 失败：进度行改显错误
@@ -736,6 +862,75 @@ void WinSettingPlugins::finishDownload(int idx, const std::wstring& err)
 	// 刷新后按当前光标位置重算按钮显隐
 	POINT pt{}; GetCursorPos(&pt); ScreenToClient(win->hwnd, &pt);
 	updateHover(pt);
+}
+
+void WinSettingPlugins::startRackDownload()
+{
+	if (cards.size() < 4) return;
+	CardSlot& c = cards[CardRack];
+	if (c.busy) return;
+	c.busy = true;
+	c.offer = false;
+	if (c.delBtn) c.delBtn->hide();
+	if (c.dlBtn) c.dlBtn->show();
+	if (rackBadgeRow) rackBadgeRow->hide();
+	setCardProgress(c, 0.f);
+	const std::wstring title = Lang::get(L"setting.plugRackTitle");
+	startDots(rackProgress, Lang::get(L"setting.plugDownloading") + L"「" + title + L"」");
+
+	// 先卸载已加载的插件，释放 rack.dll；下载/解压/复制全部在后台线程做
+	PluginHost::instance().shutdown();
+
+	// 有更新时下载最新版；否则下载内置的 Beta 首发版
+	std::wstring installVer = Update::rackLatestVersion();
+	if (installVer.empty()) installVer = kRackVersion;
+	const std::wstring url = rackDownloadUrl(installVer);
+
+	auto weak = getWeakThis();
+	std::thread([this, weak, title, url]() {
+		const auto root = PluginPaths::root();
+		const auto zip = root / L"_rack_download.zip";
+		const auto stage = root / L"_rack_stage";
+		std::error_code ec;
+		std::filesystem::create_directories(root, ec);
+
+		const bool downloaded = SnowHttp::downloadFile(url, zip,
+			[this, weak, title](uint64_t got, uint64_t total) {
+				onUi([this, weak, title, got, total]() {
+					if (!weak.lock() || cards.size() < 4) return;
+					const float p = total > 0 ? 0.9f * (float)got / (float)total : 0.f;
+					setCardProgress(cards[CardRack], p);
+					std::wstring text = Lang::get(L"setting.plugDownloading") + L"「" + title + L"」";
+					if (total > 0) text += L" " + fmtMb(got) + L" / " + fmtMb(total);
+					setDotsPrefix(text);
+				});
+			}, 3);
+
+		bool ok = downloaded;
+		std::wstring err;
+		if (!downloaded) {
+			err = Lang::get(L"setting.plugRackDownloadFailed");
+		}
+		else {
+			onUi([this, weak, title]() {
+				if (!weak.lock() || cards.size() < 4) return;
+				setCardProgress(cards[CardRack], 0.95f);
+				setDotsPrefix(Lang::get(L"setting.plugRackInstalling") + L"「" + title + L"」");
+			});
+			ok = extractRackPackage(zip, stage)
+				&& copyRackTree(stage / L"rack", root / L"rack");
+			if (!ok) err = Lang::get(L"setting.plugRackInstallFailed");
+		}
+		std::filesystem::remove(zip, ec);
+		std::filesystem::remove_all(stage, ec);
+
+		onUi([this, weak, ok, err]() {
+			// 失败时也重新加载：恢复原来已安装的版本（没有安装时 init 会安全返回）
+			PluginHost::instance().init();
+			if (!weak.lock()) return;
+			finishDownload(CardRack, ok ? std::wstring{} : err);
+		});
+	}).detach();
 }
 
 void WinSettingPlugins::deleteCard(int idx)

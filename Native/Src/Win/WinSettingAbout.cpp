@@ -517,6 +517,8 @@ void WinSettingAbout::startCheck()
 	if (spinIcon_) spinIcon_(true);
 	if (checkLabel_) checkLabel_->setText(Lang::get(L"about.checkingBtn"));
 	setStatus(Lang::get(L"about.checking"), L"", SettingTheme::textTertiary);
+	// 主程序与晾衣架插件同时检查；插件结果由 Update 缓存，插件集成页直接读取
+	Update::checkRackUpdate(true);
 	// 网络请求在后台线程跑，回来经 dq 落到 onCheckFinished（内部用 weak 守卫页面存活）
 	fetchLatestTag(getWeakThis(), this, seq);
 }

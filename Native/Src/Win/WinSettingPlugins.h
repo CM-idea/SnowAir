@@ -39,6 +39,7 @@ private:
 		bool busy{ false };      // 正在下载
 		bool offer{ false };     // 是否提供下载（未安装且不在下载中）
 		bool installed{ false }; // 已安装（悬停显示删除）
+		bool update{ false };    // 已安装且检测到插件新版本（删除按钮改为绿色更新）
 	};
 	enum CardIndex { CardOcr = 0, CardTr = 1, CardRack = 2, CardGh = 3 };
 
@@ -52,6 +53,7 @@ private:
 	void choosePluginDir();
 	void startOcrDownload();
 	void startTrDownload();
+	void startRackDownload();
 	void deleteCard(int idx);
 	// 下载中：按钮显示「NN%」数字进度（图标字体切回默认 UI 字体）
 	void setCardProgress(CardSlot& c, float p);
@@ -74,11 +76,13 @@ private:
 	Ling::Node* trBadgeRow{ nullptr };
 	Ling::Label* trProgress{ nullptr };
 	Ling::Node* rackBadgeRow{ nullptr };
+	Ling::Label* rackProgress{ nullptr };
 	int trPackIdx{ 0 };            // 离线翻译当前选中的语言包下标
 	int ocrVariantIdx{ 0 };        // 离线文字识别当前选中的模型档位（0=轻量 1=标准）
 	std::vector<CardSlot> cards;   // [0]=OCR [1]=翻译 [2]=晾衣架 [3]=果核看图
 	winrt::event_token hoverTok{};
 	winrt::event_token timerTok{};
+	winrt::event_token rackUpdateTok{};
 	// 省略号动画状态（同一时刻只服务一个进度行）
 	Ling::Label* dotsLabel{ nullptr };
 	std::wstring dotsPrefix, dotsSuffix;

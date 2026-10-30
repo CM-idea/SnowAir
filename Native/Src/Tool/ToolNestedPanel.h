@@ -10,7 +10,7 @@ class ToolSub;
 class ToolNestedPanel : public Ling::WinBase
 {
 public:
-	enum class Kind { None, Corner, WmAngle, PatinaWm, Emoji, BoardOpacity, PenOpacity, ShapeSides };
+	enum class Kind { None, Corner, WmAngle, PatinaWm, Emoji, BoardOpacity, PenOpacity, ShapeSides, TextStroke };
 	explicit ToolNestedPanel(ToolSub* owner);
 	~ToolNestedPanel();
 	void openCorner(const RECT& workArea, Ling::Button* anchor);
@@ -22,9 +22,13 @@ public:
 	void openPenOpacity(const RECT& workArea, Ling::Button* anchor);
 	// 多边形边数 / 星形角数（3–20）：与水印角度同款单滑条气泡
 	void openShapeSides(const RECT& workArea, Ling::Button* anchor, bool star);
+	// 文字描边：色块选择 + 粗细滑条
+	void openTextStroke(const RECT& workArea, Ling::Button* anchor);
+	void refreshTextStrokeSwatch();
 	void closePanel();
 	bool isOpen() const { return open_; }
 	Kind kind() const { return kind_; }
+	bool tipDown() const { return tipDown_; }
 	void updatePosition(const RECT& workArea);
 	void hideHoverTip() { if (tip) tip->hide(); }
 private:
@@ -58,6 +62,9 @@ private:
 	// 当前内容的滑条（悬停时在滑条上方显示说明；多边形/星形还会在画布上预览形状）
 	Ling::Slider* activeSlider_{ nullptr };
 	Ling::Label* activeValue_{ nullptr };
+	Ling::Button* textStrokeTrigger_{ nullptr };
+	Ling::Node* textStrokeRing_{ nullptr };
+	Ling::Label* textStrokeSwatch_{ nullptr };
 	std::wstring sliderTip_;
 	bool sliderHover_{ false };
 	bool sidesHover_{ false };

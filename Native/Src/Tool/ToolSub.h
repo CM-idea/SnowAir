@@ -67,14 +67,41 @@ public:
 	void updatePosition(const RECT& workArea);
 	D2D1_COLOR_F getSelectedColor() const;
 	UINT32 getSelectedColorValue() const;
+	// 文字描边
+	bool isTextStroke{ false };
+	float textStrokeWidth{ 2.f };          // 逻辑像素，滑条值
+	UINT32 getTextStrokeColorValue() const;
+	D2D1_COLOR_F getTextStrokeColor() const;
+	UINT strokeColorIndexValue() const { return strokeColorIndex; }
+	void setStrokeColorIndex(size_t index);
+	float getTextStrokeWidthPx() const;
+	void setTextStrokeWidthPx(float px);
+	void selectStrokeColorByValue(UINT32 rgba);
+	void updateTextStrokeControls();
+	// 二级描边栏里的色块被点击：复用主颜色面板，锚到该色块下方；
+	// parentRect 是二级栏的窗口矩形，颜色面板只在它外侧展开，不盖住它
+	void openStrokeColorPanel(float screenCenterX, float screenBottom, const RECT& parentRect);
+	// 三级颜色面板的参考矩形：去掉父气泡的箭头本体，保证换向后间距仍一致
+	RECT colorPanelParentBodyRect() const;
+	bool colorPanelPreferBelow() const;
+	bool colorPanelAnchoredToNested() const { return colorParentOverride_; }
+	// 二级栏互斥：新二级栏打开前，先收起颜色面板
+	void closeColorPopup();
 	float getSliderVal() const;
 	float setShapeSliderVal(const std::wstring& tool, float px);
 	static constexpr float mainGap{ 2.f };
 	void bindOwner(HWND ownerHwnd);
+	// 复用属性栏的「颜色」色块组件（主栏填充色与二级描边色共用）
+	struct ColorTriggerUi {
+		Ling::Button* btn{ nullptr };
+		Ling::Node* ring{ nullptr };
+		Ling::Label* swatch{ nullptr };
+	};
+	ColorTriggerUi makeColorTrigger(Ling::Node* parent);
 	// 供 ToolColorPanel 读写色板
 	const std::vector<UINT32>& colorPalette() const { return colors; }
 	size_t customColorIdx() const { return customColorIndex; }
-	size_t selectedColorIdx() const { return selectColorIndex; }
+	size_t selectedColorIdx() const { return colorPanelForStroke_ ? strokeColorIndex : selectColorIndex; }
 	void onColorPicked(size_t index);
 	// 把色板指到指定颜色（二次选中标注时同步它的颜色）；不在预设里就落到自定义色块
 	void selectColorByValue(UINT32 rgba);
@@ -161,10 +188,13 @@ private:
 	void onCreated() override;
 	void initColorTrigger();
 	void updateColorTriggerSwatch();
-	void toggleColorPanel();
+	void initStrokeColorTrigger();
+	void updateStrokeColorTriggerSwatch();
+	void toggleColorPanel(bool stroke);
 	void closeColorPanel();
 	void closeNestedPanel();
 	void initSlider();
+	void initStrokeSlider();
 	void updateSliderValueLabel();
 	void loadStrokeSlider(const std::wstring& toolId);
 	std::wstring getSliderTipKey() const;
@@ -213,6 +243,19 @@ private:
 	std::unique_ptr<ToolNestedPanel> nestedPanel;
 	Ling::Slider* slider{ nullptr };
 	Ling::Label* sliderValue{ nullptr };
+	// —— 文字描边 ——
+	Ling::Button* strokeBtn{ nullptr };
+	Ling::Button* strokeColorTrigger{ nullptr };
+	Ling::Node* strokeColorTriggerRing{ nullptr };
+	Ling::Label* strokeColorTriggerSwatch{ nullptr };
+	Ling::Slider* strokeSlider{ nullptr };
+	Ling::Label* strokeSliderValue{ nullptr };
+	Ling::Slider* hoverSlider_{ nullptr };
+	UINT strokeColorIndex{ 5 };            // 默认白色（调色板第 6 项）
+	bool colorPanelForStroke_{ false };    // 当前颜色面板改的是描边色而非填充色
+	float colorAnchorCX_{ -1.f }, colorAnchorBottom_{ -1.f };   // 二级栏色块锚点（屏幕坐标）
+	bool colorParentOverride_{ false };
+	RECT colorParentRect_{};
 	Ling::TextBox* wmTextBox{ nullptr };
 	// —— 序号工具：属性栏输入框与「下一次落笔」的取值 ——
 	Ling::TextBox* numberInput{ nullptr };
@@ -226,9 +269,10 @@ private:
 	struct StylePreviewSnapshot {
 		bool isEllipse{}, isRectFill{}, isRectDash{}, isArrowDash{}, isArrowRound{};
 		bool isLine{}, isPenDash{}, isPenSoft{}, isPenMarker{};
-		bool isTextBold{}, isTextItalic{}, isHighlightBorder{}, isHighlightEllipse{}, isMosaicBlur{};
+		bool isTextBold{}, isTextItalic{}, isTextStroke{}, isHighlightBorder{}, isHighlightEllipse{}, isMosaicBlur{};
 		int rectKind{}, polygonSides{}, starPoints{}, arrowHead{}, lineKind{}, numberStyle{};
-		float cornerRadius{}, lastCornerRadius{}, sliderVal{}, sliderMin{}, sliderMax{};
+		float cornerRadius{}, lastCornerRadius{}, sliderVal{}, sliderMin{}, sliderMax{}, textStrokeWidth{};
+		UINT strokeColorIndex{};
 		std::wstring curSliderKey;
 		UINT selectColorIndex{};
 		UINT32 sessionCustomColor{}, customColor{};

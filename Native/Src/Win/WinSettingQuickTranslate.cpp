@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <ctime>
+#include <thread>
 #include "../Lang.h"
 #include "../Setting.h"
 #include "../App.h"
@@ -128,6 +129,21 @@ WinSettingQuickTranslate::WinSettingQuickTranslate(Ling::WinBase* parent) : Ling
 		if (histToggleBtn && histToggleBtn->isPosIn(pos)) return;
 		toggleHistory();
 	});
+	// 结果复制按钮默认隐藏：鼠标进入某条译文所在行时才浮出。
+	// 记录里可能残留已被重建掉的气泡/按钮，先按 weak 指针清掉，再遍历当前存活的。
+	mouseMoveTok = win->onMouseMove.add([this, weakThis = getWeakThis()](POINT pos) {
+		if (!weakThis.lock()) return;
+		std::erase_if(copyHosts, [](const CopyHost& h) {
+			return h.bubbleAlive.expired() || h.btnAlive.expired();
+			});
+		for (auto& h : copyHosts) {
+			if (!h.bubble || !h.btn) continue;
+			// 以整条气泡行作为停悬区：气泡与按钮之间有间距，落在间距上也不会让按钮闪没。
+			// 按钮始终参与布局、只切 visual 可见性，命中区域在隐藏时也已算好。
+			const bool on = h.bubble->parent && h.bubble->parent->isPosIn(pos);
+			h.btn->visual.IsVisible(on);
+		}
+	});
 	loadSessions();
 }
 
@@ -137,6 +153,7 @@ WinSettingQuickTranslate::~WinSettingQuickTranslate()
 	if (histAnimRunning) win->killTimer(kAnimTimerId);
 	win->onTimer.remove(timerTok);
 	win->onMouseDown.remove(mouseDownTok);
+	win->onMouseMove.remove(mouseMoveTok);
 	// 离开这一页就把离线翻译模型（几百 MB）还回去：截图会话那条链路已在 WinCap::onClosed
 	// 释放过，这里补上缺的那条 —— 否则在这一页翻过一次离线之后，模型会一直常驻到退出。
 	// release() 内部加锁，后台还在翻的那一段会先跑完，不会被抽掉。
@@ -617,6 +634,18 @@ void WinSettingQuickTranslate::showProviderBox(Ling::Button* btn)
 
 // ============ 翻译 ============
 
+Ling::Label* WinSettingQuickTranslate::makeSelectableText(Ling::Node* parent,
+	const std::wstring& text, float fontSize, uint32_t color)
+{
+	if (!parent) return nullptr;
+	auto* label = parent->makeChild<Ling::Label>();
+	label->setFontSize(fontSize);
+	label->setColor(color);
+	label->setSelectable(true);
+	label->setText(text);
+	return label;
+}
+
 Ling::Node* WinSettingQuickTranslate::appendBubble(const std::wstring& role, const std::wstring& text)
 {
 	// 一条消息 = block（整宽，Column）：上面右/左对齐的气泡行，下面挂释义卡（字典模式）
@@ -629,6 +658,8 @@ Ling::Node* WinSettingQuickTranslate::appendBubble(const std::wstring& role, con
 	row->setWidthPercent(100.f);
 	row->setFlexDirection(Ling::FlexDirection::Row);
 	row->setJustifyContent(role == L"user" ? Ling::Justify::End : Ling::Justify::Start);
+	// 译文行的复制按钮贴在气泡右侧，底部与气泡对齐
+	if (role != L"user") row->setAlignItems(Ling::Align::FlexEnd);
 
 	auto bubble = row->makeChild<Ling::Node>();
 	bubble->setFlexDirection(Ling::FlexDirection::Column);
@@ -647,11 +678,12 @@ Ling::Node* WinSettingQuickTranslate::appendBubble(const std::wstring& role, con
 		buildResultContent(bubble, block, text);
 	}
 	else {
-		auto lab = bubble->makeChild<Ling::Label>();
-		lab->setFontSize(13.f);
-		lab->setColor(role == L"user" ? SettingTheme::primaryForeground : SettingTheme::textPrimary);
-		lab->setText(wrapText(text, kBubbleMaxW));
+		makeSelectableText(bubble, wrapText(text, kBubbleMaxW), 13.f,
+			role == L"user" ? SettingTheme::primaryForeground : SettingTheme::textPrimary);
 	}
+	// 译文气泡带复制按钮；「翻译中…」的占位气泡等结果回来再挂（见 updateBubble）
+	if (role != L"user" && text != Lang::get(L"quick.translating"))
+		appendCopyButton(bubble, text);
 	scrollToBottom();
 	updateWelcome();
 	return bubble;
@@ -664,18 +696,76 @@ void WinSettingQuickTranslate::updateBubble(Ling::Node* bubble, const std::wstri
 	Ling::Node* block = (bubble->parent ? bubble->parent->parent : nullptr);
 	// 内容重建 → 挂在该条上的释义卡一并失效
 	if (dictCard && block && dictCard->parent == block) resetDictState();
+	// 旧的复制按钮是气泡的兄弟节点（row 的第二个子节点），一并摘掉，避免反复回填时堆叠
+	if (auto* row = bubble->parent) {
+		while (row->children.size() > 1)
+			row->removeChild(row->children.back().get());
+	}
 	while (!bubble->children.empty())
 		bubble->removeChild(bubble->children.back().get());
+	dictViews.erase(std::remove_if(dictViews.begin(), dictViews.end(),
+		[&](const DictTextView& v) { return v.block == block; }), dictViews.end());
 	if (dictModeOn() && block) {
 		buildResultContent(bubble, block, text);
 	}
 	else {
-		auto lab = bubble->makeChild<Ling::Label>();
-		lab->setFontSize(13.f);
-		lab->setColor(SettingTheme::textPrimary);
-		lab->setText(wrapText(text, kBubbleMaxW));
+		makeSelectableText(bubble, wrapText(text, kBubbleMaxW), 13.f,
+			SettingTheme::textPrimary);
 	}
+	appendCopyButton(bubble, text);
 	scrollToBottom();
+}
+
+// 译文气泡右侧的复制按钮：默认隐藏，鼠标停悬到这条结果所在行才显示。
+// 按钮是气泡的兄弟节点（都在 row 里），所以不会影响气泡自身的宽度；回填时随气泡一起重建。
+void WinSettingQuickTranslate::appendCopyButton(Ling::Node* bubble, const std::wstring& text)
+{
+	if (!bubble || text.empty()) return;
+	auto* row = bubble->parent;
+	if (!row) return;
+	auto* copy = row->makeChild<Ling::Button>();
+	copy->setText(Icon::Copy);
+	copy->setFontFamily(Icon::Family);
+	copy->setFontSize(15.f);
+	copy->setWidth(28.f);
+	copy->setHeight(28.f);
+	copy->setMarginLeft(8.f);       // 与结果气泡留出间距
+	copy->setMarginBottom(2.f);
+	copy->setFlexShrink(0.f);
+	copy->setBorderRadius(SettingTheme::radiusCtl);   // 圆角方形，不用 radiusFull 的圆形
+	copy->setBg(SettingTheme::card);
+	copy->setBorder(1.f, SettingTheme::border);
+	copy->setColor(SettingTheme::textMuted);
+	copy->setHoverBg(SettingTheme::accent);
+	copy->setHoverColor(SettingTheme::textPrimary);
+	// 不走 hide()（那会 display:none 退出布局）；只隐藏绘制，保留 28px 命中区域
+	copy->visual.IsVisible(false);
+
+	auto weak = getWeakThis();
+	auto btnWeak = copy->getWeakThis();
+	copy->onClick.add([weak, btnWeak, copy, text](Ling::Button*) {
+		if (!weak.lock() || !btnWeak.lock()) return;
+		Ling::Util::setTextToClipboard(text);
+		if (auto* s = Setting::get()) s->markOwnClipboardWrite();
+		copy->setText(Icon::CopyOk);
+		copy->setColor(0x34C759FF);
+		copy->setHoverColor(0x34C759FF);
+		// 1.2s 后恢复图标；按钮/页面已销毁时 weak 为空，直接跳过
+		std::thread([btnWeak, copy]() {
+			std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+			// 页面先销毁时按钮 weak 已过期，先拦掉，避免退出阶段再去碰 App/调度队列
+			if (!btnWeak.lock()) return;
+			if (auto* app = Ling::App::get()) {
+				app->dq.TryEnqueue([btnWeak, copy]() {
+					if (!btnWeak.lock()) return;
+					copy->setText(Icon::Copy);
+					copy->setColor(SettingTheme::textMuted);
+					copy->setHoverColor(SettingTheme::textPrimary);
+				});
+			}
+		}).detach();
+	});
+	copyHosts.push_back({ bubble, copy, bubble->getWeakThis(), copy->getWeakThis() });
 }
 
 // ============ 字典模式（单击译文英文单词，于该条下方展开释义） ============
@@ -698,20 +788,35 @@ void WinSettingQuickTranslate::buildResultContent(Ling::Node* bubble, Ling::Node
 	plain.reserve(text.size());
 	for (wchar_t c : text) plain += (c == L'\r' || c == L'\n') ? L' ' : c;
 
-	// 分词：连续的「字母/数字/'/-」为一个词元；其余（空白、标点）为普通文本
-	struct Tok { std::wstring s; bool word; };
+	// 分词：连续的「字母/数字/'/-」为一个词元；空白单独成段；其余标点成段。
+	// 空白必须单独拿出来做定宽占位：空白若放在 Label 末尾，DWrite 会把它当行尾空白
+	// 裁掉，视觉上相邻的两个单词就粘在一起（离线英文结果最常见）。
+	enum class TokKind { Word, Space, Other };
+	struct Tok { std::wstring s; TokKind kind; };
 	auto isWordChar = [](wchar_t c) {
 		return iswalnum(c) || c == L'\'' || c == L'\u2019' || c == L'-';
 	};
+	auto kindOf = [&](wchar_t c) -> TokKind {
+		if (isWordChar(c)) return TokKind::Word;
+		if (iswspace(c)) return TokKind::Space;
+		return TokKind::Other;
+	};
 	std::vector<Tok> toks;
 	for (size_t i = 0, n = plain.size(); i < n;) {
-		const bool word = isWordChar(plain[i]);
+		const TokKind kind = kindOf(plain[i]);
 		size_t j = i;
-		while (j < n && isWordChar(plain[j]) == word) j++;
+		while (j < n && kindOf(plain[j]) == kind) j++;
 		std::wstring s = plain.substr(i, j - i);
-		bool alpha = false;
-		if (word) for (wchar_t c : s) if (iswalpha(c)) { alpha = true; break; }
-		toks.push_back({ s, word && alpha });   // 纯数字不当单词
+		TokKind tk = TokKind::Other;
+		if (kind == TokKind::Space) {
+			tk = TokKind::Space;
+		}
+		else if (kind == TokKind::Word) {
+			bool alpha = false;
+			for (wchar_t c : s) if (iswalpha(c)) { alpha = true; break; }
+			if (alpha) tk = TokKind::Word;   // 纯数字不当单词
+		}
+		toks.push_back({ s, tk });
 		i = j;
 	}
 
@@ -723,65 +828,51 @@ void WinSettingQuickTranslate::buildResultContent(Ling::Node* bubble, Ling::Node
 		if (FAILED(lay->GetMetrics(&m))) return 0.f;
 		return m.width;
 	};
+	// 空格宽度：单独量一个空格可能被当成行尾空白返回 0，用「a a」与「aa」的差值反推。
+	const float spaceW = std::max(1.f, measure(L"a a") - measure(L"aa"));
 
-	// 逐词手动折行：按行铺（行内 Row），保证气泡仍是自适应宽度（不用 flexWrap）
-	auto* flow = bubble->makeChild<Ling::Node>();
-	flow->setFlexDirection(Ling::FlexDirection::Column);
-	flow->setAlignItems(Ling::Align::FlexStart);
-
-	// 释义卡不在这里预建：点词时按需新建在该条消息的 block 下（见 makeDictCard）。
-	// 预建一个隐藏空卡会在"点第二次收起"时闪出一帧只有内边距+描边的空框。
-
-	Ling::Node* line = nullptr;
-	float lineW = 0.f;
+	// 生成可拖选的纯文本，同时记录每个单词在文本中的范围。
+	std::wstring out;
+	std::vector<DictWordRange> words;
 	int wordIndex = -1;
+	float lineW = 0.f;
 	auto newLine = [&]() {
-		line = flow->makeChild<Ling::Node>();
-		line->setFlexDirection(Ling::FlexDirection::Row);
-		line->setAlignItems(Ling::Align::Center);
+		if (!out.empty()) out += L'\n';
 		lineW = 0.f;
 	};
 
 	for (auto& t : toks) {
 		if (t.s.empty()) continue;
-		if (t.word) wordIndex++;
-		float w = measure(t.s);
-		if (!line) newLine();
+		if (t.kind == TokKind::Space) {
+			if (lineW <= 0.f) continue;
+			const float w = spaceW * (float)t.s.size();
+			if (lineW + w > maxLineW) {
+				newLine();
+				continue;
+			}
+			out += t.s;
+			lineW += w;
+			continue;
+		}
+		const bool word = t.kind == TokKind::Word;
+		if (word) wordIndex++;
+		const float w = measure(t.s);
 		if (lineW > 0.f && lineW + w > maxLineW) newLine();
-		std::wstring s = t.s;
-		if (lineW == 0.f && !t.word) {   // 行首空白裁掉
-			size_t a = s.find_first_not_of(L" \t");
-			if (a == std::wstring::npos) continue;
-			s = s.substr(a);
-		}
-		if (t.word)
-		{
-			auto* b = line->makeChild<Ling::Button>();
-			b->setText(s);
-			b->setFontSize(fs);
-			b->setColor(SettingTheme::textPrimary);
-			b->setPadding(0, 0, 0, 0);
-			b->setBorder(0.f, 0);
-			b->setBorderRadius(0.f);
-			b->setBg(0);
-			b->setHoverBg(SettingTheme::accent);
-			b->setHoverColor(SettingTheme::textPrimary);
-			const int idx = wordIndex;
-			auto weak = getWeakThis();
-			b->onClick.add([this, weak, idx, s, block, b](Ling::Button*) {
-				if (!weak.lock()) return;
-				onDictWordClicked(block, b, s, idx);
-			});
-		}
-		else
-		{
-			auto* l = line->makeChild<Ling::Label>();
-			l->setText(s);
-			l->setFontSize(fs);
-			l->setColor(SettingTheme::textPrimary);
-		}
+		if (word)
+			words.push_back({ (int)out.size(), (int)(out.size() + t.s.size()), wordIndex, t.s });
+		out += t.s;
 		lineW += w;
 	}
+	if (out.empty()) return;
+	auto* box = makeSelectableText(bubble, out, fs, SettingTheme::textPrimary);
+	if (!box) return;
+	box->setHandCursor(true);   // 字典模式：悬停译文用点按光标
+	dictViews.push_back({ block, box, std::move(words) });
+	auto weak = getWeakThis();
+	box->onTextClick.add([this, weak, block, box](Ling::Label*, int idx) {
+		if (!weak.lock()) return;
+		onDictTextClicked(block, box, idx);
+	});
 }
 
 Ling::Node* WinSettingQuickTranslate::makeDictCard(Ling::Node* block)
@@ -801,43 +892,56 @@ Ling::Node* WinSettingQuickTranslate::makeDictCard(Ling::Node* block)
 	return card;
 }
 
-void WinSettingQuickTranslate::setWordActive(Ling::Button* btn, bool active)
+void WinSettingQuickTranslate::setWordActive(Ling::Label* box, int start, int end, bool active)
 {
-	if (!btn) return;
-	// 选中：加粗 + 绿色；常态：常规字重 + 正文色。hover 色取与常态同值，避免悬停时配色突变。
-	const uint32_t c = active ? 0x34C759FF : SettingTheme::textPrimary;
-	btn->setFontWeight(active ? 700 : 400);
-	btn->setColor(c);
-	btn->setHoverColor(c);
+	if (!box) return;
+	box->setTextRangeColor(start, end,
+		active ? 0x34C759FF : SettingTheme::textPrimary);
 }
 
-void WinSettingQuickTranslate::onDictWordClicked(Ling::Node* block, Ling::Button* btn,
-	const std::wstring& word, int index)
+void WinSettingQuickTranslate::onDictTextClicked(Ling::Node* block, Ling::Label* box, int textIndex)
 {
-	if (!block || !btn) return;
+	if (!block || !box) return;
+	for (auto& view : dictViews) {
+		if (view.box != box) continue;
+		for (auto& w : view.words) {
+			if (textIndex >= w.start && textIndex < w.end) {
+				onDictWordClicked(block, box, w.start, w.end, w.word, w.index);
+				return;
+			}
+		}
+		return;
+	}
+}
+
+void WinSettingQuickTranslate::onDictWordClicked(Ling::Node* block, Ling::Label* box,
+	int start, int end, const std::wstring& word, int index)
+{
+	if (!block || !box) return;
 
 	// 再点同一个词 → 收起
 	const bool same = (dictCard && dictCard->parent == block && dictActiveIndex == index &&
-		_wcsicmp(dictActiveWord.c_str(), word.c_str()) == 0);
+		dictActiveBox == box && _wcsicmp(dictActiveWord.c_str(), word.c_str()) == 0);
 	if (same) {
-		// 卡片子树里没有订阅窗口事件的节点（纯 Node + Label），可同步销毁；
-		// 且它是被点按钮所在行的兄弟节点，销毁它不会动到正在派发事件的按钮本身。
 		block->removeChild(dictCard);
-		setWordActive(btn, false);
+		setWordActive(box, start, end, false);
 		resetDictState();
 		win->refresh();
 		return;
 	}
 
-	// 收起上一条（含"换到别的消息里点词"的情形）
+	// 收起上一条（含“换到别的消息里点词”的情形）
 	if (dictCard && dictCard->parent) dictCard->parent->removeChild(dictCard);
-	if (dictActiveBtn && dictActiveBtn != btn) setWordActive(dictActiveBtn, false);
+	if (dictActiveBox)
+		setWordActive(dictActiveBox, dictActiveStart, dictActiveEnd, false);
 
 	dictCard = makeDictCard(block);
-	dictActiveBtn = btn;
+	dictActiveBox = box;
+	dictActiveStart = start;
+	dictActiveEnd = end;
 	dictActiveIndex = index;
 	dictActiveWord = word;
-	setWordActive(btn, true);
+	setWordActive(box, start, end, true);
 	if (dictCard) {
 		auto* loading = dictCard->makeChild<Ling::Label>();
 		loading->setText(Lang::get(L"setting.dictLoading"));
@@ -849,10 +953,11 @@ void WinSettingQuickTranslate::onDictWordClicked(Ling::Node* block, Ling::Button
 
 	// 回调已由 DictLookup 投递回 UI 线程；期间用户可能已改选/收起 → 用当前状态校验
 	auto weak = getWeakThis();
-	DictLookup::instance().lookup(word, [this, weak, block, word, index](const DictEntry& e) {
+	DictLookup::instance().lookup(word, [this, weak, block, box, word, index](const DictEntry& e) {
 		if (!weak.lock()) return;
 		if (!dictCard || dictCard->parent != block) return;
-		if (dictActiveIndex != index || _wcsicmp(dictActiveWord.c_str(), word.c_str()) != 0) return;
+		if (dictActiveBox != box || dictActiveIndex != index ||
+			_wcsicmp(dictActiveWord.c_str(), word.c_str()) != 0) return;
 		fillDictCard(dictCard, e);
 		win->refresh();
 		scrollToBottom();
@@ -863,12 +968,10 @@ void WinSettingQuickTranslate::fillDictCard(Ling::Node* card, const DictEntry& e
 {
 	if (!card) return;
 	while (!card->children.empty()) card->removeChild(card->children.back().get());
-	auto addLab = [card](const std::wstring& s, float sz, uint32_t col, float mt) {
-		auto* l = card->makeChild<Ling::Label>();
-		l->setText(s);
-		l->setFontSize(sz);
-		l->setColor(col);
-		if (mt > 0.f) l->setMarginTop(mt);
+	auto addLab = [this, card](const std::wstring& s, float sz, uint32_t col, float mt) {
+		auto* box = makeSelectableText(card, s, sz, col);
+		// 释义卡段落间距收紧到原来的 1/2
+		if (box && mt > 0.f) box->setMarginTop(mt * 0.5f);
 		};
 	if (!e.ok) {
 		addLab(e.error.empty() ? Lang::get(L"setting.dictNotFound") : e.error, 12.f,
@@ -895,7 +998,9 @@ void WinSettingQuickTranslate::fillDictCard(Ling::Node* card, const DictEntry& e
 void WinSettingQuickTranslate::resetDictState()
 {
 	dictCard = nullptr;
-	dictActiveBtn = nullptr;
+	dictActiveBox = nullptr;
+	dictActiveStart = 0;
+	dictActiveEnd = 0;
 	dictActiveWord.clear();
 	dictActiveIndex = -1;
 }
@@ -1064,6 +1169,7 @@ void WinSettingQuickTranslate::loadSession(const std::wstring& id)
 		msgList->removeChild(msgList->children.back().get());
 	}
 	resetDictState();
+	dictViews.clear();
 	for (auto& m : target->msgs) {
 		appendBubble(m.role, m.content);
 	}
@@ -1088,6 +1194,7 @@ void WinSettingQuickTranslate::startNewSession()
 		msgList->removeChild(msgList->children.back().get());
 	}
 	resetDictState();
+	dictViews.clear();
 	if (input) input->setText(L"");
 	refreshHistoryList();
 	scrollToBottom();
@@ -1103,6 +1210,7 @@ void WinSettingQuickTranslate::clearSessions()
 		msgList->removeChild(msgList->children.back().get());
 	}
 	resetDictState();
+	dictViews.clear();
 	saveSessions();
 	refreshHistoryList();
 	updateWelcome();

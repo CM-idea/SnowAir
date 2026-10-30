@@ -263,14 +263,18 @@ void ToolColorPanel::updatePosition(const RECT& workArea)
 	float triggerCX = 0.f, triggerBottom = 0.f;
 	owner->getColorTriggerAnchor(triggerCX, triggerBottom);
 	const float subPad = ToolbarTheme::shadowPad * owner->dpi;
-	const float gap = ToolSub::mainGap;
-	const float refTop = static_cast<float>(owner->y) + subPad;
-	const float refBottom = static_cast<float>(owner->y) + owner->h - subPad;
-	const bool preferBelow = !owner->tipDown();
+	const float gap = ToolbarTheme::propBubbleGap;
+	// 颜色面板是三级弹窗：贴着所属二级栏的外侧展开；下方放不下就翻到上方，
+	// 不覆盖二级栏本身。
+	const RECT parent = owner->colorPanelParentBodyRect();
+	const float refTop = static_cast<float>(parent.top) + subPad;
+	const float refBottom = static_cast<float>(parent.bottom) - subPad;
+	const bool preferBelow = owner->colorPanelPreferBelow();
 	const auto place = ToolbarChrome::placeBubble(
 		workArea, refTop, refBottom, w, h, gap,
 		triggerCX - w / 2.f, triggerCX, preferBelow, tipDown_, arrowX, x, y);
-	if (place.tipFlipped) applyTipDirection(place.tipDown);
+	// 换向后无条件同步箭头方向，不能只在“检测到翻转”时更新
+	applyTipDirection(place.tipDown);
 	arrowX = place.arrowX;
 	if (place.moved) setPosition(place.x, place.y);
 	if (hwnd && owner->hwnd) {
@@ -286,6 +290,11 @@ void ToolColorPanel::open(const RECT& workArea)
 	open_ = true;
 	updatePosition(workArea);
 	show();
+	// 三级弹窗可能由二级栏打开；确保它在最上层，不被捕获遮罩或二级栏压住
+	if (hwnd) {
+		SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+			SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+	}
 }
 
 void ToolColorPanel::closePanel()

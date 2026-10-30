@@ -26,6 +26,8 @@ namespace ToolbarTheme
 	inline constexpr float propBtnSize{ 42.f };
 	inline constexpr float propIconInner{ 34.f };
 	inline constexpr float caretSize{ 6.f };
+	// 属性气泡与主栏/上级栏的统一间距
+	inline constexpr float propBubbleGap{ 2.f };
 	inline constexpr float sliderWidth{ 100.f };
 	// 一级 / 二级属性栏滑条右侧数值区（共用，勿在子面板再写一套）
 	inline constexpr float sliderValueWidth{ 28.f };

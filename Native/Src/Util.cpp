@@ -11,6 +11,7 @@
 #include "Image/WebpCodec.h"
 #include "Lang.h"
 #include "Setting.h"
+#include "Setting.h"
 #include "Win/WinPin.h"
 #include "ReadBarcode.h"
 
@@ -314,6 +315,7 @@ void Util::saveToClipboard(const int w, const int h, BYTE* data)
 		GlobalFree(hPng);
 	}
 	CloseClipboard();
+	if (auto* s = Setting::get()) s->markOwnClipboardWrite();
 }
 
 bool Util::saveToFile(const std::wstring& path, const int w, const int h, BYTE* data)

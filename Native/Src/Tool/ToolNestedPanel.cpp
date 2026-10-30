@@ -97,6 +97,9 @@ void ToolNestedPanel::clearContent()
 	if (contentNode) contentNode->removeAllChildren();
 	activeSlider_ = nullptr;
 	activeValue_ = nullptr;
+	textStrokeTrigger_ = nullptr;
+	textStrokeRing_ = nullptr;
+	textStrokeSwatch_ = nullptr;
 	sliderTip_.clear();
 	sliderHover_ = false;
 }
@@ -164,7 +167,7 @@ void ToolNestedPanel::place(const RECT& workArea, Ling::Button* anchor)
 		ax = (float)owner->x + (anchor->x + anchor->w * 0.5f);
 	}
 	const float subPad = ToolbarTheme::shadowPad * owner->dpi;
-	const float gap = ToolSub::mainGap;
+	const float gap = ToolbarTheme::propBubbleGap;
 	const float refTop = (float)owner->y + subPad;
 	const float refBottom = (float)owner->y + owner->h - subPad;
 	const bool preferBelow = !owner->tipDown();
@@ -174,7 +177,8 @@ void ToolNestedPanel::place(const RECT& workArea, Ling::Button* anchor)
 	const auto place = ToolbarChrome::placeBubble(
 		workArea, refTop, refBottom, w, h, gap,
 		desiredX, ax, preferBelow, tipDown_, arrowX, x, y);
-	if (place.tipFlipped) applyTipDirection(place.tipDown);
+	// 换向后无条件同步箭头方向，不能只在“检测到翻转”时更新
+	applyTipDirection(place.tipDown);
 	arrowX = place.arrowX;
 	if (place.moved) setPosition(place.x, place.y);
 	if (hwnd && owner->hwnd) {
@@ -215,6 +219,7 @@ void ToolNestedPanel::closePanel()
 void ToolNestedPanel::openCorner(const RECT& workArea, Ling::Button* anchor)
 {
 	closePanel();
+	owner->closeColorPopup();
 	kind_ = Kind::Corner;
 	clearContent();
 	prepareContentRow();
@@ -239,6 +244,7 @@ void ToolNestedPanel::openWmAngle(const RECT& workArea, Ling::Button* anchor)
 		return;
 	}
 	closePanel();
+	owner->closeColorPopup();
 	kind_ = Kind::WmAngle;
 	clearContent();
 	prepareContentRow();
@@ -261,6 +267,7 @@ void ToolNestedPanel::openShapeSides(const RECT& workArea, Ling::Button* anchor,
 		return;
 	}
 	closePanel();
+	owner->closeColorPopup();
 	kind_ = Kind::ShapeSides;
 	sidesStar_ = star;
 	clearContent();
@@ -281,9 +288,56 @@ void ToolNestedPanel::openShapeSides(const RECT& workArea, Ling::Button* anchor,
 	owner->refreshNestedTrigger();
 }
 
+void ToolNestedPanel::refreshTextStrokeSwatch()
+{
+	if (kind_ != Kind::TextStroke || !textStrokeSwatch_) return;
+	textStrokeSwatch_->setBg(owner->getTextStrokeColorValue());
+	if (owner->getTextStrokeColorValue() == 0xFFFFFFFF)
+		textStrokeSwatch_->setBorder(1.f, 0xA8A8A8FF);
+	else
+		textStrokeSwatch_->setBorder(0.f, 0);
+	if (textStrokeRing_) textStrokeRing_->setBorder(0.f, 0);
+}
+
+void ToolNestedPanel::openTextStroke(const RECT& workArea, Ling::Button* anchor)
+{
+	closePanel();
+	owner->closeColorPopup();
+	kind_ = Kind::TextStroke;
+	clearContent();
+	prepareContentRow();
+
+	// 复用主属性栏的「颜色」色块组件；单击后依旧打开同一个 ToolColorPanel
+	auto ui = owner->makeColorTrigger(contentNode);
+	textStrokeTrigger_ = ui.btn;
+	textStrokeRing_ = ui.ring;
+	textStrokeSwatch_ = ui.swatch;
+	tip->bind(textStrokeTrigger_, Lang::get(L"tool.textStrokeColor"));
+	textStrokeTrigger_->onClick.add([this](Ling::Button*) {
+		if (!textStrokeTrigger_) return;
+		const float cx = static_cast<float>(x) + textStrokeTrigger_->x + textStrokeTrigger_->w * 0.5f;
+		const float bottom = static_cast<float>(y) + textStrokeTrigger_->y + textStrokeTrigger_->h;
+		if (textStrokeRing_) textStrokeRing_->setBorder(1.f, Icon::ColorActive);
+		owner->openStrokeColorPanel(cx, bottom,
+			RECT{ x, y, x + static_cast<int>(w), y + static_cast<int>(h) });
+	});
+	refreshTextStrokeSwatch();
+
+	sliderTip_ = Lang::get(L"tool.textStrokeWidth");
+	addSlider(1.f, 12.f, owner->textStrokeWidth, [this](float nv) {
+		owner->textStrokeWidth = nv;
+		owner->notifyStyleChanged();
+	});
+	finishOpen(workArea, anchor,
+		ToolbarTheme::propPad * 2.f + (Icon::Size + ToolbarTheme::propGap)
+		+ PropSlider::rowLogicW() + ToolbarTheme::shadowPad * 2.f);
+	owner->refreshNestedTrigger();
+}
+
 void ToolNestedPanel::openBoardOpacity(const RECT& workArea, Ling::Button* anchor, float value)
 {
 	closePanel();
+	owner->closeColorPopup();
 	kind_ = Kind::BoardOpacity;
 	clearContent();
 	prepareContentRow();
@@ -298,6 +352,7 @@ void ToolNestedPanel::openBoardOpacity(const RECT& workArea, Ling::Button* ancho
 void ToolNestedPanel::openPenOpacity(const RECT& workArea, Ling::Button* anchor)
 {
 	closePanel();
+	owner->closeColorPopup();
 	kind_ = Kind::PenOpacity;
 	clearContent();
 	prepareContentRow();
@@ -349,6 +404,7 @@ void ToolNestedPanel::openPatinaWm(const RECT& workArea, Ling::Button* anchor)
 	}
 
 	closePanel();
+	owner->closeColorPopup();
 	kind_ = Kind::PatinaWm;
 	owner->isPatinaWatermark = true;
 	owner->patinaPlan = 0;
@@ -418,6 +474,7 @@ void ToolNestedPanel::openEmoji(const RECT& workArea, Ling::Button* anchor)
 		return;
 	}
 	closePanel();
+	owner->closeColorPopup();
 	kind_ = Kind::Emoji;
 	rebuildEmojiGrid();
 	constexpr float cell{ 40.f };

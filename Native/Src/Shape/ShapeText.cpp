@@ -12,6 +12,133 @@
 
 using Microsoft::WRL::ComPtr;
 
+namespace {
+	// 把 GetGlyphRunOutline 吐出的字形轮廓平移到该 run 的 baseline 位置。
+	// IDWriteGeometrySink 就是 ID2D1SimplifiedGeometrySink；这里只做点坐标平移。
+	class OffsetGeometrySink final : public ID2D1SimplifiedGeometrySink
+	{
+	public:
+		OffsetGeometrySink(ID2D1SimplifiedGeometrySink* sink, float ox, float oy)
+			: sink_(sink), ox_(ox), oy_(oy) {
+			sink_->AddRef();
+		}
+		~OffsetGeometrySink() { sink_->Release(); }
+
+		STDMETHOD_(ULONG, AddRef)() override { return InterlockedIncrement(&ref_); }
+		STDMETHOD_(ULONG, Release)() override {
+			const ULONG n = InterlockedDecrement(&ref_);
+			if (n == 0) delete this;
+			return n;
+		}
+		STDMETHOD(QueryInterface)(REFIID riid, void** ppv) override {
+			if (!ppv) return E_POINTER;
+			if (riid == __uuidof(IUnknown) || riid == __uuidof(ID2D1SimplifiedGeometrySink)) {
+				*ppv = this;
+				AddRef();
+				return S_OK;
+			}
+			*ppv = nullptr;
+			return E_NOINTERFACE;
+		}
+
+		STDMETHOD_(void, SetFillMode)(D2D1_FILL_MODE fillMode) override { sink_->SetFillMode(fillMode); }
+		STDMETHOD_(void, SetSegmentFlags)(D2D1_PATH_SEGMENT vertexFlags) override { sink_->SetSegmentFlags(vertexFlags); }
+		STDMETHOD_(void, BeginFigure)(D2D1_POINT_2F startPoint, D2D1_FIGURE_BEGIN figureBegin) override {
+			sink_->BeginFigure(pt(startPoint), figureBegin);
+		}
+		STDMETHOD_(void, AddLines)(const D2D1_POINT_2F* points, UINT32 pointsCount) override {
+			if (!points || pointsCount == 0) return;
+			std::vector<D2D1_POINT_2F> tmp(points, points + pointsCount);
+			for (auto& p : tmp) p = pt(p);
+			sink_->AddLines(tmp.data(), pointsCount);
+		}
+		STDMETHOD_(void, AddBeziers)(const D2D1_BEZIER_SEGMENT* beziers, UINT32 beziersCount) override {
+			if (!beziers || beziersCount == 0) return;
+			std::vector<D2D1_BEZIER_SEGMENT> tmp(beziers, beziers + beziersCount);
+			for (auto& b : tmp) {
+				b.point1 = pt(b.point1);
+				b.point2 = pt(b.point2);
+				b.point3 = pt(b.point3);
+			}
+			sink_->AddBeziers(tmp.data(), beziersCount);
+		}
+		STDMETHOD_(void, EndFigure)(D2D1_FIGURE_END figureEnd) override { sink_->EndFigure(figureEnd); }
+		STDMETHOD(Close)() override { return sink_->Close(); }
+
+	private:
+		D2D1_POINT_2F pt(D2D1_POINT_2F p) const { return D2D1::Point2F(p.x + ox_, p.y + oy_); }
+		ID2D1SimplifiedGeometrySink* sink_{};
+		float ox_{}, oy_{};
+		LONG ref_{ 1 };
+	};
+
+	class TextOutlineRenderer final : public IDWriteTextRenderer
+	{
+	public:
+		explicit TextOutlineRenderer(ID2D1SimplifiedGeometrySink* sink) : sink_(sink) {}
+
+		STDMETHOD_(ULONG, AddRef)() override { return InterlockedIncrement(&ref_); }
+		STDMETHOD_(ULONG, Release)() override {
+			const ULONG n = InterlockedDecrement(&ref_);
+			if (n == 0) delete this;
+			return n;
+		}
+		STDMETHOD(QueryInterface)(REFIID riid, void** ppv) override {
+			if (!ppv) return E_POINTER;
+			if (riid == __uuidof(IUnknown) || riid == __uuidof(IDWriteTextRenderer)) {
+				*ppv = this;
+				AddRef();
+				return S_OK;
+			}
+			*ppv = nullptr;
+			return E_NOINTERFACE;
+		}
+
+		STDMETHOD(IsPixelSnappingDisabled)(void*, BOOL* disabled) override {
+			if (disabled) *disabled = TRUE;
+			return S_OK;
+		}
+		STDMETHOD(GetCurrentTransform)(void*, DWRITE_MATRIX* transform) override {
+			if (transform) *transform = DWRITE_MATRIX{ 1.f, 0.f, 0.f, 1.f, 0.f, 0.f };
+			return S_OK;
+		}
+		STDMETHOD(GetPixelsPerDip)(void*, FLOAT* ppd) override {
+			if (ppd) *ppd = 1.f;
+			return S_OK;
+		}
+		STDMETHOD(DrawGlyphRun)(void*, FLOAT baselineOriginX, FLOAT baselineOriginY,
+			DWRITE_MEASURING_MODE, const DWRITE_GLYPH_RUN* glyphRun,
+			const DWRITE_GLYPH_RUN_DESCRIPTION*, IUnknown*) override {
+			if (!glyphRun || !glyphRun->fontFace || !glyphRun->glyphCount) return S_OK;
+			auto* sink = new OffsetGeometrySink(sink_, baselineOriginX, baselineOriginY);
+			const HRESULT hr = glyphRun->fontFace->GetGlyphRunOutline(
+				glyphRun->fontEmSize,
+				glyphRun->glyphIndices,
+				glyphRun->glyphAdvances,
+				glyphRun->glyphOffsets,
+				glyphRun->glyphCount,
+				glyphRun->isSideways,
+				(glyphRun->bidiLevel & 1) != 0,
+				sink);
+			sink->Release();
+			return hr;
+		}
+		STDMETHOD(DrawUnderline)(void*, FLOAT, FLOAT, const DWRITE_UNDERLINE*, IUnknown*) override {
+			return S_OK;
+		}
+		STDMETHOD(DrawStrikethrough)(void*, FLOAT, FLOAT, const DWRITE_STRIKETHROUGH*, IUnknown*) override {
+			return S_OK;
+		}
+		STDMETHOD(DrawInlineObject)(void*, FLOAT, FLOAT, IDWriteInlineObject*, BOOL, BOOL, IUnknown*) override {
+			return S_OK;
+		}
+
+	private:
+		ID2D1SimplifiedGeometrySink* sink_{};
+		LONG ref_{ 1 };
+	};
+}
+
 ShapeText::ShapeText(AnnotHost* win, bool bubble, bool burst) : ShapeBase(win),
 	borderPadding{ 6.f * win->dpi },
 	bubble_{ bubble && !burst },
@@ -376,6 +503,19 @@ void ShapeText::updateBubbleTail()
 	};
 }
 
+void ShapeText::paintTextStroke(ID2D1DeviceContext* ctx, float tx, float ty)
+{
+	if (!strokeEnabled_ || !textOutline || !strokeBrush || strokeWidth_ <= 0.f) return;
+	D2D1_MATRIX_3X2_F old{};
+	ctx->GetTransform(&old);
+	ctx->SetTransform(D2D1::Matrix3x2F::Translation(tx, ty) * old);
+	// 字形轮廓是以字形边缘为中线的；填色会盖住内侧一半，所以画两倍宽度，
+	// 露在字外的可见描边才等于滑条上的数值。
+	ctx->DrawGeometry(textOutline.Get(), strokeBrush.Get(), strokeWidth_ * 2.f,
+		textOutlineStyle.Get());
+	ctx->SetTransform(old);
+}
+
 void ShapeText::paint(ID2D1DeviceContext* ctx)
 {
 	if (isEditing) {
@@ -417,6 +557,7 @@ void ShapeText::paint(ID2D1DeviceContext* ctx)
 				if (whiteBrush) fgBrush = whiteBrush.Get();
 			}
 			if (!text.empty()) {
+				paintTextStroke(ctx, tx, ty);
 				ctx->DrawTextLayout({ tx, ty }, textLayout.Get(), fgBrush,
 					D2D1_DRAW_TEXT_OPTIONS_NONE);
 			}
@@ -450,12 +591,14 @@ void ShapeText::paint(ID2D1DeviceContext* ctx)
 			textLayout->GetMetrics(&m);
 			const float tx = rect.left + ((rect.right - rect.left) - m.widthIncludingTrailingWhitespace) * 0.5f;
 			const float ty = rect.top + ((rect.bottom - rect.top) - m.height) * 0.5f;
+			paintTextStroke(ctx, tx, ty);
 			ctx->DrawTextLayout({ tx, ty }, textLayout.Get(), textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
 		}
 		ctx->SetTransform(old);
 		return;
 	}
 	if (!textLayout) { ctx->SetTransform(old); return; }
+	paintTextStroke(ctx, rect.left + borderPadding, rect.top + borderPadding);
 	ctx->DrawTextLayout({ rect.left + borderPadding, rect.top + borderPadding },
 		textLayout.Get(), textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
 	ctx->SetTransform(old);
@@ -1168,7 +1311,27 @@ void ShapeText::syncToolFromShape() const
 	}
 	ts->isTextBold = isBold;
 	ts->isTextItalic = isItalic;
+	ts->isTextStroke = strokeEnabled_;
+	ts->selectStrokeColorByValue(strokeColorValue_);
+	ts->setTextStrokeWidthPx(strokeWidth_);
+	ts->updateTextStrokeControls();
 	ts->setShapeSliderVal(L"text", fontSize);
+}
+
+ComPtr<ID2D1PathGeometry> ShapeText::buildTextOutline()
+{
+	if (!textLayout || text.empty()) return nullptr;
+	auto d2d = Ling::D2D::get();
+	if (!d2d || !d2d->d2dFactory) return nullptr;
+	ComPtr<ID2D1PathGeometry> path;
+	if (FAILED(d2d->d2dFactory->CreatePathGeometry(path.GetAddressOf())) || !path) return nullptr;
+	ComPtr<ID2D1GeometrySink> sink;
+	if (FAILED(path->Open(sink.GetAddressOf())) || !sink) return nullptr;
+	sink->SetFillMode(D2D1_FILL_MODE_WINDING);
+	TextOutlineRenderer renderer(sink.Get());
+	if (FAILED(textLayout->Draw(nullptr, &renderer, 0.f, 0.f))) return nullptr;
+	if (FAILED(sink->Close())) return nullptr;
+	return path;
 }
 
 void ShapeText::makeTextLayout()
@@ -1197,6 +1360,7 @@ void ShapeText::makeTextLayout()
 			attachLineSlack = lines[0].height > attachLineStep ? lines[0].height - attachLineStep : 0.f;
 		}
 	}
+	textOutline = strokeEnabled_ ? buildTextOutline() : nullptr;
 }
 
 void ShapeText::setAttr()
@@ -1207,5 +1371,17 @@ void ShapeText::setAttr()
 	fontSize = toolSub->getSliderVal();
 	isBold = toolSub->isTextBold;
 	isItalic = toolSub->isTextItalic;
-	Ling::D2D::get()->deviceContext->CreateSolidColorBrush(color, textBrush.ReleaseAndGetAddressOf());
+	strokeEnabled_ = toolSub->isTextStroke;
+	strokeColorValue_ = toolSub->getTextStrokeColorValue();
+	strokeColor_ = toolSub->getTextStrokeColor();
+	strokeWidth_ = toolSub->getTextStrokeWidthPx();
+	auto d2d = Ling::D2D::get();
+	d2d->deviceContext->CreateSolidColorBrush(color, textBrush.ReleaseAndGetAddressOf());
+	d2d->deviceContext->CreateSolidColorBrush(strokeColor_, strokeBrush.ReleaseAndGetAddressOf());
+	// 文字描边用圆角连接/端点，避免粗描边在笔画转折处出现尖角
+	D2D1_STROKE_STYLE_PROPERTIES strokeProps = D2D1::StrokeStyleProperties(
+		D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+		D2D1_LINE_JOIN_ROUND, 10.f, D2D1_DASH_STYLE_SOLID, 0.f);
+	d2d->d2dFactory->CreateStrokeStyle(strokeProps, nullptr, 0,
+		textOutlineStyle.ReleaseAndGetAddressOf());
 }

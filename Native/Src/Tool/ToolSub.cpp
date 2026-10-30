@@ -137,17 +137,25 @@ void ToolSub::onCreated()
 		Ling::FlexDirection::Row);
 	onMouseMove.add([this](POINT pos) {
 		if (!slider) return;
-		const bool onSlider = slider->isPosIn(pos)
-			|| (sliderValue && sliderValue->isPosIn(pos));
-		if (onSlider != sliderHover) {
+		Ling::Slider* hovered = nullptr;
+		if (slider->isPosIn(pos) || (sliderValue && sliderValue->isPosIn(pos)))
+			hovered = slider;
+		else if (strokeSlider && (strokeSlider->isPosIn(pos)
+			|| (strokeSliderValue && strokeSliderValue->isPosIn(pos))))
+			hovered = strokeSlider;
+		const bool onSlider = hovered != nullptr;
+		if (onSlider != sliderHover || (onSlider && hovered != hoverSlider_)) {
 			sliderHover = onSlider;
+			hoverSlider_ = hovered;
 			if (onSlider) {
-				tip->showAbove(slider, Lang::get(getSliderTipKey()));
+				const std::wstring tipKey = (hovered == strokeSlider)
+					? L"tool.textStrokeWidth" : getSliderTipKey();
+				tip->showAbove(hovered, Lang::get(tipKey));
 				// 二次选中本工具的标注时，改的就是它本身，不再画独立的画布预览
 				if (!win->sizePreviewSuppressed()) win->setSizePreviewHold(true, false);
 			}
 			else {
-				tip->hide(slider);
+				tip->hide();
 				win->setSizePreviewHold(false);
 			}
 		}
@@ -164,6 +172,13 @@ void ToolSub::beginTool(const std::wstring& id)
 	colorTrigger = nullptr;
 	colorTriggerRing = nullptr;
 	colorTriggerSwatch = nullptr;
+	strokeBtn = nullptr;
+	strokeColorTrigger = nullptr;
+	strokeColorTriggerRing = nullptr;
+	strokeColorTriggerSwatch = nullptr;
+	strokeSlider = nullptr;
+	strokeSliderValue = nullptr;
+	hoverSlider_ = nullptr;
 	slider = nullptr;
 	sliderValue = nullptr;
 	wmTextBox = nullptr;
@@ -769,6 +784,7 @@ void ToolSub::showNumberTools()
 
 void ToolSub::showTextTools()
 {
+	const bool newBar = (curToolId != L"text" || !hasTools);
 	beginTool(L"text");
 	// 初始属性：0 常规 / 1 粗体 / 2 斜体 / 3 粗斜体
 	{
@@ -778,13 +794,59 @@ void ToolSub::showTextTools()
 			isTextItalic = (form & 2) != 0;
 		}
 	}
-	initSize(2, true);
+	if (newBar) {
+		isTextStroke = false;
+		textStrokeWidth = 2.f;
+		strokeColorIndex = 5;   // 默认白色
+	}
+	initSize(3, true);
 	boldBtn = makeToggleBtn(Icon::Bold, &isTextBold, L"tool.bold", L"bold");
 	italicBtn = makeToggleBtn(Icon::Italic, &isTextItalic, L"tool.italic", L"italic");
+	// 描边按钮自己处理切换：开启时弹出二级属性栏，关闭时收起来。
+	// 不能拆成 makeToggleBtn + 第二个 onClick —— 事件触发顺序不保证，面板会时开时不开。
+	strokeBtn = contentNode->makeChild<Ling::Button>();
+	strokeBtn->setText(Icon::Stroke);
+	styleToolbarBtn(strokeBtn);
+	strokeBtn->setFontFamily(Icon::Family);
+	strokeBtn->setFontSize(Icon::Size);
+	applyToggleStyle(strokeBtn, isTextStroke);
+	tip->bind(strokeBtn, Lang::get(L"tool.textStroke"));
+	strokeBtn->onClick.add([this, b = strokeBtn](Ling::Button*) {
+		const bool strokePanelOn = nestedPanel && nestedPanel->isOpen()
+			&& nestedPanel->kind() == ToolNestedPanel::Kind::TextStroke;
+		const bool colorPopupOn = colorPanel && colorPanel->isOpen();
+		const bool otherSecondaryOn = nestedPanel && nestedPanel->isOpen()
+			&& nestedPanel->kind() != ToolNestedPanel::Kind::TextStroke;
+
+		// 描边已开启且描边二级栏就是当前栏、又没有三级颜色面板压在上面：
+		// 这才算“再次点按描边”，关闭描边。
+		if (isTextStroke && strokePanelOn && !colorPopupOn && !otherSecondaryOn) {
+			isTextStroke = false;
+			applyToggleStyle(b, false);
+			closeNestedPanel();
+			closeColorPopup();
+			win->onToolStyleChanged();
+			return;
+		}
+
+		// 其余情况都是“继续打开描边属性栏”：
+		// 例如二级栏里点开颜色后，描边仍高亮，再点描边只收起颜色面板，不关闭描边。
+		isTextStroke = true;
+		applyToggleStyle(b, true);
+		closeColorPopup();
+		if (!strokePanelOn && nestedPanel)
+			nestedPanel->openTextStroke(workAreaRect(), b);
+		win->onToolStyleChanged();
+	});
 	registerStyleToggle([this] { return isTextBold; }, [this] { isTextBold = false; });
 	registerStyleToggle([this] { return isTextItalic; }, [this] { isTextItalic = false; });
+	registerStyleToggle([this] { return isTextStroke; }, [this] {
+		isTextStroke = false;
+		updateTextStrokeControls();
+		});
 	initColorTrigger();
 	initSlider();
+	updateTextStrokeControls();
 }
 
 void ToolSub::showMosaicTools()
@@ -1323,20 +1385,31 @@ void ToolSub::applyTipDirection(bool tipDown)
 	ToolbarChrome::applyPropBubbleContentPad(contentNode, tipDown_);
 }
 
+ToolSub::ColorTriggerUi ToolSub::makeColorTrigger(Ling::Node* parent)
+{
+	ColorTriggerUi ui;
+	if (!parent) return ui;
+	ui.btn = parent->makeChild<Ling::Button>();
+	styleToolbarBtn(ui.btn);
+	ui.ring = ui.btn->makeChild<Ling::Node>();
+	ui.ring->setSize(swatchRing, swatchRing);
+	ui.ring->setBorderRadius(swatchRadius + 1.f);
+	ui.ring->setAlignItems(Ling::Align::Center);
+	ui.ring->setJustifyContent(Ling::Justify::Center);
+	ui.swatch = ui.ring->makeChild<Ling::Label>();
+	ui.swatch->setSize(swatchSize, swatchSize);
+	ui.swatch->setBorderRadius(swatchRadius);
+	return ui;
+}
+
 void ToolSub::initColorTrigger()
 {
-	colorTrigger = contentNode->makeChild<Ling::Button>();
-	styleToolbarBtn(colorTrigger);
+	auto ui = makeColorTrigger(contentNode);
+	colorTrigger = ui.btn;
+	colorTriggerRing = ui.ring;
+	colorTriggerSwatch = ui.swatch;
 	tip->bind(colorTrigger, L"颜色");
-	colorTrigger->onClick.add([this](Ling::Button*) { toggleColorPanel(); });
-	colorTriggerRing = colorTrigger->makeChild<Ling::Node>();
-	colorTriggerRing->setSize(swatchRing, swatchRing);
-	colorTriggerRing->setBorderRadius(swatchRadius + 1.f);
-	colorTriggerRing->setAlignItems(Ling::Align::Center);
-	colorTriggerRing->setJustifyContent(Ling::Justify::Center);
-	colorTriggerSwatch = colorTriggerRing->makeChild<Ling::Label>();
-	colorTriggerSwatch->setSize(swatchSize, swatchSize);
-	colorTriggerSwatch->setBorderRadius(swatchRadius);
+	colorTrigger->onClick.add([this](Ling::Button*) { toggleColorPanel(false); });
 	updateColorTriggerSwatch();
 }
 
@@ -1353,16 +1426,91 @@ void ToolSub::updateColorTriggerSwatch()
 	}
 }
 
-void ToolSub::toggleColorPanel()
+void ToolSub::initStrokeColorTrigger()
+{
+	strokeColorTrigger = contentNode->makeChild<Ling::Button>();
+	styleToolbarBtn(strokeColorTrigger);
+	tip->bind(strokeColorTrigger, L"描边颜色");
+	strokeColorTrigger->onClick.add([this](Ling::Button*) { toggleColorPanel(true); });
+	strokeColorTriggerRing = strokeColorTrigger->makeChild<Ling::Node>();
+	strokeColorTriggerRing->setSize(swatchRing, swatchRing);
+	strokeColorTriggerRing->setBorderRadius(swatchRadius + 1.f);
+	strokeColorTriggerRing->setAlignItems(Ling::Align::Center);
+	strokeColorTriggerRing->setJustifyContent(Ling::Justify::Center);
+	strokeColorTriggerSwatch = strokeColorTriggerRing->makeChild<Ling::Label>();
+	strokeColorTriggerSwatch->setSize(swatchSize, swatchSize);
+	strokeColorTriggerSwatch->setBorderRadius(swatchRadius);
+	updateStrokeColorTriggerSwatch();
+}
+
+void ToolSub::updateStrokeColorTriggerSwatch()
+{
+	if (!strokeColorTriggerSwatch) return;
+	const auto c = colors[strokeColorIndex];
+	strokeColorTriggerSwatch->setBg(c);
+	if (strokeColorIndex == 5 || c == 0xFFFFFFFF) {
+		strokeColorTriggerSwatch->setBorder(1.f, 0xA8A8A8FF);
+	}
+	else {
+		strokeColorTriggerSwatch->setBorder(0.f, 0);
+	}
+}
+
+void ToolSub::openStrokeColorPanel(float screenCenterX, float screenBottom, const RECT& parentRect)
 {
 	if (!colorPanel) return;
-	closeNestedPanel();
-	if (colorPanel->isOpen()) {
+	// 同一个描边色块再次点击 = 收起颜色面板
+	if (colorPanel->isOpen() && colorPanelForStroke_) {
 		closeColorPanel();
 		return;
 	}
+	colorPanelForStroke_ = true;
+	colorAnchorCX_ = screenCenterX;
+	colorAnchorBottom_ = screenBottom;
+	colorParentOverride_ = true;
+	colorParentRect_ = parentRect;
+	if (colorPanel->isOpen()) colorPanel->closePanel();
 	colorPanel->open(workAreaRect());
-	if (colorTriggerRing) {
+}
+
+RECT ToolSub::colorPanelParentBodyRect() const
+{
+	RECT r = colorParentOverride_
+		? colorParentRect_
+		: RECT{ x, y, x + static_cast<int>(w), y + static_cast<int>(h) };
+	const bool parentAbove = colorParentOverride_ && nestedPanel
+		? nestedPanel->tipDown() : tipDown();
+	const int caret = static_cast<int>(std::lround(ToolbarTheme::caretSize * dpi));
+	if (parentAbove) r.bottom -= caret;
+	else r.top += caret;
+	return r;
+}
+
+bool ToolSub::colorPanelPreferBelow() const
+{
+	// 颜色面板往父栏的外侧展开：父栏在上就继续上弹，在下就下弹
+	if (colorParentOverride_ && nestedPanel) return !nestedPanel->tipDown();
+	return !tipDown();
+}
+
+void ToolSub::toggleColorPanel(bool stroke)
+{
+	if (!colorPanel) return;
+	closeNestedPanel();
+	if (colorPanel->isOpen() && colorPanelForStroke_ == stroke) {
+		closeColorPanel();
+		return;
+	}
+	// 切换目标色块：先清掉旧高亮，再以新目标重建色板
+	colorPanelForStroke_ = stroke;
+	colorPanel->closePanel();
+	if (colorTriggerRing) colorTriggerRing->setBorder(0.f, 0);
+	if (strokeColorTriggerRing) strokeColorTriggerRing->setBorder(0.f, 0);
+	colorPanel->open(workAreaRect());
+	if (stroke) {
+		if (strokeColorTriggerRing) strokeColorTriggerRing->setBorder(1.f, Icon::ColorActive);
+	}
+	else if (colorTriggerRing) {
 		colorTriggerRing->setBorder(1.f, Icon::ColorActive);
 	}
 }
@@ -1372,6 +1520,32 @@ void ToolSub::closeColorPanel()
 	if (colorPanel) colorPanel->closePanel();
 	if (colorTriggerRing) {
 		colorTriggerRing->setBorder(0.f, 0);
+	}
+	if (strokeColorTriggerRing) {
+		strokeColorTriggerRing->setBorder(0.f, 0);
+	}
+	colorPanelForStroke_ = false;
+	colorAnchorCX_ = -1.f;
+	colorAnchorBottom_ = -1.f;
+	colorParentOverride_ = false;
+	if (nestedPanel && nestedPanel->kind() == ToolNestedPanel::Kind::TextStroke)
+		nestedPanel->refreshTextStrokeSwatch();
+}
+
+void ToolSub::closeColorPopup()
+{
+	closeColorPanel();
+}
+
+void ToolSub::updateTextStrokeControls()
+{
+	if (curToolId != L"text" || !hasTools) return;
+	if (strokeBtn) applyToggleStyle(strokeBtn, isTextStroke);
+	// 关闭描边时同步收起二级属性栏与描边颜色面板
+	if (!isTextStroke) {
+		if (nestedPanel && nestedPanel->kind() == ToolNestedPanel::Kind::TextStroke)
+			closeNestedPanel();
+		if (colorPanelForStroke_) closeColorPanel();
 	}
 }
 
@@ -1407,6 +1581,9 @@ void ToolSub::resetStyleToDefaults()
 	const int tf = designInt(ToolKey::Text, DesignKey::Form, 0);
 	isTextBold = (tf & 1) != 0;
 	isTextItalic = (tf & 2) != 0;
+	isTextStroke = false;
+	textStrokeWidth = 2.f;
+	strokeColorIndex = 5;
 	isHighlightBorder = designInt(ToolKey::Highlight, DesignKey::Border, 0) != 0;
 	isHighlightEllipse = designInt(ToolKey::Highlight, DesignKey::Form, 0) == 1;
 	isMosaicBlur = designInt(ToolKey::Mosaic, DesignKey::Form, 0) == 1;
@@ -1425,7 +1602,8 @@ void ToolSub::beginShapeStylePreview()
 	s.isEllipse = isEllipse; s.isRectFill = isRectFill; s.isRectDash = isRectDash;
 	s.isArrowDash = isArrowDash; s.isArrowRound = isArrowRound; s.isLine = isLine;
 	s.isPenDash = isPenDash; s.isPenSoft = isPenSoft; s.isPenMarker = isPenMarker;
-	s.isTextBold = isTextBold; s.isTextItalic = isTextItalic;
+	s.isTextBold = isTextBold; s.isTextItalic = isTextItalic; s.isTextStroke = isTextStroke;
+	s.textStrokeWidth = textStrokeWidth; s.strokeColorIndex = strokeColorIndex;
 	s.isHighlightBorder = isHighlightBorder; s.isHighlightEllipse = isHighlightEllipse;
 	s.isMosaicBlur = isMosaicBlur;
 	s.rectKind = rectKind; s.polygonSides = polygonSides; s.starPoints = starPoints;
@@ -1449,7 +1627,8 @@ void ToolSub::endShapeStylePreview()
 	isEllipse = s.isEllipse; isRectFill = s.isRectFill; isRectDash = s.isRectDash;
 	isArrowDash = s.isArrowDash; isArrowRound = s.isArrowRound; isLine = s.isLine;
 	isPenDash = s.isPenDash; isPenSoft = s.isPenSoft; isPenMarker = s.isPenMarker;
-	isTextBold = s.isTextBold; isTextItalic = s.isTextItalic;
+	isTextBold = s.isTextBold; isTextItalic = s.isTextItalic; isTextStroke = s.isTextStroke;
+	textStrokeWidth = s.textStrokeWidth; strokeColorIndex = s.strokeColorIndex;
 	isHighlightBorder = s.isHighlightBorder; isHighlightEllipse = s.isHighlightEllipse;
 	isMosaicBlur = s.isMosaicBlur;
 	rectKind = s.rectKind; polygonSides = s.polygonSides; starPoints = s.starPoints;
@@ -1470,6 +1649,15 @@ void ToolSub::endShapeStylePreview()
 		suppressSliderStyleNotify = false;
 	}
 	updateColorTriggerSwatch();
+	updateStrokeColorTriggerSwatch();
+	if (strokeSlider) {
+		suppressSliderStyleNotify = true;
+		strokeSlider->setValue(textStrokeWidth);
+		suppressSliderStyleNotify = false;
+	}
+	if (strokeSliderValue)
+		strokeSliderValue->setText(wfmt(L"%d", static_cast<int>(std::round(textStrokeWidth))));
+	updateTextStrokeControls();
 	refreshNestedTrigger();
 	if (curToolId == L"number") syncNumberInput();
 }
@@ -1528,6 +1716,7 @@ void ToolSub::refreshStyleToggles()
 	if (penBaseBtn) applyToggleStyle(penBaseBtn, !isPenMarker && !isPenSoft);
 	if (boldBtn) applyToggleStyle(boldBtn, isTextBold);
 	if (italicBtn) applyToggleStyle(italicBtn, isTextItalic);
+	if (strokeBtn) applyToggleStyle(strokeBtn, isTextStroke);
 	if (hiEllipseBtn) applyToggleStyle(hiEllipseBtn, isHighlightEllipse);
 	if (hiRectBtn) applyToggleStyle(hiRectBtn, !isHighlightEllipse);
 	if (hiBorderBtn) applyToggleStyle(hiBorderBtn, isHighlightBorder);
@@ -1585,20 +1774,60 @@ void ToolSub::selectColorByValue(UINT32 rgba)
 	updateColorTriggerSwatch();
 }
 
+void ToolSub::setStrokeColorIndex(size_t index)
+{
+	if (index >= colors.size()) return;
+	strokeColorIndex = static_cast<UINT>(index);
+	if (nestedPanel && nestedPanel->kind() == ToolNestedPanel::Kind::TextStroke)
+		nestedPanel->refreshTextStrokeSwatch();
+	win->onToolStyleChanged();
+}
+
+void ToolSub::selectStrokeColorByValue(UINT32 rgba)
+{
+	if (rgba == 0) return;
+	UINT idx = static_cast<UINT>(customColorIndex);
+	bool found = false;
+	for (size_t i = 0; i < colors.size(); ++i) {
+		if (colors[i] == rgba) { idx = static_cast<UINT>(i); found = true; break; }
+	}
+	if (!found) {
+		sessionCustomColor = rgba;
+		colors[customColorIndex] = rgba;
+	}
+	if (strokeColorIndex != idx) {
+		strokeColorIndex = idx;
+		if (colorPanel && colorPanel->isOpen() && colorPanelForStroke_)
+			colorPanel->refreshSelection();
+	}
+	updateStrokeColorTriggerSwatch();
+	if (nestedPanel && nestedPanel->kind() == ToolNestedPanel::Kind::TextStroke)
+		nestedPanel->refreshTextStrokeSwatch();
+}
+
 void ToolSub::onColorPicked(size_t index)
 {
 	if (index >= colors.size()) return;
+	const bool forStroke = colorPanelForStroke_;
 	if (index == customColorIndex) {
 		if (!pickCustomColor()) return;
 	}
-	else if (index == selectColorIndex) {
+	else if (index == (forStroke ? strokeColorIndex : selectColorIndex)) {
 		closeColorPanel();
 		return;
 	}
-	selectColorIndex = static_cast<UINT>(index);
-	if (!curToolId.empty())
-		colorIndexMem[curToolId] = selectColorIndex;
-	updateColorTriggerSwatch();
+	if (forStroke) {
+		strokeColorIndex = static_cast<UINT>(index);
+		updateStrokeColorTriggerSwatch();
+		if (nestedPanel && nestedPanel->kind() == ToolNestedPanel::Kind::TextStroke)
+			nestedPanel->refreshTextStrokeSwatch();
+	}
+	else {
+		selectColorIndex = static_cast<UINT>(index);
+		if (!curToolId.empty())
+			colorIndexMem[curToolId] = selectColorIndex;
+		updateColorTriggerSwatch();
+	}
 	if (index == customColorIndex) {
 		if (colorPanel && colorPanel->isOpen())
 			colorPanel->refreshSelection();
@@ -1611,9 +1840,16 @@ void ToolSub::onColorPicked(size_t index)
 
 void ToolSub::getColorTriggerAnchor(float& screenCenterX, float& screenBottom) const
 {
-	if (colorTrigger) {
-		screenCenterX = static_cast<float>(x) + colorTrigger->x + colorTrigger->w * 0.5f;
-		screenBottom = static_cast<float>(y) + colorTrigger->y + colorTrigger->h;
+	if (colorPanelForStroke_ && colorAnchorCX_ >= 0.f) {
+		screenCenterX = colorAnchorCX_;
+		screenBottom = colorAnchorBottom_;
+		return;
+	}
+	const Ling::Button* trigger = (colorPanelForStroke_ && strokeColorTrigger)
+		? strokeColorTrigger : colorTrigger;
+	if (trigger) {
+		screenCenterX = static_cast<float>(x) + trigger->x + trigger->w * 0.5f;
+		screenBottom = static_cast<float>(y) + trigger->y + trigger->h;
 	}
 	else {
 		screenCenterX = static_cast<float>(x) + w * 0.5f;
@@ -2175,6 +2411,20 @@ void ToolSub::initSlider()
 	sliderValue = pair.value;
 }
 
+void ToolSub::initStrokeSlider()
+{
+	auto pair = PropSlider::mount(contentNode, 1.f, 12.f, textStrokeWidth,
+		[this](float val) {
+			textStrokeWidth = val;
+			if (suppressSliderStyleNotify) return;
+			win->onToolStyleChanged();
+		});
+	strokeSlider = pair.slider;
+	strokeSliderValue = pair.value;
+	strokeSlider->hide();
+	strokeSliderValue->hide();
+}
+
 bool ToolSub::adjustPrimarySize(int dir)
 {
 	if (curToolId.empty() || dir == 0) return false;
@@ -2277,6 +2527,33 @@ UINT32 ToolSub::getSelectedColorValue() const
 	return colors[selectColorIndex];
 }
 
+D2D1_COLOR_F ToolSub::getTextStrokeColor() const
+{
+	return Ling::Color(colors[strokeColorIndex]).getD2DColor();
+}
+
+UINT32 ToolSub::getTextStrokeColorValue() const
+{
+	return colors[strokeColorIndex];
+}
+
+float ToolSub::getTextStrokeWidthPx() const
+{
+	return textStrokeWidth * dpi;
+}
+
+void ToolSub::setTextStrokeWidthPx(float px)
+{
+	textStrokeWidth = std::clamp(px / dpi, 1.f, 12.f);
+	if (strokeSlider) {
+		suppressSliderStyleNotify = true;
+		strokeSlider->setValue(textStrokeWidth);
+		suppressSliderStyleNotify = false;
+	}
+	if (strokeSliderValue)
+		strokeSliderValue->setText(wfmt(L"%d", static_cast<int>(std::round(textStrokeWidth))));
+}
+
 float ToolSub::getSliderVal() const
 {
 	return sliderVal * dpi;
@@ -2322,6 +2599,13 @@ void ToolSub::hideTools()
 	colorTrigger = nullptr;
 	colorTriggerRing = nullptr;
 	colorTriggerSwatch = nullptr;
+	strokeBtn = nullptr;
+	strokeColorTrigger = nullptr;
+	strokeColorTriggerRing = nullptr;
+	strokeColorTriggerSwatch = nullptr;
+	strokeSlider = nullptr;
+	strokeSliderValue = nullptr;
+	hoverSlider_ = nullptr;
 	wmTextBox = nullptr;
 	numberInput = nullptr;
 	numberShowsSelected_ = false;
@@ -2417,7 +2701,7 @@ void ToolSub::updatePosition(const RECT& workArea)
 	const float refBottom = bar.y + bar.h - mainPad;
 	const float arrowAnchor = mainX + btnCenterX;
 	auto place = ToolbarChrome::placeBubble(
-		wa, refTop, refBottom, w, h, mainGap,
+		wa, refTop, refBottom, w, h, ToolbarTheme::propBubbleGap,
 		// 属性栏优先在主栏下方；下方不够再上弹
 		px, arrowAnchor, true, tipDown_, arrowX, x, y);
 
@@ -2446,12 +2730,13 @@ void ToolSub::updatePosition(const RECT& workArea)
 		};
 		if (overlapArea(place) > 0) {
 			const auto flipped = ToolbarChrome::placeBubble(
-				wa, refTop, refBottom, w, h, mainGap, px, arrowAnchor,
+				wa, refTop, refBottom, w, h, ToolbarTheme::propBubbleGap, px, arrowAnchor,
 				false, tipDown_, arrowX, x, y);
 			if (overlapArea(flipped) < overlapArea(place)) place = flipped;
 		}
 	}
-	if (place.tipFlipped) applyTipDirection(place.tipDown);
+	// 换向后无条件同步箭头方向，避免方向状态残留导致间距按旧方向计算
+	applyTipDirection(place.tipDown);
 	arrowX = place.arrowX;
 	if (place.moved) setPosition(place.x, place.y);
 	if (!isVisible) {

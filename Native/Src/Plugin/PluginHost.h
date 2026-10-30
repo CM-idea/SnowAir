@@ -31,6 +31,7 @@ public:
     void quickHang();
     void toggleRack();
     bool rackInstalled() const;
+    std::wstring rackVersion() const;   // 插件已加载时返回其自报版本，否则空串
     bool uninstallRack();
 
     // Theme preview/apply. `preview` keeps the value out of config.json.

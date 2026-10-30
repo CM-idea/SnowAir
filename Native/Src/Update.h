@@ -14,4 +14,13 @@ public:
 	static void checkLater();
 	// 每日检查发现的新版本号（如 "0.1.12"）；空 = 没有新版 / 今天还没查
 	static std::wstring pendingVersion();
+
+	// 晾衣架插件更新：与主程序检查同时跑。force=true 供「关于」页手动检查重查。
+	static void checkRackUpdate(bool force = false);
+	// 已查到的最新晾衣架版本（如 "0.1.1"）；空 = 尚未查到
+	static std::wstring rackLatestVersion();
+	// 最新版本 > 已安装插件版本时返回 true（未安装返回 false）
+	static bool rackUpdateAvailable();
+	// 晾衣架更新状态变化（查到最新版本后触发，UI 线程）
+	static winrt::event<winrt::delegate<>>& onRackUpdateChanged();
 };

@@ -7,6 +7,7 @@
 #include "../Win/SettingTheme.h"
 #include "../Win/WinSetting.h"
 #include "../Win/PinMenu.h"
+#include "../Win/WinPin.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -745,15 +746,20 @@ void PluginHost::init()
     host_.entry_tags_set = entryTagsSet;
     host_.entry_all_tags = entryAllTags;
 
-    const std::filesystem::path local = L"I:\\SnowAir-Rack\\dist\\rack.dll";
     const std::filesystem::path installed =
         PluginPaths::root() / L"rack" / L"rack.dll";
     std::filesystem::path dll;
     std::error_code ec;
     if (std::filesystem::exists(installed, ec)) dll = installed;
-    else if (std::filesystem::exists(local, ec)) dll = local;
+#ifdef _DEBUG
+    else {
+        // 开发期便利：Release 构建不走这个固定路径，避免正式包依赖本地源码目录
+        const std::filesystem::path local = L"I:\\SnowAir-Rack\\dist\\rack.dll";
+        if (std::filesystem::exists(local, ec)) dll = local;
+    }
+#endif
     if (dll.empty()) {
-        dbg(L"rack.dll not found (plugins\\rack or SnowAir-Rack\\dist)");
+        dbg(L"rack.dll not installed");
         return;
     }
 
@@ -857,6 +863,11 @@ bool PluginHost::rackInstalled() const
     return std::filesystem::exists(PluginPaths::root() / L"rack" / L"rack.dll", ec);
 }
 
+std::wstring PluginHost::rackVersion() const
+{
+    return plugin_ && plugin_->version ? std::wstring{ plugin_->version } : std::wstring{};
+}
+
 bool PluginHost::uninstallRack()
 {
     shutdown();
@@ -892,6 +903,52 @@ void PluginHost::quickHang()
             onCapture(item.filePath);
             return;
         }
+    }
+}
+
+/* 插件可调用：把图片按 SnowAir 的贴图形态贴到桌面（带原生落下动效）。
+   同一张图重复贴图时不再新建，而是让已有贴图抖动提示。
+   导出符号给插件用 GetProcAddress 查找，旧宿主没有这个符号时插件自行降级。 */
+static std::map<std::wstring, HWND> g_rackPinnedImages;
+
+static std::wstring lowerKey(const std::wstring& text)
+{
+    std::wstring key = text;
+    for (auto& ch : key) ch = static_cast<wchar_t>(towlower(ch));
+    return key;
+}
+
+extern "C" __declspec(dllexport) void SnowAirPinImageFile(const wchar_t* path)
+{
+    if (!path || !*path) return;
+    const std::wstring key = lowerKey(path);
+    auto it = g_rackPinnedImages.find(key);
+    if (it != g_rackPinnedImages.end()) {
+        if (IsWindow(it->second)) {
+            RECT rc{};
+            GetWindowRect(it->second, &rc);
+            for (int i = 0; i < 8; ++i) {
+                const int offset = (i % 2 == 0) ? 7 : -7;
+                SetWindowPos(it->second, nullptr, rc.left + offset, rc.top, 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                Sleep(26);
+            }
+            SetWindowPos(it->second, nullptr, rc.left, rc.top, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            return;
+        }
+        g_rackPinnedImages.erase(it);
+    }
+    auto [w, h, px] = Util::loadImagePixels(path);
+    if (w <= 0 || h <= 0 || px.empty()) return;
+    RECT rc{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &rc, 0);
+    const int areaW = static_cast<int>(rc.right - rc.left);
+    const int areaH = static_cast<int>(rc.bottom - rc.top);
+    const int x = static_cast<int>(rc.left) + (std::max)(0, (areaW - w) / 2);
+    const int y = static_cast<int>(rc.top) + (std::max)(0, (areaH - h) / 2);
+    if (WinPin* pin = WinPin::initFromData(x, y, w, h, px)) {
+        if (pin->hwnd) g_rackPinnedImages[key] = pin->hwnd;
     }
 }
 

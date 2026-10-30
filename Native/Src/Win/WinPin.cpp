@@ -453,7 +453,7 @@ void WinPin::init(int x, int y, int w, int h, const std::wstring& initialTool, s
 	winPins.push_back(std::move(winPin));
 }
 
-void WinPin::initFromData(int x, int y, int w, int h, std::vector<BYTE>& data)
+WinPin* WinPin::initFromData(int x, int y, int w, int h, std::vector<BYTE>& data)
 {
 	auto ptr = new WinPin(x, y, w, h, &data);
 	std::unique_ptr<WinPin> winPin{ ptr };
@@ -463,6 +463,7 @@ void WinPin::initFromData(int x, int y, int w, int h, std::vector<BYTE>& data)
 		ptr->raiseToolChrome();
 	}
 	winPins.push_back(std::move(winPin));
+	return ptr;
 }
 
 Microsoft::WRL::ComPtr<IDWriteTextLayout> WinPin::makeHoverIcon(const wchar_t* code)

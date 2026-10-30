@@ -55,7 +55,7 @@ namespace {
 		if (v.ValueType() == JsonValueType::Object) return v.GetObjectW();
 		if (v.ValueType() == JsonValueType::Array) {
 			auto a = v.GetArray();
-			if (a.Size() > 0 && a.GetAt(0).ValueType() == JsonValueType::Object)
+			if (a && a.Size() > 0 && a.GetAt(0).ValueType() == JsonValueType::Object)
 				return a.GetAt(0).GetObjectW();
 		}
 		return JsonObject{ nullptr };
@@ -79,7 +79,9 @@ namespace {
 		if (v.ValueType() == JsonValueType::String) return v.GetString().c_str();
 		if (v.ValueType() == JsonValueType::Array) {
 			std::wstring out;
-			for (auto&& x : v.GetArray()) {
+			auto arr = v.GetArray();
+			if (!arr) return out;
+			for (auto&& x : arr) {
 				if (x.ValueType() != JsonValueType::String) continue;
 				if (!out.empty()) out += L"；";
 				out += x.GetString().c_str();
@@ -122,13 +124,13 @@ namespace {
 				e.usPhone = strAt(w0, L"usphone");
 
 				auto trs = arrOf(w0, L"trs");
-				for (auto&& tv : trs) {
+				if (trs) for (auto&& tv : trs) {
 					if (tv.ValueType() != JsonValueType::Object) continue;
 					auto trObj = tv.GetObjectW();
 					const std::wstring pos = trim(strAt(trObj, L"pos"));
 					std::wstring meaning;
 					auto trArr = arrOf(trObj, L"tr");
-					for (auto&& trv : trArr) {
+					if (trArr) for (auto&& trv : trArr) {
 						if (trv.ValueType() != JsonValueType::Object) continue;
 						auto l = objOf(trv.GetObjectW(), L"l");
 						if (l && l.HasKey(L"i")) appendJoin(meaning, liToString(l.GetNamedValue(L"i")));
@@ -142,7 +144,7 @@ namespace {
 				}
 
 				auto wfs = arrOf(w0, L"wfs");
-				for (auto&& fv : wfs) {
+				if (wfs) for (auto&& fv : wfs) {
 					if (fv.ValueType() != JsonValueType::Object) continue;
 					auto wf = objOf(fv.GetObjectW(), L"wf");
 					auto name = trim(strAt(wf, L"name"));
@@ -152,14 +154,14 @@ namespace {
 			}
 			// 标签（考试类型）
 			auto examArr = arrOf(ec, L"exam_type");
-			for (auto&& v : examArr)
+			if (examArr) for (auto&& v : examArr)
 				if (v.ValueType() == JsonValueType::String) e.tags.push_back(v.GetString().c_str());
 		}
 
 		// 短语
 		if (auto phrs = objOf(root, L"phrs")) {
 			auto list = arrOf(phrs, L"phrs");
-			for (auto&& pv : list) {
+			if (list) for (auto&& pv : list) {
 				if (pv.ValueType() != JsonValueType::Object) continue;
 				auto phr = objOf(pv.GetObjectW(), L"phr");
 				const std::wstring en = strAt(objOf(objOf(phr, L"headword"), L"l"), L"i");

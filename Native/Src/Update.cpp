@@ -12,6 +12,7 @@
 #include "Setting.h"
 #include "Lang.h"
 #include "Util.h"
+#include "Plugin/PluginHost.h"
 
 namespace {
 	using namespace winrt::Windows::Foundation;
@@ -262,6 +263,15 @@ namespace {
 	// 只在 UI 线程读写
 	std::wstring g_pendingVersion;
 
+	// 晾衣架插件的最新版本 / 检查状态。只在 UI 线程读写。
+	std::wstring g_rackLatestVersion;
+	bool g_rackChecking{ false };
+	winrt::event<winrt::delegate<>>& rackChangedEvent()
+	{
+		static winrt::event<winrt::delegate<>> event;
+		return event;
+	}
+
 	// "v0.1.12" / "0.1.12" → {0,1,12}；认不出来返回全 0（等于「没有新版」）
 	std::array<int, 3> parseTag(const std::wstring& tag)
 	{
@@ -280,6 +290,47 @@ namespace {
 		}
 		flush();
 		return ver;
+	}
+
+	// 拉 SnowAir-Rack 的 Releases Atom，只取最新 tag；失败静默。
+	winrt::fire_and_forget doRackCheck()
+	{
+		std::wstring latest;
+		try {
+			co_await winrt::resume_background();
+			winrt::Windows::Web::Http::Filters::HttpBaseProtocolFilter filter;
+			filter.CacheControl().ReadBehavior(
+				winrt::Windows::Web::Http::Filters::HttpCacheReadBehavior::NoCache);
+			winrt::Windows::Web::Http::HttpClient client{ filter };
+			client.DefaultRequestHeaders().UserAgent().TryParseAdd(L"SnowAir");
+			auto op = client.GetStringAsync(Uri{
+				L"https://github.com/CM-idea/SnowAir-Rack/releases.atom" });
+			auto guard = ThreadPoolTimer::CreateTimer(
+				[op](const ThreadPoolTimer&) { op.Cancel(); }, std::chrono::seconds(8));
+			std::wstring body{ co_await op };
+			guard.Cancel();
+			const std::wstring tag = Util::parseGithubReleaseTag(body);
+			if (!tag.empty()) {
+				const auto remote = parseTag(tag);
+				if (remote[0] || remote[1] || remote[2])
+					latest = wfmt(L"%d.%d.%d", remote[0], remote[1], remote[2]);
+			}
+		}
+		catch (...) {
+			// 网络不通 / 超时 / 解析失败：保留上次结果，下次手动检查再试
+		}
+		if (auto app = Ling::App::get()) {
+			app->dq.TryEnqueue([latest]() {
+				g_rackChecking = false;
+				if (!latest.empty()) {
+					g_rackLatestVersion = latest;
+					rackChangedEvent()();
+				}
+			});
+		}
+		else {
+			g_rackChecking = false;
+		}
 	}
 
 	winrt::fire_and_forget checkGithubLatest()
@@ -322,6 +373,32 @@ std::wstring Update::pendingVersion()
 	return g_pendingVersion;
 }
 
+std::wstring Update::rackLatestVersion()
+{
+	return g_rackLatestVersion;
+}
+
+bool Update::rackUpdateAvailable()
+{
+	if (g_rackLatestVersion.empty()) return false;
+	const std::wstring installed = PluginHost::instance().rackVersion();
+	if (installed.empty()) return false;
+	return parseTag(g_rackLatestVersion) > parseTag(installed);
+}
+
+winrt::event<winrt::delegate<>>& Update::onRackUpdateChanged()
+{
+	return rackChangedEvent();
+}
+
+void Update::checkRackUpdate(bool)
+{
+	// 频率/记账由 checkLater 控制；这里只防并发。手动检查直接走这里。
+	if (g_rackChecking) return;
+	g_rackChecking = true;
+	doRackCheck();
+}
+
 void Update::checkLater()
 {
 	// 按用户设置的频率查：一天 / 一周 / 一月 / 从不；记账在配置里，跨进程有效。
@@ -331,7 +408,15 @@ void Update::checkLater()
 	const long long day = today();
 	const long long last = Setting::get()->getUpdateCheckDay();
 	const long long interval = (freq == 0) ? 1 : (freq == 1) ? 7 : 30;
-	if (last != 0 && day - last < interval) return;
-	Setting::get()->setUpdateCheckDay(day);
-	checkGithubLatest();
+	if (last == 0 || day - last >= interval) {
+		Setting::get()->setUpdateCheckDay(day);
+		checkGithubLatest();
+	}
+	// 晾衣架有独立版本号，与主程序共用「一天/一周/一月/从不」频率，但单独记账。
+	// 这样主程序今天已经查过，也仍会按周期补查插件。
+	const int rackLast = Setting::get()->getRackInt(L"rack.updateCheckDay", 0);
+	if (rackLast == 0 || day - rackLast >= interval) {
+		Setting::get()->setRackInt(L"rack.updateCheckDay", (int)day);
+		checkRackUpdate(false);
+	}
 }

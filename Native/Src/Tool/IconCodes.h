@@ -56,6 +56,7 @@ namespace Icon
 	inline constexpr const wchar_t* Fill = L"\ue629";           // 填充
 	inline constexpr const wchar_t* Bold = L"\ue62e";           // 加粗
 	inline constexpr const wchar_t* Italic = L"\ue625";         // 斜体
+	inline constexpr const wchar_t* Stroke = L"\ue687";         // 文字描边（新字库）
 	inline constexpr const wchar_t* Pierce = L"\ue634";         // 穿透模式：沿用「显示光标」的光标图标
 	inline constexpr const wchar_t* Opacity = L"\ue66b";        // 透明度
 	inline constexpr const wchar_t* MicOn = L"\ue63b";          // 打开麦克风

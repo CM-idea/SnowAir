@@ -13,6 +13,8 @@ public:
 	~ShapeText();
 	void paint(ID2D1DeviceContext* ctx) override;
 	void paintDragger(ID2D1DeviceContext* ctx) override;
+	// 文字描边：先画字形轮廓，再画填充字（填充盖住轮廓内侧，只留外侧描边）
+	void paintTextStroke(ID2D1DeviceContext* ctx, float tx, float ty);
 	void mouseDrag(const float x, const float y) override;
 	void mouseDown(const float x, const float y) override;
 	void mouseUp(const float x, const float y) override;
@@ -71,6 +73,7 @@ public:
 	float attachCx{ 0.f }, attachCy{ 0.f };   // 挂点（线段中点），编辑中也要按它居中
 private:
 	void makeTextLayout();
+	Microsoft::WRL::ComPtr<ID2D1PathGeometry> buildTextOutline();
 	// 编辑中插入符在标注坐标系里的位置 / 行高（文字矩形 + 排版内 hit-test）
 	D2D1_POINT_2F editCaretPos(float& lineH) const;
 	void paintPunch(ID2D1DeviceContext* ctx);
@@ -125,6 +128,14 @@ private:
 	std::vector<D2D1_RECT_F> draggers; // 0..3 角缩放；旋转改走「角外一圈」
 	Microsoft::WRL::ComPtr<IDWriteTextLayout> textLayout;
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> textBrush;
+	// 文字描边：颜色/粗细属于文字样式，轮廓几何随排版重建
+	bool strokeEnabled_{ false };
+	UINT32 strokeColorValue_{ 0xFFFFFFFF };
+	D2D1_COLOR_F strokeColor_{ 1.f, 1.f, 1.f, 1.f };
+	float strokeWidth_{ 2.f };   // 物理像素
+	Microsoft::WRL::ComPtr<ID2D1PathGeometry> textOutline;
+	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> strokeBrush;
+	Microsoft::WRL::ComPtr<ID2D1StrokeStyle> textOutlineStyle;   // 圆角连接/端点
 	Microsoft::WRL::ComPtr<ID2D1StrokeStyle> dashedStrokeStyle;
 	float borderPadding;
 	// 线上文字用的行距（标注单位，"一个字"≈字体 baseline）。编辑框要设同一个值，
