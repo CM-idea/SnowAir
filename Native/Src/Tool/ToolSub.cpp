@@ -137,20 +137,12 @@ void ToolSub::onCreated()
 		Ling::FlexDirection::Row);
 	onMouseMove.add([this](POINT pos) {
 		if (!slider) return;
-		Ling::Slider* hovered = nullptr;
-		if (slider->isPosIn(pos) || (sliderValue && sliderValue->isPosIn(pos)))
-			hovered = slider;
-		else if (strokeSlider && (strokeSlider->isPosIn(pos)
-			|| (strokeSliderValue && strokeSliderValue->isPosIn(pos))))
-			hovered = strokeSlider;
-		const bool onSlider = hovered != nullptr;
-		if (onSlider != sliderHover || (onSlider && hovered != hoverSlider_)) {
+		const bool onSlider = slider->isPosIn(pos)
+			|| (sliderValue && sliderValue->isPosIn(pos));
+		if (onSlider != sliderHover) {
 			sliderHover = onSlider;
-			hoverSlider_ = hovered;
 			if (onSlider) {
-				const std::wstring tipKey = (hovered == strokeSlider)
-					? L"tool.textStrokeWidth" : getSliderTipKey();
-				tip->showAbove(hovered, Lang::get(tipKey));
+				tip->showAbove(slider, Lang::get(getSliderTipKey()));
 				// 二次选中本工具的标注时，改的就是它本身，不再画独立的画布预览
 				if (!win->sizePreviewSuppressed()) win->setSizePreviewHold(true, false);
 			}
@@ -173,12 +165,6 @@ void ToolSub::beginTool(const std::wstring& id)
 	colorTriggerRing = nullptr;
 	colorTriggerSwatch = nullptr;
 	strokeBtn = nullptr;
-	strokeColorTrigger = nullptr;
-	strokeColorTriggerRing = nullptr;
-	strokeColorTriggerSwatch = nullptr;
-	strokeSlider = nullptr;
-	strokeSliderValue = nullptr;
-	hoverSlider_ = nullptr;
 	slider = nullptr;
 	sliderValue = nullptr;
 	wmTextBox = nullptr;
@@ -1426,36 +1412,6 @@ void ToolSub::updateColorTriggerSwatch()
 	}
 }
 
-void ToolSub::initStrokeColorTrigger()
-{
-	strokeColorTrigger = contentNode->makeChild<Ling::Button>();
-	styleToolbarBtn(strokeColorTrigger);
-	tip->bind(strokeColorTrigger, L"描边颜色");
-	strokeColorTrigger->onClick.add([this](Ling::Button*) { toggleColorPanel(true); });
-	strokeColorTriggerRing = strokeColorTrigger->makeChild<Ling::Node>();
-	strokeColorTriggerRing->setSize(swatchRing, swatchRing);
-	strokeColorTriggerRing->setBorderRadius(swatchRadius + 1.f);
-	strokeColorTriggerRing->setAlignItems(Ling::Align::Center);
-	strokeColorTriggerRing->setJustifyContent(Ling::Justify::Center);
-	strokeColorTriggerSwatch = strokeColorTriggerRing->makeChild<Ling::Label>();
-	strokeColorTriggerSwatch->setSize(swatchSize, swatchSize);
-	strokeColorTriggerSwatch->setBorderRadius(swatchRadius);
-	updateStrokeColorTriggerSwatch();
-}
-
-void ToolSub::updateStrokeColorTriggerSwatch()
-{
-	if (!strokeColorTriggerSwatch) return;
-	const auto c = colors[strokeColorIndex];
-	strokeColorTriggerSwatch->setBg(c);
-	if (strokeColorIndex == 5 || c == 0xFFFFFFFF) {
-		strokeColorTriggerSwatch->setBorder(1.f, 0xA8A8A8FF);
-	}
-	else {
-		strokeColorTriggerSwatch->setBorder(0.f, 0);
-	}
-}
-
 void ToolSub::openStrokeColorPanel(float screenCenterX, float screenBottom, const RECT& parentRect)
 {
 	if (!colorPanel) return;
@@ -1505,14 +1461,9 @@ void ToolSub::toggleColorPanel(bool stroke)
 	colorPanelForStroke_ = stroke;
 	colorPanel->closePanel();
 	if (colorTriggerRing) colorTriggerRing->setBorder(0.f, 0);
-	if (strokeColorTriggerRing) strokeColorTriggerRing->setBorder(0.f, 0);
 	colorPanel->open(workAreaRect());
-	if (stroke) {
-		if (strokeColorTriggerRing) strokeColorTriggerRing->setBorder(1.f, Icon::ColorActive);
-	}
-	else if (colorTriggerRing) {
+	if (!stroke && colorTriggerRing)
 		colorTriggerRing->setBorder(1.f, Icon::ColorActive);
-	}
 }
 
 void ToolSub::closeColorPanel()
@@ -1520,9 +1471,6 @@ void ToolSub::closeColorPanel()
 	if (colorPanel) colorPanel->closePanel();
 	if (colorTriggerRing) {
 		colorTriggerRing->setBorder(0.f, 0);
-	}
-	if (strokeColorTriggerRing) {
-		strokeColorTriggerRing->setBorder(0.f, 0);
 	}
 	colorPanelForStroke_ = false;
 	colorAnchorCX_ = -1.f;
@@ -1649,14 +1597,6 @@ void ToolSub::endShapeStylePreview()
 		suppressSliderStyleNotify = false;
 	}
 	updateColorTriggerSwatch();
-	updateStrokeColorTriggerSwatch();
-	if (strokeSlider) {
-		suppressSliderStyleNotify = true;
-		strokeSlider->setValue(textStrokeWidth);
-		suppressSliderStyleNotify = false;
-	}
-	if (strokeSliderValue)
-		strokeSliderValue->setText(wfmt(L"%d", static_cast<int>(std::round(textStrokeWidth))));
 	updateTextStrokeControls();
 	refreshNestedTrigger();
 	if (curToolId == L"number") syncNumberInput();
@@ -1800,7 +1740,6 @@ void ToolSub::selectStrokeColorByValue(UINT32 rgba)
 		if (colorPanel && colorPanel->isOpen() && colorPanelForStroke_)
 			colorPanel->refreshSelection();
 	}
-	updateStrokeColorTriggerSwatch();
 	if (nestedPanel && nestedPanel->kind() == ToolNestedPanel::Kind::TextStroke)
 		nestedPanel->refreshTextStrokeSwatch();
 }
@@ -1818,7 +1757,6 @@ void ToolSub::onColorPicked(size_t index)
 	}
 	if (forStroke) {
 		strokeColorIndex = static_cast<UINT>(index);
-		updateStrokeColorTriggerSwatch();
 		if (nestedPanel && nestedPanel->kind() == ToolNestedPanel::Kind::TextStroke)
 			nestedPanel->refreshTextStrokeSwatch();
 	}
@@ -1845,11 +1783,9 @@ void ToolSub::getColorTriggerAnchor(float& screenCenterX, float& screenBottom) c
 		screenBottom = colorAnchorBottom_;
 		return;
 	}
-	const Ling::Button* trigger = (colorPanelForStroke_ && strokeColorTrigger)
-		? strokeColorTrigger : colorTrigger;
-	if (trigger) {
-		screenCenterX = static_cast<float>(x) + trigger->x + trigger->w * 0.5f;
-		screenBottom = static_cast<float>(y) + trigger->y + trigger->h;
+	if (colorTrigger) {
+		screenCenterX = static_cast<float>(x) + colorTrigger->x + colorTrigger->w * 0.5f;
+		screenBottom = static_cast<float>(y) + colorTrigger->y + colorTrigger->h;
 	}
 	else {
 		screenCenterX = static_cast<float>(x) + w * 0.5f;
@@ -2411,20 +2347,6 @@ void ToolSub::initSlider()
 	sliderValue = pair.value;
 }
 
-void ToolSub::initStrokeSlider()
-{
-	auto pair = PropSlider::mount(contentNode, 1.f, 12.f, textStrokeWidth,
-		[this](float val) {
-			textStrokeWidth = val;
-			if (suppressSliderStyleNotify) return;
-			win->onToolStyleChanged();
-		});
-	strokeSlider = pair.slider;
-	strokeSliderValue = pair.value;
-	strokeSlider->hide();
-	strokeSliderValue->hide();
-}
-
 bool ToolSub::adjustPrimarySize(int dir)
 {
 	if (curToolId.empty() || dir == 0) return false;
@@ -2545,13 +2467,6 @@ float ToolSub::getTextStrokeWidthPx() const
 void ToolSub::setTextStrokeWidthPx(float px)
 {
 	textStrokeWidth = std::clamp(px / dpi, 1.f, 12.f);
-	if (strokeSlider) {
-		suppressSliderStyleNotify = true;
-		strokeSlider->setValue(textStrokeWidth);
-		suppressSliderStyleNotify = false;
-	}
-	if (strokeSliderValue)
-		strokeSliderValue->setText(wfmt(L"%d", static_cast<int>(std::round(textStrokeWidth))));
 }
 
 float ToolSub::getSliderVal() const
@@ -2600,12 +2515,6 @@ void ToolSub::hideTools()
 	colorTriggerRing = nullptr;
 	colorTriggerSwatch = nullptr;
 	strokeBtn = nullptr;
-	strokeColorTrigger = nullptr;
-	strokeColorTriggerRing = nullptr;
-	strokeColorTriggerSwatch = nullptr;
-	strokeSlider = nullptr;
-	strokeSliderValue = nullptr;
-	hoverSlider_ = nullptr;
 	wmTextBox = nullptr;
 	numberInput = nullptr;
 	numberShowsSelected_ = false;
