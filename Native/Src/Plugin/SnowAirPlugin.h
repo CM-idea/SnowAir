@@ -23,7 +23,7 @@
 #endif
 #include <wchar.h>
 
-#define SNOWAIR_PLUGIN_API 3
+#define SNOWAIR_PLUGIN_API 4
 
 /*
  * The plugin is loaded with GetProcAddress("SnowAirPluginEntry"), so it does not
@@ -188,6 +188,31 @@ typedef struct SnowAirHost {
     void (*entry_reveal)(void* user, int index);    /* show the file in Explorer */
     void (*entry_tags_set)(void* user, int index, const wchar_t* tags);
     int  (*entry_all_tags)(void* user, wchar_t* out, int capacity);
+
+    /*
+     * v4 — 文本记录（便签）。
+     *
+     * 便签属于轻雪的剪切板历史，插件只保存条目 id，不自己存文本：
+     * 新建/修改/销毁都通过下面这组接口落回轻雪。
+     */
+
+    /* 第 index 个条目的 id（剪切板条目才有，跨重启稳定）。成功返回 1。 */
+    int  (*entry_id)(void* user, int index, wchar_t* out, int capacity);
+
+    /* 按 id 取完整文本，返回字符数（不含结尾 0）；条目不存在返回 -1。 */
+    int  (*entry_text)(void* user, const wchar_t* id, wchar_t* out, int capacity);
+
+    /* 新建一条文本记录并放到最前；tags 用 '\n' 分隔，可为空。
+       id_out 返回新条目 id。成功返回 1。 */
+    int  (*entry_create_text)(void* user, const wchar_t* text, const wchar_t* tags,
+                              wchar_t* id_out, int capacity);
+
+    /* 按 id 更新文本（移到最前）；tags 非空时一并替换标签。成功返回 1。 */
+    int  (*entry_update_text)(void* user, const wchar_t* id, const wchar_t* text,
+                              const wchar_t* tags);
+
+    /* 按 id 删除文本记录。成功返回 1。 */
+    int  (*entry_delete_id)(void* user, const wchar_t* id);
 } SnowAirHost;
 
 /* Settings item kind. */

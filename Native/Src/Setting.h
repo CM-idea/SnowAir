@@ -302,7 +302,9 @@ public:
 	std::vector<ClipboardItem> getClipboardItems();
 	std::vector<std::wstring> getClipboardTags(const std::wstring& id);
 	void setClipboardTags(const std::wstring& id, const std::vector<std::wstring>& tags);
-	void addClipboardText(const std::wstring& text);
+	void addClipboardText(const std::wstring& text, bool dedup = true);
+	// 插件便签：按 id 改写文本（挪到最前）；id 不存在或不是文本返回 false
+	bool setClipboardText(const std::wstring& id, const std::wstring& text);
 	void addClipboardImage(int w, int h, const std::vector<BYTE>& bgra);
 	// 文件列表（资源管理器 / Word / PPT 等复制的文件）：只记路径，可以一次多个
 	void addClipboardFiles(const std::vector<std::wstring>& files);
