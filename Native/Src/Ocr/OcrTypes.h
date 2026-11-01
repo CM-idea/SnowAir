@@ -18,6 +18,8 @@ struct OcrRegion {
 	// 竖排（日文/中文竖写）：检测框高明显大于宽时置位。叠加层需逐字竖排，
 	// 否则横排文字在 54px 宽的窄框内会被压缩成一条线。
 	bool vertical{ false };
+	// 大字号粗体估测：重绘识别结果时用（默认 OCR / 翻译）；小字不猜（置 false）。
+	bool bold{ false };
 };
 
 struct OcrResult {

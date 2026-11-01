@@ -49,6 +49,9 @@ public:
 	void selectAnnotTool(const std::wstring& id);
 	void bindOwner(HWND ownerHwnd);
 	void updateUndoEnabled();
+	// 让「识别 / 翻译」两个按钮的选中态与当前浮层（识别 or 翻译 or 无）保持一致。
+	// 浮层被 WinCap 收起（改选区等）时也要由宿主调一次，不能只靠点按钮那条路径。
+	void syncOcrTranslateButtons();
 	std::wstring resolveToolId(const std::wstring& slotId) const;
 	// 内置的停悬气泡候选（未经初始属性裁剪）：设置页「初始属性」编辑气泡内容时用
 	static const std::vector<ToolPickItem>* getBuiltinSubTools(const std::wstring& slotId);
@@ -78,8 +81,6 @@ private:
 	void updateSlotButton(const std::wstring& slot);
 	void showToolSubForEffective(const std::wstring& eff);
 	void showComingSoon();
-	// 让「识别 / 翻译」两个按钮的选中态与当前浮层（识别 or 翻译 or 无）保持一致
-	void syncOcrTranslateButtons();
 	void applyNormalStyle(Ling::Button* btn);
 	void applySelectedStyle(Ling::Button* btn);
 	void applyActionColors(Ling::Button* btn);

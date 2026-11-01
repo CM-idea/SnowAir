@@ -196,7 +196,7 @@ inputArea->setPadding(0.f, 8.f, 0.f, 0.f);
 |---|---|---|
 | 直接运行 exe（无参数） | 仅托盘待命，同时 `Update::checkLater()` | `App::App()` |
 | `--auto-start`（开机自启）/ 升级后重启 / `--enter=tray` | 同上，仅托盘待命 | `App::App()` |
-| `--enter=pin\|long\|video\|ocr\|qr` | 直接进入对应模式（`WinCap::init()` → `enterByArg()`） | `App::App()` / `WinCap::enterByArg()` |
+| `--enter=pin\|long\|video\|ocr\|qr` | 直接进入对应模式（`WinCap::init()` → `enterByArg()`）；该参数**一次性**，只作用于进程内第一个会话，取走后 F1 / 托盘截图恢复普通截图 | `App::App()` / `WinCap::init()` / `WinCap::enterByArg()` |
 | `--auto-quit=true` | 立即进入截图、截完即退（脚本 / 命令行用） | `App::App()` / `WinCap`、`WinPin` |
 | 托盘图标**左键单击** | 按设置 `Setting::getTrayClickAction()`：0 截图 / 1 打开设置 / 2 无操作 | `Tray::Tray()` |
 | 托盘图标**右键** | 弹出菜单：截图 / 截取全屏 / 屏幕录制 / 演示画布 / 快捷翻译 / 截图历史 / 打开目录 / 设置 / 退出（见第 9 节） | `Tray::onTrayRightClick()` |

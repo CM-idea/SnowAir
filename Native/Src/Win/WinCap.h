@@ -18,7 +18,9 @@ public:
 	enum class StartMode { Normal, Record, Demo };
 	static void init(StartMode mode = StartMode::Normal);
 	// init 的第二段：抓屏在工作线程做完后回 UI 线程建窗（见 init 的实现注释）。
-	static void initNow(StartMode mode, std::shared_ptr<std::vector<BYTE>> grab);
+	// enterArg：命令行 --enter=... 的一次性入口，只对本次会话生效（见 init）。
+	static void initNow(StartMode mode, std::shared_ptr<std::vector<BYTE>> grab,
+		const std::wstring& enterArg);
 	static WinCap* get();
 	static void dispose();
 	static void stopIfRecording();
@@ -210,6 +212,9 @@ private:
 	bool beginMaskResize(POINT pos);
 	void applyMaskHitCursor(MaskHit hit);
 	bool hasAnnotShapes() const;
+	// 双击空白处是否等于「复制并退出」：仅截图 Adjust；命中标注/控点、选区边角、
+	// 信息栏（onDown 里已先返回）、编辑/绘制中都不算空白。
+	bool canFinishOnBlankDoubleClick(POINT pos);
 	void setToolChromeHidden(bool hidden);
 	bool nudgeSelectionByOutsideWheel(POINT pos, int dir);
 	bool nudgeSelectionByArrow(int dx, int dy);
@@ -250,6 +255,9 @@ private:
 	bool toolHidden{ false };
 	// 托盘「屏幕录制」：本次会话框选完成后直接进录屏（不再弹截图工具栏）
 	bool pendingRecord{ false };
+	// 命令行 --enter=... 的一次性入口：建会话时从 args 取走，只保留在本次会话里。
+	// （若一直留在 args 中，进程生命周期内每次框选都会再次进入录屏/长截图等模式）
+	std::wstring enterArg_;
 	// 演示模式（全屏实时画布）：不画静帧、不画遮罩/选框，工具栏在顶部居中
 	bool demoMode{ false };
 	// —— 演示画布：白板背景 ——

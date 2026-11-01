@@ -60,12 +60,12 @@ namespace {
 		{
 			Ling::TextBox::layout();
 			if (fitW <= 0.f || fitH <= 0.f || inkH <= 0.f || w <= 0.f || h <= 0.f) return;
-			// 等比缩放（取"框宽/文字宽"与"框高/字形高"的较小者），横纵同比例，绝不单独拉伸某一轴。
-			// 竖排是"每字一行"的多行文本，行距由排版决定、不能再用 inkH 估算，直接按整列自然高度缩放；
-			// 且只缩不放（上限 1.0）：列短时保持字号与其它列一致，靠居中对齐而不是把字撑大。
+			// 字号已经在建框时按识别框适配过（见 rebuildEditors 里的 measureTextSize）；
+			// 这里只做最后兜底，并且**只缩不放**：放大等于把文字画布整体拉伸，边缘会发虚。
+			// 竖排是"每字一行"的多行文本，行距由排版决定、不能再用 inkH 估算，直接按整列自然高度缩放。
 			const float s = vertical
 				? std::min(std::min(fitW / w, fitH * 0.98f / h), 1.f)
-				: std::min(fitW / w, fitH * vFill / inkH);
+				: std::min(std::min(fitW / w, fitH * vFill / inkH), 1.f);
 			scale_ = s;
 			// 水平按原文对齐摆放：译文比原文短、装不满框时，居左/居中/居右的差别才看得出来。
 			// 居左 = 和原文一样从同一列起排；居中/居右照原样还原。
@@ -73,10 +73,13 @@ namespace {
 			float visX = boxL;                                     // 居左
 			if (align == 1) visX = boxL + (fitW - visW) * 0.5f;     // 居中
 			else if (align == 2) visX = boxL + (fitW - visW);       // 居右
+			// 位置对齐到物理像素：合成层按小数坐标摆放时会把文字画布重采样一遍，边缘也会发虚。
+			const float d = (win && win->dpi > 0.f) ? win->dpi : 1.f;
+			auto snap = [d](float v) { return std::round(v * d) / d; };
 			// ox 是"未缩放节点"的偏移：缩放绕节点自身中心，故视觉左边缘 = ox + (w - visW)/2
-			const float ox = visX - (w - visW) * 0.5f;
+			const float ox = snap(visX - (w - visW) * 0.5f);
 			// 纵向仍居中：文字块的墨迹落在识别框中间，和原文的墨迹位置对齐。
-			const float oy = boxT + (fitH - h) * 0.5f;
+			const float oy = snap(boxT + (fitH - h) * 0.5f);
 			visual.CenterPoint({ w * 0.5f, h * 0.5f, 0.f });
 			visual.Scale({ s, s, 1.f });
 			visual.Offset({ ox, oy, 0.f });
@@ -89,7 +92,8 @@ namespace {
 	};
 
 	// 量一段文本按指定宽度折行后的总高度，设备像素（折行设置与 TextBox 保持一致）。
-	float measureTextHeight(const std::wstring& s, float fontSizeLogical, float maxWidthLogical, float dpi)
+	float measureTextHeight(const std::wstring& s, float fontSizeLogical, float maxWidthLogical, float dpi,
+		bool bold = false)
 	{
 		auto* d2d = Ling::D2D::get();
 		if (!d2d || !d2d->dwriteFactory || s.empty() || maxWidthLogical <= 0.f) return 0.f;
@@ -100,10 +104,34 @@ namespace {
 			fmt, maxWidthLogical * dpi, FLT_MAX, tl.GetAddressOf())) || !tl)
 			return 0.f;
 		tl->SetFontSize(fontSizeLogical * dpi, { 0, INT_MAX });
+		tl->SetFontWeight(bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL, { 0, INT_MAX });
 		tl->SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
 		DWRITE_TEXT_METRICS m{};
 		if (FAILED(tl->GetMetrics(&m))) return 0.f;
 		return m.height;
+	}
+
+	// 不折行时文字的自然宽高（设备像素）：OCR 叠加层用它在建框前算字号，让文字按**字号**
+	// 缩放到识别框，而不是绘完再拉伸位图（拉伸会糊，重排字号不会）。
+	bool measureTextSize(const std::wstring& s, float fontSizeLogical, float dpi, bool bold,
+		float& outW, float& outH)
+	{
+		auto* d2d = Ling::D2D::get();
+		if (!d2d || !d2d->dwriteFactory || s.empty()) return false;
+		auto fmt = d2d->getTextFormat(L"");
+		if (!fmt) return false;
+		Microsoft::WRL::ComPtr<IDWriteTextLayout> tl;
+		if (FAILED(d2d->dwriteFactory->CreateTextLayout(s.c_str(), (UINT32)s.size(),
+			fmt, FLT_MAX, FLT_MAX, tl.GetAddressOf())) || !tl)
+			return false;
+		tl->SetFontSize(fontSizeLogical * dpi, { 0, INT_MAX });
+		tl->SetFontWeight(bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL, { 0, INT_MAX });
+		tl->SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
+		DWRITE_TEXT_METRICS m{};
+		if (FAILED(tl->GetMetrics(&m))) return false;
+		outW = m.widthIncludingTrailingWhitespace;
+		outH = m.height;
+		return outW > 0.f && outH > 0.f;
 	}
 
 	// 逐通道中位数
@@ -216,6 +244,71 @@ namespace {
 		if (first < 0 || last < first) return 0.f;
 		return (float)(last - first + 1);
 	}
+
+	// 单行笔画宽度（image 像素）：框内按背景色二值化，再逐行取前景游程的 25 分位。
+	// 取 25 分位是为了避开中文长横（长横的游程接近整字宽），留下竖笔/短笔的真实粗细。
+	float estimateStrokeWidth(const std::vector<BYTE>& px, int W, int H, const OcrRegion& reg)
+	{
+		if (px.empty() || W <= 0 || H <= 0) return 0.f;
+		const int x0 = std::clamp((int)std::floor(reg.x), 0, W - 1);
+		const int y0 = std::clamp((int)std::floor(reg.y), 0, H - 1);
+		const int x1 = std::clamp((int)std::ceil(reg.x + reg.w), x0 + 1, W);
+		const int y1 = std::clamp((int)std::ceil(reg.y + reg.h), y0 + 1, H);
+		if (x1 - x0 < 4 || y1 - y0 < 4) return 0.f;
+		int br = 0, bg = 0, bb = 0;
+		if (!regionBg(px, W, H, reg.x, reg.y, reg.w, reg.h, br, bg, bb)) return 0.f;
+
+		std::vector<int> runs;
+		runs.reserve((size_t)(y1 - y0) * 2);
+		for (int y = y0; y < y1; ++y) {
+			const BYTE* p = px.data() + ((size_t)y * W + x0) * 4;
+			int run = 0;
+			for (int x = x0; x < x1; ++x, p += 4) {
+				const int dr = std::abs((int)p[2] - br);
+				const int dg = std::abs((int)p[1] - bg);
+				const int db = std::abs((int)p[0] - bb);
+				const bool fg = (std::max)({ dr, dg, db }) > 48;
+				if (fg) ++run;
+				else if (run > 0) { runs.push_back(run); run = 0; }
+			}
+			if (run > 0) runs.push_back(run);
+		}
+		if (runs.size() < 8) return 0.f;
+		std::sort(runs.begin(), runs.end());
+		return (float)runs[runs.size() / 4];
+	}
+
+	// 大字号粗体估测：只对明显大于正文的框（>=24px × dpi）做，且必须比正文笔画中位数
+	// 明显更粗（>=1.25 倍）。小字（1~2px 笔画）量化误差比粗体差异还大，一律不猜。
+	// 默认 OCR 和翻译都会重绘文字，才需要判断；文本重排是整段一个框，不做逐行加粗。
+	void estimateBoldRegions(const std::vector<BYTE>& px, int W, int H,
+		std::vector<OcrRegion>& regions, float dpi)
+	{
+		if (px.empty() || W <= 0 || H <= 0 || regions.empty()) return;
+		if ((size_t)W * (size_t)H * 4 > px.size()) return;
+		const float large = 24.f * (dpi > 0.f ? dpi : 1.f);
+		std::vector<float> ratio(regions.size(), 0.f);
+		std::vector<float> body;
+		for (size_t i = 0; i < regions.size(); ++i) {
+			auto& reg = regions[i];
+			reg.bold = false;
+			if (reg.text.empty() || reg.h < 2.f) continue;
+			const float sw = estimateStrokeWidth(px, W, H, reg);
+			if (sw <= 0.f) continue;
+			ratio[i] = sw / (std::max)(1.f, reg.h);
+			if (reg.h < large) body.push_back(ratio[i]);
+		}
+		if (body.empty()) return;   // 没有正文基线：不猜
+		std::sort(body.begin(), body.end());
+		const float bodyMed = body[body.size() / 2];
+		for (size_t i = 0; i < regions.size(); ++i) {
+			auto& reg = regions[i];
+			if (reg.text.empty() || reg.h < large || ratio[i] <= 0.f) continue;
+			if (ratio[i] >= (std::max)(0.12f, bodyMed * 1.25f))
+				reg.bold = true;
+		}
+	}
+
 
 	// 逐框字号（单位：image 像素）。
 	//   正文：取全局「中位框高」统一，再用墨迹高 × K 标定 —— 单个框的高度不可靠（带边距/行高拟合
@@ -631,6 +724,10 @@ void ToolOcr::rebuildEditors()
 
 	// 文本重排只作用于 OCR 结果；翻译仍要保留"译文对齐原文位置"的语义。
 	reflow_ = !translateMode_ && Setting::get()->getOcrResultMode() == 1;
+	// OCR 结果要重绘识别文字：否则用户看不到识别结果，没法核对对错。
+	// 字号按识别框适配（见下面的 measureTextSize），不再用 visual.Scale 拉伸位图。
+	// 加粗只对大字标题估，小字不猜；文本重排是整段一个框，不做逐行加粗。
+	if (!reflow_) estimateBoldRegions(srcImage_, imgW, imgH, result_.regions, dpi);
 
 	const float scaleX = (imgW > 0) ? (w / (float)imgW) : 1.f;
 	const float scaleY = (imgH > 0) ? (h / (float)imgH) : 1.f;
@@ -771,7 +868,7 @@ void ToolOcr::rebuildEditors()
 			const float vFill = wide ? kCjkVFill : 1.f;
 			const float fLogical = std::clamp(ph * vFill / (inkRatio * dpi), 7.f / dpi, 300.f / dpi)
 				* (wide ? 1.f : 0.95f);   // 西文字形偏小，同字号看着略小，收一点更贴近原文
-			const float measured = measureTextHeight(text, fLogical, boxW / dpi, dpi);
+			const float measured = measureTextHeight(text, fLogical, boxW / dpi, dpi, reg.bold);
 			const float boxH = std::max(1.f, measured > 0.f ? measured + 1.f : ph);
 			const float top = std::max(py, cursorY);
 			auto* box = body->makeChild<Ling::TextBox>();
@@ -782,6 +879,7 @@ void ToolOcr::rebuildEditors()
 			box->setColor(palFg_);
 			box->setPadding(0.f);
 			box->setFontSize(fLogical);
+			if (reg.bold) box->setBold(true);   // 大字标题估出的加粗；小字不猜
 			box->setScrollBarVisible(false);   // 单个框不滚（高度已按内容给足），滚动只发生在整层
 			box->setTextAlignCenter(aligns[i] == 1);
 			box->setSelectionBgColor(0x1890FFFF);
@@ -816,14 +914,16 @@ void ToolOcr::rebuildEditors()
 		}
 
 		// 1) 背景块：**严格等于识别框**，整块盖住原文字 —— 这是"覆盖到位"的关键。
-		auto* bgNode = body->makeChild<Ling::Node>();
-		bgNode->setPositionType(Ling::Position::Absolute);
-		bgNode->setPosition(Ling::Edge::Left, rx);
-		bgNode->setPosition(Ling::Edge::Top, ry);
-		bgNode->setSize(rw, rh);
-		bgNode->setBg(bg);
-		bgNode->setBorderRadius(2.f);
-		bgs_.push_back(bgNode);
+		{
+			auto* bgNode = body->makeChild<Ling::Node>();
+			bgNode->setPositionType(Ling::Position::Absolute);
+			bgNode->setPosition(Ling::Edge::Left, rx);
+			bgNode->setPosition(Ling::Edge::Top, ry);
+			bgNode->setSize(rw, rh);
+			bgNode->setBg(bg);
+			bgNode->setBorderRadius(2.f);
+			bgs_.push_back(bgNode);
+		}
 
 		// 2) 文字：字号按"字形高度 = 识别框高"取，再交给 OcrText 在 layout() 里
 		//    按**真实排版尺寸**缩放并居中到识别框（字形与框上下齐平、左右拉满）。
@@ -845,10 +945,13 @@ void ToolOcr::rebuildEditors()
 		// 节点自身几何按识别框摆放（文字命中选择用）；实际绘制位置由 layout() 精确定位。
 		box->setPosition(Ling::Edge::Left, rx);
 		box->setPosition(Ling::Edge::Top, ry);
+		// 重绘识别文字：用户要能看到识别结果才能核对；字号已在建框时按识别框适配过。
 		box->setColor(fg);
 		// 拖选文字的背景色统一 #1890FF（原位覆盖 / 文本重排一致）
 		box->setSelectionBgColor(0x1890FFFF);
 		box->setSelectionTextColor(0xFFFFFFFF);   // 拖选反白
+		// 大字标题估出的加粗；小字不猜
+		if (reg.bold) box->setBold(true);
 		// 不能留 TextBox 默认的 6px 内边距：OcrText 的缩放比是按「识别框宽 / 控件宽」算的，
 		// 控件宽含内边距就会被算成"文字比框宽 12px"，文字被整体压小一圈（短行尤其明显），
 		// 纵向也会因为多出的上下内边距而偏移。识别文字是原位覆盖，不需要内边距。
@@ -888,7 +991,18 @@ void ToolOcr::rebuildEditors()
 			const bool wide = hasWideGlyph(text);
 			const float inkRatio = wide ? kCjkInkRatio : kYaheiInkRatio;
 			const float vFill = wide ? kCjkVFill : 1.f;
-			const float fLogical = std::clamp(boxH * vFill / (inkRatio * dpi), 7.f / dpi, 300.f / dpi);
+			float fLogical = std::clamp(boxH * vFill / (inkRatio * dpi), 7.f / dpi, 300.f / dpi);
+			// 用**字号**把文字适配到识别框：先量当前字号的自然宽高，再把字号乘上
+			// "宽/高哪个先顶满"的倍率。以前是绘完再用 visual.Scale 拉伸位图，短行放大后
+			// 边缘会糊；改字号是重新排版，字形始终按最终尺寸栅格化，边缘是清楚的。
+			float naturalW = 0.f, naturalH = 0.f;
+			if (measureTextSize(text, fLogical, dpi, reg.bold, naturalW, naturalH)) {
+				const float inkH = fLogical * dpi * inkRatio;
+				const float fitS = std::min(
+					naturalW > 0.f ? boxW / naturalW : 1.f,
+					inkH > 0.f ? boxH * vFill / inkH : 1.f);
+				fLogical = std::clamp(fLogical * fitS, 7.f / dpi, 300.f / dpi);
+			}
 			box->inkH = fLogical * dpi * inkRatio;
 			box->vFill = vFill;
 			box->setFontSize(fLogical);

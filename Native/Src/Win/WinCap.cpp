@@ -330,33 +330,46 @@ void WinCap::init(StartMode mode)
     // 双击托盘图标会连着来两下，已经开着就不再建第二个
     if (winCap) return;
 
+    // 命令行入口 --enter=... 是**一次性**的：在这里取走并从 args 删掉，只带进本次会话。
+    // 不删的话参数会随进程一直留着，之后每次 F1 / 托盘截图框完都再走一遍录屏/长截图/识别，
+    // 表现就是「区域截图明明是 F1，按下去框完却弹出录屏工具栏」（见 enterByArg）。
+    std::wstring enterArg;
+    auto* app = Ling::App::get();
+    if (app) {
+        if (auto it = app->args.find(L"--enter"); it != app->args.end()) {
+            enterArg = it->second;
+            app->args.erase(it);
+        }
+    }
+
     // 抢在铺盾牌 / 建覆盖窗之前，抓一次"鼠标下真实窗口此刻的光标"（见 primeCursorForCapture）
     primeCursorForCapture();
 
-    auto* app = Ling::App::get();
     if (!app) {   // 无调度队列：退回同步（正常不会走到）
         CaptureShield::arm();
-        initNow(mode, nullptr);
+        initNow(mode, nullptr, enterArg);
         return;
     }
     const auto [sx, sy, sw, sh] = App::get()->getScreenArea();
     auto grab = std::make_shared<std::vector<BYTE>>();
-    std::thread([grab, sx, sy, sw, sh, app, mode]() {
+    std::thread([grab, sx, sy, sw, sh, app, mode, enterArg]() {
         // 演示画布不用底图（实时桌面），省掉这次抓屏
         // 截图统一走 ScreenCapture：HDR 屏用 DXGI 桌面复制（系统做 HDR→SDR），失败再回退 GDI
         if (mode != StartMode::Demo) *grab = ScreenCapture::captureOrGdi(sx, sy, sw, sh);
-        app->dq.TryEnqueue([grab, mode]() {
+        app->dq.TryEnqueue([grab, mode, enterArg]() {
             CaptureShield::arm();   // 抓屏完成后再铺盾牌：不遮挡目标窗口的悬停态
-            WinCap::initNow(mode, grab);
+            WinCap::initNow(mode, grab, enterArg);
         });
     }).detach();
 }
 
-void WinCap::initNow(StartMode mode, std::shared_ptr<std::vector<BYTE>> grab)
+void WinCap::initNow(StartMode mode, std::shared_ptr<std::vector<BYTE>> grab,
+    const std::wstring& enterArg)
 {
     if (winCap) return;   // 抓屏这段空窗里已经开过了
     auto ptr = new WinCap();
     winCap.reset(ptr);
+    ptr->enterArg_ = enterArg;   // 一次性命令行入口，随本会话生命周期
     // 初始属性：默认显示光标（每次会话开始时按设置重置）
     if (auto* s = Setting::get())
         ptr->showCursor = s->getToolDesignInt(ToolKey::ShowCursor, DesignKey::Enabled, 0) != 0;
@@ -1652,6 +1665,36 @@ bool WinCap::beginMaskResize(POINT pos)
 	return true;
 }
 
+// 双击空白处 = 「复制并退出」。判定口径：
+//   · 只在截图 Adjust：录屏/长图/演示画布各有自己的收尾方式；
+//   · 命中标注本体/控点/文字 → 交给标注自己的双击手势（进编辑、切端点、选中）；
+//   · 命中选区边/角 → 交给 beginMaskResize（拖边缩放优先，不算空白）；
+//   · 文字编辑中、刚结束编辑的抑制窗口、正在绘制/拖动 → 不算空白。
+// 第一下点击可能已经落了一笔（序号/画笔点）：先撤销它，否则双击手势本身会留在图里。
+bool WinCap::canFinishOnBlankDoubleClick(POINT pos)
+{
+	if (stage != CapStage::Adjust || demoMode) return false;
+	if (!cutMask || !cutMask->hasRect()) return false;
+	if (editingText || annotMouseDown || newShape || isPress || maskDragging) return false;
+	if (GetTickCount64() < annotSuppressUntil) return false;
+	if (hasSelectedAnnot()) return false;
+
+	// 先撤掉"双击第一下"刚落的形状，再做空白命中：否则序号/画笔点正好在光标下，
+	// hitShapeAt 会把它当成"点到了标注"，这次双击永远完成不了。
+	if (prevPressCreatedShape && history && history->canUndo()) {
+		prevPressCreatedShape = false;
+		history->undo();
+	}
+
+	// None = 选区外（全屏都能标注，外面同样是画布）；Inside = 选区内空白。
+	// 其余边/角是选区控件，不参与"完成"。
+	const MaskHit hit = cutMask->hitTest(pos);
+	if (hit != MaskHit::None && hit != MaskHit::Inside) return false;
+
+	const auto img = toImgPos(pos);
+	return hitShapeAt((float)img.x, (float)img.y) == nullptr;
+}
+
 void WinCap::setToolChromeHidden(bool hidden)
 {
 	// 按当前阶段只显隐「自己的」工具栏，截图栏与录屏栏互不串台
@@ -2536,22 +2579,28 @@ void WinCap::onDown(POINT pos, bool isRight)
         if (tip) { tip->hide(); infoTipHit_ = InfoHit::None; }
         return;
     }
-    // 选区框好之后、且当前没有任何标注时，窗口里任意位置双击 = 点工具条上的「完成」（复制并退出）。
+    // 选区框好之后、双击空白处 = 点工具条上的「完成」（复制并退出）。有没有标注都走同一条规则：
+    //   · 选区边/角是控件，交给拖边缩放，不算空白；
+    //   · 标注本体/控点/文字由 annotDown 的双击手势处理，不算空白；
+    //   · 无标注时这里直接完成；有标注时交给下面的 annotLive 分支再判一次。
     // 双击判定自己做：Ling 的窗口类没带 CS_DBLCLKS，WM_LBUTTONDBLCLK 根本不会来，
     // 所以用系统双击间隔（控制面板里调的那个）+ 双击判定框来认。
-    // ★ 必须放在 annotLive 分支之前：选区框好后 annotLive 恒为 true，
-    //   原先那次判定写在 annotLive 之后 → 永远走不到，"双击完成"形同不存在。
+    bool doubleClickDown = false;
     {
         const auto now = GetTickCount64();
-        const bool dbl = (now - lastDownTime <= GetDoubleClickTime())
+        doubleClickDown = (now - lastDownTime <= GetDoubleClickTime())
             && std::abs(pos.x - lastDownPos.x) <= GetSystemMetrics(SM_CXDOUBLECLK)
             && std::abs(pos.y - lastDownPos.y) <= GetSystemMetrics(SM_CYDOUBLECLK);
         lastDownTime = now;
         lastDownPos = pos;
-        if (dbl && !demoMode && cutMask && cutMask->hasRect()
+        if (doubleClickDown && !demoMode && cutMask && cutMask->hasRect()
             && !hasAnnotShapes() && stage == CapStage::Adjust) {
-            copyToClipboard();
-            return;
+            // 选区边/角是控件：不当作空白，继续走下面的拖边缩放
+            const MaskHit maskHit = cutMask->hitTest(pos);
+            if (maskHit == MaskHit::None || maskHit == MaskHit::Inside) {
+                copyToClipboard();
+                return;
+            }
         }
     }
     // 演示画布：白板交互（调整背景拖边 / 底部页码）优先于标注
@@ -2582,6 +2631,11 @@ void WinCap::onDown(POINT pos, bool isRight)
     }
     if (annotLive) {
         if (beginMaskResize(pos)) return;
+        // 有标注时：双击空白（无标注命中、无选中、非编辑、非绘制）同样 = 完成。
+        if (doubleClickDown && canFinishOnBlankDoubleClick(pos)) {
+            copyToClipboard();
+            return;
+        }
         annotDown(pos, isRight);
         return;
     }
@@ -2595,6 +2649,10 @@ void WinCap::onDown(POINT pos, bool isRight)
         refresh();
     }
     else if (stage == CapStage::Adjust) {
+        // 识别/二维码结果面板开着时，选区内部整体拖移会把结果面板一起带走（"拖着结果走"）。
+        // beginMaskResize 里已经挡了，但无标注时 annotLive 为 false，会从这条分支溜过去；
+        // 这里同样只放行边/角缩放，选区内部按下不启动调整。
+        if ((toolOcr || toolQrcode) && cutMask->hitTest(pos) == MaskHit::Inside) return;
         isPress = true;
         cutMask->startAdjust(pos);
         setPixPos(pos);
@@ -2963,10 +3021,11 @@ void WinCap::makeToolCap()
 
 bool WinCap::enterByArg()
 {
-    auto& args = Ling::App::get()->args;
-    auto it = args.find(L"--enter");
-    if (it == args.end()) return false;
-    auto& val = it->second;
+    // 命令行入口是一次性的：值已在 init 里从 args 取走并只带进本次会话（见 init）。
+    // 先拷一份再清空 —— startPin() 会直接关闭本会话（this 随后销毁），不能再用成员。
+    if (enterArg_.empty()) return false;
+    const std::wstring val = enterArg_;
+    enterArg_.clear();
     stage = CapStage::Adjust;
     refresh();
     if (val == L"long") startLong();
@@ -3184,18 +3243,13 @@ void WinCap::onMaskRectChanged()
 {
 	if (stage == CapStage::Video && capVideo && capVideo->isRecording())
 		capVideo->syncCaptureMove();
-	// 识别/翻译浮层是独立窗口，选区变化时它必须跟着走（以前只同步了录制侧）：
-	//   · 拖动选区（尺寸不变）：只挪浮层位置，识别结果仍与原图对齐；
-	//   · 改过尺寸：识别用的图已经不对应当前选区，继续按新尺寸铺开只会把旧结果整体缩放，
-	//     看起来就是"字变小、盖不住原文"，所以直接收起面板，要看得重新识别。
-	if (!toolOcr || !toolOcr->hwnd || !cutMask || !cutMask->hasRect()) return;
-	const float mw = cutMask->maskRect.right - cutMask->maskRect.left;
-	const float mh = cutMask->maskRect.bottom - cutMask->maskRect.top;
-	if (std::lround(mw) != std::lround(toolOcr->w) || std::lround(mh) != std::lround(toolOcr->h)) {
+	// 识别/翻译浮层是按**旧选区**裁出来的：选区只要动了（挪位置或改大小），
+	// 旧结果就和当前画面/选区对不上，继续跟着走只会让文字错位。直接收起，要看得重新识别。
+	// 选区内部整体拖动已在 onDown 里挡住；拖边/方向键/滚轮改到这里时一并作废。
+	if (toolOcr) {
 		clearOcrPanel();
 		return;
 	}
-	syncOcrPanel();
 }
 
 bool WinCap::annotRightClick()
@@ -4225,6 +4279,9 @@ void WinCap::syncOcrPanel()
 void WinCap::clearOcrPanel()
 {
 	toolOcr.reset();
+	// 面板被收起（改选区 / 用户再点一次 / 换模式）后，工具栏的「识别 / 翻译」选中态
+	// 必须跟着回到常态。否则按钮还亮着绿，但功能已经不在，用户得再按一次才恢复。
+	if (toolCap) toolCap->syncOcrTranslateButtons();
 	refresh();
 }
 
