@@ -188,13 +188,10 @@ private:
 	void onCreated() override;
 	void initColorTrigger();
 	void updateColorTriggerSwatch();
-	void initStrokeColorTrigger();
-	void updateStrokeColorTriggerSwatch();
 	void toggleColorPanel(bool stroke);
 	void closeColorPanel();
 	void closeNestedPanel();
 	void initSlider();
-	void initStrokeSlider();
 	void updateSliderValueLabel();
 	void loadStrokeSlider(const std::wstring& toolId);
 	std::wstring getSliderTipKey() const;
@@ -245,12 +242,6 @@ private:
 	Ling::Label* sliderValue{ nullptr };
 	// —— 文字描边 ——
 	Ling::Button* strokeBtn{ nullptr };
-	Ling::Button* strokeColorTrigger{ nullptr };
-	Ling::Node* strokeColorTriggerRing{ nullptr };
-	Ling::Label* strokeColorTriggerSwatch{ nullptr };
-	Ling::Slider* strokeSlider{ nullptr };
-	Ling::Label* strokeSliderValue{ nullptr };
-	Ling::Slider* hoverSlider_{ nullptr };
 	UINT strokeColorIndex{ 5 };            // 默认白色（调色板第 6 项）
 	bool colorPanelForStroke_{ false };    // 当前颜色面板改的是描边色而非填充色
 	float colorAnchorCX_{ -1.f }, colorAnchorBottom_{ -1.f };   // 二级栏色块锚点（屏幕坐标）

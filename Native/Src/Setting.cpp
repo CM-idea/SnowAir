@@ -2403,7 +2403,7 @@ namespace {
     }
 }
 
-void Setting::addClipboardText(const std::wstring& text)
+void Setting::addClipboardText(const std::wstring& text, bool dedup)
 {
     std::wstring s = text;
     // 去掉末尾的 \0 / 空白换行，避免把同一个内容记成不同条目
@@ -2413,12 +2413,14 @@ void Setting::addClipboardText(const std::wstring& text)
     const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     // 同内容只把它移到最前（复制历史里的文字回来也会走到这里）
-    const int dup = promoteClipboardItem(items, (long long)nowMs, [&](const ClipboardItem& it) {
-        return it.type == L"text" && it.text == s;
-    });
-    if (dup >= 0) {
-        if (dup > 0) writeClipboardItems(items);
-        return;
+    if (dedup) {
+        const int dup = promoteClipboardItem(items, (long long)nowMs, [&](const ClipboardItem& it) {
+            return it.type == L"text" && it.text == s;
+        });
+        if (dup >= 0) {
+            if (dup > 0) writeClipboardItems(items);
+            return;
+        }
     }
 
     static unsigned long long seq = 0;
@@ -2429,6 +2431,27 @@ void Setting::addClipboardText(const std::wstring& text)
     it.createdAt = (long long)nowMs;
     items.insert(items.begin(), std::move(it));
     writeClipboardItems(items);
+}
+
+bool Setting::setClipboardText(const std::wstring& id, const std::wstring& text)
+{
+    if (id.empty()) return false;
+    std::wstring s = text;
+    while (!s.empty() && (s.back() == L'\0' || s.back() == L'\r' || s.back() == L'\n')) s.pop_back();
+    auto items = getClipboardItems();
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (items[i].id != id) continue;
+        if (items[i].type != L"text") return false;
+        auto hit = std::move(items[i]);
+        hit.text = std::move(s);
+        hit.createdAt = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        items.erase(items.begin() + (std::ptrdiff_t)i);
+        items.insert(items.begin(), std::move(hit));
+        writeClipboardItems(items);
+        return true;
+    }
+    return false;
 }
 
 void Setting::addClipboardImage(int w, int h, const std::vector<BYTE>& bgra)

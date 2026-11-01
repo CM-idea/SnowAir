@@ -535,8 +535,6 @@
     "rackThemeDesc": "选择晾衣架画布、卡片与强调色。四个主题都保持清晰的纸感/金属感，不做柔彩日常。",
     "rackThemeGroup": "主题",
     "rackCollectGroup": "常规",
-    "rackCollectImages": "收集截图",
-    "rackCollectClipboard": "收集剪切板",
     "rackAutoCapture": "截图自动上绳",
     "rackQuickPinHang": "快速贴屏上绳",
     "rackQuickPinHangDesc": "对应全局热键「快速贴屏」：贴出的图片同时挂到晾衣架。",

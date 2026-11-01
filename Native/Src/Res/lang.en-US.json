@@ -535,8 +535,6 @@
     "rackThemeDesc": "Canvas, card and accent palette for the rack. Four crisp paper/metal themes, not soft pastel.",
     "rackThemeGroup": "Theme",
     "rackCollectGroup": "General",
-    "rackCollectImages": "Collect screenshots",
-    "rackCollectClipboard": "Collect clipboard",
     "rackAutoCapture": "Hang new screenshots automatically",
     "rackQuickPinHang": "Hang Quick Pin images",
     "rackQuickPinHangDesc": "Works with the global Quick Pin hotkey: pinned images also hang on the rack.",

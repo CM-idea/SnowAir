@@ -606,18 +606,6 @@ void WinSettingAppearance::buildRackTab(Ling::Node* host)
     SettingUi::groupLabel(rackTab, Lang::get(L"setting.rackCollectGroup"));
     auto* collectGrid = SettingUi::grid2(rackTab);
     auto* s = Setting::get();
-    SettingUi::toggleRow(collectGrid, Lang::get(L"setting.rackCollectImages"),
-        s->getRackFlag(L"rack.collect_images", true),
-        [](bool on) {
-            Setting::get()->setRackFlag(L"rack.collect_images", on);
-            PluginHost::instance().onSettingChanged(L"rack.collect_images");
-        }, true);
-    SettingUi::toggleRow(collectGrid, Lang::get(L"setting.rackCollectClipboard"),
-        s->getRackFlag(L"rack.collect_clipboard", true),
-        [](bool on) {
-            Setting::get()->setRackFlag(L"rack.collect_clipboard", on);
-            PluginHost::instance().onSettingChanged(L"rack.collect_clipboard");
-        }, true);
     SettingUi::toggleRow(collectGrid, Lang::get(L"setting.rackAutoCapture"),
         s->getRackFlag(L"rack.auto_capture", true),
         [](bool on) {

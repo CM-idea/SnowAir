@@ -456,6 +456,93 @@ int entryAllTags(void*, wchar_t* out, int capacity)
     return static_cast<int>(ranked.size());
 }
 
+/* ---- v4：文本记录（便签）读写 ---- */
+
+namespace {
+std::wstring trimNoteText(const wchar_t* text)
+{
+    std::wstring out = text ? text : L"";
+    while (!out.empty() &&
+           (out.back() == L'\0' || out.back() == L'\r' || out.back() == L'\n')) {
+        out.pop_back();
+    }
+    return out;
+}
+}  // namespace
+
+int entryId(void*, int index, wchar_t* out, int capacity)
+{
+    if (!out || capacity <= 0) return 0;
+    out[0] = 0;
+    ensureEntries();
+    if (index < 0 || index >= static_cast<int>(g_entries.size())) return 0;
+    const auto& it = g_entries[static_cast<size_t>(index)];
+    if (it.source != L"clipboard") return 0;
+    wcsncpy_s(out, static_cast<size_t>(capacity), it.id.c_str(), _TRUNCATE);
+    return 1;
+}
+
+int entryText(void*, const wchar_t* id, wchar_t* out, int capacity)
+{
+    if (!id || !*id) return -1;
+    auto* s = Setting::get();
+    if (!s) return -1;
+    for (const auto& c : s->getClipboardItems()) {
+        if (c.id != id) continue;
+        if (c.type != L"text") return -1;
+        if (out && capacity > 0) {
+            wcsncpy_s(out, static_cast<size_t>(capacity), c.text.c_str(), _TRUNCATE);
+        }
+        return static_cast<int>(c.text.size());
+    }
+    return -1;
+}
+
+int entryCreateText(void*, const wchar_t* text, const wchar_t* tags, wchar_t* idOut,
+                    int capacity)
+{
+    if (idOut && capacity > 0) idOut[0] = 0;
+    const std::wstring body = trimNoteText(text);
+    if (body.empty()) return 0;
+    auto* s = Setting::get();
+    if (!s) return 0;
+    /* 每条便签都是独立记录：不去重，避免把已有的历史条目改造成便签。 */
+    s->addClipboardText(body, false);
+    const auto items = s->getClipboardItems();
+    if (items.empty() || items.front().type != L"text") return 0;
+    const std::wstring id = items.front().id;
+    const auto list = splitTagList(tags);
+    if (!list.empty()) s->setClipboardTags(id, list);
+    if (idOut && capacity > 0) {
+        wcsncpy_s(idOut, static_cast<size_t>(capacity), id.c_str(), _TRUNCATE);
+    }
+    g_entriesDirty = true;
+    return 1;
+}
+
+int entryUpdateText(void*, const wchar_t* id, const wchar_t* text, const wchar_t* tags)
+{
+    if (!id || !*id) return 0;
+    const std::wstring body = trimNoteText(text);
+    if (body.empty()) return 0;
+    auto* s = Setting::get();
+    if (!s) return 0;
+    if (!s->setClipboardText(id, body)) return 0;
+    if (tags && *tags) s->setClipboardTags(id, splitTagList(tags));
+    g_entriesDirty = true;
+    return 1;
+}
+
+int entryDeleteId(void*, const wchar_t* id)
+{
+    if (!id || !*id) return 0;
+    auto* s = Setting::get();
+    if (!s) return 0;
+    s->removeClipboardItem(id);
+    g_entriesDirty = true;
+    return 1;
+}
+
 int clipHang(void*, int index)
 {
     auto* s = Setting::get();
@@ -745,6 +832,11 @@ void PluginHost::init()
     host_.entry_reveal = entryReveal;
     host_.entry_tags_set = entryTagsSet;
     host_.entry_all_tags = entryAllTags;
+    host_.entry_id = entryId;
+    host_.entry_text = entryText;
+    host_.entry_create_text = entryCreateText;
+    host_.entry_update_text = entryUpdateText;
+    host_.entry_delete_id = entryDeleteId;
 
     const std::filesystem::path installed =
         PluginPaths::root() / L"rack" / L"rack.dll";
