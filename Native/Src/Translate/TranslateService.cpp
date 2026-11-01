@@ -13,12 +13,7 @@ namespace {
 // 这台机器上离线引擎能不能翻这个方向：所需的语言对（可能是 en 枢轴的两段）都装齐了才算
 bool offlineCanServe(const std::wstring& sourceLang, const std::wstring& targetLang)
 {
-	const auto pairs = TranslateLangs::pairIds(sourceLang, targetLang);
-	if (pairs.empty()) return false;
-	auto& mgr = TranslateModelManager::instance();
-	for (const auto& pid : pairs)
-		if (!mgr.isBranchInstalled(pid)) return false;
-	return true;
+	return TranslateModelManager::instance().canServeOffline(sourceLang, targetLang);
 }
 }
 

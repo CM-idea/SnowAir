@@ -14,6 +14,8 @@ public:
 	bool isBranchInstalled(const std::wstring& pairId) const;
 	/** 一个语言包（含正向/反向若干语言对）是否完整 */
 	bool isPackInstalled(const std::wstring& packId) const;
+	/** 这台机器上离线引擎能否翻该方向：直译或经英语枢轴的语言对都装齐了才算 */
+	bool canServeOffline(const std::wstring& sourceLang, const std::wstring& targetLang) const;
 	/** 已装好的语言包 id（DLL 未装好时返回空） */
 	std::vector<std::wstring> installedPacks() const;
 	// 下载进度：overall(0~1) 给"整体进度条/按钮"，其余给"当前在干什么"的文案

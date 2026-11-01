@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "TranslateModelManager.h"
 #include "BergamotEngine.h"
+#include "TranslateLangs.h"
 #include "../Ocr/PluginPaths.h"
 #include "../Net/HttpClient.h"
 #include <thread>
@@ -317,6 +318,18 @@ bool TranslateModelManager::isPackInstalled(const std::wstring& packId) const
 	if (!pack || pack->pairs.empty()) return false;
 	for (const auto& pr : pack->pairs)
 		if (!isBranchInstalled(pr.pairId)) return false;
+	return true;
+}
+
+// 离线能不能翻某个方向：引擎 DLL 就绪 + 该方向要的语言对都完整。
+// 非英语之间是「经英语枢轴」的两段（见 TranslateLangs::pairIds），两段都得装。
+bool TranslateModelManager::canServeOffline(const std::wstring& sourceLang, const std::wstring& targetLang) const
+{
+	if (!isDllInstalled()) return false;
+	const auto pairs = TranslateLangs::pairIds(sourceLang, targetLang);
+	if (pairs.empty()) return false;   // 源=目标、或源无法识别
+	for (const auto& pid : pairs)
+		if (!isBranchInstalled(pid)) return false;
 	return true;
 }
 

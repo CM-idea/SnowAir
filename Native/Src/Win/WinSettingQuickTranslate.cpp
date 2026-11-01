@@ -12,6 +12,7 @@
 #include "../Tool/IconCodes.h"
 #include "../Translate/TranslateService.h"
 #include "../Translate/TranslateTypes.h"
+#include "../Translate/TranslateModelManager.h"
 #include "../Translate/DictLookup.h"
 #include "../Translate/BergamotEngine.h"
 
@@ -572,33 +573,64 @@ void WinSettingQuickTranslate::ensureTargetWhenSrcZh()
 
 void WinSettingQuickTranslate::showLangBox(Ling::Button* btn, bool target)
 {
+	auto* s = Setting::get();
+	// 离线服务只能翻「已经下载的语言包」：下拉里只列这些。在线服务照旧列全部主流语种
+	// —— 用户只装了中/英/日，下拉就不该还能选到法语，选了也只是白白回退到在线。
+	std::vector<std::wstring> codes;
+	codes.reserve(kPopularLangCount);
+	for (int i = 0; i < kPopularLangCount; i++) codes.push_back(kPopularLangs[i].code);
+	if (_wcsicmp(s->getTranslateProvider().c_str(), TranslateProvider::Offline) == 0) {
+		auto& mgr = TranslateModelManager::instance();
+		std::vector<std::wstring> keep;
+		for (const auto& code : codes) {
+			// 源语言看「从它翻出去」，目标语言看「翻进它」；非英语之间可能还要经 en 枢轴
+			bool ok = false;
+			for (const auto& other : codes) {
+				if (_wcsicmp(code.c_str(), other.c_str()) == 0) continue;
+				const bool hit = target ? mgr.canServeOffline(other, code) : mgr.canServeOffline(code, other);
+				if (hit) { ok = true; break; }
+			}
+			if (ok) keep.push_back(code);
+		}
+		// 一个语言包都没装：保持完整清单，别让下拉空着（实际请求会由服务链回退到在线）
+		if (!keep.empty()) codes.swap(keep);
+	}
+
 	std::vector<std::wstring> ids, labs;
 	if (!target) {   // 源语言最前多一项「自动检测」
 		ids.push_back(L"auto");
 		labs.push_back(Lang::get(L"setting.fnLangAuto"));
 	}
-	for (int i = 0; i < kPopularLangCount; i++) {
-		ids.push_back(kPopularLangs[i].code);
-		labs.push_back(Lang::get(kPopularLangs[i].labelKey));
+	for (const auto& code : codes) {
+		ids.push_back(code);
+		labs.push_back(langLabel(code));
 	}
-	auto* s = Setting::get();
-	std::wstring cur = target ? s->getTranslateTargetLang() : s->getTranslateSourceLang();
+	const std::wstring cur = target ? s->getTranslateTargetLang() : s->getTranslateSourceLang();
+	// 当前值不在过滤后的清单里（刚切到离线服务，或语言包被卸掉）：仍然列出来，否则下拉
+	// 高亮会落到第一项，和按钮上的文字对不上
+	bool hasCur = false;
+	for (const auto& id : ids)
+		if (_wcsicmp(id.c_str(), cur.c_str()) == 0) { hasCur = true; break; }
+	if (!hasCur && !cur.empty()) {
+		ids.push_back(cur);
+		labs.push_back(langLabel(cur));
+	}
 	int curIdx = 0;
 	for (int i = 0; i < (int)ids.size(); i++)
 		if (_wcsicmp(ids[i].c_str(), cur.c_str()) == 0) curIdx = i;
 	showOptionsBox(btn, labs, curIdx, kLangDdlW, [this, target, ids](int i) {
 		if (i < 0 || i >= (int)ids.size()) return;
-		auto* s = Setting::get();
+		auto* st = Setting::get();
 		if (target) {
-			s->setTranslateTargetLang(ids[i]);
+			st->setTranslateTargetLang(ids[i]);
 			// 源为中文/自动时，用户手动把目标改成中文 → 锁定，不再自动纠偏
-			const std::wstring src = s->getTranslateSourceLang();
+			const std::wstring src = st->getTranslateSourceLang();
 			const bool srcZh = isChineseLang(src) || _wcsicmp(src.c_str(), L"auto") == 0;
 			if (srcZh && isChineseLang(ids[i])) tgtPinnedZh = true;
 			else if (!isChineseLang(ids[i])) tgtPinnedZh = false;
 		}
 		else {
-			s->setTranslateSourceLang(ids[i]);
+			st->setTranslateSourceLang(ids[i]);
 			ensureTargetWhenSrcZh();
 		}
 		refreshTopBar();
