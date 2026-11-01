@@ -19,25 +19,37 @@
 namespace {
 	constexpr float kBubbleMaxW{ 340.f };      // 气泡最大逻辑宽度
 	constexpr float kHistW{ 200.f };           // 历史侧栏展开宽度
-	constexpr float kGapSidebar{ 8.f };        // 历史侧栏与主面板的间距
+	constexpr float kGapSidebar{ 16.f };       // 历史侧栏与主面板的间距（中间那条缝）
+	constexpr float kToggleBox{ 36.f };        // 展开/折叠按钮的尺寸（与顶栏等高）
 	constexpr UINT kAnimTimerId{ 0x4151 };     // 侧栏动画定时器
 
-	// 时间戳(ms) -> "MM-DD HH:mm"
-	std::wstring fmtTime(long long ts)
+	// 历史条目上的时间戳：今天只显示 HH:mm，非今天只显示 MM-DD
+	std::wstring fmtStamp(long long ts)
 	{
 		time_t t = (time_t)(ts / 1000);
 		tm local{};
 		localtime_s(&local, &t);
-		wchar_t buf[32];
-		swprintf_s(buf, L"%02d-%02d %02d:%02d", local.tm_mon + 1, local.tm_mday,
-			local.tm_hour, local.tm_min);
+		time_t now = time(nullptr);
+		tm cur{};
+		localtime_s(&cur, &now);
+		const bool today = local.tm_year == cur.tm_year && local.tm_yday == cur.tm_yday;
+		wchar_t buf[16]{};
+		wcsftime(buf, 16, today ? L"%H:%M" : L"%m-%d", &local);
 		return buf;
+	}
+
+	// 单行条目放得下的标题：超长截断加省略号
+	std::wstring fitTitle(const std::wstring& s, size_t maxChars)
+	{
+		if (s.size() <= maxChars) return s;
+		return s.substr(0, maxChars) + L"…";
 	}
 
 	// 下拉宽度：弹层与触发按钮取同一常量，两者始终等宽，避免"弹出项比下拉栏宽/窄"的错位。
 	// 语言栏放得下「自动识别语言」，服务栏只需容下四字服务名，故比语言栏窄。
 	constexpr float kLangDdlW{ 150.f };
 	constexpr float kProviderDdlW{ 100.f };
+	constexpr float kToneDdlW{ 88.f };        // 语气下拉：只放两三个字，比服务栏更窄
 	// 下拉箭头：本页下拉栏高 28（小于其他页的 ctrlH 32），同一字号会显得偏大，故比
 	// 全局 DropSize(16) 再小一档。
 	constexpr float kQuickDropSize{ 14.f };
@@ -92,6 +104,22 @@ namespace {
 		return 0;
 	}
 
+	// 微软翻译语气：id 原样作为 tone 参数（standard 表示不传），labelKey 取语言包
+	struct ToneItem { const wchar_t* id; const wchar_t* labelKey; };
+	const ToneItem kTones[] = {
+		{ L"standard", L"setting.fnToneStandard" },
+		{ L"informal", L"setting.fnToneInformal" },
+		{ L"formal",   L"setting.fnToneFormal"   },
+	};
+	constexpr int kToneCount = (int)(sizeof(kTones) / sizeof(kTones[0]));
+
+	int toneIndex(const std::wstring& id)
+	{
+		for (int i = 0; i < kToneCount; i++)
+			if (_wcsicmp(kTones[i].id, id.c_str()) == 0) return i;
+		return 0;
+	}
+
 	// 语言代码 → 下拉显示名（auto 单独处理；未知代码原样返回）
 	std::wstring langLabel(const std::wstring& code)
 	{
@@ -128,6 +156,14 @@ WinSettingQuickTranslate::WinSettingQuickTranslate(Ling::WinBase* parent) : Ling
 		if (!visual.IsVisible() || !histOpen || histAnimRunning) return;
 		if (historyShell && historyShell->isPosIn(pos)) return;
 		if (histToggleBtn && histToggleBtn->isPosIn(pos)) return;
+		// 顶栏控件与输入区不算空白区域，点击时保持侧栏展开
+		if (srcLangBtn && srcLangBtn->isPosIn(pos)) return;
+		if (tgtLangBtn && tgtLangBtn->isPosIn(pos)) return;
+		if (swapBtn && swapBtn->isPosIn(pos)) return;
+		if (providerBtn && providerBtn->isPosIn(pos)) return;
+		if (toneBtn && toneBtn->isPosIn(pos)) return;
+		if (sendBtn && sendBtn->isPosIn(pos)) return;
+		if (input && input->isPosIn(pos)) return;
 		toggleHistory();
 	});
 	// 结果复制按钮默认隐藏：鼠标进入某条译文所在行时才浮出。
@@ -144,6 +180,27 @@ WinSettingQuickTranslate::WinSettingQuickTranslate(Ling::WinBase* parent) : Ling
 			const bool on = h.bubble->parent && h.bubble->parent->isPosIn(pos);
 			h.btn->visual.IsVisible(on);
 		}
+		// 历史条目：悬停该行时才显示行尾删除键
+		for (auto& r : histRows) {
+			if (!r.row || !r.del) continue;
+			r.del->visual.IsVisible(r.row->isPosIn(pos));
+		}
+	});
+	// 发送按钮的光标由这里统一决定：可发送时为手型，置灰时为普通箭头
+	cursorTok = win->onCursor.add([this](bool* handled) {
+		if (!sendBtn || !win || !win->hwnd) return;
+		POINT p{};
+		if (!GetCursorPos(&p)) return;
+		ScreenToClient(win->hwnd, &p);
+		if (!sendBtn->isPosIn(p)) return;
+		SetCursor(LoadCursorW(nullptr, canSendNow() ? IDC_HAND : IDC_ARROW));
+		if (handled) *handled = true;
+	});
+	// 发送按钮的点击同样由这里处理：置灰时直接忽略
+	sendClickTok = win->onMouseDown.add([this](POINT pos, bool isRight) {
+		if (isRight || !sendBtn || !visual.IsVisible()) return;
+		if (!sendBtn->isPosIn(pos)) return;
+		if (canSendNow()) doTranslate(L"");
 	});
 	loadSessions();
 }
@@ -155,6 +212,8 @@ WinSettingQuickTranslate::~WinSettingQuickTranslate()
 	win->onTimer.remove(timerTok);
 	win->onMouseDown.remove(mouseDownTok);
 	win->onMouseMove.remove(mouseMoveTok);
+	win->onCursor.remove(cursorTok);
+	win->onMouseDown.remove(sendClickTok);
 	// 离开这一页就把离线翻译模型（几百 MB）还回去：截图会话那条链路已在 WinCap::onClosed
 	// 释放过，这里补上缺的那条 —— 否则在这一页翻过一次离线之后，模型会一直常驻到退出。
 	// release() 内部加锁，后台还在翻的那一段会先跑完，不会被抽掉。
@@ -233,8 +292,11 @@ void WinSettingQuickTranslate::hideOptionsBox()
 
 void WinSettingQuickTranslate::buildTranslateTab(Ling::Node* p)
 {
+	// 页面底铺画布色：左右两块直接占满内容区，中间留 16px 的缝
+	if (p->parent) p->parent->setBg(SettingTheme::canvas);
 	p->setFlexDirection(Ling::FlexDirection::Row);
 	p->setAlignItems(Ling::Align::Stretch);
+	p->setBg(0);
 
 	// —— 历史侧栏（宽度动画，内容被圆角剪裁） ——
 	historyShell = p->makeChild<Ling::Node>();
@@ -244,10 +306,10 @@ void WinSettingQuickTranslate::buildTranslateTab(Ling::Node* p)
 	// histInner(宽200) 的内容会把侧栏高度收缩到内容高，导致灰色底/圆角底部与
 	// 输入框底边不对齐（侧栏"不够高"）。heightPercent 100 依赖 host 的可确定高度。
 	historyShell->setHeightPercent(100.f);
-	historyShell->setBorderRadius(SettingTheme::radius);
-	historyShell->setBg(SettingTheme::secondary);
-	// 折叠宽度为 0 时 margin 也必须为 0，否则会残留 8px 间距使主面板整体左移，
-	// 造成折叠状态下的内容间距与其他内容页不一致。margin 由 animateHistory 随宽度同步。
+	historyShell->setBorderRadius(SettingTheme::contentCardRadius);
+	historyShell->setBg(SettingTheme::card);
+	// 折叠宽度为 0 时 margin 也必须为 0，否则会残留 16px 间距使主面板整体左移。
+	// margin 由 animateHistory 随宽度同步。
 	historyShell->setMarginRight(0.f);
 	// 初始为折叠态：直接从布局树移除（display:none）。否则宽度为 0 的 historyShell 内部
 	// histInner(宽200+x 内容) 以 alignItems:Stretch 撑高 flex 行，使折叠态主面板上下间距
@@ -255,20 +317,21 @@ void WinSettingQuickTranslate::buildTranslateTab(Ling::Node* p)
 	historyShell->hide();
 
 	histInner = historyShell->makeChild<Ling::Node>();
-	histInner->setWidth(kHistW);
+	histInner->setWidth(kHistW);   // 展开宽度（Yoga 的 width 含内边距）
 	histInner->setHeightPercent(100.f);
 	histInner->setFlexDirection(Ling::FlexDirection::Column);
-	histInner->setPadding(10.f, 10.f, 10.f, 10.f);
+	histInner->setPadding(20.f);
 
 	auto titleRow = histInner->makeChild<Ling::Node>();
 	titleRow->setFlexDirection(Ling::FlexDirection::Row);
 	titleRow->setWidthPercent(100.f);
 	titleRow->setAlignItems(Ling::Align::Center);
+	titleRow->setHeight(36.f);   // 与顶栏等高，标题行和右侧语言栏在同一水平线
 	titleRow->setMarginBottom(8.f);
 	auto hTitle = titleRow->makeChild<Ling::Label>();
 	hTitle->setText(Lang::get(L"quick.history"));
 	hTitle->setFontSize(13.f);
-	hTitle->setColor(SettingTheme::textPrimary);
+	hTitle->setColor(SettingTheme::textSecondary);
 	hTitle->setFlexGrow(1.f);
 	auto clearBtn = titleRow->makeChild<Ling::Button>();
 	clearBtn->setText(Lang::get(L"quick.clear"));
@@ -276,19 +339,42 @@ void WinSettingQuickTranslate::buildTranslateTab(Ling::Node* p)
 	clearBtn->setPadding(8.f, 0, 8.f, 0);
 	clearBtn->setBorderRadius(SettingTheme::radiusSm);
 	clearBtn->setColor(SettingTheme::textMuted);
+	clearBtn->setHoverColor(SettingTheme::textPrimary);   // 不设 hover 色会落到按钮默认的深灰
 	clearBtn->setHoverBg(SettingTheme::accent);
 	clearBtn->onClick.add([this](Ling::Button*) { clearSessions(); });
 
 	auto newHistBtn = histInner->makeChild<Ling::Button>();
-	newHistBtn->setText(Lang::get(L"quick.new"));
+	newHistBtn->setText(L"");
 	newHistBtn->setHeight(32.f);
 	newHistBtn->setWidthPercent(100.f);
+	newHistBtn->setFlexDirection(Ling::FlexDirection::Row);
+	newHistBtn->setJustifyContent(Ling::Justify::Center);
+	newHistBtn->setAlignItems(Ling::Align::Center);
 	newHistBtn->setBorderRadius(SettingTheme::radiusSm);
-	newHistBtn->setBorder(1.f, SettingTheme::primary);
-	newHistBtn->setBg(SettingTheme::primary);
-	newHistBtn->setColor(SettingTheme::primaryForeground);
-	newHistBtn->setHoverBg(SettingTheme::primary);
+	// 比卡片深一档的实心按钮
+	newHistBtn->setBg(SettingTheme::secondary);
+	newHistBtn->setHoverBg(SettingTheme::popupSelBg);
 	newHistBtn->setMarginBottom(8.f);
+	// 加号图标与文字分属两套字体，拆成两个子标签排列
+	auto newPlus = newHistBtn->makeChild<Ling::Label>();
+	newPlus->setText(Icon::Add);
+	newPlus->setFontFamily(Icon::Family);
+	newPlus->setFontSize(Icon::DropSize);   // 与下拉箭头同字号
+	newPlus->setColor(SettingTheme::textSecondary);
+	newPlus->setMarginRight(6.f);
+	auto newText = newHistBtn->makeChild<Ling::Label>();
+	newText->setText(Lang::get(L"quick.new"));
+	newText->setFontSize(13.f);
+	newText->setColor(SettingTheme::textSecondary);
+	// 按钮自身不绘制文本；悬停配色在 onEnter/onLeave 中同步给两个子标签
+	newHistBtn->onEnter.add([newPlus, newText](Ling::Button*) {
+		newPlus->setColor(SettingTheme::foreground);
+		newText->setColor(SettingTheme::foreground);
+		});
+	newHistBtn->onLeave.add([newPlus, newText](Ling::Button*) {
+		newPlus->setColor(SettingTheme::textSecondary);
+		newText->setColor(SettingTheme::textSecondary);
+		});
 	newHistBtn->onClick.add([this](Ling::Button*) { startNewSession(); });
 
 	histScroll = histInner->makeChild<Ling::ScrollerBox>();
@@ -304,6 +390,10 @@ void WinSettingQuickTranslate::buildTranslateTab(Ling::Node* p)
 	panel->setFlexGrow(1.f);
 	panel->setFlexShrink(1.f);        // 允许收缩：侧栏展开且窗口变窄时面板压缩，不被剪裁
 	panel->setFlexDirection(Ling::FlexDirection::Column);
+	// 主面板也是一张卡：与左侧历史卡同色、同圆角，靠页面底色与 16px 的缝分开
+	panel->setBg(SettingTheme::card);
+	panel->setBorderRadius(SettingTheme::contentCardRadius);
+	panel->setPadding(20.f);
 	// 解除 panel 的 auto-min(min-height:auto) 与 min-content 下限：否则窗口变矮时
 	// panel 被内容高度锁死无法收缩，底部输入区会被挤出可视区。
 	YGNodeStyleSetMinHeight(panel->node, 0.f);
@@ -317,11 +407,11 @@ void WinSettingQuickTranslate::buildTranslateTab(Ling::Node* p)
 	topBar->setHeight(36.f);
 	topBar->setAlignItems(Ling::Align::Center);
 
-	// 左侧：侧栏切换（展开/折叠图标，随历史侧栏状态切换）+ 源语言 + 互换 + 目标语言
+	// 展开/折叠按钮：跟着主面板一起移动，始终在下拉框左边
 	histToggleBtn = topBar->makeChild<Ling::Button>();
 	histToggleBtn->setText(Icon::Expand);      // 初始侧栏收起 → 显示「展开」
-	histToggleBtn->setHeight(36.f);
-	histToggleBtn->setWidth(36.f);
+	histToggleBtn->setWidth(kToggleBox);
+	histToggleBtn->setHeight(kToggleBox);
 	histToggleBtn->setFontFamily(Icon::Family);
 	histToggleBtn->setFontSize(Icon::SizeSm);
 	histToggleBtn->setBorderRadius(SettingTheme::radiusSm);
@@ -355,6 +445,7 @@ void WinSettingQuickTranslate::buildTranslateTab(Ling::Node* p)
 	swapBtn->setHeight(36.f);
 	swapBtn->setBorderRadius(SettingTheme::radiusSm);
 	swapBtn->setColor(SettingTheme::textMuted);
+	swapBtn->setHoverColor(SettingTheme::textPrimary);    // 停悬变亮，而不是落到按钮默认的深灰
 	swapBtn->setHoverBg(SettingTheme::accent);
 	swapBtn->onClick.add([this](Ling::Button*) {
 		auto* s = Setting::get();
@@ -435,9 +526,9 @@ void WinSettingQuickTranslate::buildTranslateTab(Ling::Node* p)
 	auto inputBox = inputArea->makeChild<Ling::Node>();
 	inputBox->setFlexDirection(Ling::FlexDirection::Column);
 	inputBox->setWidthPercent(100.f);
-	inputBox->setBg(SettingTheme::cardBg);
+	inputBox->setBg(SettingTheme::secondary);   // 与卡片同色会难以分辨，输入框提亮一档
 	inputBox->setBorder(1.f, SettingTheme::input);
-	inputBox->setBorderRadius(SettingTheme::radiusXl);
+	inputBox->setBorderRadius(26.f);   // = 发送按钮半径 18 + 右下内边距 8：圆角与按钮同心
 	inputBox->setPadding(10.f, 8.f, 8.f, 8.f);
 
 	input = inputBox->makeChild<Ling::TextBox>();
@@ -474,6 +565,23 @@ void WinSettingQuickTranslate::buildTranslateTab(Ling::Node* p)
 		showProviderBox(btn);
 		});
 
+	// 语气下拉：只有微软翻译支持（标准 / 非正式 / 正式），选其它服务时隐藏
+	DdlParts toneDdl = makeDdl(toolRow);
+	toneBtn = toneDdl.btn;
+	toneVal = toneDdl.value;
+	toneVal->setColor(SettingTheme::textMuted);
+	toneBtn->setHeight(36.f);
+	toneBtn->setWidth(kToneDdlW);
+	toneBtn->setPadding(10.f, 0, 10.f, 0);
+	toneBtn->setFlexShrink(1.f);
+	toneBtn->setBorderRadius(SettingTheme::radiusSm);
+	toneBtn->setHoverBg(SettingTheme::popupSelBg);
+	toneBtn->onClick.add([this](Ling::Button* btn) {
+		if (optionsPopup) return;
+		showToneBox(btn);
+		});
+	updateToneDdl();   // 初始按当前服务决定显示/隐藏
+
 	auto toolGrow = toolRow->makeChild<Ling::Node>();
 	toolGrow->setFlexGrow(1.f);
 
@@ -484,17 +592,19 @@ void WinSettingQuickTranslate::buildTranslateTab(Ling::Node* p)
 	counterLab->setFlexShrink(0.f);
 	counterLab->setMarginRight(8.f);
 
-	sendBtn = toolRow->makeChild<Ling::Button>();
-	sendBtn->setText(Icon::Send2);
-	sendBtn->setFontFamily(Icon::Family);
-	sendBtn->setFontSize(18.f);
+	// 发送按钮用普通 Node 而不是 Button：置灰时不希望它带按钮的悬停手型光标，
+	// 光标与点击都交给窗口事件统一处理（见 ctor 中的 onCursor / onMouseDown）
+	sendBtn = toolRow->makeChild<Ling::Node>();
 	sendBtn->setWidth(36.f);
 	sendBtn->setHeight(36.f);
 	sendBtn->setBorderRadius(SettingTheme::radiusFull);
-	sendBtn->onClick.add([this](Ling::Button*) {
-		doTranslate(L"");   // 是否可发由 doTranslate 按"当前服务是否在翻"统一判断
-		});
-	updateSendBtn();   // 初始（无输入）：灰底黑图标
+	sendBtn->setJustifyContent(Ling::Justify::Center);   // 图标居中：普通 Node 默认从左上角开始排
+	sendBtn->setAlignItems(Ling::Align::Center);
+	sendIcon = sendBtn->makeChild<Ling::Label>();
+	sendIcon->setText(Icon::Send2);
+	sendIcon->setFontFamily(Icon::Family);
+	sendIcon->setFontSize(18.f);
+	updateSendBtn();   // 初始（无输入）：灰底灰图标
 
 	// 回车翻译（TextBox 的 VK_RETURN 会插入 '\n'，在 onTextChanged 里捕获）
 	auto weak = getWeakThis();
@@ -533,20 +643,24 @@ void WinSettingQuickTranslate::refreshTopBar()
 	win->refresh();
 }
 
-// 发送按钮配色：无输入、或**当前所选服务**正在翻译 = #E5E5E5 底 + 黑图标（不可发送）；
+// 现在能不能发送：有输入、且当前所选服务不在翻译
+bool WinSettingQuickTranslate::canSendNow()
+{
+	return input && !input->getText().empty()
+		&& !providerBusy(Setting::get()->getTranslateProvider());
+}
+
+// 发送按钮配色：无输入、或**当前所选服务**正在翻译 = 置灰（不可发送）；
 // 有输入 = #0FDC78 底 + 白图标。翻译请求按服务区分：换到别的服务立刻就能发。
-// 悬停底色/图标色取与常态同值 —— Button 悬停时靠 hoverBg/hoverColor 落笔，取同值就没有悬停效果。
 void WinSettingQuickTranslate::updateSendBtn()
 {
 	if (!sendBtn) return;
-	const bool canSend = input && !input->getText().empty()
-		&& !providerBusy(Setting::get()->getTranslateProvider());
-	const uint32_t bg = canSend ? 0x0FDC78FF : 0xE5E5E5FF;
-	const uint32_t fg = canSend ? 0xFFFFFFFF : 0x000000FF;
-	sendBtn->setBg(bg);
-	sendBtn->setColor(fg);
-	sendBtn->setHoverBg(bg);
-	sendBtn->setHoverColor(fg);
+	const bool canSend = canSendNow();
+	// 置灰底色要和输入框底色（secondary）区分开：浅色下 secondary 与 popupSelBg 同为 #F5F4F4，
+	// 直接复用会让圆形按钮整块消失，所以按主题各取一档。
+	const uint32_t disabledBg = SettingTheme::isDark() ? 0x424242FF : 0xDDDDDDFF;
+	sendBtn->setBg(canSend ? 0x0FDC78FF : disabledBg);
+	if (sendIcon) sendIcon->setColor(canSend ? 0xFFFFFFFF : SettingTheme::textMuted);
 }
 
 bool WinSettingQuickTranslate::providerBusy(const std::wstring& provider) const
@@ -642,9 +756,40 @@ void WinSettingQuickTranslate::refreshProviderBtn()
 	if (!providerBtn) return;
 	int idx = providerIndex(Setting::get()->getTranslateProvider());
 	providerVal->setText(Lang::get(kProviders[idx].labKey));
+	// 语气只有微软支持：换服务后同步显示/隐藏
+	updateToneDdl();
 	// 换服务后"当前服务是否在翻"可能就变了 → 发送按钮立刻重算可用态
 	updateSendBtn();
 	win->refresh();
+}
+
+// 语气下拉的显示与取值：仅微软在线翻译显示
+void WinSettingQuickTranslate::updateToneDdl()
+{
+	if (!toneBtn) return;
+	const bool ms = _wcsicmp(Setting::get()->getTranslateProvider().c_str(),
+		TranslateProvider::Microsoft) == 0;
+	toneBtn->visual.IsVisible(ms);
+	toneBtn->setWidth(ms ? kToneDdlW : 0.f);      // 隐藏时连占位一起去掉
+	toneBtn->setMarginLeft(ms ? 8.f : 0.f);
+	if (!ms) return;
+	toneVal->setText(Lang::get(kTones[toneIndex(Setting::get()->getTranslateMsTone())].labelKey));
+}
+
+void WinSettingQuickTranslate::showToneBox(Ling::Button* btn)
+{
+	std::vector<std::wstring> ids, labs;
+	for (int i = 0; i < kToneCount; i++) {
+		ids.push_back(kTones[i].id);
+		labs.push_back(Lang::get(kTones[i].labelKey));
+	}
+	const int curIdx = toneIndex(Setting::get()->getTranslateMsTone());
+	showOptionsBox(btn, labs, curIdx, kToneDdlW, [this, ids](int i) {
+		if (i < 0 || i >= (int)ids.size()) return;
+		Setting::get()->setTranslateMsTone(ids[i]);
+		updateToneDdl();
+		win->refresh();
+		});
 }
 
 void WinSettingQuickTranslate::showProviderBox(Ling::Button* btn)
@@ -1090,6 +1235,9 @@ void WinSettingQuickTranslate::doTranslate(const std::wstring& preset)
 	req.sourceLang = Setting::get()->getTranslateSourceLang();
 	req.targetLang = Setting::get()->getTranslateTargetLang();
 	req.provider = provider;
+	// 语气只对微软在线翻译有意义
+	if (_wcsicmp(provider.c_str(), TranslateProvider::Microsoft) == 0)
+		req.tone = Setting::get()->getTranslateMsTone();
 	// 回调可能晚于页面销毁（快速切页）：getWeakThis() 哨兵保护，页面已销毁则直接丢弃。
 	// 并发请求各自带 reqId：回来只回填自己那条消息与气泡，不会盖掉别人的结果。
 	auto weak = getWeakThis();
@@ -1152,7 +1300,7 @@ void WinSettingQuickTranslate::animateHistory()
 		historyShell->hide();
 	}
 	historyShell->setWidth(histAnimW);
-	// margin 随宽度同步缩放，保证折叠(宽度0)时 margin=0、展开时 margin=8。
+	// 两卡之间的缝随展开动画同步变宽（折叠 0、展开 16）
 	historyShell->setMarginRight(kGapSidebar * histAnimW / kHistW);
 	win->refresh();
 }
@@ -1163,31 +1311,77 @@ void WinSettingQuickTranslate::refreshHistoryList()
 	while (!histList->children.empty()) {
 		histList->removeChild(histList->children.back().get());
 	}
+	histRows.clear();
 	std::vector<Session> list = sessions;
 	std::sort(list.begin(), list.end(), [](const Session& a, const Session& b) { return a.ts > b.ts; });
 	for (auto& s : list) {
-		auto* item = histList->makeChild<Ling::Button>();
-		std::wstring title = s.title.empty() ? Lang::get(L"quick.untitled") : s.title;
-		item->setText(title + L"\n" + fmtTime(s.ts));
-		item->setHeight(52.f);
-		item->setWidthPercent(100.f);
+		const bool empty = s.title.empty();
+		// 空会话也保留在列表中（显示为「新翻译」），切换到其它条目时不会消失
+		auto* row = histList->makeChild<Ling::Node>();
+		row->setHeight(32.f);   // 与「新建翻译」按钮同高
+		row->setWidthPercent(100.f);
+		row->setFlexDirection(Ling::FlexDirection::Row);
+		row->setAlignItems(Ling::Align::Center);
+		row->setMarginBottom(4.f);
+		row->setBorderRadius(SettingTheme::radiusSm);
+		const bool sel = s.id == curId;
+		row->setBg(sel ? SettingTheme::accent : 0);
+
+		// 标题/时间：整行可点（切换会话），不做自己的悬停底色
+		auto* item = row->makeChild<Ling::Button>();
+		const std::wstring label = empty ? Lang::get(L"quick.untitled") : s.title;
+		item->setText(fmtStamp(s.ts) + L"  " + fitTitle(label, 9));
+		item->setFlexGrow(1.f);
+		item->setFlexShrink(1.f);
+		item->setHeightPercent(100.f);
 		item->setFlexDirection(Ling::FlexDirection::Row);
 		item->setJustifyContent(Ling::Justify::Start);
 		item->setAlignItems(Ling::Align::Center);
 		item->setPadding(8.f, 0, 8.f, 0);
-		item->setMarginBottom(4.f);
 		item->setBorderRadius(SettingTheme::radiusSm);
-		bool sel = s.id == curId;
-		item->setColor(sel ? SettingTheme::primaryForeground : SettingTheme::textPrimary);
-		item->setBg(sel ? SettingTheme::primary : 0);
-		item->setHoverBg(sel ? SettingTheme::primary : SettingTheme::accent);
+		item->setColor(sel ? SettingTheme::textPrimary : SettingTheme::textSecondary);
+		item->setHoverBg(0);   // 条目本身不做悬停底色
+		item->setHoverColor(sel ? SettingTheme::textPrimary : SettingTheme::textSecondary);   // 悬停不改文字颜色
 		std::wstring sid = s.id;
 		item->onClick.add([this, sid](Ling::Button*) {
 			// 有请求在跑时不切会话：每条请求的结果要回填到它自己的气泡，消息列表不能重建
 			if (anyBusy()) return;
 			loadSession(sid);
+			if (histOpen) toggleHistory();   // 选中后收起侧栏
 			});
+
+		// 删除键默认隐藏，悬停该行时显示（见 onMouseMove）
+		auto* del = row->makeChild<Ling::Button>();
+		del->setText(Icon::Remove);
+		del->setFontFamily(Icon::Family);
+		del->setFontSize(Icon::DropSize);   // 较行内图标小一档
+		del->setWidth(20.f);
+		del->setHeight(20.f);
+		del->setMarginRight(6.f);   // 与上下留白一致：行高 32、按钮 20，上下各 6
+		del->setColor(SettingTheme::textMuted);
+		del->setHoverBg(0);   // 悬停不加底色，仅图标变红
+		del->setHoverColor(SettingTheme::destructive);
+		del->visual.IsVisible(false);
+		del->onClick.add([this, sid](Ling::Button*) { deleteSession(sid); });
+		histRows.push_back({ row, del });
 	}
+}
+
+// 删除单个历史条目：删除后立即保存；若删的是当前会话，同时清空消息区
+void WinSettingQuickTranslate::deleteSession(const std::wstring& id)
+{
+	if (anyBusy()) return;
+	sessions.erase(std::remove_if(sessions.begin(), sessions.end(),
+		[&](const Session& s) { return s.id == id; }), sessions.end());
+	if (curId == id) {
+		curId.clear();
+		while (!msgList->children.empty()) {
+			msgList->removeChild(msgList->children.back().get());
+		}
+	}
+	saveSessions();
+	refreshHistoryList();
+	updateWelcome();
 }
 
 void WinSettingQuickTranslate::loadSession(const std::wstring& id)
@@ -1213,8 +1407,13 @@ void WinSettingQuickTranslate::loadSession(const std::wstring& id)
 void WinSettingQuickTranslate::startNewSession()
 {
 	if (anyBusy()) return;
-	if (auto* s = currentSession()) {
-		if (s->msgs.empty() && s->title.empty()) return;  // 空会话不重复建
+	// 已经有一个空会话（还没输入/输出）时，直接切到它，不再重复新建
+	for (auto& s : sessions) {
+		if (s.title.empty() && s.msgs.empty()) {
+			if (s.id != curId) loadSession(s.id);
+			if (histOpen) toggleHistory();   // 新建后收起侧栏
+			return;
+		}
 	}
 	Session ns;
 	ns.id = newId();
@@ -1228,6 +1427,8 @@ void WinSettingQuickTranslate::startNewSession()
 	resetDictState();
 	dictViews.clear();
 	if (input) input->setText(L"");
+	saveSessions();   // 空会话一并保存，重启后仍可回到该条目
+	if (histOpen) toggleHistory();   // 新建后收起侧栏
 	refreshHistoryList();
 	scrollToBottom();
 	updateWelcome();

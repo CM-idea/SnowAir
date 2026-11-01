@@ -309,7 +309,8 @@ void WinSetting::onCreated()
 	YGNodeStyleSetMinWidth(card->node, 0.f);
 	card->setFlexDirection(Ling::FlexDirection::Column);
 	card->setBg(SettingTheme::background);
-	card->setBorder(1.f, SettingTheme::contentBorder);   // 内容区描边 EEEEEE
+	// 内容卡不画 1px 描边：描边沿 16px 圆弧逐段抗锯齿，在深色底上会呈现为颗粒。
+	// 卡片边界改由底色差 + 圆角本身表达。
 	card->setBorderRadius(SettingTheme::contentCardRadius);
 	cardNode = card;   // 视口容器：QuickFeatures 页直接挂这（不包外层滚动）
 
@@ -489,6 +490,8 @@ void WinSetting::loadPage(int index)
 	// 切走前必须先把 contentScroll 恢复显示、并把页面从 cardNode 摘除，
 	// 否则页面残留为 cardNode 子节点、contentScroll 被 display:none 钉死。
 	contentScroll->show();
+	// 内容卡默认用背景色；快捷翻译页会把它改成画布色（见 case 1）
+	if (cardNode) cardNode->setBg(SettingTheme::background);
 	if (pageQuick) {
 		cardNode->removeChild(pageQuick);   // 立即销毁 pageQuick（返回值丢弃 == 解构）
 		pageQuick = nullptr;
@@ -561,13 +564,11 @@ void WinSetting::loadPage(int index)
 		pageQuick = new WinSettingQuickTranslate(this);
 		SettingUi::adoptChild(cardNode, pageQuick);
 		makeFullFill(pageQuick);
-		// 还原卡片内边距：旧方案里这块 padding 由 contentScroll->content->setPadding(...) 提供，
-		// 让内容缩进卡片边框之内，露出 1px 描边 + 16px 圆角 + 四周画布留白。本页改为直接挂
-		// cardNode 后若不补回等价 padding，页面内容会顶满到内容盒边缘、把白卡描边/圆角盖掉
-		// —— 即"四周边框都没了"。此处给 pageQuick 自身加同样的 contentPadX/Y，内容内缩后
-		// 边框/圆角恢复可见，同时仍保持 definite height（无外层滚动、输入区不被裁剪）。
-		pageQuick->setPadding(SettingTheme::contentPadX, SettingTheme::contentPadY,
-			SettingTheme::contentPadX, SettingTheme::contentPadY);
+		// 快捷翻译页自行铺画布底色并占满内容区，
+		// 因此这里不再加 contentPad，否则画布铺不满、边缘会露出卡片底色。
+		pageQuick->setPadding(0.f, 0.f, 0.f, 0.f);
+		// 让内容卡自己也用画布色：页面画布铺满后，圆角处的抗锯齿两侧同色，不再出现颗粒
+		cardNode->setBg(SettingTheme::canvas);
 		break;
 	case 2:
 		// 系统按键：命令表内容铺出来（见 CommandKeys / WinSettingSystemKeys）

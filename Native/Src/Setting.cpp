@@ -978,6 +978,9 @@ void Setting::setTranslateSourceLang(const std::wstring& v) { setFeatStr(L"trans
 std::wstring Setting::getTranslateTargetLang() { return featStr(L"translateTargetLang", L"en"); }
 void Setting::setTranslateTargetLang(const std::wstring& v) { setFeatStr(L"translateTargetLang", v); }
 bool Setting::getTranslateDictMode() { return featBool(L"translateDictMode", false); }
+// 微软翻译语气（仅微软在线翻译用）：standard 标准 / informal 非正式 / formal 正式
+std::wstring Setting::getTranslateMsTone() { return featStr(L"translateMsTone", L"standard"); }
+void Setting::setTranslateMsTone(const std::wstring& v) { setFeatStr(L"translateMsTone", v); }
 void Setting::setTranslateDictMode(bool on) { setFeatBool(L"translateDictMode", on); }
 bool Setting::getFeatureTips() { return featBool(L"featureTips", true); }
 void Setting::setFeatureTips(bool on) { setFeatBool(L"featureTips", on); }
@@ -1181,6 +1184,7 @@ void Setting::restoreFunctionTranslateDefaults()
 {
 	setTranslateProvider(L"microsoft");
 	setTranslateDictMode(false);
+	setTranslateMsTone(L"standard");
 }
 
 // —— 与上面的 restore* 成对：判断该子页是否**仍是出厂值**（供「恢复默认」按钮置灰）——
@@ -1224,7 +1228,8 @@ bool Setting::functionOcrAtDefaults()
 
 bool Setting::functionTranslateAtDefaults()
 {
-	return getTranslateProvider() == L"microsoft" && !getTranslateDictMode();
+	return getTranslateProvider() == L"microsoft" && !getTranslateDictMode()
+		&& getTranslateMsTone() == L"standard";
 }
 
 int Setting::getVideoQuality() { return featInt(L"videoQuality", 4); }

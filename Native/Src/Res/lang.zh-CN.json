@@ -461,6 +461,10 @@
     "fnTransBaidu": "百度翻译",
     "fnTransOffline": "离线翻译",
     "fnDictMode": "字典模式",
+    "fnTone": "语气",
+    "fnToneStandard": "标准",
+    "fnToneInformal": "非正式",
+    "fnToneFormal": "正式",
     "dictLoading": "正在查询…",
     "dictEmpty": "词典返回为空",
     "dictNotFound": "未找到词典释义",
@@ -569,7 +573,7 @@
     "translating": "翻译中…",
     "error": "翻译失败",
     "send": "翻译",
-    "untitled": "未命名翻译"
+    "untitled": "新翻译"
   },
   "about": {
     "version": "版本：",

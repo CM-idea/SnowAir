@@ -44,6 +44,7 @@ struct TranslateRequest {
 	std::wstring sourceLang{ L"auto" };
 	std::wstring targetLang{ L"zh-CN" };
 	std::wstring provider;
+	std::wstring tone;         // 微软翻译语气：standard / informal / formal（空 = 默认）
 };
 
 struct TranslateResult {

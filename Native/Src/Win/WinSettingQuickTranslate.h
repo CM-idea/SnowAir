@@ -27,6 +27,8 @@ private:
 	void refreshProviderBtn();            // 同步翻译服务下拉按钮文本
 	void showLangBox(Ling::Button* btn, bool target);
 	void showProviderBox(Ling::Button* btn);
+	void showToneBox(Ling::Button* btn);       // 微软翻译语气下拉
+	void updateToneDdl();                    // 按当前服务显示/隐藏并刷新语气值
 	void doTranslate(const std::wstring& text);
 	Ling::Node* appendBubble(const std::wstring& role, const std::wstring& text);
 	void updateBubble(Ling::Node* bubble, const std::wstring& text);   // 回填某一条译文气泡
@@ -46,10 +48,12 @@ private:
 	void scrollToBottom();
 	void updateWelcome();                 // 无记录时显示居中提示语
 	void updateSendBtn();                 // 发送按钮：无输入或当前服务正在翻译时置灰，否则绿底白图标
+	bool canSendNow();                    // 现在能不能发送（有输入 + 当前服务不在翻）
 	// —— 历史侧栏 ——
 	void toggleHistory();
 	void animateHistory();                // onTimer 单帧步进侧栏宽度
 	void refreshHistoryList();
+	void deleteSession(const std::wstring& id);
 	void loadSessions();
 	void loadSession(const std::wstring& id);
 	void saveSessions();
@@ -68,7 +72,8 @@ private:
 	Ling::ScrollerBox* msgScroll{ nullptr };
 	Ling::Node* msgList{ nullptr };
 	Ling::TextBox* input{ nullptr };
-	Ling::Button* sendBtn{ nullptr };
+	Ling::Node* sendBtn{ nullptr };        // 发送按钮用普通 Node：置灰时不该带按钮的手型光标
+	Ling::Label* sendIcon{ nullptr };
 	Ling::Node* welcomeWrap{ nullptr };    // 空态居中提示语
 	Ling::Button* srcLangBtn{ nullptr };
 	Ling::Label* srcLangVal{ nullptr };    // 源语言下拉的选中值
@@ -76,8 +81,10 @@ private:
 	Ling::Label* tgtLangVal{ nullptr };    // 目标语言下拉的选中值
 	Ling::Button* swapBtn{ nullptr };
 	bool tgtPinnedZh{ false };   // 用户在「源为中文/自动」时手动把目标改回中文 → 不再自动纠偏
-	Ling::Button* providerBtn{ nullptr };  // 翻译服务（微软/谷歌/有道/百度/离线）
+	Ling::Button* providerBtn{ nullptr };
 	Ling::Label* providerVal{ nullptr };   // 翻译服务下拉的选中值
+	Ling::Button* toneBtn{ nullptr };      // 微软翻译语气下拉（仅微软时显示）
+	Ling::Label* toneVal{ nullptr };
 	Ling::Label* counterLab{ nullptr };    // 输入字数 "n / 5000"
 	// —— 历史侧栏 ——
 	Ling::Button* histToggleBtn{ nullptr };  // 侧栏切换按钮（展开/折叠图标随状态切换）
@@ -88,6 +95,8 @@ private:
 	winrt::event_token timerTok;          // onTimer 订阅（仅注册一次）
 	winrt::event_token mouseDownTok;      // 窗口内点击：点侧栏外空白处收起历史侧栏
 	winrt::event_token mouseMoveTok;      // 鼠标移动：停悬结果时显示复制按钮
+	winrt::event_token cursorTok;         // 光标：发送按钮的箭头/手型由这里统一决定
+	winrt::event_token sendClickTok;      // 点击：发送按钮的鼠标点击
 	bool histAnimRunning{ false };
 	float histAnimW{ 0.f };
 	bool histOpen{ false };
@@ -126,6 +135,9 @@ private:
 		std::weak_ptr<bool> btnAlive;
 	};
 	std::vector<CopyHost> copyHosts;
+	// 历史条目：悬停该行时显示行尾删除键
+	struct HistRow { Ling::Node* row{ nullptr }; Ling::Button* del{ nullptr }; };
+	std::vector<HistRow> histRows;
 	// —— 字典模式 ——
 	Ling::Node* dictCard{ nullptr };        // 当前显示的释义卡（同一时刻只显示一张）
 	struct DictWordRange {

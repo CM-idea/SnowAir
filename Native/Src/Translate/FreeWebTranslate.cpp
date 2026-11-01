@@ -277,11 +277,14 @@ TranslateResult bingTranslateOnce(const TranslateRequest& req, const BingCreds& 
 	headers[L"Referer"] = c.host + L"/translator";
 	headers[L"Origin"] = c.host;
 
-	const std::string body = "text=" + urlEncodeUtf8(req.text)
+	std::string body = "text=" + urlEncodeUtf8(req.text)
 		+ "&fromLang=" + wToUtf8(bingLang(req.sourceLang))
 		+ "&to=" + wToUtf8(bingLang(req.targetLang))
 		+ "&token=" + wToUtf8(c.token)
 		+ "&key=" + wToUtf8(c.key);
+	// 语气（仅微软）：standard 不传，informal / formal 作为 tone 参数
+	if (!req.tone.empty() && req.tone != L"standard")
+		body += "&tone=" + wToUtf8(req.tone);
 	const std::wstring url = c.host + L"/ttranslatev3?IG=" + c.ig + L"&IID=" + c.iid;
 	auto resp = SnowHttp::post(url, body, L"application/x-www-form-urlencoded", headers);
 	if (!resp.ok) {

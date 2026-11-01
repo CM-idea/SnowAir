@@ -78,6 +78,8 @@ public:
 	void setTranslateTargetLang(const std::wstring& v);
 	bool getTranslateDictMode();
 	void setTranslateDictMode(bool on);
+	std::wstring getTranslateMsTone();           // 微软翻译语气：standard / informal / formal
+	void setTranslateMsTone(const std::wstring& v);
 	// 「功能提示」总开关：开则在设置项旁显示说明问号（默认开）
 	bool getFeatureTips();
 	void setFeatureTips(bool on);

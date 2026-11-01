@@ -461,6 +461,10 @@
     "fnTransBaidu": "Baidu Translate",
     "fnTransOffline": "Offline Translate",
     "fnDictMode": "Dictionary mode",
+    "fnTone": "Tone",
+    "fnToneStandard": "Standard",
+    "fnToneInformal": "Informal",
+    "fnToneFormal": "Formal",
     "dictLoading": "Looking up…",
     "dictEmpty": "Empty dictionary response",
     "dictNotFound": "No definition found",
@@ -569,7 +573,7 @@
     "translating": "Translating…",
     "error": "Translation failed",
     "send": "Translate",
-    "untitled": "Untitled"
+    "untitled": "New translation"
   },
   "about": {
     "version": "Version:",
