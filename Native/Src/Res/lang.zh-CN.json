@@ -502,6 +502,7 @@
     "pluginsDirNested": "不能选择当前插件目录的子目录。",
     "pluginsDirBusy": "组件正在下载，请等下载完成后再修改插件目录。",
     "pluginsDirMoveFailed": "插件迁移失败，未能移动到新目录：\n%1\n\n原目录保持不变。",
+    "pluginsDirMoving": "正在迁移中",
     "plugTransTitle": "离线翻译",
     "plugTransDesc": "采用 Firefox 方案，支持简体中文、繁体中文、英文、俄语、韩语、日语等多种语言互译，按需下载离线语言包。",
     "plugDownloadDll": "下载 DLL",

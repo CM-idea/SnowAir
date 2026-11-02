@@ -502,6 +502,7 @@
     "pluginsDirNested": "You cannot select a subfolder of the current plugin folder.",
     "pluginsDirBusy": "Components are downloading. Wait for the download to finish before changing the plugin folder.",
     "pluginsDirMoveFailed": "Failed to migrate plugins to the new folder:\n%1\n\nThe original folder is kept unchanged.",
+    "pluginsDirMoving": "Moving",
     "plugTransTitle": "Offline Translate",
     "plugTransDesc": "Powered by the Firefox solution, with mutual translation among Simplified Chinese, Traditional Chinese, English, Russian, Korean, Japanese and more; offline language packs download on demand.",
     "plugDownloadDll": "Download DLL",

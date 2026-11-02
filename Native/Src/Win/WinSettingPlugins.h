@@ -49,7 +49,7 @@ private:
 	void setBadges(Ling::Node* row, const std::vector<std::wstring>& labels);
 	PackUi makePack(Ling::Node* parent, const std::wstring& title, const std::wstring& desc);
 	void updateHover(POINT pos);
-	// 选一个目录作为插件根目录：把已下载的组件搬过去，成功后切换并清掉旧目录
+	// 选一个目录作为插件根目录：把已下载的组件搬过去，成功后切换并清掉旧目录（搬运在后台线程做）
 	void choosePluginDir();
 	void startOcrDownload();
 	void startTrDownload();
@@ -71,6 +71,7 @@ private:
 
 private:
 	Ling::Label* summary{ nullptr };
+	bool migrating{ false };           // 正在后台迁移插件目录
 	Ling::Node* ocrBadgeRow{ nullptr };
 	Ling::Label* ocrProgress{ nullptr };
 	Ling::Node* trBadgeRow{ nullptr };

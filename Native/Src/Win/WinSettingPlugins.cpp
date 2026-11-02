@@ -152,23 +152,56 @@ namespace {
 	}
 
 	// 把旧插件目录里的组件复制到新目录（合并；同名文件以当前已下载的为准）。
-	// 返回空 = 成功；否则返回出错的顶层条目名。
-	std::wstring copyPluginComponents(const std::filesystem::path& from, const std::filesystem::path& to)
+	// 返回空 = 成功；否则返回出错的条目名。onProgress 按「已复制字节 / 总字节」回调，
+	// 只在百分比变化时调，免得几千个小文件把 UI 线程刷爆。
+	std::wstring copyPluginComponents(const std::filesystem::path& from, const std::filesystem::path& to,
+		const std::function<void(unsigned, uint64_t, uint64_t)>& onProgress)
 	{
 		std::error_code ec;
 		if (!std::filesystem::is_directory(from, ec)) return {};   // 还没装过组件
+
+		// 先量一遍总量（字节数），才有百分比可报
+		uint64_t total = 0;
+		for (auto it = std::filesystem::recursive_directory_iterator(from, ec);
+			!ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+			std::error_code fec;
+			if (it->is_regular_file(fec)) total += it->file_size(fec);
+		}
+		if (ec) return from.wstring();
+
 		std::filesystem::create_directories(to, ec);
 		if (ec) return to.wstring();
 
-		std::filesystem::directory_iterator it(from, ec);
-		if (ec) return from.wstring();
-		for (const auto& entry : it) {
+		uint64_t done = 0;
+		unsigned lastPct = 101;
+		for (auto it = std::filesystem::recursive_directory_iterator(from, ec);
+			!ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+			const auto rel = std::filesystem::relative(it->path(), from, ec);
+			if (ec) break;
+			const auto target = to / rel;
+
+			std::error_code kec;
+			if (it->is_directory(kec)) {
+				std::filesystem::create_directories(target, ec);
+				if (ec) return rel.wstring();
+				continue;
+			}
+			if (!it->is_regular_file(kec)) continue;   // 跳过链接等其它类型
+
 			std::error_code cec;
-			std::filesystem::copy(entry.path(), to / entry.path().filename(),
-				std::filesystem::copy_options::recursive
-				| std::filesystem::copy_options::overwrite_existing, cec);
-			if (cec) return entry.path().filename().wstring();
+			std::filesystem::create_directories(target.parent_path(), cec);
+			if (!cec) std::filesystem::copy_file(it->path(), target,
+				std::filesystem::copy_options::overwrite_existing, cec);
+			if (cec) return rel.wstring();
+
+			done += it->file_size(kec);
+			const unsigned pct = total ? (unsigned)(done * 100 / total) : 100;
+			if (pct != lastPct) {
+				lastPct = pct;
+				if (onProgress) onProgress(pct, done, total);
+			}
 		}
+		if (ec) return from.wstring();
 		return {};
 	}
 
@@ -607,13 +640,25 @@ void WinSettingPlugins::build()
 	SettingUi::trimTrailingGap(this);
 }
 
+// 把回调切回 UI 线程（下载、迁移这类工作线程的回调都走这里）
+namespace {
+	void onUi(std::function<void()> fn)
+	{
+		if (auto* app = Ling::App::get()) app->dq.TryEnqueue(std::move(fn));
+		else fn();
+	}
+}
+
 // 选一个目录作为插件根目录：先把已下载的组件复制过去，成功了再切换配置并清理旧目录。
 // 复制失败时旧目录保持原样、配置不变，不会出现"组件只搬了一半"的坏状态。
+// 复制动辄几百 MB，必须放到后台线程：同步做会把 UI 线程堵死（窗口「未响应」，用户只能
+// 强杀，而配置是复制成功后才写的，于是重启又回到默认目录）。卸载/重新加载插件仍留在
+// UI 线程 —— 销毁、创建窗口只能在窗口线程做。
 void WinSettingPlugins::choosePluginDir()
 {
 	namespace fs = std::filesystem;
 	auto* s = Setting::get();
-	if (!s) return;
+	if (!s || migrating) return;
 
 	// 下载中改目录会让正在写入的组件被搬走/复制成不完整的文件
 	for (const auto& c : cards) {
@@ -659,24 +704,53 @@ void WinSettingPlugins::choosePluginDir()
 		}
 	}
 
-	// 先解除引擎/插件对 DLL 的占用（否则旧目录里的 dll 删不掉）
+	// 先解除引擎/插件对 DLL 的占用（否则旧目录里的 dll 搬不动、也删不掉）
 	LwPpOcrEngine::release();
 	BergamotEngine::release();
 	PluginHost::instance().shutdown();
 
-	const std::wstring failed = copyPluginComponents(oldRoot, newRoot);
-	if (!failed.empty()) {
-		PluginHost::instance().init();   // 迁移失败：插件仍从旧目录加载
-		SettingUi::ConfirmDialog::ask(win,
-			fillArg(Lang::get(L"setting.pluginsDirMoveFailed"), failed), nullptr,
-			Lang::get(L"setting.confirm"), L"", true);
-		return;
-	}
+	// 搬运放后台：底部计数行显示「正在迁移中... 42%」（逐字点 + 百分比），窗口照常响应
+	migrating = true;
+	startDots(summary, Lang::get(L"setting.pluginsDirMoving"), L" 0%");
+	auto setMovingPct = [this](unsigned pct) {
+		if (!dotsRunning) return;   // 已收工（或页面已关），别再覆盖计数行
+		dotsSuffix = L" " + std::to_wstring(pct) + L"%";
+		applyDots();
+	};
 
-	s->setPluginDir(newRoot.wstring());
-	removePluginComponents(oldRoot);
-	PluginHost::instance().init();       // 从新目录重新加载晾衣架
-	refreshStatus();
+	auto weak = getWeakThis();
+	std::thread([this, weak, oldRoot, newRoot, setMovingPct]() {
+		const std::wstring failed = copyPluginComponents(oldRoot, newRoot,
+			[this, weak, setMovingPct](unsigned pct, uint64_t, uint64_t) {
+				onUi([this, weak, setMovingPct, pct]() {
+					if (!weak.lock()) return;   // 页面已关：别再碰界面
+					setMovingPct(pct);
+				});
+			});
+		onUi([this, weak, failed, oldRoot, newRoot]() {
+			// 插件无论成败都要重新加载：失败仍从旧目录，成功从新目录
+			if (failed.empty()) {
+				if (auto* st = Setting::get()) st->setPluginDir(newRoot.wstring());
+			}
+			PluginHost::instance().init();
+
+			// 页面可能已经关掉：只有还活着才碰 this
+			if (auto keepAlive = weak.lock()) {
+				migrating = false;
+				stopDots();
+				refreshStatus();   // 计数行恢复成「已安装组件：N」
+				if (!failed.empty()) {
+					SettingUi::ConfirmDialog::ask(win,
+						fillArg(Lang::get(L"setting.pluginsDirMoveFailed"), failed), nullptr,
+						Lang::get(L"setting.confirm"), L"", true);
+				}
+			}
+
+			// 旧目录在后台清理（dll 已卸载，删不掉的留着，不影响新目录）
+			if (failed.empty())
+				std::thread([oldRoot]() { removePluginComponents(oldRoot); }).detach();
+		});
+	}).detach();
 }
 
 // 鼠标移动：光标落在哪张卡片上就显示哪张卡片的按钮，其余隐藏。
@@ -698,18 +772,10 @@ void WinSettingPlugins::updateHover(POINT pos)
 	}
 }
 
-// 把回调切回 UI 线程（下载回调在工作线程）
-namespace {
-	void onUi(std::function<void()> fn)
-	{
-		if (auto* app = Ling::App::get()) app->dq.TryEnqueue(std::move(fn));
-		else fn();
-	}
-}
-
 void WinSettingPlugins::startOcrDownload()
 {
 	if (cards.size() < 3) return;
+	if (migrating) return;            // 目录迁移中：别往即将被清掉的旧目录里写组件
 	if (cards[CardOcr].busy) return;   // 下载中再点不重开（按钮此时显示进度）
 	CardSlot& c = cards[CardOcr];
 	c.busy = true;
@@ -760,6 +826,7 @@ void WinSettingPlugins::startOcrDownload()
 void WinSettingPlugins::startTrDownload()
 {
 	if (cards.size() < 3) return;
+	if (migrating) return;            // 目录迁移中：别往即将被清掉的旧目录里写组件
 	if (cards[CardTr].busy) return;   // 下载中再点不重开（按钮此时显示进度）
 	CardSlot& c = cards[CardTr];
 	c.busy = true;
@@ -867,6 +934,7 @@ void WinSettingPlugins::finishDownload(int idx, const std::wstring& err)
 void WinSettingPlugins::startRackDownload()
 {
 	if (cards.size() < 4) return;
+	if (migrating) return;            // 目录迁移中：别往即将被清掉的旧目录里写组件
 	CardSlot& c = cards[CardRack];
 	if (c.busy) return;
 	c.busy = true;
@@ -936,6 +1004,7 @@ void WinSettingPlugins::startRackDownload()
 void WinSettingPlugins::deleteCard(int idx)
 {
 	if (idx < 0 || idx >= (int)cards.size()) return;
+	if (migrating) return;   // 目录迁移中：别和后台搬运抢同一个目录
 	std::wstring msg;
 	if (idx == CardOcr) msg = Lang::get(L"setting.plugDelOcrConfirm");
 	else if (idx == CardTr) msg = Lang::get(L"setting.plugDelTrConfirm");
