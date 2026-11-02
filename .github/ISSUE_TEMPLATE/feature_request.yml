@@ -8,7 +8,7 @@ body:
     attributes:
       label: 针对
       options:
-        - SnowAir
+        - SnowAir 轻雪
         - SnowAir 晾衣架
     validations:
       required: true
