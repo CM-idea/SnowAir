@@ -315,7 +315,9 @@ Ling::Button* selectRow(Ling::Node* parent,
     const std::vector<std::wstring>& options,
     int current,
     std::function<void(int, const std::wstring&)> onChange,
-    bool chrome = false);
+    bool chrome = false,
+    // 非空时覆盖该标签的「?」说明
+    const std::wstring& helpText = L"");
 //   重载 2（简明，无 desc）: selectRow(parent, label, options, current, onChange)
 inline Ling::Button* selectRow(Ling::Node* parent,
     const std::wstring& label,

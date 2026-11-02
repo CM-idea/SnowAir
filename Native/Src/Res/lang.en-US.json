@@ -359,6 +359,7 @@
     "finishSaveCopyImage": "Save and copy image",
     "finishSaveCopyFile": "Save and copy file",
     "finishCopyOnly": "Copy image only",
+    "captureFinishActionTip": "When \"Copy image only\" is selected, no file is saved and the capture goes to the clipboard only",
     "cancelConfirmDialog": "Cancel confirmation dialog",
     "dateVar": "Date variable",
     "focusAppVar": "Focused app name variable",

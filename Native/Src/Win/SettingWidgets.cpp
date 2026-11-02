@@ -908,7 +908,6 @@ namespace {
             { L"以管理员身份运行", L"避免因权限不足导致快捷键注册失败、无法截取高权限窗口等问题" },
             { L"查找窗口元素", L"截图时识别并框选窗口内的子元素" },
             { L"“取消”弹窗", L"已绘制标注时，截图里按取消会先确认，避免误触丢失内容" },
-            { L"以文件复制", L"截图先保存到指定目录，再以文件形式复制到剪贴板" },
             { L"截图自动保存", L"按键取消或关闭截图时，自动把选区内容保存至截图目录" },
             { L"光标中心缩放", L"滚轮缩放贴图时以鼠标位置为中心" },
             { L"自动文本识别", L"贴图后自动进行文本识别" },
@@ -926,7 +925,7 @@ namespace {
             { L"动图清晰度", L"动图的输出高度上限，同样只缩不放" },
             { L"动图格式", L"GIF 兼容最好 / WebP 体积最小 / APNG 无损" },
             { L"麦克风", L"选择录制使用的麦克风，无设备时使用系统默认" },
-            { L"截图文件路径", L"截图与「以文件复制」的保存位置，留空用默认目录" },
+            { L"截图文件路径", L"截图的保存位置，留空用默认目录" },
             { L"录屏文件路径", L"录屏与动图的保存位置，留空用默认目录" },
             { L"文件保留天数", L"超过该天数的截图/录屏文件会自动清理；「永久保留」则不再自动清理" },
             { L"停用截图历史", L"停用侧栏 / 托盘 / 快捷键里的历史入口，截图仍正常保存" },
@@ -1333,9 +1332,10 @@ Ling::Button* selectRow(Ling::Node* parent,
                         const std::vector<std::wstring>& options,
                         int current,
                         std::function<void(int, const std::wstring&)> onChange,
-                        bool chrome)
+                        bool chrome,
+                        const std::wstring& helpText)
 {
-    auto r = optionRow(parent, label, desc, chrome);
+    auto r = optionRow(parent, label, desc, chrome, SettingTheme::ctrlH, helpText);
     auto* btn = selectDdl(r.ctrlBox, options, current, onChange);
     // 触发按钮宽度与弹出项统一为 dropdownWidth(160)，保证二者等宽对齐。
     btn->setWidth(SettingTheme::dropdownWidth);

@@ -359,6 +359,7 @@
     "finishSaveCopyImage": "保存并复制图片",
     "finishSaveCopyFile": "保存并复制文件",
     "finishCopyOnly": "仅复制图片",
+    "captureFinishActionTip": "选择「仅复制图片」时，不保存文件、截图仅进剪贴板",
     "cancelConfirmDialog": "“取消”弹窗",
     "dateVar": "日期变量",
     "focusAppVar": "焦点窗口应用名",
