@@ -129,9 +129,6 @@ class MIXBUFFER
     unsigned int count = 0;
 public:
 
-    friend struct REBUFFER;
-
-    unsigned int Count() { return count; }
     MIXBUFFER(T* f = 0)
     {
         Set(f);
@@ -193,60 +190,28 @@ public:
         }
         count++;
     }
-    T* Fin(unsigned long long samples, float* A = 0)
+    T* Fin(unsigned long long samples)
     {
-        if (count <= 1 && A == 0)
+        if (count <= 1 || !m)
         {
             count = 0;
             return m;
         }
-        if (!m)
-            return m;
 
-        float V = 0;
         for (unsigned long long s = 0; s < samples; s++)
-        {
-            if (count > 0)
-                m[s] /= (float)count;
-            if (A)
-            {
-                auto ff = fabs(m[s]);
-                if (ff <= 1.0f && ff > V)
-                    V = ff;
-            }
-        }
-        if (A && samples)
-            *A = V;
+            m[s] /= (float)count;
         count = 0;
         return m;
     }
 
 };
-template <typename T>
-inline T Peak(T* d, size_t s)
-{
-    T mm = 0;
-    for (size_t i = 0; i < s; i++)
-    {
-        auto fa = fabs(d[i]);
-        if (fa > mm)
-            mm = fa;
-    }
-    return mm;
-}
 struct REBUFFER
 {
     std::recursive_mutex m;
     std::vector<char> d;
     AHANDLE Has = CreateEvent(0, TRUE, 0, 0);
-    MIXBUFFER<float> mb;
 
-    void FinMix(size_t sz, float* A = 0)
-    {
-        mb.Fin(sz / sizeof(float), A);
-    }
-
-    size_t PushX(const char* dd, size_t sz, float* A = 0, float V = 1.0f)
+    size_t PushX(const char* dd, size_t sz)
     {
         REBUFFERLOCK l(m);
         auto s = d.size();
@@ -256,26 +221,7 @@ struct REBUFFER
         else
             memset(d.data() + s, 0, sz);
 
-        char* a1 = d.data();
-        a1 += s;
-        mb.Set((float*)a1);
-        mb.count = 1;
-
         SetEvent(Has);
-
-        float* b = (float*)(d.data() + s);
-        if (V > 1.01f || V < 0.99f)
-        {
-            auto st = sz / sizeof(float);
-            for (size_t i = 0; i < st; i++)
-                b[i] *= V;
-        }
-        if (A)
-        {
-            *A = Peak<float>(b, sz / sizeof(float));
-        }
-
-
         return s + sz;
     }
 
@@ -399,229 +345,6 @@ inline HRESULT MFTrs(DWORD, DWORD iid, DWORD ood, CComPtr<IMFTransform> trs, CCo
         return S_OK;
     }
     return hr;
-}
-struct VISTAMIXER
-{
-    std::wstring id; // id
-    std::wstring name; // friendly
-    DWORD st = 0; // state
-    bool CanCapture = 0;
-    bool CanPlay = 0;
-    int Mode = 0; // 0 none, 1 shared, 2 exclusive
-
-    std::map<AUDCLNT_SHAREMODE, std::map<int, WAVEFORMATEXTENSIBLE>> maps;
-
-    int NumChannels(AUDCLNT_SHAREMODE s)
-    {
-        auto mo = maps.find(s);
-        if (mo == maps.end())
-            return 0;
-        if (mo->second.empty())
-            return 0;
-        return mo->second.begin()->second.Format.nChannels;
-    }
-    void test(CComPtr<IAudioClient> ac, bool AllShared)
-    {
-        if (ac == 0)
-        {
-            CComPtr<IMMDeviceEnumerator> deviceEnumerator = 0;
-            auto hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_INPROC_SERVER, __uuidof(IMMDeviceEnumerator), (LPVOID*)&deviceEnumerator);
-            if (!deviceEnumerator)
-                return;
-
-            CComPtr<IMMDevice> d;
-            deviceEnumerator->GetDevice(id.c_str(), &d);
-            if (!d)
-                return;
-            hr = d->Activate(__uuidof(IAudioClient), CLSCTX_INPROC_SERVER, NULL, (LPVOID*)&ac);
-            if (!ac)
-                return;
-        }
-
-        // Mix format
-        WAVEFORMATEXTENSIBLE* ext = 0;
-        ac->GetMixFormat((WAVEFORMATEX**)&ext);
-        if (!ext)
-            return;
-
-        maps[AUDCLNT_SHAREMODE_SHARED][ext->Format.nSamplesPerSec] = *ext;
-        WAVEFORMATEXTENSIBLE wfx = *ext;
-        CoTaskMemFree(ext);
-
-        if (AllShared)
-        {
-            for (DWORD sr : { 22050, 44100, 48000, 88200, 96000, 192000 })
-            {
-                if (ext->Format.nSamplesPerSec != sr)
-                {
-                    auto wfx2 = *ext;
-                    wfx2.Format.nSamplesPerSec = sr;
-                    wfx2.Format.nAvgBytesPerSec = wfx.Format.nSamplesPerSec * wfx.Format.nBlockAlign;
-                    maps[AUDCLNT_SHAREMODE_SHARED][sr] = wfx2;
-                }
-            }
-        }
-
-        // And the exclusives
-        wfx.Format.wFormatTag = WAVE_FORMAT_PCM;
-        wfx.Format.cbSize = 0;
-        wfx.Format.wBitsPerSample = 16;
-        wfx.Format.nBlockAlign = wfx.Format.nChannels * wfx.Format.wBitsPerSample / 8;
-        for (auto sr : { 22050,44100,48000,88200,96000,192000 })
-        {
-            wfx.Format.nSamplesPerSec = sr;
-            wfx.Format.nAvgBytesPerSec = wfx.Format.nSamplesPerSec * wfx.Format.nBlockAlign;
-            auto hr = ac->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, (WAVEFORMATEX*)&wfx, 0);
-            if (hr == S_OK)
-                maps[AUDCLNT_SHAREMODE_EXCLUSIVE][wfx.Format.nSamplesPerSec] = wfx;
-        }
-    }
-
-    bool CanSR(AUDCLNT_SHAREMODE sm, std::vector<std::tuple<int, bool, int>>& sampleRates)
-    {
-        auto mo = maps.find(sm);
-        if (mo == maps.end())
-            return false;
-        if (mo->second.empty())
-            return false;
-        for (auto& s : sampleRates)
-        {
-            int sr = std::get<0>(s);
-            auto m2 = mo->second.find(sr);
-            if (m2 == mo->second.end())
-            {
-                std::get<1>(s) = 0;
-                std::get<2>(s) = 0;
-                if (sm == AUDCLNT_SHAREMODE_SHARED)
-                {
-                    std::get<1>(s) = 1;
-                    std::get<2>(s) = mo->second[0].Format.nChannels;
-                }
-                continue;
-            }
-            std::get<1>(s) = 1;
-            std::get<2>(s) = m2->second.Format.nChannels;
-        }
-        return true;
-    }
-
-};
-DEFINE_PROPERTYKEY(PKEY_Device_FriendlyName, 0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0, 14);    // DEVPROP_TYPE_STRING
-inline void EnumVistaMixers(std::vector<VISTAMIXER>& vistamixers)
-{
-    vistamixers.clear();
-
-    // Windows Vista+ Mixers as well
-    CComPtr<IMMDeviceEnumerator> deviceEnumerator = 0;
-    CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_INPROC_SERVER, __uuidof(IMMDeviceEnumerator), (LPVOID*)&deviceEnumerator);
-    if (deviceEnumerator)
-    {
-        CComPtr <IMMDeviceCollection> e = 0;
-
-        // Capture
-        deviceEnumerator->EnumAudioEndpoints(eCapture, DEVICE_STATEMASK_ALL, &e);
-        if (e)
-        {
-            UINT c = 0;
-            e->GetCount(&c);
-            for (unsigned int i = 0; i < c; i++)
-            {
-                CComPtr<IMMDevice> d = 0;
-                e->Item(i, &d);
-                if (d)
-                {
-                    VISTAMIXER vm;
-                    LPWSTR id = 0;
-                    d->GetId(&id);
-                    if (id)
-                    {
-                        vm.id = id;
-                        CoTaskMemFree(id);
-                    }
-                    d->GetState(&vm.st);
-
-                    CComPtr <IPropertyStore> st = 0;
-                    d->OpenPropertyStore(STGM_READ, &st);
-                    if (st)
-                    {
-                        PROPVARIANT pv;
-                        PropVariantInit(&pv);
-                        st->GetValue(PKEY_Device_FriendlyName, &pv);
-                        if (pv.pwszVal)
-                            vm.name = pv.pwszVal;
-                        else
-                            vm.name = L"Record Device";
-                        PropVariantClear(&pv);
-                    }
-
-                    vm.CanCapture = true;
-                    vm.CanPlay = false;
-                    CComPtr<IAudioClient> ac = 0;
-                    d->Activate(__uuidof(IAudioClient), CLSCTX_ALL, 0, (void**)&ac);
-                    if (ac)
-                    {
-                        vm.test(ac, 0);
-                        ac.Release();
-                        vm.Mode = 0;
-                        vistamixers.push_back(vm);
-                    }
-                }
-            }
-        }
-
-        // Render
-        e.Release();
-        deviceEnumerator->EnumAudioEndpoints(eRender, DEVICE_STATEMASK_ALL, &e);
-        if (e)
-        {
-            UINT c = 0;
-            e->GetCount(&c);
-            for (unsigned int i = 0; i < c; i++)
-            {
-                CComPtr<IMMDevice> d = 0;
-                e->Item(i, &d);
-                if (d)
-                {
-                    VISTAMIXER vm;
-                    LPWSTR id = 0;
-                    d->GetId(&id);
-                    if (id)
-                    {
-                        vm.id = id;
-                        CoTaskMemFree(id);
-                    }
-                    d->GetState(&vm.st);
-
-                    CComPtr <IPropertyStore> st = 0;
-                    d->OpenPropertyStore(STGM_READ, &st);
-                    if (st)
-                    {
-                        PROPVARIANT pv;
-                        PropVariantInit(&pv);
-                        st->GetValue(PKEY_Device_FriendlyName, &pv);
-                        if (pv.pwszVal)
-                            vm.name = pv.pwszVal;
-                        else
-                            vm.name = L"Playback Device";
-                        PropVariantClear(&pv);
-                    }
-
-                    vm.CanCapture = false;
-                    vm.CanPlay = true;
-                    CComPtr<IAudioClient> ac = 0;
-                    d->Activate(__uuidof(IAudioClient), CLSCTX_ALL, 0, (void**)&ac);
-                    if (ac)
-                    {
-                        vm.test(ac, 0);
-                        ac.Release();
-                        vm.Mode = 0;
-                        vistamixers.push_back(vm);
-                    }
-                    d.Release();
-                }
-            }
-        }
-    }
 }
 class CAPTURE
 {
@@ -1032,11 +755,18 @@ public:
     }
 
 };
+// 一个要录的音频端点：id 取自 IMMDevice::GetId，loopback=true 表示「系统声音」
+// （播放端点 + AUDCLNT_STREAMFLAGS_LOOPBACK），false 表示麦克风。
+struct AUDIOSOURCE
+{
+    std::wstring id;
+    bool loopback = false;
+};
 struct DESKTOPCAPTUREPARAMS
 {
     bool HasVideo = 1;
     bool HasAudio = 1;
-    std::vector<std::tuple<std::wstring, std::vector<int>>> AudioFrom;
+    std::vector<AUDIOSOURCE> AudioFrom;
     GUID VIDEO_ENCODING_FORMAT = MFVideoFormat_H264;
     GUID AUDIO_ENCODING_FORMAT = MFAudioFormat_MP3;
     std::wstring f;
@@ -1318,57 +1048,25 @@ struct VectorStreamX2 : public IMFByteStream
 
 };
 
-// 通道映射得按设备实际声道数来：单声道设备只有 0 号声道，
-// 硬写 {0,1} 会让混音时的 s[ch] 按第 1 声道越界读到缓冲区外面。
-// 拿的是混音格式(GetMixFormat)，与录制端 Initialize 用的格式同源，声道数一致。
-inline std::vector<int> getChannelMap(IMMDevice* dev)
-{
-    std::vector<int> chm{ 0 };
-    if (!dev) return chm;
-    ComPtr<IAudioClient> ac = nullptr;
-    if (FAILED(dev->Activate(__uuidof(IAudioClient), CLSCTX_INPROC_SERVER, NULL, (LPVOID*)ac.GetAddressOf())) || !ac)
-        return chm;
-    WAVEFORMATEX* mix = nullptr;
-    if (SUCCEEDED(ac->GetMixFormat(&mix)) && mix)
-    {
-        if (mix->nChannels >= 2)
-            chm.push_back(1);
-        CoTaskMemFree(mix);
-    }
-    return chm;
-}
-inline void setAudio(DESKTOPCAPTUREPARAMS* dp,bool useSpeaker, bool useMic) 
+// 录谁：默认播放端点走 loopback（系统声音），默认录音端点走麦克风。
+// 只记端点 id 与用途，具体格式由采集端统一成 16bit/dp.SR，再由音频引擎转换。
+inline void setAudio(DESKTOPCAPTUREPARAMS* dp, bool useSpeaker, bool useMic)
 {
     if (!useMic && !useSpeaker) return;
     dp->AudioFrom.clear();
     ComPtr<IMMDeviceEnumerator> deviceEnumerator = nullptr;
-    HRESULT hrAudio = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_INPROC_SERVER, __uuidof(IMMDeviceEnumerator), (LPVOID*)&deviceEnumerator);
-    if (SUCCEEDED(hrAudio) && deviceEnumerator)
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_INPROC_SERVER, __uuidof(IMMDeviceEnumerator), (LPVOID*)&deviceEnumerator)) || !deviceEnumerator)
+        return;
+    const std::pair<EDataFlow, bool> want[] = { { eCapture, false }, { eRender, true } };
+    for (auto& [flow, loopback] : want)
     {
-        if (useMic) {
-            ComPtr<IMMDevice> defaultCapture = nullptr;
-            if (SUCCEEDED(deviceEnumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &defaultCapture)) && defaultCapture)
-            {
-                LPWSTR capId = nullptr;
-                if (SUCCEEDED(defaultCapture->GetId(&capId)) && capId)
-                {
-                    dp->AudioFrom.push_back({ capId, getChannelMap(defaultCapture.Get()) });
-                    CoTaskMemFree(capId);
-                }
-            }
-        }
-        if (useSpeaker) {
-            ComPtr<IMMDevice> defaultRender = nullptr;
-            if (SUCCEEDED(deviceEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &defaultRender)) && defaultRender)
-            {
-                LPWSTR renId = nullptr;
-                if (SUCCEEDED(defaultRender->GetId(&renId)) && renId)
-                {
-                    dp->AudioFrom.push_back({ renId, getChannelMap(defaultRender.Get()) });
-                    CoTaskMemFree(renId);
-                }
-            }
-        }
+        if (loopback ? !useSpeaker : !useMic) continue;
+        ComPtr<IMMDevice> dev = nullptr;
+        if (FAILED(deviceEnumerator->GetDefaultAudioEndpoint(flow, eConsole, &dev)) || !dev) continue;
+        LPWSTR id = nullptr;
+        if (FAILED(dev->GetId(&id)) || !id) continue;
+        dp->AudioFrom.push_back({ id, loopback });
+        CoTaskMemFree(id);
     }
 }
 
@@ -1414,16 +1112,15 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
         DWORD  flags = 0;
 
     public:
-        std::wstring id;
-        CComPtr<IMMDevice> d;
         CComPtr<IAudioClient> ac;
         CComPtr<IAudioClient> ac2;
         CComPtr<IAudioCaptureClient> cap;
         CComPtr<IAudioRenderClient> ren;
-        WAVEFORMATEXTENSIBLE wfx = {};
+        // 采集格式由初始化时统一指定（16bit / dp.NCH / dp.SR），各设备差异由音频引擎转换，
+        // 所以这里只有一种样本格式，混音端不必再按位深/声道分叉。
+        WAVEFORMATEX wfx = {};
 
         std::vector<float> tempf;
-        std::vector<int> chm;
         std::vector<std::shared_ptr<REBUFFER>> buffer;
         HANDLE hEv = 0;
 
@@ -1435,14 +1132,11 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
         std::shared_ptr<REBUFFER> AudioDataX;
         std::vector<char> PopBuffer;
 
-#define REFTIMES_PER_SEC  10000000
-#define REFTIMES_PER_MILLISEC  10000
-
         size_t AvFrames()
         {
             auto avs = AudioDataX->Av();
-            avs /= wfx.Format.nChannels;
-            avs /= (wfx.Format.wBitsPerSample / 8);
+            avs /= wfx.nChannels;
+            avs /= (wfx.wBitsPerSample / 8);
             return avs;
         }
 
@@ -1452,7 +1146,7 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
             rt /= 10000;
             // in SR , 1000 ms
             //  ?    , rt ms
-            auto ns = (wfx.Format.nSamplesPerSec * rt);
+            auto ns = (wfx.nSamplesPerSec * rt);
             ns /= 1000;
             while (Capturing)
             {
@@ -1479,7 +1173,7 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
                 hr = ren->GetBuffer((UINT32)numFramesAvailable, &db);
                 if (FAILED(hr))
                     break;
-                auto bs = numFramesAvailable * wfx.Format.nChannels * wfx.Format.wBitsPerSample / 8;
+                auto bs = numFramesAvailable * wfx.nChannels * wfx.wBitsPerSample / 8;
                 memset(db, 0,(size_t) bs);
                 ren->ReleaseBuffer((UINT32)numFramesAvailable, 0); //AUDCLNT_BUFFERFLAGS_SILENT
             }
@@ -1502,7 +1196,7 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
                 if (framesAvailable == 0)
                     continue;
 
-                auto ThisAudioBytes = framesAvailable * wfx.Format.nChannels * wfx.Format.wBitsPerSample/8 ;
+                auto ThisAudioBytes = framesAvailable * wfx.nChannels * wfx.wBitsPerSample/8 ;
 
                 AudioDataX->PushX((const char*)pData, ThisAudioBytes);
                 cap->ReleaseBuffer(framesAvailable);
@@ -1510,23 +1204,6 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
             CapturingFin1 = true;
         }
     };
-#ifndef TURBO_PLAY_SC
-    std::vector<VISTAMIXER> vistamixers;
-    EnumVistaMixers(vistamixers);
-#else
-    EnumVistaMixers();
-#endif
-/*    if (dp.HasAudio)
-    {
-        VM::EnumVistaMixers();
-        dp.AudioFrom
-            = {
-        //        VM::vistamixers[0].id,VM::vistamixers[1].id,
-        //        VM::vistamixers[1].id,
-                {VM::vistamixers[0].id, {0,1} }
-        };
-    }
-*/
     // ---------------------- 
     std::vector<std::shared_ptr<AUDIOIN>> ains;
 
@@ -1564,12 +1241,8 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
     };
     AINRELEASE arx(ains);
 
-    REFERENCE_TIME rt;
-    unsigned long long a = dp.SR/ dp.fps; // Samples per frame
-    a *= 1000;
-    a *= 10000;
-    a /= dp.SR;
-    rt = a;
+    // 音频流缓冲长度 = 一帧视频的时长（100ns 单位）：SR 在原来的换算里会被约掉
+    const REFERENCE_TIME rt = 10000000 / dp.fps;
 
     if (dp.hWnd)
     {
@@ -1716,113 +1389,84 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
         if (FAILED(hr)) return -5;
     }
 
-    // Audio
+    // Audio：采集格式统一成 16bit / dp.NCH / dp.SR，设备本来的采样率、位深、声道数
+    // 全交给 AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM 在音频引擎里转换 —— 96k、24bit、
+    // 单声道设备都不用再各自适配，混音端也就只剩一种样本格式。
+    WAVEFORMATEX wfx{};
+    wfx.wFormatTag = WAVE_FORMAT_PCM;
+    wfx.nChannels = (WORD)dp.NCH;
+    wfx.nSamplesPerSec = dp.SR;
+    wfx.wBitsPerSample = 16;
+    wfx.nBlockAlign = wfx.nChannels * wfx.wBitsPerSample / 8;
+    wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
+
     std::vector<HANDLE> AudioEvents;
     if (deviceEnumerator && dp.HasAudio)
     {
-        for (auto& vm : vistamixers)
+        for (auto& src : dp.AudioFrom)
         {
-            for (auto& xy : dp.AudioFrom)
+            std::shared_ptr<AUDIOIN> ain = std::make_shared<AUDIOIN>();
+            ain->AudioDataX = std::make_shared<REBUFFER>();
+
+            CComPtr<IMMDevice> d;
+            deviceEnumerator->GetDevice(src.id.c_str(), &d);
+            if (!d)
+                continue;
+
+            // 麦克风走事件回调，系统声音走 loopback
+            DWORD flg = AUDCLNT_STREAMFLAGS_NOPERSIST | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM;
+            flg |= src.loopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+
+            hr = d->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (LPVOID*)&ain->ac);
+            if (!ain->ac)
+                continue;
+
+            hr = ain->ac->Initialize(AUDCLNT_SHAREMODE_SHARED, flg, rt, 0, &wfx, 0);
+            if (FAILED(hr))
+                continue;
+
+            hr = ain->ac->GetService(__uuidof(IAudioCaptureClient), (void**)&ain->cap);
+            if (!ain->cap)
+                continue;
+
+            AudioEvents.push_back(ain->AudioDataX->Has);
+            if (!src.loopback)
             {
-                auto& x = std::get<0>(xy);
-                if (x == vm.id)
-                {
-                    std::shared_ptr<AUDIOIN> ain = std::make_shared<AUDIOIN>();
-                    ain->AudioDataX = std::make_shared<REBUFFER>();
-                    ain->id = x;
-
-                    CComPtr<IMMDevice> d;
-                    deviceEnumerator->GetDevice(x.c_str(), &d);
-                    if (!d)
-                        continue;
-
-                    DWORD flg = AUDCLNT_STREAMFLAGS_NOPERSIST;
-                    flg |= AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM;
-                    if (vm.CanCapture)
-                    {
-                        flg |= AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
-
-                    }
-                    if (vm.CanPlay)
-                    {
-                        flg |= AUDCLNT_STREAMFLAGS_LOOPBACK;
-                    }
-
-                    ain->d = d;
-
-                    hr = d->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (LPVOID*)&ain->ac);
-                    if (!ain->ac)
-                        continue;
-
-
-                    auto ww = vm.maps[AUDCLNT_SHAREMODE::AUDCLNT_SHAREMODE_SHARED][dp.SR];
-                    if (ww.Format.nSamplesPerSec == 0 && dp.SR == 44100)
-                        ww = vm.maps[AUDCLNT_SHAREMODE::AUDCLNT_SHAREMODE_SHARED][48000];
-                    else
-                        if (ww.Format.nSamplesPerSec == 0 && dp.SR == 48000)
-                            ww = vm.maps[AUDCLNT_SHAREMODE::AUDCLNT_SHAREMODE_SHARED][44100];
-
-                    ww.Format.nSamplesPerSec = dp.SR;
-                    ww.Format.nAvgBytesPerSec = dp.SR * ww.Format.nBlockAlign;
-                    hr = ain->ac->Initialize(AUDCLNT_SHAREMODE::AUDCLNT_SHAREMODE_SHARED, flg, rt, 0, (WAVEFORMATEX*)&ww, 0);
-                    if (FAILED(hr))
-                        continue;
-
-                    hr = ain->ac->GetService(__uuidof(IAudioCaptureClient), (void**)&ain->cap);
-                    if (!ain->cap)
-                        continue;
-
-
-                    AudioEvents.push_back(ain->AudioDataX->Has);
-                    if (vm.CanCapture)
-                    {
-                        ain->hEv = CreateEvent(0, 0, 0, 0);
-                        ain->ac->SetEventHandle(ain->hEv);
-                    }
-
-                    if (vm.CanPlay)
-                    {
-                        hr = d->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (LPVOID*)&ain->ac2);
-                        if (!ain->ac2)
-                            continue;
-
-
-                        DWORD flg2 = AUDCLNT_STREAMFLAGS_NOPERSIST;
-                        flg2 |= AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM;
-//                        flg2 |= AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
-
-                        hr = ain->ac2->Initialize(AUDCLNT_SHAREMODE::AUDCLNT_SHAREMODE_SHARED, flg2, rt, 0, (WAVEFORMATEX*)&ww, 0);
-                        if (FAILED(hr))
-                            continue;
-
-                        hr = ain->ac2->GetService(__uuidof(IAudioRenderClient), (void**)&ain->ren);
-                        if (!ain->ren)
-                            continue;
-                    }
-
-                    hr = ain->ac->Start();
-                    if (FAILED(hr))
-                        continue;
-
-                    ain->wfx = ww;
-                    ain->chm = std::get<1>(xy);
-                    if (vm.CanPlay)
-                    {
-                        hr = ain->ac2->Start();
-                        if (FAILED(hr))
-                            continue;
-                        std::thread tx2(&AUDIOIN::PlaySilence, ain.get(), rt);
-                        tx2.detach();
-                    }
-                    else
-                        ain->CapturingFin2 = true;
-                    std::thread tx(&AUDIOIN::ThreadLoopCapture, ain.get());
-                    tx.detach();
-                    ains.push_back(ain);
-                }
+                ain->hEv = CreateEvent(0, 0, 0, 0);
+                ain->ac->SetEventHandle(ain->hEv);
             }
-        }
+            else
+            {
+                // 播放端点：另开一路持续写静音，系统没在放声音时 loopback 也照样有数据可抓
+                hr = d->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (LPVOID*)&ain->ac2);
+                if (!ain->ac2)
+                    continue;
+                hr = ain->ac2->Initialize(AUDCLNT_SHAREMODE_SHARED,
+                    AUDCLNT_STREAMFLAGS_NOPERSIST | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, rt, 0, &wfx, 0);
+                if (FAILED(hr))
+                    continue;
+                hr = ain->ac2->GetService(__uuidof(IAudioRenderClient), (void**)&ain->ren);
+                if (!ain->ren)
+                    continue;
+            }
 
+            hr = ain->ac->Start();
+            if (FAILED(hr))
+                continue;
+
+            ain->wfx = wfx;
+            if (ain->ren)
+            {
+                hr = ain->ac2->Start();
+                if (FAILED(hr))
+                    continue;
+                std::thread(&AUDIOIN::PlaySilence, ain.get(), rt).detach();
+            }
+            else
+                ain->CapturingFin2 = true;
+            std::thread(&AUDIOIN::ThreadLoopCapture, ain.get()).detach();
+            ains.push_back(ain);
+        }
     }
 
     if (ains.empty())
@@ -2023,7 +1667,6 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
     }
 
     CComPtr<IMFMediaType> pMediaTypeAudioIn;
-    std::vector<std::wstring> TempAudioFiles;
     if (dp.HasAudio)
     {
         hr = MFCreateMediaType(&pMediaTypeAudioIn);
@@ -2069,8 +1712,6 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
     std::vector<char> AudioData;
     std::vector<std::vector<float>> v(dp.NCH);
     std::vector<MIXBUFFER<float>> mixv(dp.NCH);
-    v.resize(dp.NCH);
-    mixv.resize(dp.NCH);
    
 #ifdef _DEBUG
     wchar_t ydebug[300] = { 0};
@@ -2086,173 +1727,111 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
         unsigned long long ThisDurV = 0;
         size_t FinalAudioBytes = 0;
 
-        bool DirectAudioCopy = false;
-/*        if (ains.size() == 1 && ains[0]->wfx.Format.nChannels == dp.NCH && ains[0]->wfx.Format.wBitsPerSample == 16)
-            DirectAudioCopy = true;
-*/
         if (dp.HasAudio)
         {
             // Wait for all the events
             if (!AudioEvents.empty())
                 WaitForMultipleObjects((DWORD)AudioEvents.size(), AudioEvents.data(), TRUE, INFINITE);
-            if (DirectAudioCopy)
+
+            size_t AvailableSamples = 0;
+            for (auto& ain : ains)
             {
+                auto frm = ain->AvFrames();
+                if (frm < AvailableSamples || AvailableSamples == 0)
+                    AvailableSamples = frm;
+            }
+
+            // Pop 出来按声道拆成 float；样本统一是 16bit，混音端不再分位深
+            int TotalBuffers = 0;
+            for (auto& ain : ains)
+            {
+                if (AvailableSamples == 0)
+                    break;
+                const size_t ThisAudioBytes = AvailableSamples * dp.NCH * sizeof(short);
+
+                ain->PopBuffer.resize(ThisAudioBytes);
+                ain->AudioDataX->PopX(ain->PopBuffer.data(), ThisAudioBytes);
+
+                const short* s = (const short*)ain->PopBuffer.data();
+                ain->buffer.resize(dp.NCH);
+                for (int ch = 0; ch < dp.NCH; ch++)
+                {
+                    auto& aa = ain->buffer[ch];
+                    if (!aa)
+                        aa = std::make_shared<REBUFFER>();
+                    ain->tempf.resize(AvailableSamples);
+                    for (size_t j = 0; j < AvailableSamples; j++)
+                        ain->tempf[j] = s[j * dp.NCH + ch] / 32768.0f;
+
+                    aa->PushX((const char*)ain->tempf.data(), AvailableSamples * sizeof(float));
+                    TotalBuffers++;
+                }
+            }
+
+            for (int i = 0; i < dp.NCH; i++)
+                v[i].resize(AvailableSamples);
+
+            if (TotalBuffers == dp.NCH)
+            {
+                // 只有一路音源（最常见：系统声音），按声道直接拷贝
+                int ib = 0;
+                for (auto& ain : ains)
+                {
+                    for (auto& b : ain->buffer)
+                    {
+                        if (!AvailableSamples)
+                            continue;
+                        b->PopX((char*)v[ib].data(), AvailableSamples * sizeof(float));
+                        ib++;
+                    }
+                }
             }
             else
             {
-                size_t AvailableSamples = 0;
-                for (auto& ain : ains)
+                // 麦克风 + 系统声音：各路都摊到每个声道上再合回去
+                for (int ich = 0; ich < dp.NCH; ich++)
                 {
-                    auto frm = ain->AvFrames();
-                    if (frm < AvailableSamples || AvailableSamples == 0)
-                        AvailableSamples = frm;
+                    mixv[ich].Set(v[ich].data());
+                    mixv[ich].Reset(AvailableSamples);
                 }
 
-                // Pop All
-                int TotalBuffers = 0;
                 for (auto& ain : ains)
                 {
                     if (AvailableSamples == 0)
-                        break;
-                    size_t ThisAudioBytes = (size_t)(AvailableSamples * ain->wfx.Format.nChannels * ain->wfx.Format.wBitsPerSample / 8);
-
-                    ain->PopBuffer.resize(ThisAudioBytes);
-                    ain->AudioDataX->PopX(ain->PopBuffer.data(), ThisAudioBytes);
-
-                    // Convert buffer to float 
-                    // shorts, interleaved
-                    ain->buffer.resize(ain->chm.size());
-                    for (size_t i = 0; i < ain->buffer.size(); i++)
+                        continue;
+                    for (auto& b : ain->buffer)
                     {
-                        auto& aa = ain->buffer[i];
-                        auto& ch = ain->chm[i];
-                        if (!aa)
-                            aa = std::make_shared<REBUFFER>();
-                        ain->tempf.resize(AvailableSamples);
-
-                        if (ain->wfx.Format.wBitsPerSample == 16)
-                        {
-                            short* s = (short*)ain->PopBuffer.data();
-                            for (UINT32 j = 0; j < AvailableSamples; j++)
-                            {
-                                short X = s[ch];
-                                float V = X / 32768.0f;
-                                ain->tempf[j] = V;
-
-                                s += ain->wfx.Format.nChannels;
-                            }
-                        }
-                        if (ain->wfx.Format.wBitsPerSample == 32)
-                        {
-                            float* s = (float*)ain->PopBuffer.data();
-                            for (UINT32 j = 0; j < AvailableSamples; j++)
-                            {
-                                float X = s[ch];
-                                float V = X;
-                                ain->tempf[j] = V;
-                                s += ain->wfx.Format.nChannels;
-                            }
-                        }
-
-                        aa->PushX((const char*)ain->tempf.data(), AvailableSamples * sizeof(float));
-                        TotalBuffers++;
-                    }
-                }
-
-                for (int i = 0; i < dp.NCH; i++)
-                    v[i].resize(AvailableSamples);
-
-                if (TotalBuffers == dp.NCH)
-                {
-                    // Direct Copy to v
-                    int ib = 0;
-                    for (auto& ain : ains)
-                    {
-                        for (auto& b : ain->buffer)
-                        {
-                            if (!AvailableSamples)
-                                continue;
-                            v[ib].resize(AvailableSamples);
-                            b->PopX((char*)v[ib].data(), AvailableSamples * sizeof(float));
-                            ib++;
-                        }
-                    }
-                }
-                else
-                {
-                    // Mix to all
-                    for (int ich = 0; ich < dp.NCH; ich++)
-                    {
-                        mixv[ich].Set(v[ich].data());
-                        mixv[ich].Reset(AvailableSamples);
-                    }
-
-                    for (auto& ain : ains)
-                    {
-                        if (AvailableSamples == 0)
+                        if (!AvailableSamples)
                             continue;
-                        for (auto& b : ain->buffer)
-                        {
-                            if (!AvailableSamples)
-                                continue;
-                            ain->tempf.resize(AvailableSamples);
-                            b->PopX((char*)ain->tempf.data(), AvailableSamples * sizeof(float));
-
-                            for (int ich = 0; ich < dp.NCH; ich++)
-                                mixv[ich].Put(ain->tempf.data(), AvailableSamples);
-                        }
-                    }
-                    for (int ich = 0; ich < dp.NCH; ich++)
-                        mixv[ich].Fin(AvailableSamples);
-                }
-
-
-                // v to shorts
-                FinalAudioBytes = AvailableSamples * dp.NCH * 2;
-                AudioData.resize(FinalAudioBytes);
-                short* ad = (short*)AudioData.data();
-                for (size_t i = 0; i < AvailableSamples; i++)
-                {
-                    for (int nch = 0; nch < dp.NCH; nch++)
-                    {
-                        float V = v[nch][i];
-                        short S = (short)(V * 32768.0f);
-                        ad[i * dp.NCH + nch] = S;
+                        b->PopX((char*)ain->tempf.data(), AvailableSamples * sizeof(float));
+                        for (int ich = 0; ich < dp.NCH; ich++)
+                            mixv[ich].Put(ain->tempf.data(), AvailableSamples);
                     }
                 }
-
-                // In SR , 1000 ms
-                // In ThisAudioSamples, ? 
-                unsigned long long  ms = 1000 * AvailableSamples;
-                ms *= 10000;
-                ms /= dp.SR;
-                ThisDurA = ms;
+                for (int ich = 0; ich < dp.NCH; ich++)
+                    mixv[ich].Fin(AvailableSamples);
             }
 
-
-
-/*
-            if (DirectAudioCopy)
+            // v to shorts
+            FinalAudioBytes = AvailableSamples * dp.NCH * 2;
+            AudioData.resize(FinalAudioBytes);
+            short* ad = (short*)AudioData.data();
+            for (size_t i = 0; i < AvailableSamples; i++)
             {
-                hr = ains[0].cap->GetBuffer(&ains[0].pData, &ains[0].framesAvailable, &ains[0].flags, NULL, NULL);
-
-                ThisAudioSamples = ains[0].framesAvailable;
-                ThisAudioBytes = ains[0].framesAvailable * dp.NCH * 2;
-                AudioData.resize(ThisAudioBytes);
-                memcpy(AudioData.data(), ains[0].pData, ThisAudioBytes);
-
-                ains[0].cap->ReleaseBuffer(ains[0].framesAvailable);
-
-                // In SR , 1000 ms
-                // In ThisAudioSamples, ? 
-                unsigned long long  ms = 1000 * ThisAudioSamples;
-                ms *= 10000;
-                ms /= dp.SR;
-                ThisDurA = ms;
-                ThisDurV = ms;
+                for (int nch = 0; nch < dp.NCH; nch++)
+                {
+                    float V = v[nch][i];
+                    short S = (short)(V * 32768.0f);
+                    ad[i * dp.NCH + nch] = S;
+                }
             }
-           
-*/
+
+            // In SR , 1000 ms
+            // In ThisAudioSamples, ?
+            unsigned long long  ms = 1000 * AvailableSamples;
+            ms *= 10000;
+            ms /= dp.SR;
+            ThisDurA = ms;
         }
 
         ThisDurV = 10 * 1000 * 1000 / dp.fps;
@@ -2514,7 +2093,6 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
             if (FAILED(hr))
                 break;
 
-            memset(pData, 0, FinalAudioBytes);
             memcpy(pData, AudioData.data(), FinalAudioBytes);
 
             hr = pAudioBuffer->Unlock();
