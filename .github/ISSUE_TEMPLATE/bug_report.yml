@@ -1,0 +1,22 @@
+name: BUG 反馈
+description: 报告一个问题或异常
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: input
+    id: os
+    attributes:
+      label: 系统版本
+      placeholder: Windows 11 23H2 x64
+    validations:
+      required: true
+  - type: textarea
+    id: desc
+    attributes:
+      label: 描述
+      description: 发生了什么，怎么复现，期望是什么
+      placeholder: |
+        1. 按 F1 截图……
+        2. 出现……
+    validations:
+      required: true
