@@ -40,6 +40,9 @@ public:
 	// 渐隐画笔等：不可点选，淡出后自动移除
 	virtual bool isEphemeral() { return false; };
 	virtual bool hitErase(const float x, const float y) { return false; };
+	// 气泡 / 爆裂这类"框"：点是否落在框内（含旋转）。只给"已选中时双击进文字编辑"用，
+	// 不参与单击命中 —— 单击仍然只认描边和文字，内部空白留给下面的标注
+	virtual bool frameContainsPoint(const float x, const float y) const { (void)x; (void)y; return false; }
 	// 撤销/重做切换后回调（默认无动作）。白板背景尺寸这类"非绘制操作"靠它回滚。
 	virtual void onUndoChanged(bool undone) {}
 	// 几何快照：拖动、缩放、旋转要能单独作为一步撤销。

@@ -153,6 +153,9 @@ protected:
 	virtual void annotAfterEmptyToolUp() {}
 	// 录屏等：工具启用时只落笔、不点选已有标注（避免画着被拖走）
 	virtual bool annotSkipHitSelect() const { return false; }
+	// 按住 Alt = 强制落笔：有工具时跳过"按下先命中已有标注"和悬停手型，让笔直接压在旧标注上。
+	// 没有选中工具时不生效（此时仍按"点谁选谁"处理）。
+	bool altForceDraw() const;
 	// 尺寸工具（标注栏的「尺寸」形态）：只绘制尺寸线，不点选 / 拖动 / 连线已有标注
 	bool dimensionToolActive() const;
 protected:

@@ -502,6 +502,8 @@
     "quickSwitch": "Cycle Tools",
     "exitLevel": "Exit Level",
     "deleteSel": "Delete Annotation",
+    "forceDraw": "Force Draw",
+    "toggleColorValue": "Toggle Color Value",
     "showCursor": "Show Cursor",
     "toolRect": "Rectangle",
     "toolArrow": "Arrow",

@@ -435,26 +435,21 @@ void ShapeText::updateFrameStyle()
 	}
 }
 
-// 爆裂命中：轮廓附近或内部都算（空框也要能单击选中 / 双击进编辑）
+// 爆裂命中：只算轮廓附近，和矩形一样 —— 内部空白不抢点击，
+// 否则会挡住放在它下面的标注，也挡住选区里的拖动
 bool ShapeText::hitBurstShape(float x, float y, float band) const
 {
 	auto geo = buildBurstGeometry();
 	if (!geo) return false;
 	const D2D1_POINT_2F p{ x, y };
 	BOOL inside = FALSE;
-	if (SUCCEEDED(geo->FillContainsPoint(p, nullptr, &inside)) && inside) return true;
-	inside = FALSE;
 	return SUCCEEDED(geo->StrokeContainsPoint(p, band, nullptr, nullptr, &inside)) && inside;
 }
 
 // 气泡命中（描边）：点到圆角轮廓附近才算。用"从中心沿该方向到轮廓的距离"比较，
-// 圆角和直边都统一由 LinkGeom 算，不会因为圆角大就把命中区算到框内空白里。
+// 圆角和直边都统一由 LinkGeom 算，不会因为圆角大就把命中区算到框内空白里
 bool ShapeText::hitBubbleStroke(float x, float y, float band) const
 {
-	// 空气泡没有文字可命中，整块框都要能点选，否则删掉提示语以后就"点不中"了
-	if (text.empty()
-		&& x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)
-		return true;
 	const float w = rect.right - rect.left;
 	const float h = rect.bottom - rect.top;
 	if (w < 1.f || h < 1.f) return false;
@@ -978,7 +973,10 @@ void ShapeText::mouseMove(const float x, const float y)
 		const float strokeBand = std::max(6.f * win->dpi, bubbleStroke_ * 0.5f + 4.f * win->dpi);
 		const bool onFrame = hitBubbleText(lx, ly)
 			|| (bubble_ ? hitBubbleStroke(lx, ly, strokeBand) : hitBurstShape(lx, ly, strokeBand));
-		if (onFrame) {
+		// 选中后整块都能拖，和矩形一致：框内空白也给"移动"光标，不再往下落笔。
+		// 未选中时仍然只认描边和文字（内部空白不抢点击，可点到下面的标注）
+		const bool insideSelected = isSelected() && frameContainsPoint(x, y);
+		if (onFrame || insideSelected) {
 			hoverDraggerIndex = isEditing ? 9 : 8;
 			return;
 		}
@@ -996,9 +994,10 @@ void ShapeText::mouseMove(const float x, const float y)
 
 void ShapeText::setCursor()
 {
-	// 文本工具在任何文字上（尤其是挂在线上那种）：始终工字型 ——
-	// 否则已选中的文字会走移动/缩放光标（↔），二次编辑时鼠标就变了样
-	if (win && win->getCurToolId() == L"text") {
+	// 文本工具：**未选中**的文字给工字型（提示"能点进去改"）。
+	// 二次选中之后整块是可拖的，光标要跟着走位（移动 / 缩放），否则拖得动却显示工字型，
+	// 看着像"这里只能打字"；编辑中由下面的 9 号分支给回工字型
+	if (win && win->getCurToolId() == L"text" && !isSelected()) {
 		SetCursor(LoadCursor(nullptr, IDC_IBEAM));
 		return;
 	}
@@ -1024,7 +1023,7 @@ void ShapeText::setCursor()
 bool ShapeText::hitErase(const float x, const float y)
 {
 	if (isFrame()) {
-		// 气泡：描边和文字；爆裂：轮廓或内部
+		// 气泡 / 爆裂：描边和文字（内部空白不参与，和矩形一致）
 		float lx = x, ly = y;
 		if (std::fabs(angle) > 1e-6f) {
 			const float cx = (rect.left + rect.right) * 0.5f;
@@ -1103,6 +1102,24 @@ bool ShapeText::hitLabelBox(const float x, const float y) const
 	return std::fabs(lx) <= halfW && std::fabs(ly) <= halfH;
 }
 
+// 气泡 / 爆裂：框内（含旋转）。只给"已选中时双击进文字编辑"用 —— 单击命中仍然只认描边和文字
+bool ShapeText::frameContainsPoint(const float x, const float y) const
+{
+	if (!isFrame()) return false;
+	const float cx = (rect.left + rect.right) * 0.5f;
+	const float cy = (rect.top + rect.bottom) * 0.5f;
+	float lx = x - cx, ly = y - cy;
+	if (std::fabs(angle) > 1e-6f) {
+		const float c = std::cos(angle), s = std::sin(angle);
+		const float u = lx * c + ly * s;
+		const float v = -lx * s + ly * c;
+		lx = u;
+		ly = v;
+	}
+	return std::fabs(lx) <= (rect.right - rect.left) * 0.5f
+		&& std::fabs(ly) <= (rect.bottom - rect.top) * 0.5f;
+}
+
 void ShapeText::initAttachedText(const std::wstring& t, float px)
 {
 	text = t.empty() ? L"请输入文字" : t;
@@ -1136,6 +1153,15 @@ void ShapeText::startEdit(bool selectAll)
 	// 文字与插入符由形状直接绘制，键盘由宿主 onChar/onKey 转发
 	win->setEditingText(this);
 	win->beginTextEdit();
+	win->refresh();
+}
+
+// 编辑中再次双击：全选文字，下一次输入即整体替换
+void ShapeText::selectAllText()
+{
+	if (!isEditing || text.empty()) return;
+	selectAll_ = true;
+	caretIndex_ = (int)text.size();
 	win->refresh();
 }
 

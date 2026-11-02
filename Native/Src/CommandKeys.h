@@ -80,11 +80,24 @@ namespace CommandKeys
 
 	// 固定键判定：chord 是否被**只读行**（设置页只展示的既有行为固定键）占用。
 	// 与 boundToOther 不同，此处**跨界面一律算占用**：固定键不允许被其他命令改绑。命中则回写占用者标签。
-	bool reservedChord(const std::wstring& chord, std::wstring* ownerLabelKey);
+	// forId：正在改绑的命令 —— 少数"分属不同阶段"的组合（切换色值 / 工具循环 都是 Tab）允许共存。
+	bool reservedChord(const std::wstring& chord, std::wstring* ownerLabelKey, const std::wstring& forId = L"");
 
 	// chord 是否"可解析"（修饰键 + 一个能被 strToKey 认出来的主键）。
 	// 设置页落盘前的最后一道闸：存进去但解析不出来的键 = 一条永远命中不了的死绑定。
 	bool validChord(const std::wstring& chord);
+	// 同上，但允许"只有修饰键"的写法（Alt / Ctrl+Shift）：只给显式开了 allowModifierOnly
+	// 的命令用（目前只有「切换色值」—— 它仅在框选时生效，不会长期占住修饰键）。
+	bool validChord(const std::wstring& chord, bool allowModifierOnly);
+	// 该命令是否允许只绑修饰键
+	bool allowModifierOnly(const std::wstring& id);
+	// 该命令当前的键位是不是"只有修饰键"（用于按住时的自动重复去抖）
+	bool isModifierOnlyBinding(const std::wstring& id);
+
+	// 这一下按键是否正好命中某条命令的**当前**键位：主键相同，且修饰键完全一致
+	// （多按一个修饰键不算命中）。用于"键位可改绑、但派发有自己的阶段判断"的命令
+	// —— 例如「切换色值」只在查找元素阶段生效，不能交给 actionForKey 按表派发。
+	bool keyHits(const std::wstring& id, unsigned vk);
 
 	// 键 → 命令 id。
 	// `surface` = 会话窗口自己的工具栏掩码；返回**已实装、掩码有交集**的命令

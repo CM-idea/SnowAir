@@ -509,6 +509,8 @@
     "quickSwitch": "工具循环",
     "exitLevel": "层级退出",
     "deleteSel": "删除标注",
+    "forceDraw": "强制落笔",
+    "toggleColorValue": "切换色值",
     "showCursor": "显示光标",
     "toolRect": "矩形",
     "toolArrow": "箭头",

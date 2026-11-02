@@ -206,6 +206,17 @@ inputArea->setPadding(0.f, 8.f, 0.f, 0.f);
 - `main.cpp` 不调用 `WinSetting::init()`：启动时不弹设置窗口，设置中心由托盘左键（设置为「打开设置」时）、托盘右键菜单或再次运行 exe 打开
 - `WinCap::init()` 与 `WinSetting::init()` 都是幂等的，重复触发不会开出两份窗口
 
+### 开机自启（`Setting::setAutoStart()`）
+
+| 场景 | 登记方式 |
+|---|---|
+| 普通自启 / 内置 Administrator | `HKCU\...\Run` 的 `SnowAir` 值，WinAPI 直写，值为 `"<exe>" --auto-start` |
+| 开了「以管理员身份运行」 | 计划任务 `SnowAir`（登录触发 + 最高权限）；Run 键给不了提权启动 |
+
+- 两者互斥：先删 Run 值与同名任务，只登记一种；启动时 `takeOverAutoStart()` 按 `autoStartExe` 重登记
+- 计划任务用 XML + `schtasks /Create /XML`：`<Command>` 不过命令行解析（`/TR` 遇带空格路径会静默失败），并写死 `ExecutionTimeLimit=PT0S` 与电池两项 `false`（默认 3 天被杀、不插电不启动）
+- schtasks 用 `CreateProcessW` 直起，不经 `cmd.exe`；注册表不用 `reg add`（薄壳，多一层转义与代码页）
+
 ## 9. 托盘右键菜单（源：Src\Tray.cpp）
 
 菜单项顺序固定：**截图 / 截取全屏 / 屏幕录制 / 演示画布 ┊ 快捷翻译 ┊ 截图历史 / 打开目录 ┊ 设置 / 退出**（`kMenuRows[]`，文案在语言文件 `tray.*`）

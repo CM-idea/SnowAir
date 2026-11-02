@@ -259,6 +259,8 @@ WinCap::WinCap() : AnnotHost()
     onMouseMove.add([this](POINT pos) { this->onMove(pos); });
     onMouseUp.add([this](POINT pos, bool isRight) { this->onUp(pos, isRight); });
     onKeyDown.add([this](UINT key) { this->onKey(key); });
+    // 修饰键抬起 = 解除「切换色值」的去抖闩（它绑成纯修饰键时按住会重复发 keydown）
+    onKeyUp.add([this](UINT key) { if (this->modToggleHeld_ == key) this->modToggleHeld_ = 0; });
     onChar.add([this](UINT ch) { annotChar(ch); });
     onTimer.add([this](UINT id) {
 		// 未框选时 Ctrl+C 只取色：提示显示完后退出截图（期间用户开始框选/按下则取消）
@@ -2097,6 +2099,9 @@ bool WinCap::runCommand(const std::wstring& id)
 	if (editingText) return false;
 	// 「删除标注」为只读行，scan 不会返回它，此处再兜一层
 	if (id == L"cmd_delete_sel") return false;
+	// 「切换色值」只在查找元素阶段有意义（见 onKey 里按阶段判的那一段）；
+	// 从命令表兜底命中时什么都不做，别把键吞掉
+	if (id == L"cmd_toggle_pix_color") return false;
 
 	// —— 「常规」组中带阶段差别的四条 ——
 	// 语义与原 onKey 的硬编码分支逐条一致（原分支已删除）：演示画布的 Enter 不结束会话、
@@ -2263,14 +2268,24 @@ void WinCap::onKey(UINT key)
         confirmExitRecording();
         return;
     }
-    // 查找元素阶段：Tab 切换放大镜的色值口径（#RRGGBB ⇄ rgb(r, g, b)）。
-    // 只拦"纯 Tab"：带修饰键的组合仍走命令表，不抢用户自定义的键位。
+    // 查找元素阶段：切换放大镜的色值口径（#RRGGBB ⇄ rgb(r, g, b)）。
+    // 键位默认 Tab，可在「设置 → 系统按键 → 常规」里改，也可以清空成不绑；
+    // 只认"完全一致"的组合：带别的修饰键仍走命令表，不抢用户自定义的键位。
     const bool elementLookup = stage == CapStage::Select && !isPress && !demoMode
         && Setting::get()->getFindWindowElements();
-    if (elementLookup && key == VK_TAB
-        && !(GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000)
-        && !(GetKeyState(VK_SHIFT) & 0x8000)) {
+    if (elementLookup && CommandKeys::keyHits(L"cmd_toggle_pix_color", key)) {
+        // 纯修饰键（Alt / Ctrl / Shift）按住时系统会反复发 keydown：按下到松开之间只切一次
+        if (CommandKeys::isModifierOnlyBinding(L"cmd_toggle_pix_color")) {
+            if (modToggleHeld_ == key) return;
+            modToggleHeld_ = key;
+        }
         pixColorRgb_ = !pixColorRgb_;
+        // 就地重取一次样再重绘：不然放大镜要等鼠标下一次移动才换格式（按了键像没反应）
+        POINT cur{};
+        GetCursorPos(&cur);
+        ScreenToClient(hwnd, &cur);
+        setPixPos(cur);
+        samplePixColor();
         refresh();
         return;
     }

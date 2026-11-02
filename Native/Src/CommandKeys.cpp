@@ -42,6 +42,10 @@ namespace
 		bool implemented;  // false = 设置行先占位，功能待做
 		bool readOnly;     // 只读提示行：只展示、不可改、也不派发
 		const wchar_t* dflt; // 默认键位；空串 = 默认不绑
+		// 允许"只有修饰键"的绑定（Alt / Ctrl / Shift）。仅给只在某个阶段生效、不长期占键的命令用
+		bool allowModifierOnly{ false };
+		// 行里写的键是否算"被占用"（挡别人绑同一个键）。纯展示行写 false：它只是说明，不是真实绑定
+		bool reserveChord{ true };
 	};
 
 	// ⚠ 顺序 = 设置页的分组块顺序与组内行顺序（唯一来源，别在设置页另抄一份）
@@ -64,6 +68,15 @@ namespace
 		// 工具循环（Tab）：在工具栏的绘图工具之间循环切换。气泡里的子工具（包浆/水印/高亮）
 		// 不单独计数（见 ToolCap::cycleTool）。
 		{ L"cmd_quick_switch",kGrpCommon, L"cmdkey.quickSwitch", Scope::Session, Scene::Capture, SurfaceCapture | SurfaceRecord | SurfaceFullscreen, true, true, L"Tab" },
+		// 强制落笔：按住 Alt 落笔跳过"点选旧标注"（见 AnnotHost::altForceDraw）。固定键，只展示。
+		// 键位写作 Alt（没有主键），parseChord 解析不出 → 不参与派发，只在设置页当提示；
+		// reserveChord=false：这行只是说明，不能把 Alt 从「切换色值」手里挡掉
+		{ L"cmd_force_draw",  kGrpCommon, L"cmdkey.forceDraw",   Scope::Session, Scene::Capture, kDraw,    true, true,  L"Alt", false, false },
+		// 切换色值：查找元素阶段在 #RRGGBB / rgb() 之间切（派发有自己的阶段分支，见 WinCap::onKey）。
+		// 默认也是 Tab，与「工具循环」同键但分属不同阶段 —— 排在其后，scan 先命中的仍是工具循环，
+		// 不会把它在 Adjust 阶段的 Tab 抢走；设置页那行带「?」，专门说明这件事。
+		// allowModifierOnly：框选完就不再生效，绑成纯 Alt/Ctrl/Shift 不会长期占键，按下去就是切一下
+		{ L"cmd_toggle_pix_color", kGrpCommon, L"cmdkey.toggleColorValue", Scope::Session, Scene::Capture, kCapture, true, false, L"Tab", true },
 		// 右键逐层退出是既有行为，列出来只是"告诉用户有这么个键"
 		{ L"cmd_exit_level",  kGrpCommon, L"cmdkey.exitLevel",   Scope::Session, Scene::Capture, kSession, true, true,  L"MouseRight" },
 		// 选中标注后 Backspace 删除，既有行为
@@ -185,6 +198,52 @@ namespace
 		return m;
 	}
 
+	// 宽松解析：允许"只有修饰键、没有主键"的写法（Alt / Ctrl+Shift）。
+	// 只有显式开了 allowModifierOnly 的命令才走这条路（见 validChord 的重载）
+	bool parseChordLoose(const std::wstring& s, unsigned& mods, unsigned& key)
+	{
+		mods = 0; key = 0;
+		if (s.empty()) return false;
+		std::wstring lower = s;
+		std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+		bool any = false;
+		for (auto& part : Ling::Util::splitStr(lower, L'+')) {
+			if (part.empty()) continue;
+			if (part == L"ctrl") mods |= MOD_CONTROL;
+			else if (part == L"alt") mods |= MOD_ALT;
+			else if (part == L"shift") mods |= MOD_SHIFT;
+			else if (part == L"win" || part == L"lwin" || part == L"rwin") mods |= MOD_WIN;
+			else {
+				key = Ling::Util::strToKey(part);
+				if (key == 0) return false;
+			}
+			any = true;
+		}
+		return any;
+	}
+
+	// 某颗键属于哪个修饰键位；不是修饰键返回 0
+	unsigned modBitOf(unsigned vk)
+	{
+		switch (vk) {
+		case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL: return MOD_CONTROL;
+		case VK_MENU: case VK_LMENU: case VK_RMENU: return MOD_ALT;
+		case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT: return MOD_SHIFT;
+		case VK_LWIN: case VK_RWIN: return MOD_WIN;
+		default: return 0;
+		}
+	}
+
+	// 「切换色值」与「工具循环」默认都是 Tab，但一个在框选前、一个在框选后，
+	// 派发本身就按阶段分开（见 WinCap::onKey 与 scan），所以同键不算冲突 ——
+	// 否则用户把切换色值改回 Tab 会被当成占用而拒绝。
+	bool stageDisjoint(const std::wstring& a, const std::wstring& b)
+	{
+		auto pair = [&](const wchar_t* x, const wchar_t* y) { return a == x && b == y; };
+		return pair(L"cmd_toggle_pix_color", L"cmd_quick_switch")
+			|| pair(L"cmd_quick_switch", L"cmd_toggle_pix_color");
+	}
+
 	// 表内顺序查找：命中一条"掩码与 surface 有交集、已实装"的命令。
 	// ⚠ readOnly 的**不跳过**：只读 = 只挡"改绑"，键位仍按默认值**照旧派发**
 	//   （「常规」整组、层级退出、删除标注都是这一类）。
@@ -285,6 +344,8 @@ bool boundToOther(const std::wstring& chord, const std::wstring& forId,
 	if (mine == 0) return false;
 	for (const auto& e : kEntries) {
 		if (forId == e.id) continue;
+		if (!e.reserveChord) continue;                          // 纯展示行不占键
+		if (stageDisjoint(e.id, forId)) continue;                // 分属不同阶段，允许同键共存
 		if ((e.surfaces & mine) == 0) continue;                 // 跨界面（无交集）不算冲突
 		if (_wcsicmp(binding(e.id).c_str(), chord.c_str()) != 0) continue;
 		if (otherLabelKey) *otherLabelKey = e.label;
@@ -298,14 +359,48 @@ bool validChord(const std::wstring& chord)
 {
 	if (chord.empty()) return false;
 	unsigned m = 0, k = 0;
-	return parseChord(chord, m, k);
+	return parseChordLoose(chord, m, k) && k != 0;
 }
 
-bool reservedChord(const std::wstring& chord, std::wstring* ownerLabelKey)
+bool validChord(const std::wstring& chord, bool allowModifierOnly)
+{
+	if (chord.empty()) return false;
+	unsigned m = 0, k = 0;
+	if (!parseChordLoose(chord, m, k)) return false;
+	return k != 0 || (allowModifierOnly && m != 0);
+}
+
+bool allowModifierOnly(const std::wstring& id)
+{
+	const auto* e = findEntry(id);
+	return e ? e->allowModifierOnly : false;
+}
+
+bool isModifierOnlyBinding(const std::wstring& id)
+{
+	unsigned m = 0, k = 0;
+	return parseChordLoose(binding(id), m, k) && k == 0 && m != 0;
+}
+
+bool keyHits(const std::wstring& id, unsigned vk)
+{
+	unsigned m = 0, k = 0;
+	if (vk == 0 || !parseChordLoose(binding(id), m, k)) return false;
+	if (k != 0) return k == vk && liveMods() == m;
+	// 纯修饰键绑定：按下的必须就是这个修饰键本身（Alt / Ctrl / Shift 各占一个位）。
+	// 这里不能要求 liveMods() 完全等于 m —— 修饰键的 keydown 到达时，键盘状态有时还没把它算进去，
+	// 严格要求会出现"按了没反应、下一次按才生效"的抽风；只要求"没有多按别的修饰键"即可
+	const unsigned bit = modBitOf(vk);
+	return bit != 0 && (m & bit) != 0 && (liveMods() & ~m) == 0;
+}
+
+bool reservedChord(const std::wstring& chord, std::wstring* ownerLabelKey, const std::wstring& forId)
 {
 	if (chord.empty()) return false;
 	for (const auto& e : kEntries) {
 		if (!e.readOnly) continue;
+		if (!e.reserveChord) continue;   // 「强制落笔」这类纯展示行只是说明，不占键
+		if (stageDisjoint(e.id, forId)) continue;   // 分属不同阶段，允许共用（切换色值 Tab）
 		if (_wcsicmp(binding(e.id).c_str(), chord.c_str()) != 0) continue;
 		if (ownerLabelKey) *ownerLabelKey = e.label;
 		return true;

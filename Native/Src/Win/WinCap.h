@@ -369,6 +369,8 @@ private:
 	bool maskDragging{ false };
 	COLORREF pixColor_{ 0 };
 	bool pixColorRgb_{ false };   // 色值显示口径：false = #RRGGBB（默认），true = rgb(r, g, b)
+	// 「切换色值」绑成纯修饰键时，按住会随系统自动重复：记下已处理过的那个键，松开前不再切
+	UINT modToggleHeld_{ 0 };
 	int pixSampleX_{ -1 }, pixSampleY_{ -1 };
 	Microsoft::WRL::ComPtr<ID2D1Bitmap1> pixSampleBmp_;
 	ULONGLONG pixCopiedUntil_{ 0 };   // 色值复制成功提示的截止时间（放大镜提示行变绿）

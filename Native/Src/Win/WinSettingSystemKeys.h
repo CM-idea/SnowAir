@@ -29,6 +29,8 @@ private:
 	struct Row { std::wstring id; Ling::Button* btn; };
 	KeyCapture capture_;
 	std::vector<Row> rows;          // 可录制的行（只读行不进这里）
+	// 正在录制的那一行：校验规则要看这行是否允许"纯修饰键"（见 isValidKeys）
+	std::wstring captureId_;
 	Ling::Button* restoreBtn{ nullptr };
 	winrt::event_token onMouseMoveToken{};
 	winrt::event_token onMouseDownToken, onKeyDownToken, onKeyUpToken, onTimerToken, onBlurToken;

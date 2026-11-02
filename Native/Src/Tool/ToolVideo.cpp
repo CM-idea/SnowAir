@@ -297,6 +297,7 @@ void ToolVideo::makeSlot(const std::wstring& id)
 		tip->bind(btnUndo, Lang::get(L"tool.undo"));
 	}
 	else if (id == L"gif") {
+		// 一个图标打天下：不按 GIF / WebP / APNG 换字形，文案是「录制动图」
 		btnGif = makeIconBtn(Icon::Gif, L"gif");
 		btnGif->onClick.add([this](Ling::Button*) { onGifClick(); });
 		tip->bind(btnGif, Lang::get(L"video.outputGif"));

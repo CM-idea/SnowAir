@@ -19,6 +19,19 @@ namespace
     };
     constexpr int kSpinnerFramesCount = 8;
 
+    // 修饰键 vk → MOD_* 位。钩子那边已把左右修饰键归一成 VK_CONTROL / VK_SHIFT / VK_MENU，
+    // 这里仍把左右写法一并认下，免得换条输入路径就漏
+    UINT modBitsOf(UINT vk)
+    {
+        switch (vk) {
+        case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL: return MOD_CONTROL;
+        case VK_MENU: case VK_LMENU: case VK_RMENU: return MOD_ALT;
+        case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT: return MOD_SHIFT;
+        case VK_LWIN: case VK_RWIN: return MOD_WIN;
+        default: return 0;
+        }
+    }
+
     // 录制中的实时预览：按当前按住的修饰键拼前缀（顺序与落盘口径一致，末尾带 "+"）。
     // 只反映修饰键，主键一按下就整条落盘并结束录制，所以预览到这里为止。
     std::wstring modifierPrefix(UINT mods)
@@ -64,6 +77,7 @@ void KeyCapture::begin(Ling::Button* btn, const std::wstring& id, StyleFn style)
     btn_ = btn;
     id_ = id;
     style_ = std::move(style);
+    heldMods_ = 0;
 
     // 清空按钮内置文本，改用自定义的两个子节点（加载指示 + 文案）。Button 的内置 Text
     // 固定为 flex 首个子节点，无法插入到加载指示左侧，因此先置空，再以 (spinner, label) 居中排列。
@@ -94,7 +108,7 @@ void KeyCapture::begin(Ling::Button* btn, const std::wstring& id, StyleFn style)
     // 先行消费所有按键（含系统快捷键），再转回页面。
     HotkeyHook::beginCapture([this](UINT vk, bool up, UINT mods) {
         if (id_.empty()) return;
-        if (up) { preview(mods); return; }   // 松开修饰键：预览退回
+        if (up) { onKeyUp(vk, mods); return; }   // 松开修饰键：可能是纯修饰键组合落盘
         onKeyDown(vk, mods);
     });
 
@@ -174,8 +188,13 @@ void KeyCapture::onKeyDown(UINT key, UINT mods)
     // 导致三键组合无法录入。
     const std::wstring keyStr = keyToStr(key);
     if (keyStr.empty()) return;
-    // 只按修饰键：立即把已按住的修饰键显示出来，继续等主键（纯修饰键不落盘）
-    if (isModifierKey(keyStr)) { preview(mods); return; }
+    // 只按修饰键：先记下并显示出来，继续等主键；
+    // 若这行允许"纯修饰键"，松手那一刻才落盘（见 onKeyUp）
+    if (isModifierKey(keyStr)) {
+        heldMods_ |= modBitsOf(key);
+        preview(mods);
+        return;
+    }
 
     // 裸 Backspace / Delete = 清空这一行（带修饰键时仍按普通组合录制）
     if ((key == VK_BACK || key == VK_DELETE) && mods == 0) {
@@ -199,6 +218,26 @@ void KeyCapture::onKeyDown(UINT key, UINT mods)
     // 最多三键（两个修饰键 + 一个主键）；不合法就丢弃，保持原键位
     if (keys.size() > 3) return;
     if (valid_ && !valid_(keys)) return;
+    if (commit_) commit_(id, keys);
+}
+
+void KeyCapture::onKeyUp(UINT key, UINT mods)
+{
+    if (!active()) return;
+    const std::wstring name = keyToStr(key);
+    if (!isModifierKey(name)) { preview(mods); return; }
+    // 纯修饰键：松到"一个不剩"时才算录完，用松开前按住的那些修饰键拼组合。
+    // 合不合法交给这一行的 valid_ 判：普通命令要求"修饰键 + 主键"，于是这里等同什么都不做。
+    std::vector<std::wstring> keys;
+    if (heldMods_ & MOD_CONTROL) keys.push_back(L"Ctrl");
+    if (heldMods_ & MOD_ALT) keys.push_back(L"Alt");
+    if (heldMods_ & MOD_SHIFT) keys.push_back(L"Shift");
+    if (heldMods_ & MOD_WIN) keys.push_back(L"LWin");
+    heldMods_ &= ~modBitsOf(key);
+    if (heldMods_ != 0 || keys.empty()) { preview(mods); return; }
+    if (!valid_ || !valid_(keys)) { preview(mods); return; }
+    const std::wstring id = id_;
+    end();
     if (commit_) commit_(id, keys);
 }
 

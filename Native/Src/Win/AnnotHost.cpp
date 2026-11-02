@@ -112,10 +112,21 @@ std::wstring AnnotHost::getCurToolId() const
 	return eff == L"line" ? L"arrow" : eff;
 }
 
+// 按住 Alt = 强制落笔：跳过"按下先命中已有标注"，让当前工具直接压在旧标注上作画。
+// 只在"手里有工具"时生效 —— 空工具（选择态）下 Alt 不改变"点谁选谁"。
+bool AnnotHost::altForceDraw() const
+{
+	// GetKeyState 读的是本线程消息队列里的键状态：处理这条鼠标消息时，Alt 的状态就是
+	// 按下/抬起这一下的真实状态（比 GetAsyncKeyState 更适合配合鼠标事件判断）。
+	if (getCurToolId().empty()) return false;
+	return (GetKeyState(VK_MENU) & 0x8000) != 0;
+}
+
 void AnnotHost::forwardKey(UINT key)
 {
 	annotKey(key);
 }
+
 
 POINT AnnotHost::toImgPos(const POINT& pos) const
 {
@@ -390,7 +401,7 @@ bool AnnotHost::shouldPaintAnnotHandles() const
 {
 	if (!shapeHover || shapeHover->isUndo || shapeHover->isViewportFilter()) return false;
 	if (shapeHover == newShape) return false; // 落笔中
-	if (editingText && editingText->isEditingNow()) return false; // 文字编辑中
+	// 编辑文字时也照常画控点：用户要求"选中即带控件"，编辑和选中是同一个视觉状态
 	return true;
 }
 
@@ -927,8 +938,8 @@ void AnnotHost::applyAnnotCursor()
 	const auto img = toImgPos(pos);
 	const float ix = (float)img.x, iy = (float)img.y;
 
-	// 已选中：边缘缩放 / 区内移动
-	if (shapeHover && !shapeHover->isUndo && shapeHover != newShape
+	// 已选中：边缘缩放 / 区内移动（按住 Alt 时让位给落笔，见 altForceDraw）
+	if (!altForceDraw() && shapeHover && !shapeHover->isUndo && shapeHover != newShape
 		&& !shapeHover->isViewportFilter()) {
 		shapeHover->mouseMove(ix, iy);
 		if (shapeHover->hoverDraggerIndex >= 0) {
@@ -940,7 +951,7 @@ void AnnotHost::applyAnnotCursor()
 	// 未选中标注上：手型，提示可点选（录屏工具启用时跳过，只显示画笔光标）。
 	// 空工具时也**保留手型** —— 用户确认过：悬停在标注上给手型是对的（提示"能点它"）；
 	// "没选工具 = 普通箭头"说的是**选框里的空白处**（那条走 applyEmptyToolCursor）
-	if (!annotSkipHitSelect()) {
+	if (!annotSkipHitSelect() && !altForceDraw()) {
 		if (auto* under = probeShapeUnder(ix, iy, nullptr)) {
 			// 尺寸工具：矩形仅作为底图，不参与悬停与点选交互。
 			const bool rectIgnored = dimensionToolActive() && dynamic_cast<ShapeRect*>(under);
@@ -1223,10 +1234,23 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 	if (toolSub) toolSub->blurInputs();
 	editStepTarget = nullptr;
 	editStepBefore.clear();
+	// 双击判定提前算：编辑文字时"再次双击 = 全选"也要用它（见下面的 editingText 分支）。
+	// 时间戳只给左键记 —— 右键是"逐层退出"，不该打断双击序列
+	POINT screenPos{};
+	GetCursorPos(&screenPos);
+	const auto now = GetTickCount64();
+	const bool isDblClick = (now - annotLastDownTime <= GetDoubleClickTime())
+		&& std::abs(screenPos.x - annotLastDownPos.x) <= GetSystemMetrics(SM_CXDOUBLECLK)
+		&& std::abs(screenPos.y - annotLastDownPos.y) <= GetSystemMetrics(SM_CYDOUBLECLK);
 	// 编辑中点到插入符以外：先结束编辑，但**不吞掉这次点击** ——
 	// 同一个点击继续去命中其它标注/落笔，不需要用户再点第二次。
 	if (editingText) {
 		const auto ip = toImgPos(pos);
+		// 编辑中再次双击（点在文字框内）= 全选；第一次双击进编辑时只把插入符放到末尾
+		if (isDblClick && editingText->hitLabelBox((float)ip.x, (float)ip.y)) {
+			editingText->selectAllText();
+			return true;
+		}
 		if (editingText->hitCaretArea((float)ip.x, (float)ip.y)) return true;
 		editingText->finishEdit(false);
 	}
@@ -1237,6 +1261,8 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 		return true;
 	}
 	if (isRight) return annotRightClick();
+	annotLastDownTime = now;
+	annotLastDownPos = screenPos;
 
 	// 连线：点中线上的叉 —— 直接删掉这条箭头/线段。
 	// 优先于其它命中，否则这一下会被当成拖动这条线
@@ -1251,14 +1277,6 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 		}
 	}
 
-	POINT screenPos{};
-	GetCursorPos(&screenPos);
-	auto now = GetTickCount64();
-	bool isDblClick = (now - annotLastDownTime <= GetDoubleClickTime())
-		&& std::abs(screenPos.x - annotLastDownPos.x) <= GetSystemMetrics(SM_CXDOUBLECLK)
-		&& std::abs(screenPos.y - annotLastDownPos.y) <= GetSystemMetrics(SM_CYDOUBLECLK);
-	annotLastDownTime = now;
-	annotLastDownPos = screenPos;
 	// 双击落在线段"中间热区"（提示挖空那块）时，语义是"在这条线上打字"，不能走下面的
 	// "双击切端点 free" —— 它会把这个双击吃掉（日志里 shaft=1 shaftDist=3.5 dbl=1 却
 	// 插不进光标就是这个）。用悬停提示标志判断，它在按下前已经算好了；跳过这里之后，
@@ -1293,7 +1311,8 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 		if (dblText) {
 			shapeHover = dblText;
 			setEditingText(dblText);
-			dblText->startEdit(true);
+			// 文字：双击即全选；气泡/爆裂：先落插入符（它们双击后一般还要补字）
+			dblText->startEdit(!dblText->isFrame());
 			annotMouseDown = false;
 			return true;
 		}
@@ -1309,7 +1328,8 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 		if (auto* hit = hitShapeAt(dx, dy)) {
 			if (auto* txt = dynamic_cast<ShapeText*>(hit)) {
 				shapeHover = txt;
-				txt->startEdit(true);
+				// 同一条规则：文字双击即全选，气泡/爆裂先落插入符
+				txt->startEdit(!txt->isFrame());
 				annotMouseDown = false;
 				return true;
 			}
@@ -1449,7 +1469,7 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 			}
 		}
 	}
-	if (!annotSkipHitSelect() && !textOnShaft && !linkFromShape) {
+	if (!annotSkipHitSelect() && !textOnShaft && !linkFromShape && !altForceDraw()) {
 		if (auto* hit = hitShapeAt((float)imgPos.x, (float)imgPos.y)) {
 			// 文本工具：马赛克这类"整块铺满的背景"不抢这一下，直接往下走"落笔造文字"，
 			// 于是"先马赛克、后文字"能正常叠起来（文字压在马赛克上）。

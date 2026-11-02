@@ -31,8 +31,10 @@ public:
 	// 反向同步：把文字 / 气泡的属性写回属性栏
 	void syncToolFromShape() const override;
 	uint32_t styleColorValue() const override { return colorValue; }
-	// selectAll：双击已有文字进入编辑时全选，方便直接整体替换
+	// selectAll：进编辑时全选（当前默认不走这条：双击先落插入符，二次双击才全选）
 	void startEdit(bool selectAll = false);
+	// 编辑中再次双击：全选，下一次输入即整体替换
+	void selectAllText();
 	// 撤销/重做恢复文字内容，并同步重排和气泡/文字框尺寸
 	void applyTextFromUndo(const std::wstring& t);
 	// 标注文字编辑：直接维护 text / caretIndex
@@ -52,6 +54,8 @@ public:
 	// 线上文字角度恒为 0，这里是给用户手动转过角度的普通文字用的。
 	// 坐标同 rect，都是标注坐标系
 	bool hitLabelBox(float x, float y) const;
+	// 气泡 / 爆裂：框内（含旋转）。只给"已选中时双击进文字编辑"用，不参与单击命中
+	bool frameContainsPoint(float x, float y) const override;
 	// 编辑时唯一"不退出"的点击区域：插入符那一小条（点其它任何地方都提交退出）
 	bool hitCaretArea(float x, float y) const;
 	float stylePrimarySize() const override { return fontSize; }

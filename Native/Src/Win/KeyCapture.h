@@ -55,6 +55,8 @@ public:
 
 private:
     void onKeyDown(UINT key, UINT mods);
+    // 松开：普通键只回退预览；修饰键松开到"一个不剩"时尝试落盘纯修饰键组合
+    void onKeyUp(UINT key, UINT mods);
     void preview(UINT mods);
 
     Ling::WinBase* win_{ nullptr };
@@ -70,4 +72,6 @@ private:
     Ling::Label* spinner_{ nullptr };
     Ling::Label* label_{ nullptr };
     int spinIdx_{ 0 };
+    // 录制期间按住的修饰键（MOD_*）：纯修饰键落盘时按它拼组合
+    UINT heldMods_{ 0 };
 };

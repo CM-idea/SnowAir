@@ -67,7 +67,7 @@ namespace Icon
 	inline constexpr const wchar_t* Hand = L"\ue614";           // 抓手
 	inline constexpr const wchar_t* Shadow = L"\ue61b";         // 阴影
 	inline constexpr const wchar_t* Html = L"\ue639";           // HTML
-	inline constexpr const wchar_t* Gif = L"\ue63a";            // GIF
+	inline constexpr const wchar_t* Gif = L"\ue688";            // 录制动图（新字库，不再区分 GIF / WebP / APNG）
 	inline constexpr const wchar_t* Patina = L"\ue63c";         // 包浆
 	inline constexpr const wchar_t* RoundCorner = L"\ue61e";    // 圆角
 	inline constexpr const wchar_t* ArrowBoth = L"\ue61f";      // 双向箭头

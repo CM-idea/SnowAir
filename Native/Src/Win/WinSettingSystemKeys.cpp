@@ -21,13 +21,17 @@ namespace {
 	// 录到的这组键能否作为「系统按键」：允许不带修饰键的单键（默认值里就有 1..0 / W / Q / F /
 	// ` / Space / Esc / Enter / Tab / Backspace）—— 这些命令只在会话窗口有焦点时派发，
 	// 不占用其他程序的按键。要求恰好一个主键，且主键能被 strToKey 识别（否则落盘后无法命中）。
-	bool isValidKeys(const std::vector<std::wstring>& keys)
+	// 例外：命令显式允许时也接受"只有修饰键"（Alt / Ctrl / Shift）—— 目前只有「切换色值」，
+	// 它只在框选时生效，框选一结束就失效，不会长期占住修饰键。
+	bool isValidKeys(const std::vector<std::wstring>& keys, const std::wstring& id)
 	{
 		if (keys.empty()) return false;
 		unsigned mains = 0;
 		for (const auto& k : keys) if (!KeyCapture::isModifierKey(k)) mains++;
+		const std::wstring chord = KeyCapture::joinKeys(keys);
+		if (mains == 0) return CommandKeys::allowModifierOnly(id) && CommandKeys::validChord(chord, true);
 		if (mains != 1) return false;
-		return CommandKeys::validChord(KeyCapture::joinKeys(keys));
+		return CommandKeys::validChord(chord);
 	}
 
 	// 配色与「全局热键」页同款：
@@ -97,6 +101,11 @@ WinSettingSystemKeys::WinSettingSystemKeys(Ling::WinBase* parent) : Ling::Node(p
 			r.row->setPadding(SettingTheme::sp4, 0,
 				(SettingTheme::hotkeyRowH - SettingTheme::ctrlH) * 0.5f, 0);
 
+			// 「切换色值」与「工具循环」默认同为 Tab（分属不同阶段）：标题旁给个「?」，
+			// 免得两行都写着 Tab，被当成重复配置或以为工具循环坏了
+			if (id == L"cmd_toggle_pix_color")
+				SettingUi::helpTipButton(r.labRow, Lang::get(L"setting.toggleColorValueTip"));
+
 			// 只读 / 未实装行：键位框换成只读展示框（不给手型、不可点），行名称保持正常色
 			if (!editable) {
 				SettingUi::staticBox(r.ctrlBox, chordDisplay(chord), kKeyBoxW);
@@ -126,7 +135,7 @@ WinSettingSystemKeys::WinSettingSystemKeys(Ling::WinBase* parent) : Ling::Node(p
 		[this](const std::wstring& id) { refreshRow(id); },       // 收尾后把框恢复成已落盘的值
 		[this](const std::wstring& id, const std::vector<std::wstring>& keys) { applyChord(id, keys); },
 		[this](const std::wstring& id) { CommandKeys::setBinding(id, L""); },
-		[this](const std::vector<std::wstring>& keys) { return isValidKeys(keys); });
+		[this](const std::vector<std::wstring>& keys) { return isValidKeys(keys, captureId_); });
 
 	auto weakThis = getWeakThis();
 	onKeyDownToken = win->onKeyDown.add([this, weakThis](UINT key) {
@@ -195,6 +204,7 @@ void WinSettingSystemKeys::refreshRow(const std::wstring& id)
 
 void WinSettingSystemKeys::onBtnClick(Ling::Button* btn)
 {
+	captureId_ = btn->id;   // 校验要按这一行的规则来（是否允许纯修饰键）
 	capture_.begin(btn, btn->id, styleKeyBtn);
 }
 
@@ -203,10 +213,13 @@ void WinSettingSystemKeys::onBtnClick(Ling::Button* btn)
 void WinSettingSystemKeys::applyChord(const std::wstring& id, const std::vector<std::wstring>& keys)
 {
 	const std::wstring chord = KeyCapture::joinKeys(keys);
+	// 录到的还是原键位：没变化，不必走冲突判定
+	//（否则「切换色值」重录一次默认的 Tab 会弹一句"已被 工具循环 占用"，莫名其妙）
+	if (_wcsicmp(chord.c_str(), CommandKeys::binding(id).c_str()) == 0) return;
 	std::wstring otherLabel, otherId;
 	// 只读行占用的固定键不让其他命令改绑（也即不提供"覆盖"），直接拒绝并说明被哪条占用
 	std::wstring ownerLabel;
-	if (CommandKeys::reservedChord(chord, &ownerLabel)) {
+	if (CommandKeys::reservedChord(chord, &ownerLabel, id)) {
 		SettingUi::ConfirmDialog::ask(win,
 			KeyCapture::fillMessage(L"cmdkey.reserved", chord, Lang::get(ownerLabel)),
 			[](bool) {});
