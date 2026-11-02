@@ -8,8 +8,8 @@ body:
     attributes:
       label: 针对
       options:
-        - 轻雪
-        - 晾衣架
+        - SnowAir
+        - SnowAir 晾衣架
     validations:
       required: true
   - type: input
