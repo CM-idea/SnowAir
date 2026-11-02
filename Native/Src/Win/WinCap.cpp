@@ -4376,12 +4376,16 @@ void WinCap::copyToClipboard(bool keepOpen)
     int cw{ 0 }, ch{ 0 };
     if (!exportSelection(pixels, cw, ch)) return;
     if (!keepOpen) rememberLastRegion();
-    // 收工即落盘（历史以真实文件为准）；「以文件复制」时剪贴板放文件，否则放位图
+    // 完成动作三档：保存并复制图片 / 保存并复制文件 / 仅复制图片（不落盘、不进历史）
+    auto* st = Setting::get();
+    const int action = st ? st->getCaptureFinishAction() : 0;
+    const bool saveFile = action != 2;
+    const bool copyAsFile = action == 1;
     std::wstring saved;
-    if (!keepOpen) saved = Util::saveCompletedCapture(pixels, cw, ch, focusAppName_);
-    if (!saved.empty() && Setting::get()->getCopyAsFile()) Util::addFileToClipboard(saved);
+    if (!keepOpen && saveFile) saved = Util::saveCompletedCapture(pixels, cw, ch, focusAppName_);
+    if (!saved.empty() && copyAsFile) Util::addFileToClipboard(saved);
     else Util::saveToClipboard(cw, ch, pixels.data());
-    if (!saved.empty()) Setting::get()->addHistoryFile(saved, cw, ch, L"capture");
+    if (!saved.empty()) st->addHistoryFile(saved, cw, ch, L"capture");
     if (!keepOpen) close();
 }
 
@@ -4414,8 +4418,14 @@ void WinCap::closeByUser()
         std::vector<BYTE> pixels;
         int cw{ 0 }, ch{ 0 };
         if (exportSelection(pixels, cw, ch)) {
-            const auto path = Util::quietSaveCapture(pixels, cw, ch, focusAppName_);
-            if (!path.empty()) s->addHistoryFile(path, cw, ch, L"autosave");
+            // 「仅复制图片」时，ESC/关闭也把图放进剪贴板（不落盘）；其余档照旧静默存盘
+            if (s->getCaptureFinishAction() == 2) {
+                Util::saveToClipboard(cw, ch, pixels.data());
+            }
+            else {
+                const auto path = Util::quietSaveCapture(pixels, cw, ch, focusAppName_);
+                if (!path.empty()) s->addHistoryFile(path, cw, ch, L"autosave");
+            }
         }
     }
     close();

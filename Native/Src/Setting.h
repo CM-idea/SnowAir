@@ -136,8 +136,9 @@ public:
 	void setAutoSaveAfterCapture(bool on);
 	std::wstring getSaveFormat();
 	void setSaveFormat(const std::wstring& v);
-	bool getCopyAsFile();
-	void setCopyAsFile(bool on);
+	// 截图完成时做什么：0 保存并复制图片 / 1 保存并复制文件 / 2 仅复制图片（不落盘）
+	int getCaptureFinishAction();
+	void setCaptureFinishAction(int v);
 	bool getCancelConfirmDialog();
 	void setCancelConfirmDialog(bool on);
 	void restoreFunctionScreenshotDefaults();

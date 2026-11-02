@@ -1112,8 +1112,15 @@ bool Setting::getAutoSaveAfterCapture() { return featBool(L"autoSaveAfterCapture
 void Setting::setAutoSaveAfterCapture(bool on) { setFeatBool(L"autoSaveAfterCapture", on); }
 std::wstring Setting::getSaveFormat() { return featStr(L"saveFormat", L"PNG (*.png)"); }
 void Setting::setSaveFormat(const std::wstring& v) { setFeatStr(L"saveFormat", v); }
-bool Setting::getCopyAsFile() { return featBool(L"copyAsFile", false); }
-void Setting::setCopyAsFile(bool on) { setFeatBool(L"copyAsFile", on); }
+int Setting::getCaptureFinishAction()
+{
+	// 老配置只有布尔 copyAsFile：true = 以文件复制，false = 复制图片。
+	// 迁移成三档时保持它们原来的行为，之后就以 captureFinishAction 为准。
+	const int v = featInt(L"captureFinishAction", -1);
+	if (v >= 0 && v <= 2) return v;
+	return featBool(L"copyAsFile", false) ? 1 : 0;
+}
+void Setting::setCaptureFinishAction(int v) { setFeatInt(L"captureFinishAction", v < 0 ? 0 : (v > 2 ? 2 : v)); }
 bool Setting::getCancelConfirmDialog() { return featBool(L"cancelConfirmDialog", false); }
 void Setting::setCancelConfirmDialog(bool on) { setFeatBool(L"cancelConfirmDialog", on); }
 
@@ -1124,7 +1131,7 @@ void Setting::restoreFunctionScreenshotDefaults()
 	setFindWindowElements(true);
 	setCancelConfirmDialog(false);
 	setAutoSaveAfterCapture(false);
-	setCopyAsFile(false);
+	setCaptureFinishAction(0);
 	setSaveFormat(L"PNG (*.png)");
 	setManualSaveFormat(L"");
 	setAutoSaveFormat(L"");
@@ -1196,7 +1203,7 @@ bool Setting::functionScreenshotAtDefaults()
 	const bool runAsAdminDefault = Util::isBuiltinAdminAccount() || !getRunAsAdmin();
 	return getAutoStart() && runAsAdminDefault
 		&& getFindWindowElements() && !getCancelConfirmDialog() && !getAutoSaveAfterCapture()
-		&& !getCopyAsFile() && getSaveFormat() == L"PNG (*.png)"
+		&& getCaptureFinishAction() == 0 && getSaveFormat() == L"PNG (*.png)"
 		&& getManualSaveFormat().empty() && getAutoSaveFormat().empty()
 		&& getVideoRecordFormat().empty() && getTrayClickAction() == 0
 		&& getDemoDefaultTool() == 0 && getDemoEdgeBehavior() == 0

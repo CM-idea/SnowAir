@@ -483,10 +483,15 @@ void WinSettingFeatures::buildBasic(Ling::Node* p)
 			[fmts](int i, const std::wstring&) {
 				if (i >= 0 && i < (int)fmts.size()) Setting::get()->setSaveFormat(fmts[i]);
 			}, true);
-		SettingUi::toggleRow(g, Lang::get(L"setting.copyAsFile"), s->getCopyAsFile(),
-			[](bool on) { Setting::get()->setCopyAsFile(on); }, true);
+		// 右列三行都是下拉：托盘单击行为 / 保存格式 / 截图完成执行，视觉上对齐
 		SettingUi::toggleRow(g, Lang::get(L"setting.cancelConfirmDialog"), s->getCancelConfirmDialog(),
 			[](bool on) { Setting::get()->setCancelConfirmDialog(on); }, true);
+		SettingUi::selectRow(g, Lang::get(L"setting.captureFinishAction"),
+			{ Lang::get(L"setting.finishSaveCopyImage"),
+			  Lang::get(L"setting.finishSaveCopyFile"),
+			  Lang::get(L"setting.finishCopyOnly") },
+			std::clamp(s->getCaptureFinishAction(), 0, 2),
+			[](int i, const std::wstring&) { Setting::get()->setCaptureFinishAction(i); }, true);
 		SettingUi::grid2Cells(g);
 	}
 

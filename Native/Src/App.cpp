@@ -137,15 +137,18 @@ void App::captureFullScreenSilent()
 
 	// 文件名与「功能设置 → 文件输出 → 手动保存文件名格式」同一套模板（默认 SnowAir_{{YYYY-MM-DD_HH-mm-ss}}），
 	// 落到 图片\SnowAir 下；扩展名与编码取「保存格式」（PNG/JPEG/WebP/BMP）。
-	const std::wstring ext = Util::extensionFromSaveFormat(Setting::get()->getSaveFormat());
-	const std::wstring path = Util::buildSavePath(
-		Setting::get()->getManualSaveFormat(), Setting::defaultManualSaveFormat(), ext);
+	// 「仅复制图片」档不落盘
+	auto* st = Setting::get();
+	const int action = st->getCaptureFinishAction();
+	const std::wstring ext = Util::extensionFromSaveFormat(st->getSaveFormat());
+	const std::wstring path = (action != 2) ? Util::buildSavePath(
+		st->getManualSaveFormat(), Setting::defaultManualSaveFormat(), ext) : std::wstring{};
 	const bool saved = !path.empty() && Util::saveToFile(path, sw, sh, pixels.data());
 
-	if (Setting::get()->getCopyAsFile() && saved) Util::addFileToClipboard(path);
+	if (action == 1 && saved) Util::addFileToClipboard(path);
 	else Util::saveToClipboard(sw, sh, pixels.data());
-	Setting::get()->setLastCaptureRect(sx, sy, sw, sh);
-	if (saved) Setting::get()->addHistoryFile(path, sw, sh, L"fullscreen");
+	st->setLastCaptureRect(sx, sy, sw, sh);
+	if (saved) st->addHistoryFile(path, sw, sh, L"fullscreen");
 }
 
 // 全局热键「截取焦点窗口」：静默抓当前前台窗口，全程不建窗口。
@@ -175,11 +178,13 @@ void App::captureFocusedWindowSilent()
 
 	const std::wstring ext = Util::extensionFromSaveFormat(Setting::get()->getSaveFormat());
 	// 文件名走「手动保存文件名格式」（已并入原焦点窗口格式），仍支持 {{FOCUS_WINDOW_APP_NAME}}
-	const std::wstring path = Util::buildSavePath(
-		Setting::get()->getManualSaveFormat(), Setting::defaultManualSaveFormat(), ext, appName);
+	// 「仅复制图片」档不落盘
+	const bool saveFile = Setting::get()->getCaptureFinishAction() != 2;
+	const std::wstring path = saveFile ? Util::buildSavePath(
+		Setting::get()->getManualSaveFormat(), Setting::defaultManualSaveFormat(), ext, appName) : std::wstring{};
 	const bool saved = !path.empty() && Util::saveToFile(path, w, h, pixels.data());
 
-	if (Setting::get()->getCopyAsFile() && saved) Util::addFileToClipboard(path);
+	if (Setting::get()->getCaptureFinishAction() == 1 && saved) Util::addFileToClipboard(path);
 	else Util::saveToClipboard(w, h, pixels.data());
 	Setting::get()->setLastCaptureRect(rc.left, rc.top, w, h);
 	if (saved) Setting::get()->addHistoryFile(path, w, h, L"focused");
@@ -203,9 +208,10 @@ void App::captureLastRegionSilent()
 	auto pixels = ScreenCapture::captureOrGdi(rx, ry, rw, rh);
 	if (pixels.empty()) return;
 
-	// 与区域截图收工一致：落盘 + 剪贴板 + 历史
-	const auto saved = Util::saveCompletedCapture(pixels, rw, rh);
-	if (!saved.empty() && Setting::get()->getCopyAsFile()) Util::addFileToClipboard(saved);
+	// 与区域截图收工一致：按「截图完成执行」三档决定存不存文件、剪贴板放位图还是文件
+	const int action = Setting::get()->getCaptureFinishAction();
+	const auto saved = (action != 2) ? Util::saveCompletedCapture(pixels, rw, rh) : std::wstring{};
+	if (!saved.empty() && action == 1) Util::addFileToClipboard(saved);
 	else Util::saveToClipboard(rw, rh, pixels.data());
 	if (!saved.empty()) Setting::get()->addHistoryFile(saved, rw, rh, L"capture");
 }
