@@ -3,6 +3,15 @@ description: 报告一个问题或异常
 title: "[BUG] "
 labels: ["bug"]
 body:
+  - type: dropdown
+    id: target
+    attributes:
+      label: 针对
+      options:
+        - 轻雪
+        - 晾衣架
+    validations:
+      required: true
   - type: input
     id: os
     attributes:
