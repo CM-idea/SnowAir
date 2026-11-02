@@ -37,6 +37,7 @@ Tauri2/src-tauri/target/
 # Local-only notes
 Tauri2/DEV.md
 /BUGFIXES.md
+/RELEASE.md
 
 # 本地存档点（改参数前的快照，不入库）
 /_backup/
