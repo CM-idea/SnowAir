@@ -7,11 +7,9 @@ body:
     id: os
     attributes:
       label: 系统版本
-      placeholder: Windows 11 23H2 x64
   - type: textarea
     id: desc
     attributes:
       label: 描述
-      description: 想解决什么问题，希望怎么用
     validations:
       required: true
