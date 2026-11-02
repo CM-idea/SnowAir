@@ -1,6 +1,6 @@
 name: BUG 反馈
 description: 报告一个问题或异常
-title: "[BUG] "
+title: "【BUG反馈】"
 labels: ["bug"]
 body:
   - type: dropdown
