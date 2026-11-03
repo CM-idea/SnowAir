@@ -295,7 +295,16 @@ int entryGet(void*, int index, SnowAirEntry* out)
     out->height = it.height;
     out->duration_sec = it.durationSec;
     out->created_at = it.createdAt;
-    const std::wstring label = entryLabelOf(it);
+    const bool noteTagged =
+        index < static_cast<int>(g_entryTags.size()) &&
+        g_entryTags[static_cast<size_t>(index)].find(L"便签") != std::wstring::npos;
+    std::wstring label = entryLabelOf(it);
+    /* SVG 代码在轻雪里是一张图：卡片标题用 SVG，别把代码铺出来。
+       带「便签」标签的记录仍按便签处理，哪怕正文刚好是 SVG。 */
+    if (!noteTagged && out->kind == SNOWAIR_ENTRY_TEXT &&
+        it.source == L"clipboard" && Util::isSvgText(it.text)) {
+        label = L"SVG";
+    }
     wcsncpy_s(out->label, SNOWAIR_ENTRY_LABEL_MAX, label.c_str(), _TRUNCATE);
     std::wstring path = it.filePath;
     if (path.empty() && !it.files.empty()) path = it.files.front();
@@ -310,6 +319,20 @@ int entryGet(void*, int index, SnowAirEntry* out)
         }
     }
     if (thumb.empty() && out->kind == SNOWAIR_ENTRY_IMAGE) thumb = path;
+    /* 剪切板里的 SVG 代码：直接用轻雪历史页那份渲染缓存，
+       插件拿 thumb 就能当图片画，不再重复实现一套 SVG 渲染。 */
+    if (out->kind == SNOWAIR_ENTRY_TEXT && !noteTagged && it.source == L"clipboard" &&
+        Util::isSvgText(it.text)) {
+        const std::wstring svgThumb = Util::svgPreviewPath(it.id, it.text);
+        if (!svgThumb.empty()) {
+            thumb = svgThumb;
+            const auto [sw, sh] = Util::imageSize(thumb);
+            if (sw > 0 && sh > 0) {
+                out->width = sw;
+                out->height = sh;
+            }
+        }
+    }
     wcsncpy_s(out->thumb, SNOWAIR_ENTRY_PATH_MAX, thumb.c_str(), _TRUNCATE);
     wcsncpy_s(out->tags, SNOWAIR_ENTRY_TAGS_MAX,
               g_entryTags[static_cast<size_t>(index)].c_str(), _TRUNCATE);

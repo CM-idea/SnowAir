@@ -87,6 +87,10 @@ void WinSetting::init(int pageIndex)
 {
 	if (!winSetting || !winSetting->hwnd || !IsWindow(winSetting->hwnd))
 		winSetting.reset(new WinSetting());
+	// 建完窗按当前设置应用一次「历史记录」入口可见性。
+	// 不能写在构造函数里：那时全局 winSetting 还没赋值，applyHistoryMenuVisibility 会直接返回，
+	// 表现就是「停用历史记录开了，重开设置页那一项又冒出来」
+	applyHistoryMenuVisibility();
 	// 新建和已存在都抢一次前台焦点（不置顶）
 	winSetting->bringToForeground();
 	winSetting->showPage(pageIndex);

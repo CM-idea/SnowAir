@@ -714,25 +714,10 @@ namespace {
 		const int y = (int)rc.top + (std::max)(0, (areaH - h) / 2);
 		WinPin::initFromData(x, y, w, h, px);
 	}
-	// 卡片缩略图：SVG 代码渲染成 PNG 缓存（同一 id 只渲染一次；空图 / 坏图会重渲）
+	// 卡片缩略图：SVG 代码渲染成 PNG 缓存（和历史页、插件共用同一份）
 	std::wstring svgPreviewPath(const Setting::HistoryItem& it)
 	{
-		if (it.id.empty()) return {};
-		auto dir = Setting::get()->getClipboardDir();
-		std::error_code ec;
-		std::filesystem::create_directories(dir, ec);
-		// 缓存版本号跟着渲染逻辑走：裁掉透明留白后旧缓存不再适用，bump 一版让老记录重渲
-		const auto path = dir / (it.id + L".svg3.png");
-		if (std::filesystem::exists(path, ec)) {
-			const auto [pw, ph] = Util::imageSize(path.wstring());
-			if (pw > 0 && ph > 0) return path.wstring();
-			std::filesystem::remove(path, ec);
-		}
-		int w = 0, h = 0;
-		std::vector<BYTE> px;
-		if (!Util::renderSvgText(it.text, 512, w, h, px)) return {};
-		if (!Util::saveToFile(path.wstring(), w, h, px.data())) return {};
-		return path.wstring();
+		return Util::svgPreviewPath(it.id, it.text);
 	}
 }
 

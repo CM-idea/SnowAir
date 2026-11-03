@@ -889,6 +889,29 @@ bool Util::renderSvgText(const std::wstring& svg, int maxDim, int& w, int& h, st
 	return true;
 }
 
+std::wstring Util::svgPreviewPath(const std::wstring& id, const std::wstring& text)
+{
+	if (id.empty() || !isSvgText(text)) return {};
+	auto* setting = Setting::get();
+	if (!setting) return {};
+	auto dir = setting->getClipboardDir();
+	std::error_code ec;
+	std::filesystem::create_directories(dir, ec);
+	// 版本号跟着渲染逻辑走：裁掉透明留白后旧缓存不再适用，bump 一版让老记录重渲
+	const auto path = dir / (id + L".svg3.png");
+	if (std::filesystem::exists(path, ec)) {
+		const auto [pw, ph] = imageSize(path.wstring());
+		if (pw > 0 && ph > 0) return path.wstring();
+		std::filesystem::remove(path, ec);
+	}
+	int w = 0;
+	int h = 0;
+	std::vector<BYTE> px;
+	if (!renderSvgText(text, 512, w, h, px)) return {};
+	if (!saveToFile(path.wstring(), w, h, px.data())) return {};
+	return path.wstring();
+}
+
 void Util::copyHistoryFileToClipboard(const std::wstring& historyId)
 {
 	auto path = findHistoryFilePath(historyId);

@@ -38,6 +38,9 @@ public:
 	// 用 Direct2D 的 SVG 能力把代码渲染成 BGRA、top-down、行紧凑（步长 = w*4）；
 	// 最长边不超过 maxDim。系统不支持 D2D SVG（Win10 1703 以前）或代码有误时返回 false
 	static bool renderSvgText(const std::wstring& svg, int maxDim, int& w, int& h, std::vector<BYTE>& pixels);
+	// 剪切板 SVG 代码 → PNG 预览缓存（放在剪贴板目录，文件名按记录 id）。
+	// 历史页和插件共用这一份结果；渲染失败返回空串。
+	static std::wstring svgPreviewPath(const std::wstring& id, const std::wstring& text);
 	// —— History 操作 —— 根据条目 id 找到 Setting 的历史条目，然后执行对应动作
 	static void copyHistoryFileToClipboard(const std::wstring& historyId);
 	static void pinHistoryFile(const std::wstring& historyId);
