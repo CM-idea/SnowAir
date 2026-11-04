@@ -16,6 +16,8 @@ public:
 	static void dispose();
 	// 全局热键「隐藏/显示贴图」：临时隐藏 / 放回全部贴图（不落盘，重启照常显示）
 	static void toggleAllHidden();
+	// 外观页改了贴图边框颜色 / 粗细 / 圆角后，让已经开着的贴图立即重绘
+	static void refreshBorderAppearance();
 	void layoutTools() override;
 	void forwardKey(UINT key) override;
 	void copyToClipboard();

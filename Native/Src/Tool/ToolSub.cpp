@@ -58,6 +58,16 @@ namespace {
 		return s ? s->getToolDesignInt(tool, key, def) : def;
 	}
 
+	// 初始属性里该工具存过的默认数值（粗细 / 字号 / 大小），夹到当前滑条量程。
+	// 没存过返回 false —— 调用点继续沿用滑条记忆 / 全局默认。
+	bool designSliderValue(const wchar_t* tool, const wchar_t* key, float mn, float mx, float& out)
+	{
+		const int v = designInt(tool, key, -1);
+		if (v < 0) return false;
+		out = std::clamp((float)v, mn, mx);
+		return true;
+	}
+
 	// 属性栏要显示的形态：按「初始属性」里配置的顺序排，并去掉被设为工具栏默认的那一款
 	// （默认形态已经在工具栏按钮上，属性栏里不再重复）
 	std::vector<ToolInitial::InitialChoice> orderedFormsFor(const wchar_t* defId, int defaultForm)
@@ -239,11 +249,11 @@ void ToolSub::beginTool(const std::wstring& id)
 	sliderMax = cfg->max;
 	// 会话内记忆；新截图会话 ToolSub 重建后回到默认
 	sliderVal = rememberedSlider(id, strokeDefaultWidth(id, cfg->def), cfg->min, cfg->max);
-	// 初始属性里的默认数值（粗细 / 字号 / 大小）优先于会话记忆
-	{
-		const int dw = designInt(id.c_str(), L"width", -1);
-		if (dw >= 0) sliderVal = std::clamp((float)dw, sliderMin, sliderMax);
-	}
+	// 初始属性里的默认数值（粗细 / 字号 / 大小）优先于会话记忆。
+	// 键名跟着滑条配置走（text/watermark 是 fontSize，number 是 radius），不能写死 width
+	float designVal = 0.f;
+	if (designSliderValue(id.c_str(), cfg->key, sliderMin, sliderMax, designVal))
+		sliderVal = designVal;
 	auto cit = colorIndexMem.find(id);
 	selectColorIndex = (cit != colorIndexMem.end() && cit->second < colors.size()) ? cit->second : 0;
 	colors[customColorIndex] = sessionCustomColor;
@@ -758,6 +768,10 @@ void ToolSub::showNumberTools()
 		sliderMin = 20.f;
 		sliderMax = 240.f;
 		sliderVal = rememberedSlider(L"numberEmoji", 40.f, sliderMin, sliderMax);
+		// Emoji 序号同样吃「初始属性」里的默认大小（量程 20–240，按此夹紧）
+		float designVal = 0.f;
+		if (designSliderValue(ToolKey::Number, L"radius", sliderMin, sliderMax, designVal))
+			sliderVal = designVal;
 		initSize(3, false); // 字母 / Emoji开关 / 当前表情
 	}
 	else {
@@ -2327,6 +2341,11 @@ void ToolSub::loadStrokeSlider(const std::wstring& toolId)
 	sliderMin = cfg->min;
 	sliderMax = cfg->max;
 	sliderVal = rememberedSlider(toolId, strokeDefaultWidth(toolId, cfg->def), cfg->min, cfg->max);
+	// 重新载入滑条会覆盖 beginTool 已经套好的默认值，这里按各自键名再套一次：
+	// 序号是 radius、文字/水印是 fontSize，只有线迹类是 width。
+	float designVal = 0.f;
+	if (designSliderValue(toolId.c_str(), cfg->key, sliderMin, sliderMax, designVal))
+		sliderVal = designVal;
 }
 
 void ToolSub::initSlider()

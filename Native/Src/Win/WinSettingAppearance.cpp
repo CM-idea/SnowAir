@@ -6,6 +6,7 @@
 #include "../Setting.h"
 #include "WinSetting.h"
 #include "WinSettingAppearance.h"
+#include "WinPin.h"                 // 贴图边框改完立即推给已开着的贴图
 #include "SettingTheme.h"
 #include "../Plugin/PluginHost.h"
 #include "../Ocr/PluginPaths.h"
@@ -828,6 +829,9 @@ void WinSettingAppearance::initPinBorderCtrls(Ling::Node* p)
     left->setMarginRight(SettingTheme::blockGap);
 
     constexpr float labW = 56.f;
+    // 滑条左右各留了 7 逻辑像素给滑块圆点（见 Ling::Slider 的 thumbR），
+    // 可见轨道因此比滑条控件本身右移 7。色块也右移同样的量，才能和下方滑条左缘对齐。
+    constexpr float sliderTrackInset = 7.f;
 
     // 颜色行：标签 + 色块 + #hex
     {
@@ -846,6 +850,7 @@ void WinSettingAppearance::initPinBorderCtrls(Ling::Node* p)
         auto* swatch = row->makeChild<Ling::Button>();
         swatch->setSize(18.f, 18.f);
         swatch->setBorderRadius(2.f);
+        swatch->setMarginLeft(sliderTrackInset);
         swatch->setBg(col);
         swatch->setHoverBg(col);
         swatch->setFlexShrink(0.f);
@@ -908,6 +913,7 @@ void WinSettingAppearance::initPinBorderCtrls(Ling::Node* p)
         Setting::get()->setPinBorderWidth(iv);
         if (this->pinWidthVal) this->pinWidthVal->setText(std::to_wstring(iv) + L"px");
         this->refreshPinPreview();
+        WinPin::refreshBorderAppearance();
         this->tbRefreshRestore();
         });
     rSlider->onValueChanged.add([this](Ling::Slider*, float v) {
@@ -915,6 +921,7 @@ void WinSettingAppearance::initPinBorderCtrls(Ling::Node* p)
         Setting::get()->setPinBorderRadius(iv);
         if (this->pinRadiusVal) this->pinRadiusVal->setText(std::to_wstring(iv) + L"px");
         this->refreshPinPreview();
+        WinPin::refreshBorderAppearance();
         this->tbRefreshRestore();
         });
 
@@ -968,6 +975,7 @@ void WinSettingAppearance::pickPinColor()
         pinColorHex->setText(buf);
     }
     refreshPinPreview();
+    WinPin::refreshBorderAppearance();
     tbRefreshRestore();
 }
 
@@ -1366,7 +1374,8 @@ bool WinSettingAppearance::appearanceAtDefaults() const
         return s->getPinBorderDefaultEnabled()
             && s->getPinBorderColor() == 0x34C759FFu
             && s->getPinBorderWidth() == 2 && s->getPinBorderRadius() == 6
-            && s->getTrayEnabled() && s->getTrayIconStyle() == 0;
+            && s->getTrayEnabled()
+            && s->getTrayIconStyle() == (int)TrayIcon::Style::Theme;
     }
     if (tabIndex == 2) {
         return s->getFeatureTips() && !s->getHotkeyTip()
@@ -1411,7 +1420,8 @@ void WinSettingAppearance::tbRestoreDefaults()
         s->setPinBorderWidth(2);
         s->setPinBorderRadius(6);
         s->setTrayEnabled(true);
-        s->setTrayIconStyle(0);
+        // 托盘图标默认是「主题」，不是「跟随系统」；恢复默认后单选项也要回到主题
+        s->setTrayIconStyle((int)TrayIcon::Style::Theme);
         if (pinBorderSw) SettingUi::styleToggle(pinBorderSw, true);
         if (pinColorSwatch) { pinColorSwatch->setBg(defColor); pinColorSwatch->setHoverBg(defColor); }
         if (pinColorHex) {
@@ -1424,6 +1434,7 @@ void WinSettingAppearance::tbRestoreDefaults()
         if (pinRadiusSlider) pinRadiusSlider->setValue(6.f);
         if (pinRadiusVal) pinRadiusVal->setText(L"6px");
         refreshPinPreview();
+        WinPin::refreshBorderAppearance();
         if (trayEnableSw) SettingUi::styleToggle(trayEnableSw, true);
         TrayIcon::apply();
         refreshTrayRadios();

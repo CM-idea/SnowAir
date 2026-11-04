@@ -11,6 +11,10 @@ class ClipPin : public Ling::WinBase
 public:
 	static void showText(const std::wstring& text);
 	static void showFiles(const std::vector<std::wstring>& files);
+	// 「隐藏/显示贴图」热键：贴屏卡片与钉图属于同一组，必须一起隐藏 / 放回
+	static bool hasAny();
+	static void hideAll();
+	static void showAll();
 	~ClipPin();
 private:
 	ClipPin(bool isFiles, std::wstring text, std::vector<std::wstring> paths);

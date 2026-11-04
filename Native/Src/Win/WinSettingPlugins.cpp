@@ -86,8 +86,12 @@ namespace {
 		return root;
 	}
 
-	// 晾衣架插件包：版本与下载地址（与 SnowAir-Rack 的 release 资源同名）
-	constexpr wchar_t kRackVersion[] = L"0.1.0";
+	// 晾衣架插件包：固定资源名。release 必须上传 SnowAir-Rack.zip，
+	// /releases/latest/download/ 会永远指向最新 release，不再依赖版本号检查。
+	constexpr wchar_t kRackLatestUrl[] =
+		L"https://github.com/CM-idea/SnowAir-Rack/releases/latest/download/SnowAir-Rack.zip";
+	// 老 release 没有固定名资源时的兜底（也用于显示未知版本）。
+	constexpr wchar_t kRackVersion[] = L"0.1.2";
 	std::wstring rackDownloadUrl(const std::wstring& version)
 	{
 		return L"https://github.com/CM-idea/SnowAir-Rack/releases/download/v" + version
@@ -1013,30 +1017,35 @@ void WinSettingPlugins::startRackDownload()
 	// 先卸载已加载的插件，释放 rack.dll；下载/解压/复制全部在后台线程做
 	PluginHost::instance().shutdown();
 
-	// 有更新时下载最新版；否则下载内置的 Beta 首发版
-	std::wstring installVer = Update::rackLatestVersion();
-	if (installVer.empty()) installVer = kRackVersion;
-	const std::wstring url = rackDownloadUrl(installVer);
+	// 优先固定资源名：/releases/latest/download/SnowAir-Rack.zip 永远是最新 release。
+	// 老 release 还没传固定名时，退回按版本号拼 URL（不再把 0.1.0 当默认值）。
+	std::wstring fallbackVer = Update::rackLatestVersion();
+	if (fallbackVer.empty()) fallbackVer = kRackVersion;
+	const std::wstring fixedUrl = kRackLatestUrl;
+	const std::wstring fallbackUrl = rackDownloadUrl(fallbackVer);
 
 	auto weak = getWeakThis();
-	std::thread([this, weak, title, url]() {
+	std::thread([this, weak, title, fixedUrl, fallbackUrl]() {
 		const auto root = PluginPaths::root();
 		const auto zip = root / L"_rack_download.zip";
 		const auto stage = root / L"_rack_stage";
 		std::error_code ec;
 		std::filesystem::create_directories(root, ec);
 
-		const bool downloaded = SnowHttp::downloadFile(url, zip,
-			[this, weak, title](uint64_t got, uint64_t total) {
-				onUi([this, weak, title, got, total]() {
-					if (!weak.lock() || cards.size() < 4) return;
-					const float p = total > 0 ? 0.9f * (float)got / (float)total : 0.f;
-					setCardProgress(cards[CardRack], p);
-					std::wstring text = Lang::get(L"setting.plugDownloading") + L"「" + title + L"」";
-					if (total > 0) text += L" " + fmtMb(got) + L" / " + fmtMb(total);
-					setDotsPrefix(text);
-				});
-			}, 3);
+		auto progress = [this, weak, title](uint64_t got, uint64_t total) {
+			onUi([this, weak, title, got, total]() {
+				if (!weak.lock() || cards.size() < 4) return;
+				const float p = total > 0 ? 0.9f * (float)got / (float)total : 0.f;
+				setCardProgress(cards[CardRack], p);
+				std::wstring text = Lang::get(L"setting.plugDownloading") + L"「" + title + L"」";
+				if (total > 0) text += L" " + fmtMb(got) + L" / " + fmtMb(total);
+				setDotsPrefix(text);
+			});
+		};
+		// 固定名只试一次（404 时不值得重试三次），失败再走老版本号兜底
+		bool downloaded = SnowHttp::downloadFile(fixedUrl, zip, progress, 1);
+		if (!downloaded)
+			downloaded = SnowHttp::downloadFile(fallbackUrl, zip, progress, 3);
 
 		bool ok = downloaded;
 		std::wstring err;

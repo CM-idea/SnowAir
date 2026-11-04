@@ -34,6 +34,15 @@ void App::init()
         if (lapp && lapp->windows.empty())
             Ling::D2D::dispose();
     });
+    // 首次截图慢的大头是 Tip/comctl32 首次初始化（约 150ms）。启动 2s 后（1.5s 的 D2D dispose
+    // 之后）用一个隐藏小窗 + Tip 预热一次，代价约 0.2MB；首次截图从 ~256ms 降到 ~101ms。
+    // SNOWAIR_WARMUP=off 可关闭；=tipd2d 可切到极速档（常驻 D2D 设备，~15.8MB，~48ms）。
+    SetTimer(nullptr, 0x5A1A, 2000, +[](HWND, UINT, UINT_PTR id, DWORD) {
+        KillTimer(nullptr, id);
+        auto* lapp = Ling::App::get();
+        if (lapp && lapp->windows.empty())
+            WinCap::warmupOnce();
+    });
 }
 
 void App::dispose()

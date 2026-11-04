@@ -9,6 +9,7 @@
 #include "AnnotHost.h"
 #include "WinPin.h"
 #include "WinCap.h"
+#include "ClipPin.h"
 #include "PinMenu.h"
 #include "../Tool/ToolOcr.h"
 #include "../Ocr/OcrService.h"
@@ -191,9 +192,11 @@ void WinPin::dispose()
 
 // 全局热键「隐藏/显示贴图」：一次把所有贴图藏起来，再按一次全部放回来。
 // 纯临时操作 —— 不落盘、不改贴图自身状态；"放回来"时一并清除专注模式遗留的隐藏标记。
+// 快速贴屏产生的贴屏卡片（文字 / 文件 / 图片）不归 WinPin 管，但用户眼里同样是「贴图」，
+// 必须一起参与，否则只按贴图那一边切，屏幕上还会剩下一堆卡片。
 void WinPin::toggleAllHidden()
 {
-	if (winPins.empty()) return;
+	if (winPins.empty() && !ClipPin::hasAny()) return;
 	pinsHidden = !pinsHidden;
 	for (auto& p : winPins) {
 		if (!p) continue;
@@ -204,6 +207,21 @@ void WinPin::toggleAllHidden()
 			p->hiddenByFocus = false;
 			p->show();
 		}
+	}
+	if (pinsHidden) ClipPin::hideAll();
+	else ClipPin::showAll();
+}
+
+// 「软件外观 → 贴图边框」改色 / 改粗细 / 改圆角后立即推给已经贴在屏幕上的贴图。
+// borderBrush 是建窗时按当时颜色建好的，不刷新它就要等下一次悬停（触发 refresh）才生效。
+void WinPin::refreshBorderAppearance()
+{
+	if (!Setting::get()) return;
+	const auto color = Ling::Color(Setting::get()->getPinBorderColor()).getD2DColor();
+	for (auto& p : winPins) {
+		if (!p || !p->hwnd) continue;
+		if (p->borderBrush) p->borderBrush->SetColor(color);
+		p->refresh();
 	}
 }
 
@@ -656,6 +674,10 @@ void WinPin::layout()
 	auto sz = screenImg->GetSize();
 	if (sz.width == 0 || sz.height == 0) { canvas->finishPaint(); return; }
 
+	// 颜色可能刚在「软件外观」里改过：每次重绘都同步一次画刷，
+	// 不依赖建窗时的值（改色后 refreshBorderAppearance 会主动触发这里的重绘）。
+	if (borderBrush)
+		borderBrush->SetColor(Ling::Color(Setting::get()->getPinBorderColor()).getD2DColor());
 	const int bw = Setting::get()->getPinBorderWidth();
 	// 粗细 0 = 不画边框（连圆角裁剪也不做，否则会切出圆角但看不到边框）
 	const bool drawBorder = borderVisible && bw > 0;

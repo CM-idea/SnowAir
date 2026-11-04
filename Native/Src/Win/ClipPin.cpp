@@ -109,6 +109,25 @@ ClipPin::~ClipPin()
 	if (hwnd) { close(); hwnd = nullptr; }
 }
 
+bool ClipPin::hasAny()
+{
+	return !g_clipPins.empty();
+}
+
+void ClipPin::hideAll()
+{
+	for (auto& p : g_clipPins) {
+		if (p && p->hwnd) p->hide();
+	}
+}
+
+void ClipPin::showAll()
+{
+	for (auto& p : g_clipPins) {
+		if (p && p->hwnd) p->show();
+	}
+}
+
 void ClipPin::showText(const std::wstring& text)
 {
 	if (text.empty()) return;

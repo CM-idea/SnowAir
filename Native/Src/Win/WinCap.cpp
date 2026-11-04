@@ -432,6 +432,45 @@ void WinCap::beginDemoCanvas()
     // 临时全局键的镜像在 initNow() 的演示分支里做：会话没真正建起来时不能去改钩子上的绑定
 }
 
+namespace {
+// 极轻量宿主：只建一个 64×64、不激活、鼠标穿透的小 Ling 窗口 + Tip，
+// 把 comctl32/tooltip 的首次初始化提前做掉。不建全屏 Canvas / 交换链，内存代价接近零。
+class TipWarmupWindow : public Ling::WinBase
+{
+public:
+    TipWarmupWindow()
+    {
+        setSize(64.f, 64.f);
+        createNativeWindow(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE, WS_POPUP);
+    }
+    ~TipWarmupWindow() { if (hwnd) close(); }
+protected:
+    void onCreated() override { tip = std::make_unique<Tip>(this); }
+private:
+    std::unique_ptr<Tip> tip;
+};
+}
+
+// 进程空闲时的一次性预热：首次截图慢的大头是 Tip/comctl32 首次初始化（约 150ms），
+// 这里用一个隐藏小窗 + Tip 把它提前付掉；tipd2d 再把 D3D/D2D 设备也热掉（约 +15MB，首次 ~48ms）。
+// requestedMode 为空时读 SNOWAIR_WARMUP；再为空则默认 "tip"。
+void WinCap::warmupOnce(const std::wstring& requestedMode)
+{
+    if (winCap) return;
+    std::wstring modeStr = requestedMode;
+    if (modeStr.empty()) {
+        wchar_t mode[16]{};
+        GetEnvironmentVariableW(L"SNOWAIR_WARMUP", mode, 16);
+        modeStr = mode;
+    }
+    if (modeStr.empty()) modeStr = L"tip";       // 默认只预热 tooltip/comctl32
+    if (modeStr == L"off" || modeStr == L"0") return;
+
+    auto host = std::make_unique<TipWarmupWindow>();
+    host->close();
+    if (modeStr == L"tipd2d") Ling::D2D::get();
+}
+
 void WinCap::makeDemoToolCap()
 {
     if (!toolCap) {
@@ -1480,7 +1519,8 @@ void WinCap::onCreated()
     canvas = body->makeChild<Ling::Canvas>();
     canvas->enableSwapChain();
     canvas->setSizePercent(100.f, 100.f);
-    tip = std::make_unique<Tip>(this);
+    // Tip 改为懒创建（见 updateInfoBarTip）：首次截图不再为 comctl32/tooltip 首次初始化付 150ms。
+    // 启动后的 SNOWAIR_WARMUP 预热仍会提前把 Tip 拉起来，工具栏自己的 Tip 不受影响。
     d2d->deviceContext->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), brushText.GetAddressOf());
     d2d->deviceContext->CreateSolidColorBrush(D2D1::ColorF(1.f, 1.f, 1.f, 0.75f), brushMuted.GetAddressOf());
     d2d->deviceContext->CreateSolidColorBrush(D2D1::ColorF(1.f, 1.f, 1.f, 0.45f), brushHint.GetAddressOf());
@@ -2730,7 +2770,7 @@ void WinCap::onDown(POINT pos, bool isRight)
 
 void WinCap::updateInfoBarTip(POINT pos)
 {
-	if (!tip || !cutMask || cutMask->hideLabel) {
+	if (!cutMask || cutMask->hideLabel) {
 		if (tip && infoTipHit_ != InfoHit::None) {
 			tip->hide();
 			infoTipHit_ = InfoHit::None;
@@ -2746,7 +2786,7 @@ void WinCap::updateInfoBarTip(POINT pos)
 	default: break;
 	}
 	if (!text) {
-		if (infoTipHit_ != InfoHit::None) {
+		if (tip && infoTipHit_ != InfoHit::None) {
 			tip->hide();
 			infoTipHit_ = InfoHit::None;
 		}
@@ -2764,6 +2804,7 @@ void WinCap::updateInfoBarTip(POINT pos)
 	else if (hit == InfoHit::Radius) owner = reinterpret_cast<Ling::Node*>(&tipIds[1]);
 	else owner = reinterpret_cast<Ling::Node*>(&tipIds[2]);
 	infoTipHit_ = hit;
+	if (!tip) tip = std::make_unique<Tip>(this);   // 懒创建：只有真的要用提示时才付 comctl32 初始化
 	tip->showAt(owner, sx, sy, text);
 }
 

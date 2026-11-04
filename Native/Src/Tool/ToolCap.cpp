@@ -933,14 +933,17 @@ void ToolCap::applyDemoEdgeBehavior()
 	}
 
 	if (behavior != 1) {
-		// 吸附边缘（工作区，避免压住任务栏）
+		// 吸附边缘（工作区，避免压住任务栏）。
+		// 贴边时上下都留出与「默认工具栏距顶部」相同的间距：贴到 y=0 后按钮停悬气泡会被屏幕
+		// 上沿裁掉一截，留 12 逻辑像素后气泡正好回到默认位置的可见范围。
 		const RECT wa = ToolbarChrome::workAreaNear(RECT{ x, y, x + (int)w, y + (int)h });
 		const int barW = (int)w, barH = (int)h;
+		const int edgeGap = (int)(12.f * dpi + 0.5f);
 		const int distTop = y - wa.top;
 		const int distBottom = wa.bottom - (y + barH);
 		demoEdge = (distTop <= distBottom) ? 0 : 1;
 		demoExpandX = std::clamp(x, (int)wa.left, (int)wa.right - barW);
-		demoExpandY = (demoEdge == 0) ? wa.top : wa.bottom - barH;
+		demoExpandY = (demoEdge == 0) ? wa.top + edgeGap : wa.bottom - barH - edgeGap;
 		demoAutoHide = false;
 		demoCollapsed = false;
 		killTimer(demoEdgeTimerId);
