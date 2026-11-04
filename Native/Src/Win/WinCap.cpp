@@ -2137,6 +2137,13 @@ bool WinCap::runCommand(const std::wstring& id)
 		closeByUser();
 		return true;
 	}
+	// 录屏中（含暂停）按「完成 / 复制 / 存文件」：一律结束录制，与工具条 ✓ / 存文件同一入口。
+	// 不能先看 annotLive —— 录屏阶段整屏静帧（screenImg）已经释放，走"复制图片"分支会在
+	// exportSelection 里静默失败，表现就是暂停后按回车没反应（标注是否激活都一样）
+	if (!demoMode && stage == CapStage::Video && capVideo && capVideo->isRecording()) {
+		if (id == L"cmd_done" || id == L"cmd_copy") { capVideo->onSaveKey(true); return true; }
+		if (id == L"cmd_save") { capVideo->onSaveKey(false); return true; }
+	}
 	if (id == L"cmd_done") {
 		// 画布：Enter 不做"完成复制"（只靠 ✕ / Esc 退出）；标注中 = 复制，否则按当前阶段收尾
 		if (annotLive) { if (!demoMode) copyToClipboard(); return true; }
