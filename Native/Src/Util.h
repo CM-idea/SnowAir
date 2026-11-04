@@ -27,8 +27,10 @@ public:
 	static std::vector<BYTE> scaleBGRA(const BYTE* src, int sw, int sh, int dw, int dh);
 	// 把文件路径以 CF_HDROP 写进剪切板，粘贴到资源管理器/聊天窗口就是一个文件
 	static void addFileToClipboard(const std::wstring& filePath);
+	// 同上，但带「剪切」语义（Preferred DropEffect = MOVE）：粘到资源管理器是移动文件
+	static void addFileToClipboardCut(const std::wstring& filePath);
 	// 多文件版本（剪切板历史里的「N 个文件」条目复制回剪切板）
-	static void addFilesToClipboard(const std::vector<std::wstring>& paths);
+	static void addFilesToClipboard(const std::vector<std::wstring>& paths, bool cut = false);
 	// WIC 从文件解码成 BGRA、top-down、行紧凑（步长 = w*4）；失败返回 {0,0,空}
 	static std::tuple<int, int, std::vector<BYTE>> loadImagePixels(const std::wstring& path);
 	// 只读图片头拿像素尺寸（不解码像素；失败返回 {0,0}）—— 停悬大图预览按宽高比定窗口用

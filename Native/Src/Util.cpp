@@ -473,7 +473,12 @@ void Util::addFileToClipboard(const std::wstring& filePath)
 	addFilesToClipboard({ filePath });
 }
 
-void Util::addFilesToClipboard(const std::vector<std::wstring>& paths)
+void Util::addFileToClipboardCut(const std::wstring& filePath)
+{
+	addFilesToClipboard({ filePath }, true);
+}
+
+void Util::addFilesToClipboard(const std::vector<std::wstring>& paths, bool cut)
 {
 	if (paths.empty()) return;
 	// 同「复制图片」：OpenClipboard 可能被别的进程短暂占用，有限次重试
@@ -511,6 +516,22 @@ void Util::addFilesToClipboard(const std::vector<std::wstring>& paths)
 	// 成功后 HGLOBAL 归剪切板所有，只在失败时自己释放
 	if (!SetClipboardData(CF_HDROP, hGlobal)) {
 		GlobalFree(hGlobal);
+	}
+	// 「剪切」：资源管理器读这个私有格式决定粘贴是移动还是复制。
+	// 注意必须在 CF_HDROP 之后写，且同样交给剪切板管理内存。
+	if (cut) {
+		const UINT effectFormat = RegisterClipboardFormatW(L"Preferred DropEffect");
+		if (effectFormat != 0) {
+			if (auto hEffect = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD))) {
+				if (auto pEffect = static_cast<DWORD*>(GlobalLock(hEffect))) {
+					*pEffect = DROPEFFECT_MOVE;
+					GlobalUnlock(hEffect);
+					if (!SetClipboardData(effectFormat, hEffect)) GlobalFree(hEffect);
+				} else {
+					GlobalFree(hEffect);
+				}
+			}
+		}
 	}
 	CloseClipboard();
 }

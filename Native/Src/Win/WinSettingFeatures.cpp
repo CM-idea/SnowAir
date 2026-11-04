@@ -489,9 +489,10 @@ void WinSettingFeatures::buildBasic(Ling::Node* p)
 		const std::vector<std::wstring> finishOpts{
 			Lang::get(L"setting.finishSaveCopyImage"),
 			Lang::get(L"setting.finishSaveCopyFile"),
+			Lang::get(L"setting.finishSaveCutFile"),
 			Lang::get(L"setting.finishCopyOnly") };
 		SettingUi::selectRow(g, Lang::get(L"setting.captureFinishAction"), L"", finishOpts,
-			std::clamp(s->getCaptureFinishAction(), 0, 2),
+			std::clamp(s->getCaptureFinishAction(), 0, 3),
 			[](int i, const std::wstring&) { Setting::get()->setCaptureFinishAction(i); }, true,
 			Lang::get(L"setting.captureFinishActionTip"));
 		SettingUi::grid2Cells(g);
@@ -567,15 +568,22 @@ void WinSettingFeatures::buildRecord(Ling::Node* p)
 		Lang::get(L"setting.fnRecMousePierceTip"));
 	SettingUi::toggleRow(g, Lang::get(L"setting.fnRecHideToolbar"), s->getHideToolbarInRecord(),
 		[](bool on) { Setting::get()->setHideToolbarInRecord(on); }, true);
-	SettingUi::toggleRow(g, Lang::get(L"setting.fnRecKeystrokes"), s->getShowKeystrokes(),
-		[](bool on) { Setting::get()->setShowKeystrokes(on); }, true);
+	// 「记录操作按键」：位置可选 视窗左侧 / 视窗右侧 / 无（无 = 关闭，默认）。
+	// 显示与分体式绘制见 WinCap::paintKeyOverlay
+	SettingUi::selectRow(g, Lang::get(L"setting.fnRecKeystrokes"), L"",
+		{ Lang::get(L"setting.fnRecKeyOverlayLeft"), Lang::get(L"setting.fnRecKeyOverlayRight"),
+		  Lang::get(L"setting.fnRecKeyOverlayNone") },
+		std::clamp(s->getKeyOverlayPos(), 0, 2),
+		[](int i, const std::wstring&) { Setting::get()->setKeyOverlayPos(i); }, true,
+		Lang::get(L"setting.fnRecKeystrokesTip"));
 	// 行为见 ToolVideo：手动把录屏工具栏拖到屏幕上/下边缘后自动缩进边缘，悬停滑出
 	SettingUi::toggleRow(g, Lang::get(L"setting.fnRecToolbarPeek"), L"", s->getRecordToolbarPeek(),
 		[](bool on) { Setting::get()->setRecordToolbarPeek(on); }, true,
 		Lang::get(L"setting.fnRecToolbarPeekTip"));
 	// 行为见 WinCap::updateSelFollowCursor（录制中 + 穿透态）
-	SettingUi::toggleRow(g, Lang::get(L"setting.fnRecSelFollowMouse"), s->getSelFollowMouse(),
-		[](bool on) { Setting::get()->setSelFollowMouse(on); }, true);
+	SettingUi::toggleRow(g, Lang::get(L"setting.fnRecSelFollowMouse"), L"", s->getSelFollowMouse(),
+		[](bool on) { Setting::get()->setSelFollowMouse(on); }, true,
+		Lang::get(L"setting.fnRecSelFollowMouseTip"));
 	// 行为见 WinCap::paintMouseHighlight；色块 + 色号点击弹系统调色板（与「托盘自定义颜色」同款）
 	{
 		auto r = SettingUi::optionRow(g, Lang::get(L"setting.fnRecMouseHighlight"), L"", true, SettingUi::kToggleH);

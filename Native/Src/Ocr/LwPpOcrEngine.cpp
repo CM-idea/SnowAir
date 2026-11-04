@@ -353,12 +353,16 @@ OcrResult LwPpOcrEngine::recognize(int w, int h, const BYTE* bgra)
 				}
 
 				// 行首图标：检测框把图标和中文标签并在了一起（侧栏 "H系统按键"），识别结果会多出一个
-				// 孤立字符，叠在原图上还会压住图标。三个条件同时成立才处理，避免误伤正常文本：
-				//   ① 行首是 ASCII 字符、后面紧跟（可隔一个空格）方块字；
+				// 孤立字符，叠在原图上还会压住图标。判据：
+				//   ① 行首不是圆点（圆点是条目符号，要保留），后面紧跟（可隔一个空格）方块字；
 				//   ② 像素列上图标与文字之间有明显空白（≥0.45 行高，正常字间距只有 1~3px），
-				//      且行首那一簇的宽度像图标（0.55~1.2 行高；"1"、"l" 这类细字够不到下限）；
+				//      且行首那一簇的宽度像图标（0.55~1.2 行高；细字够不到下限）；
 				//   ③ 整行置信度不是满分（图标不是文字，会把这个值拉低）。
-				if (text.size() >= 3 && ln.recognition_score < 0.99f && text[0] > 0x20 && text[0] < 0x80) {
+				// 注意：图标不一定被认成 ASCII —— 实测会认成 必 / ① / 丝 / .5 / 7 这类字符，
+				// 所以这里不限制首字符类型，只靠像素列上的空白判断。
+				const bool leadIsBullet = text[0] == L'\u2022' || text[0] == L'\u00B7' ||
+					text[0] == L'\u25CF' || text[0] == L'\u25CB';
+				if (text.size() >= 3 && ln.recognition_score < 0.99f && !leadIsBullet) {
 					size_t k = 1;
 					if (k < text.size() && text[k] == L' ') ++k;
 					if (k < text.size() && isCjkChar(text[k])) {
@@ -372,6 +376,8 @@ OcrResult LwPpOcrEngine::recognize(int w, int h, const BYTE* bgra)
 							&& (float)clusterW >= lineH * 0.55f
 							&& (float)clusterW <= lineH * 1.2f) {
 							text.erase(0, k);
+							// 图标后面常跟着一个空格，删图标时一起吃掉，否则文本会以空格开头
+							while (!text.empty() && (text[0] == L' ' || text[0] == L'\t')) text.erase(0, 1);
 							minX = std::max(minX, (float)textStartX);
 							maxX = std::max(maxX, minX + 2.f);
 						}

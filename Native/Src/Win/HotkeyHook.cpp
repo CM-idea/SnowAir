@@ -31,6 +31,10 @@ namespace
 	std::vector<std::function<void()>> g_callbacks;
 	// 绑定换代号：换代前 Post 出去、换代后才到 UI 线程的旧 kMsgFire 一律丢弃
 	std::atomic<unsigned> g_generation{ 0 };
+	// 本钩子线程**装钩子那一刻**的代号。thread_local：hookProc 与 hookThread 跑的同一个线程。
+	// 它有两个用处：① 换代后仍活着的旧线程能发现自己过期了，自卸自退，不会按新一轮的绑定索引
+	// 把动作派发错；② 它 Post 出去的 kMsgFire 带着旧代号，UI 线程那边天然丢弃。
+	thread_local unsigned t_gen{ 0 };
 
 	// —— 录制模式 ——
 	// g_capturing 同时被钩子线程（读）和 UI 线程（写）访问；g_captureCb 只在 UI 线程读写。
@@ -84,6 +88,13 @@ namespace
 	LRESULT CALLBACK hookProc(int code, WPARAM wp, LPARAM lp)
 	{
 		if (code != HC_ACTION) return CallNextHookEx(nullptr, code, wp, lp);
+		// 自己这一代已经作废（上一轮没退干净的钩子线程）：
+		// 先把自己卸掉再退出，绝不留着继续吞按键 —— 否则会出现「按键被吃掉、但什么动作都没有」，
+		// 而且它会拿新一轮的绑定表按旧索引派发，动作会串。
+		if (t_gen != g_generation.load(std::memory_order_relaxed)) {
+			PostThreadMessageW(GetCurrentThreadId(), WM_QUIT, 0, 0);
+			return CallNextHookEx(nullptr, code, wp, lp);
+		}
 		auto* kb = reinterpret_cast<KBDLLHOOKSTRUCT*>(lp);
 		// 自己合成的按键不参与匹配（免得绕回来）
 		if (kb->flags & LLKHF_INJECTED) return CallNextHookEx(nullptr, code, wp, lp);
@@ -106,7 +117,9 @@ namespace
 			else g_liveMods |= bit;
 			return CallNextHookEx(nullptr, code, wp, lp);
 		}
-		const unsigned gen = g_generation.load(std::memory_order_relaxed);
+		// 代号取本线程装钩子那一刻的快照。读全局的话，一个没退干净的旧线程会冒充成
+		// 新一代去派发，动作就串了（按 F1 却去录音、按贴图却去截图）。
+		const unsigned gen = t_gen;
 		bool swallowed = false;
 		for (size_t i = 0; i < g_bindings.size(); ++i) {
 			auto& b = g_bindings[i];
@@ -114,11 +127,17 @@ namespace
 			if (!up) {
 				// 按下：要求修饰键齐备
 				if ((g_liveMods & b.mods) != b.mods) continue;
-				if (!b.keyDown) {
-					b.keyDown = true;
-					b.swallowUp = true;
-					if (g_wnd) PostMessageW(g_wnd, kMsgFire, (WPARAM)i, (LPARAM)gen);
+				// 按住不放：这一次只吞掉重复，不再触发（长按一次只算一次）
+				if (b.keyDown) { swallowed = true; break; }
+				// 没人接这一枪（消息窗已销毁 / 投递失败）：**别吞键**。
+				// 吞了就是"按了没反应、连前台程序都收不到"，比不触发更难查。
+				if (!g_wnd || !PostMessageW(g_wnd, kMsgFire, (WPARAM)i, (LPARAM)gen)) {
+					b.keyDown = false;
+					b.swallowUp = false;
+					break;
 				}
+				b.keyDown = true;
+				b.swallowUp = true;
 				swallowed = true;
 			}
 			else {
@@ -141,16 +160,23 @@ namespace
 		// 先把消息队列建出来，PostThreadMessage(WM_QUIT) 才不会失败
 		MSG msg{};
 		PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
-		g_hook = SetWindowsHookExW(WH_KEYBOARD_LL, hookProc, GetModuleHandleW(nullptr), 0);
-		g_hookOk = g_hook != nullptr;
+		HHOOK hook = SetWindowsHookExW(WH_KEYBOARD_LL, hookProc, GetModuleHandleW(nullptr), 0);
+		g_hook = hook;
+		g_hookOk = hook != nullptr;
+		// 本线程装的是哪一代：之后它 Post 的每一条 kMsgFire 都带这个代号
+		t_gen = g_generation.load(std::memory_order_relaxed);
 		if (g_ready) SetEvent(g_ready);
-		if (!g_hook) return 0;
+		if (!hook) return 0;
 		while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
 			TranslateMessage(&msg);
 			DispatchMessageW(&msg);
 		}
-		UnhookWindowsHookEx(g_hook);
-		g_hook = nullptr;
+		// 只卸**自己那把**。以前这里写的是 UnhookWindowsHookEx(g_hook)：
+		// 万一本线程退出慢了（WaitForSingleObject 超时后 UI 线程已经重建了新钩子），
+		// 它会把新一轮的钩子顺手拆掉 —— 表现就是热键突然全哑，而且 g_thread 还在，
+		// 再也不会重装。现在它只会拆自己，拆不到别人。
+		UnhookWindowsHookEx(hook);
+		if (g_hook == hook) g_hook = nullptr;
 		return 0;
 	}
 
@@ -252,9 +278,11 @@ namespace
 		if (parsed.empty()) return;
 
 		g_liveMods = 0;
+		// 先换代、再换表：这时若上一轮的钩子线程还活着，它下一次按键就会看到代号不符、
+		// 自己卸钩退出；否则它可能正按旧索引读这张表，读到一半被换掉（UB）。
+		g_generation.fetch_add(1, std::memory_order_relaxed);
 		g_bindings = std::move(parsed);
 		g_callbacks = std::move(callbacks);
-		g_generation.fetch_add(1, std::memory_order_relaxed);
 
 		// 钩子未安装成功：不留"看似已安装但无效"的状态（重试定时器仍在运行，会继续尝试 RegisterHotKey）
 		if (!startHookThread()) HotkeyHook::uninstall();

@@ -61,6 +61,11 @@ namespace {
         return L"";
     }
     constexpr UINT_PTR kHotkeyRetryTimerId{ 0x5A18 };
+    // 兜底模式下的自愈周期：只要还有热键落在钩子上，就按这个间隔重走一遍
+    // 「注册 + 重装钩子」。为什么不试几次就停：钩子会被系统静默摘掉（回调超时）、
+    // 会被别的程序后装的钩子抢在前面，一旦放弃重试，那几条热键就一直哑着，
+    // 只能靠重启或开关一次截图会话救回来。
+    constexpr UINT kHotkeyRetryMs{ 30000 };
     // 配置文件的默认内容。空文件、坏 JSON、缺键都拿它兜底，所以这里列出的每一项
     // 都是代码里会直接按名字取的（见 getLang / getAutoStart）。
     // 全局热键**不在这里**给默认值 —— 键位统一由 getShortcutKey 的内置默认表决定（defaultShortcutOf）
@@ -1267,12 +1272,12 @@ void Setting::setSaveFormat(const std::wstring& v) { setFeatStr(L"saveFormat", v
 int Setting::getCaptureFinishAction()
 {
 	// 老配置只有布尔 copyAsFile：true = 以文件复制，false = 复制图片。
-	// 迁移成三档时保持它们原来的行为，之后就以 captureFinishAction 为准。
+	// 迁移成多档时保持它们原来的行为，之后就以 captureFinishAction 为准。
 	const int v = featInt(L"captureFinishAction", -1);
-	if (v >= 0 && v <= 2) return v;
+	if (v >= 0 && v <= 3) return v;
 	return featBool(L"copyAsFile", false) ? 1 : 0;
 }
-void Setting::setCaptureFinishAction(int v) { setFeatInt(L"captureFinishAction", v < 0 ? 0 : (v > 2 ? 2 : v)); }
+void Setting::setCaptureFinishAction(int v) { setFeatInt(L"captureFinishAction", v < 0 ? 0 : (v > 3 ? 3 : v)); }
 bool Setting::getCancelConfirmDialog() { return featBool(L"cancelConfirmDialog", false); }
 void Setting::setCancelConfirmDialog(bool on) { setFeatBool(L"cancelConfirmDialog", on); }
 
@@ -1312,7 +1317,7 @@ void Setting::restoreFunctionRecordDefaults()
 	setEncodeSpeed(1);
 	setHwAccel(true);
 	setHideToolbarInRecord(true);
-	setShowKeystrokes(false);
+	setKeyOverlayPos(kKeyOverlayNone);
 	setSelFollowMouse(false);
 	setRecordToolbarPeek(false);
 	setRecordDefaultPierce(false);
@@ -1368,7 +1373,7 @@ bool Setting::functionRecordAtDefaults()
 	return getVideoQuality() == 4 && getVideoFps() == 0 && getGifQuality() == 1
 		&& getGifFps() == 1 && getGifFormat() == 0 && getRecordMic() == 0
 		&& getVideoEncoder() == 0 && getEncodeSpeed() == 1 && getHwAccel()
-		&& getHideToolbarInRecord() && !getShowKeystrokes() && !getSelFollowMouse()
+		&& getHideToolbarInRecord() && getKeyOverlayPos() == kKeyOverlayNone && !getSelFollowMouse()
 		&& !getRecordToolbarPeek() && !getRecordDefaultPierce()
 		&& !getMouseHighlight() && getMouseHighlightColor() == 0x0FDC78FF;
 }
@@ -1411,8 +1416,17 @@ bool Setting::getHwAccel() { return featBool(L"hwAccel", true); }
 void Setting::setHwAccel(bool on) { setFeatBool(L"hwAccel", on); }
 bool Setting::getHideToolbarInRecord() { return featBool(L"hideToolbarInRecord", true); }
 void Setting::setHideToolbarInRecord(bool on) { setFeatBool(L"hideToolbarInRecord", on); }
-bool Setting::getShowKeystrokes() { return featBool(L"showKeystrokes", false); }
-void Setting::setShowKeystrokes(bool on) { setFeatBool(L"showKeystrokes", on); }
+int Setting::getKeyOverlayPos()
+{
+	const int v = featInt(L"keyOverlayPos", -1);
+	if (v >= kKeyOverlayLeft && v <= kKeyOverlayNone) return v;
+	// 老配置只有布尔 showKeystrokes（开/关）：开过就按「视窗左侧」显示，没开过就是关闭
+	return featBool(L"showKeystrokes", false) ? kKeyOverlayLeft : kKeyOverlayNone;
+}
+void Setting::setKeyOverlayPos(int pos)
+{
+	setFeatInt(L"keyOverlayPos", std::clamp(pos, kKeyOverlayLeft, kKeyOverlayNone));
+}
 bool Setting::getSelFollowMouse() { return featBool(L"selFollowMouse", false); }
 void Setting::setSelFollowMouse(bool on) { setFeatBool(L"selFollowMouse", on); }
 bool Setting::getRecordToolbarPeek() { return featBool(L"recordToolbarPeek", false); }
@@ -1796,6 +1810,9 @@ void Setting::runHotkeyAction(const std::wstring& id)
     if (auto* cap = WinCap::get()) {
         const std::wstring chord = getShortcutKey(id);
         if (cap->commandFromChord(chord)) return;
+        // ⚠ 「屏幕录制」这条全局热键只负责**打开录屏功能**（进录屏会话），不兼职
+        // 「开始/暂停录制」。后者是「系统按键」里的 cmd_record_toggle，默认也是 F2，
+        // 但用户改过键位后必须按新的生效 —— 两者语义不同，不能在这里按 id 兜底转派。
     }
     if (id == L"capture") { WinCap::init(); return; }
     if (id == L"capture_repeat") { if (auto* app = App::get()) app->captureLastRegionSilent(); return; }
@@ -1836,7 +1853,7 @@ void Setting::startHotkeyRetry()
     if (hotkeyRetryTimer) return;
     hotkeyRetryTick = 0;
     // hwnd 传 NULL 的定时器：回调在装它的线程（UI 线程）的消息泵里跑，不需要窗口
-    hotkeyRetryTimer = SetTimer(nullptr, kHotkeyRetryTimerId, 4000, &Setting::onHotkeyRetry);
+    hotkeyRetryTimer = SetTimer(nullptr, kHotkeyRetryTimerId, kHotkeyRetryMs, &Setting::onHotkeyRetry);
 }
 
 void Setting::stopHotkeyRetry()
@@ -1852,13 +1869,15 @@ void CALLBACK Setting::onHotkeyRetry(HWND, UINT, UINT_PTR id, DWORD)
     if (id != kHotkeyRetryTimerId) return;
     auto* self = get();
     if (!self) return;
-    // 试满 ~1 分钟就停：钩子还在兜着，热键照样能用，不用一直占着定时器
-    if (++self->hotkeyRetryTick > 15) {
-        self->stopHotkeyRetry();
-        return;
-    }
-    // 重新走一遍注册：让出组合键的会从钩子兜底切回干净的 RegisterHotKey，
-    // 仍被占着的继续留在钩子里 —— 全好了时 applyHotkeys 会把定时器停掉
+    ++self->hotkeyRetryTick;
+    // ⚠ **不设次数上限**。以前试满 1 分钟就停，于是：开机时某条键被别人占了一下 →
+    // 掉到钩子上 → 对方放开了也没人再抢 → 钩子再被系统摘掉 / 被别的程序抢在前面 →
+    // 这条热键就永久哑了（实测现象就是"按了几次没反应，托盘点一次截图之后又好了"）。
+    // 现在只要还有键落在钩子上就每 30 秒重来一遍，这一遍同时干三件事：
+    //   ① 再抢一次 RegisterHotKey —— 对方放开了就立刻回到干净路径，并把钩子摘掉；
+    //   ② 重建钩子 —— 被系统摘掉 / 上次没装成功的钩子在这里被重新拉起来（自愈）；
+    //   ③ 清掉过期钩子线程 —— 换代后没退干净的旧线程会自己卸钩退出（见 HotkeyHook）。
+    // 全都回到 RegisterHotKey 时，applyHotkeys 里会顺手 stopHotkeyRetry()，定时器自己停。
     self->applyHotkeys();
 }
 

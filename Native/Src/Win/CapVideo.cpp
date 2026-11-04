@@ -347,21 +347,25 @@ void CapVideo::startMp4(bool useSpeaker, bool useMic)
     default: codecs = { MFVideoFormat_HEVC, MFVideoFormat_H264 }; break;
     }
     // 文案在这里先取出来按值带进线程：langObj 是 WinRT 对象，不往采集线程里带
-    auto errText = Lang::get(L"video.recordFailed");
     auto errTitle = Lang::get(L"about.sysTip");
     auto hevcText = Lang::get(L"video.hevcUnavailable");
+    auto capText = Lang::get(L"video.recordFailedCapture");
+    auto fileText = Lang::get(L"video.recordFailedFile");
+    auto encText = Lang::get(L"video.recordFailedEncoder");
+    auto otherText = Lang::get(L"video.recordFailedOther");
     // 用户点名只要 H.265：失败时值得单独解释一句（本机没有这个编码器），别让他对着
     // 笼统的「录屏失败」去猜。自动模式退到 H.264 属于设计行为，不打扰。
     const bool hevcOnly = codecs.size() == 1 && codecs[0] == MFVideoFormat_HEVC;
-    captureThread = std::jthread([this, errText, errTitle, hevcText, hevcOnly, codecs](std::stop_token st2) {
+    captureThread = std::jthread([this, errTitle, hevcText, hevcOnly, codecs,
+        capText, fileText, encText, otherText](std::stop_token st2) {
         HRESULT hr = MFStartup(MF_VERSION);
         if (FAILED(hr)) {
-            showRecordError(errText, errTitle);
+            showRecordError(otherText, errTitle);
             return;
         }
         hr = CoInitializeEx(0, COINIT_APARTMENTTHREADED);
         if (FAILED(hr)) {
-            showRecordError(errText, errTitle);
+            showRecordError(otherText, errTitle);
             return;
         }
         // 逐个候选试到桌面复制能成立为止。Prepare 挂得很早（缓存文件都还没建），
@@ -370,31 +374,63 @@ void CapVideo::startMp4(bool useSpeaker, bool useMic)
         std::vector<DupTarget> targets;
         collectDupTargets(mp4Param->rx, targets);
         const RECT deskRx = mp4Param->rx; //每个候选都从桌面坐标重新换算
+        mp4Param->rxDesk = deskRx;
         int code = 0;
+        // 桌面复制在所有候选上都立不住（混合显卡 / 虚拟显示器 / 远程桌面 / 驱动限制）时，
+        // 整体改用 GDI 抓屏接着录 —— 不要再把用户赶去「系统图形设置」里改省电模式。
+        bool gdiOnly = false;
         // 编码格式也得按可用性退让。HEVC 文件小得多，但它的编码器不是每台机器都有 ——
         // 有的只带解码，有的靠显卡的硬件 MFT 而显卡没有。缺了的时候 AddStream 照样成功
         //（那一步只是记下输出类型），要到 SetInputMediaType 解析编码器时才失败(-10)。
         // 退回 H.264：它从 Win7 起就带软件编码器，没有装不上的道理，代价是同画质下文件更大
         for (auto codec : codecs) {
             mp4Param->VIDEO_ENCODING_FORMAT = codec;
-            if (targets.empty()) {
-                mp4Param->rx = deskRx;
-                code = VideoMp4::DesktopCapture(*(mp4Param.get())); //一个都没匹配上，走库原来的默认行为
+            code = -2;
+            if (!gdiOnly) {
+                if (targets.empty()) {
+                    mp4Param->ad = nullptr;
+                    mp4Param->nOutput = 0;
+                    mp4Param->rx = deskRx;
+                    code = VideoMp4::DesktopCapture(*(mp4Param.get())); //一个都没匹配上，走库原来的默认行为
+                }
+                for (auto& t : targets) {
+                    if (mp4Param->MustEnd) break; //已经点了停止，别再起新的
+                    if (code == 0) break;         //录完了
+                    if (code != -1 && code != -2) break; //失败跟适配器/显示器无关，换候选也没用
+                    mp4Param->ad = t.ad;
+                    mp4Param->nOutput = t.output;
+                    mp4Param->rx = toLocalRect(deskRx, t.mon);
+                    code = VideoMp4::DesktopCapture(*(mp4Param.get()));
+                }
+                if (mp4Param->MustEnd) break;
+                if (code == -1 || code == -2) gdiOnly = true;
+                // HDR 屏要不到 8 位桌面复制时只能喂 HEVC；没有 HEVC 就在 GDI 下退 8 位 SDR 再录
+                else if ((code == -5 || code == -10) && mp4Param->LastCapturedHdr) gdiOnly = true;
             }
-            for (auto& t : targets) {
-                if (mp4Param->MustEnd) break; //已经点了停止，别再起新的
-                mp4Param->ad = t.ad;
-                mp4Param->nOutput = t.output;
-                mp4Param->rx = toLocalRect(deskRx, t.mon);
+            if (gdiOnly) {
+                mp4Param->GdiFallback = true;
+                mp4Param->ad = nullptr;
+                mp4Param->rxDesk = deskRx;
                 code = VideoMp4::DesktopCapture(*(mp4Param.get()));
-                if (code != -2) break; //成功了，或者失败在跟适配器无关的地方
+                mp4Param->GdiFallback = false;
+                if (mp4Param->MustEnd) break;
             }
-            if (mp4Param->MustEnd) break;
             // 只有这两个码是"这台机器认不了这个编码器"，换编码器才有意义
             if (code != -5 && code != -10) break;
         }
-        if (code != 0)
-            showRecordError((hevcOnly && !hasHevcEncoder()) ? hevcText : errText, errTitle);
+        if (code != 0) {
+            // 以前不管停在哪一步都甩「请设为省电模式」，把编码器缺失、临时文件写不进去
+            // 这类完全无关的失败也指到显卡设置上。按失败环节给不同的说明，并带上错误码，
+            // 用户反馈时能直接看出停在哪一步。
+            std::wstring text;
+            if ((code == -5 || code == -10) && hevcOnly && !hasHevcEncoder()) text = hevcText;
+            else if (code == -1 || code == -2) text = capText;
+            else if (code == -3) text = fileText;
+            else if (code == -5 || code == -10) text = encText;
+            else text = otherText;
+            text += L"\n\n(错误码 " + std::to_wstring(code) + L")";
+            showRecordError(text, errTitle);
+        }
         CoUninitialize();
         MFShutdown();
     });

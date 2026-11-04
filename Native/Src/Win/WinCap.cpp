@@ -15,6 +15,7 @@
 #include "../Tool/ToolQrcode.h"
 #include "../Tool/ToolOcr.h"
 #include "../Ocr/OcrService.h"
+#include "../Ocr/OcrInk.h"
 #include "../Translate/TranslateService.h"
 #include "../Translate/BergamotEngine.h"
 #include "../Ocr/LwPpOcrEngine.h"
@@ -398,6 +399,10 @@ void WinCap::initNow(StartMode mode, std::shared_ptr<std::vector<BYTE>> grab,
         // 「功能设置 → 演示 → 默认工具」：0 渐隐画笔（默认）/ 1 画笔 / 2 无
         const int tool = Setting::get()->getDemoDefaultTool();
         if (tool != 2) ptr->startPenSlot(tool == 0);
+        // 画布起来后把「鼠标穿透」「隐藏/显示工具栏」挂到全局钩子上（穿透之后焦点就不在本软件了）。
+        // ⚠ 必须在这里（会话真的建起来之后）同步：beginDemoCanvas() 里 init() 撞上"会话已开"
+        //   会直接 return，同步却照做，会把手上那个会话的临时全局键换成演示画布这一组。
+        syncGlobalCommandKeys(CommandKeys::SurfaceFullscreen);
     }
     else if (mode == StartMode::Record) {
         ptr->pendingRecord = true;
@@ -424,8 +429,7 @@ void WinCap::beginRecordPick()
 void WinCap::beginDemoCanvas()
 {
     init(StartMode::Demo);
-    // 画布起来后把「鼠标穿透」「隐藏/显示工具栏」挂到全局钩子上（穿透之后焦点就不在本软件了）
-    syncGlobalCommandKeys(CommandKeys::SurfaceFullscreen);
+    // 临时全局键的镜像在 initNow() 的演示分支里做：会话没真正建起来时不能去改钩子上的绑定
 }
 
 void WinCap::makeDemoToolCap()
@@ -502,7 +506,7 @@ void WinCap::startDemoRecording()
 	cutMask->hideLabel = true;
 	if (demoRecGif_) capVideo->startGif();
 	else capVideo->startMp4(demoRecAudio_, demoRecMic_);
-	if (Setting::get()->getShowKeystrokes()) startKeyOverlay();
+	if (Setting::get()->getKeyOverlayPos() != Setting::kKeyOverlayNone) startKeyOverlay();
 	demoRecRunning_ = true;
 	demoRecPaused_ = false;
 	demoRecElapsed_ = 0;
@@ -1638,21 +1642,41 @@ bool WinCap::beginMaskResize(POINT pos)
 	if (isPress || maskDragging || annotMouseDown) return false;
 	const auto hit = cutMask->hitTest(pos);
 	if (hit == MaskHit::None) return false;
+
 	// 画幅已锁定（录屏开录 / 长图滚动）时：一律不许拖边、拖角。
 	// 长图连整体挪动也禁止；录屏保留整体挪动，但要求未开鼠标穿透。
 	const bool sizeLocked = maskSizeLocked();
+	// 锁定画幅时拖边框没有"缩放"语义，录屏里按整体挪动处理（从边框起拖也能挪选区）
+	bool moveFromBorder = false;
 	if (sizeLocked) {
 		if (maskMoveLocked()) return false;
-		if (hit != MaskHit::Inside || isMouseTransparent) return false;
+		if (isMouseTransparent) return false;
+		if (hit != MaskHit::Inside) {
+			// 按在已有标注上：这一下是点选/拖动标注，不能被"拖选区"抢走
+			if (hasAnnotShapes()) {
+				const auto img = toImgPos(pos);
+				if (probeShapeUnder((float)img.x, (float)img.y, shapeHover)) return false;
+			}
+			moveFromBorder = true;
+		}
 	}
+
 	if (hit == MaskHit::Inside) {
 		// 识别/二维码结果面板开着：整体拖移会把结果一起带走，禁用（边/角缩放仍保留）
 		if (toolOcr || toolQrcode) return false;
 		// 区内平移：要求未选中标注工具；截图与长图还要求未绘制标注，录屏开录后不作要求
 		if (!getCurToolId().empty()) return false;
-		if (!sizeLocked && hasAnnotShapes()) return false;
+		if (sizeLocked) {
+			// 开录后：按下的位置是已有标注 → 交给标注层（点选 / 拖动 / 缩放），
+			// 否则录制中永远点不中标注（"标注不能二次编辑"的根因就在这里）。
+			if (hasAnnotShapes()) {
+				const auto img = toImgPos(pos);
+				if (probeShapeUnder((float)img.x, (float)img.y, shapeHover)) return false;
+			}
+		}
+		else if (hasAnnotShapes()) return false;
 	}
-	else if (hasAnnotShapes()) {
+	else if (hasAnnotShapes() && !moveFromBorder) {
 		// 按下点落在已有标注上：这一下是选中/拖动标注，不能被拖边抢走
 		const auto img = toImgPos(pos);
 		if (probeShapeUnder((float)img.x, (float)img.y, shapeHover)) return false;
@@ -1660,7 +1684,8 @@ bool WinCap::beginMaskResize(POINT pos)
 	maskDragging = true;
 	isPress = true;
 	SetCapture(hwnd);
-	cutMask->startAdjust(pos);
+	if (moveFromBorder) cutMask->startDragMove(pos);   // 锁定画幅：拖边 = 整体挪动
+	else cutMask->startAdjust(pos);
 	setPixPos(pos);
 	setToolChromeHidden(true);
 	refresh();
@@ -2656,6 +2681,13 @@ void WinCap::onDown(POINT pos, bool isRight)
     }
     // 演示画布：没开标注会话（默认工具=无）时画布不响应点击，别退化成"拖选区"
     if (demoMode) return;
+    // 录屏开录后（未穿透）：画幅锁定，但选区整体仍可拖动；这时还没选过绘图工具
+    // （annotLive 仍为 false），走不到上面的标注分支，所以在这里补一条。
+    // 落在已有标注上的按下由 beginMaskResize 放行给标注（选中 / 拖动），见那里的判断。
+    if (stage == CapStage::Video && capVideo && capVideo->isRecording()) {
+        beginMaskResize(pos);
+        return;
+    }
     if (stage == CapStage::Select) {
         isPress = true;
         selectDragging_ = false;
@@ -2757,17 +2789,18 @@ void WinCap::onMove(POINT pos)
         setCursor();
         return;
     }
+    // 拖选区（开录后整体挪动 / 长图编辑态）：不管有没有标注会话都要跟手
+    if (maskDragging && isPress) {
+        POINT cur{};
+        GetCursorPos(&cur);
+        ScreenToClient(hwnd, &cur);
+        cutMask->adjust(cur);
+        if (cutMask->isResizingEdge()) setPixPos(cur);
+        syncQrcodePanel();
+        refresh();
+        return;
+    }
     if (annotLive) {
-        if (maskDragging && isPress) {
-            POINT cur{};
-            GetCursorPos(&cur);
-            ScreenToClient(hwnd, &cur);
-            cutMask->adjust(cur);
-            if (cutMask->isResizingEdge()) setPixPos(cur);
-            syncQrcodePanel();
-            refresh();
-            return;
-        }
         annotMove(pos);
         setCursor();
         return;
@@ -2878,17 +2911,18 @@ void WinCap::onUp(POINT pos, bool isRight)
         capLong->onUp(pos);
         return;
     }
+    // 拖选区收尾：开录后整体挪动时 annotLive 可能还是 false，所以放在标注分支外面
+    if (maskDragging) {
+        maskDragging = false;
+        isPress = false;
+        ReleaseCapture();
+        if (cutMask) cutMask->endAdjust();
+        syncViewportFilters();
+        setToolChromeHidden(false);
+        refresh();
+        return;
+    }
     if (annotLive) {
-        if (maskDragging) {
-            maskDragging = false;
-            isPress = false;
-            ReleaseCapture();
-            if (cutMask) cutMask->endAdjust();
-            syncViewportFilters();
-            setToolChromeHidden(false);
-            refresh();
-            return;
-        }
         annotUp(pos, isRight);
         return;
     }
@@ -3154,7 +3188,7 @@ bool WinCap::maskMoveLocked() const
 }
 
 // 「选框鼠标跟随」(视频录制)：录制中且处于穿透态时，光标贴近选区边缘就自动平移选区，
-// 使操作始终留在录制画面内。穿透后本窗口收不到鼠标移动事件，只能按固定间隔轮询光标位置。
+// 让操作始终留在录制画面内。穿透后本窗口收不到鼠标移动事件，只能按固定间隔轮询光标位置。
 // 平移只改位置、不改画幅（与 maskSizeLocked 的"录制中不许改大小"一致）。
 void WinCap::updateSelFollowCursor()
 {
@@ -3166,6 +3200,13 @@ void WinCap::updateSelFollowCursor()
 
 	POINT cur{};
 	if (!GetCursorPos(&cur)) return;
+	// 光标停在录屏工具栏 / 属性栏上时不做跟随：那是在操作本软件，不是在操作被录程序。
+	// 不加这条，点一下穿透按钮，选区就被光标拖着往工具栏方向跑（实测会一路跟到工具栏上）。
+	if (HWND under = WindowFromPoint(cur)) {
+		if ((capVideo && under == capVideo->toolHwnd())
+			|| (toolSub && under == toolSub->hwnd))
+			return;
+	}
 	ScreenToClient(hwnd, &cur);        // 选区是客户区坐标（窗口铺满整个虚拟桌面）
 
 	const auto& r = cutMask->maskRect;
@@ -3345,7 +3386,7 @@ bool WinCap::handleLayerCancel(bool fromToolbar)
 		}
 		return true;
 	}
-	// 录屏：先退标注层，再退选区拖动，最后退出
+	// 录屏：先退标注层，再退选区拖动；开录之后右键不再退出录制
 	if (stage == CapStage::Video) {
 		if (editingText) {
 			editingText->finishEdit();
@@ -3376,6 +3417,11 @@ bool WinCap::handleLayerCancel(bool fromToolbar)
 			setToolChromeHidden(false);
 			return false;
 		}
+		// 已开录：右键最多退到「取消工具选择」，不能再一路退到退出录制。
+		// 录制中右键是用户给**被录程序**的操作（右键菜单 / 取消输入…），把它当成退出键，
+		// 轻轻一下就把整段录制丢掉，代价完全不对等。退出录制请走 Esc（会先确认）或工具栏 ✕/✓。
+		// 鼠标穿透时本窗口根本收不到右键（RightUp/Down 直接归下层窗口），走不到这里。
+		if (capVideo && capVideo->isRecording()) return false;
 		return true;
 	}
 	// 1) 文字编辑 → 完成并保留已输入
@@ -3734,14 +3780,14 @@ void WinCap::startMp4(bool useSpeaker, bool useMic)
 {
     beginVideoCapture();
     if (capVideo) capVideo->startMp4(useSpeaker, useMic);
-    if (Setting::get()->getShowKeystrokes()) startKeyOverlay();
+    if (Setting::get()->getKeyOverlayPos() != Setting::kKeyOverlayNone) startKeyOverlay();
 }
 
 void WinCap::startGif()
 {
     beginVideoCapture();
     if (capVideo) capVideo->startGif();
-    if (Setting::get()->getShowKeystrokes()) startKeyOverlay();
+    if (Setting::get()->getKeyOverlayPos() != Setting::kKeyOverlayNone) startKeyOverlay();
 }
 
 std::wstring WinCap::stopRecord()
@@ -3975,7 +4021,7 @@ namespace {
 		auto sideBySide = [](const Line& ln, const OcrRegion& r) {
 			const float lh = ln.y1 - ln.y0;
 			const float gap = std::max(0.f, std::max(ln.x0 - (r.x + r.w), r.x - ln.x1));
-			return gap <= std::max(6.f, std::min(lh, r.h) * 1.5f);
+			return gap <= std::max(2.5f, std::min(lh, r.h) * 0.25f);
 		};
 		for (size_t i = 0; i < in.regions.size(); i++) {
 			const auto& r = in.regions[i];
@@ -4040,6 +4086,90 @@ namespace {
 				[](const OcrRegion& a, const OcrRegion& b) { return a.x > b.x; });
 		}
 
+		// 段落归并：上一步只合并了"同一视觉行里的碎片"；这里把**折行**并回同一段 ——
+		// 译文按段下发/排版，才不会出现"一行缩进一行不缩进"，句子也不会被行边界切断。
+		// 判据：紧接上一行（行距之内）、起点没有更靠左、并且自己不是新的圆点开头。
+		auto hasRealText = [](const std::wstring& t) {
+			for (wchar_t c : t) {
+				if ((c >= L'0' && c <= L'9') || (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z'))
+					return true;
+				if ((c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3400 && c <= 0x4DBF) ||
+					(c >= 0x3040 && c <= 0x30FF) || (c >= 0xAC00 && c <= 0xD7AF) ||
+					(c >= 0xFF10 && c <= 0xFF19) || (c >= 0xFF21 && c <= 0xFF3A) ||
+					(c >= 0xFF41 && c <= 0xFF5A))
+					return true;
+			}
+			return false;
+		};
+		auto startsWithBullet = [](const std::wstring& t) {
+			size_t k = 0;
+			while (k < t.size() && (t[k] == L' ' || t[k] == L'\t')) ++k;
+			if (k >= t.size()) return false;
+			switch (t[k]) {
+			case L'•': case L'·': case L'●': case L'○': case L'▪': case L'◦':
+			case L'※': case L'◆': case L'◇': case L'■': case L'□':
+				return true;
+			default:
+				return false;
+			}
+		};
+		{
+			// 字身中位：明显高于它的是标题行 —— 标题和正文之间必须断段，否则翻译会把两者当一句
+			float medH = 0.f;
+			{
+				std::vector<float> hs;
+				hs.reserve(merged.size());
+				for (const auto& m : merged) hs.push_back(m.h);
+				std::sort(hs.begin(), hs.end());
+				if (!hs.empty()) medH = hs[hs.size() / 2];
+			}
+			int para = 0;
+			float paraX = merged.empty() ? 0.f : merged[0].x;
+			if (!merged.empty()) merged[0].para = 0;
+			for (size_t i = 1; i < merged.size(); ++i) {
+				const auto& prev = merged[i - 1];
+				const float lineH = std::max(1.f, std::min(prev.h, merged[i].h));
+				const float gap = std::max(0.f, merged[i].y - (prev.y + prev.h));
+				// 同一栏：起点要贴着本段起点（续行最多缩进三个字），否则是另一栏 ——
+				// 两栏并排时右栏的起点只比左栏大得多，不加这条会把两栏的文字并成一段。
+				const bool sameColumn = std::fabs(merged[i].x - paraX) <= lineH * 1.0f;
+				// 字身变了就不是同一段：标题比正文高一大截，**不能并进下面的正文**
+				// （否则翻译会把"标题 + 正文"当成一句，排版也会错位）。
+				const bool sameStyle = (merged[i].h > medH * 1.15f) == (prev.h > medH * 1.15f);
+				const bool samePara = !prev.vertical && !merged[i].vertical
+					&& gap <= lineH * 0.9f
+					&& sameColumn
+					&& sameStyle
+					&& merged[i].x >= prev.x - 2.f
+					&& !startsWithBullet(merged[i].text);
+				if (!samePara) { ++para; paraX = merged[i].x; }
+				merged[i].para = para;
+			}
+			// 段首圆点标记：翻译时把它从文本里摘掉，排版时再统一补 —— 否则有的条目
+			// 被引擎保留、有的被吞掉，译文左端就参差（用户看到的就是这个）
+			for (size_t i = 0; i < merged.size(); ++i) {
+				const bool head = (i == 0) || merged[i].para != merged[i - 1].para;
+				if (head) merged[i].bullet = startsWithBullet(merged[i].text);
+			}
+		}
+
+		// 忽略纯符号/图标：整行没有一个字母、数字或方块字（只有 • → × □ ★ 这类）就不是文字，
+		// 画在原图上只会盖住图标本身，翻译也没有可翻的内容。
+		{
+			std::vector<OcrRegion> keep;
+			keep.reserve(merged.size());
+			for (auto& r : merged) {
+				if (hasRealText(r.text)) keep.push_back(std::move(r));
+			}
+			merged.swap(keep);
+			// 段号重新编号：过滤掉某些行后原段号可能不再连续
+			int para = -1, last = -1;
+			for (auto& r : merged) {
+				if (r.para != last) { ++para; last = r.para; }
+				r.para = para;
+			}
+		}
+
 		out.regions = std::move(merged);
 		out.text.clear();
 		for (const auto& r : out.regions) {
@@ -4050,6 +4180,32 @@ namespace {
 	}
 }
 
+// 用「字身」再切一次段：OCR 给标题和正文的框高常常一样，光看框高分不出来，
+// 但笔画高度差很多（标题 20px vs 正文 16px）。归并之后再按字身断一次。
+OcrResult splitParagraphsByInk(OcrResult r, const std::vector<BYTE>& px, int w, int h)
+{
+	const size_t n = r.regions.size();
+	if (n < 2 || px.empty() || w <= 0 || h <= 0) return r;
+	std::vector<float> ink(n, 0.f);
+	for (size_t i = 0; i < n; ++i) {
+		const auto& rr = r.regions[i];
+		ink[i] = ocr::ocrInkHeight(px, w, h, rr.x, rr.y, rr.w, rr.h);
+	}
+	int para = 0;
+	for (size_t i = 0; i < n; ++i) {
+		if (i > 0) {
+			bool same = r.regions[i].para == r.regions[i - 1].para;
+			if (same && ink[i] >= 3.f && ink[i - 1] >= 3.f) {
+				const float a = std::min(ink[i], ink[i - 1]);
+				const float b = std::max(ink[i], ink[i - 1]);
+				if (b > a * 1.25f) same = false;   // 字身突变 = 标题/正文交界
+			}
+			if (!same) ++para;
+		}
+		r.regions[i].para = para;
+	}
+	return r;
+}
 void WinCap::startOcrInternal(bool translateMode)
 {
 	if (!cutMask || !cutMask->hasRect()) return;
@@ -4065,6 +4221,7 @@ void WinCap::startOcrInternal(bool translateMode)
 	auto makePanel = [&](OcrResult res, std::vector<BYTE> px) {
 		toolQrcode.reset();
 		toolOcr = std::make_unique<ToolOcr>(this, std::move(res), translateMode, std::move(px), cw, ch);
+		toolOcr->setElementBlock(selectionFromElement_);
 		toolOcr->createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP);
 		SetWindowLongPtr(toolOcr->hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(hwnd));
 		// 双击译文/识别文字 = 「完成」；拖选后 Ctrl+C = 只复制选中片段并退出。
@@ -4146,11 +4303,28 @@ void WinCap::startOcrInternal(bool translateMode)
 
 			const OcrResult raw = cached ? cachedResult
 				: OcrService::instance().recognize(cw, ch, ocrPixels.data());
-			const OcrResult merged = ocrResultMergedToLines(raw);
+			const OcrResult merged = splitParagraphsByInk(ocrResultMergedToLines(raw), ocrPixels, cw, ch);
 
 			std::vector<std::wstring> segments;
 			segments.reserve(merged.regions.size());
-			for (auto& reg : merged.regions) segments.push_back(reg.text);
+			// 按**段**下发翻译：同一段的折行先拼起来（两侧都不是 CJK 才补空格）。
+			// 段首圆点不交给引擎（见 OcrRegion::bullet）：统一在排版时补，左右才齐。
+			for (size_t i = 0; i < merged.regions.size(); ++i) {
+				const auto& reg = merged.regions[i];
+				if (i == 0 || reg.para != merged.regions[i - 1].para) {
+					std::wstring head = reg.text;
+					if (reg.bullet) {
+						size_t k = 0;
+						while (k < head.size() && (head[k] == L' ' || head[k] == L'\t')) ++k;
+						if (k < head.size()) {
+							head.erase(0, k + 1);   // 去掉圆点本身
+							while (!head.empty() && (head.front() == L' ' || head.front() == L'\t')) head.erase(0, 1);
+						}
+					}
+					segments.push_back(head);
+				}
+				else appendFragment(segments.back(), reg.text);
+			}
 
 			// 回 UI 线程干活（截图会话可能已经结束 → 用 host 校验；识别缓存只在这边写，避免跨线程）
 			auto toUi = [host](std::function<void(WinCap&)> fn) {
@@ -4218,7 +4392,7 @@ void WinCap::startOcrInternal(bool translateMode)
 		try { winrt::init_apartment(winrt::apartment_type::multi_threaded); } catch (...) {}
 
 		const OcrResult raw = OcrService::instance().recognize(cw, ch, ocrPixels.data());
-		const OcrResult merged = ocrResultMergedToLines(raw);
+		const OcrResult merged = splitParagraphsByInk(ocrResultMergedToLines(raw), ocrPixels, cw, ch);
 
 		Ling::App::get()->dq.TryEnqueue([host, sel, raw, merged]() {
 			auto* cap = WinCap::get();
@@ -4391,14 +4565,16 @@ void WinCap::copyToClipboard(bool keepOpen)
     int cw{ 0 }, ch{ 0 };
     if (!exportSelection(pixels, cw, ch)) return;
     if (!keepOpen) rememberLastRegion();
-    // 完成动作三档：保存并复制图片 / 保存并复制文件 / 仅复制图片（不落盘、不进历史）
+    // 完成动作四档：保存并复制图片 / 保存并复制文件 / 保存并剪切文件 / 仅复制图片（不落盘、不进历史）
     auto* st = Setting::get();
     const int action = st ? st->getCaptureFinishAction() : 0;
-    const bool saveFile = action != 2;
+    const bool saveFile = action != 3;
     const bool copyAsFile = action == 1;
+    const bool cutFile = action == 2;
     std::wstring saved;
     if (!keepOpen && saveFile) saved = Util::saveCompletedCapture(pixels, cw, ch, focusAppName_);
     if (!saved.empty() && copyAsFile) Util::addFileToClipboard(saved);
+    else if (!saved.empty() && cutFile) Util::addFileToClipboardCut(saved);
     else Util::saveToClipboard(cw, ch, pixels.data());
     if (!saved.empty()) st->addHistoryFile(saved, cw, ch, L"capture");
     if (!keepOpen) close();
@@ -4434,7 +4610,7 @@ void WinCap::closeByUser()
         int cw{ 0 }, ch{ 0 };
         if (exportSelection(pixels, cw, ch)) {
             // 「仅复制图片」时，ESC/关闭也把图放进剪贴板（不落盘）；其余档照旧静默存盘
-            if (s->getCaptureFinishAction() == 2) {
+            if (s->getCaptureFinishAction() == 3) {
                 Util::saveToClipboard(cw, ch, pixels.data());
             }
             else {
@@ -4718,33 +4894,51 @@ void WinCap::onKeyOverlayTimer()
 void WinCap::paintKeyOverlay(ID2D1DeviceContext* ctx)
 {
 	if (!ctx || keyOverlayLines_.empty() || GetTickCount64() > keyOverlayUntil_) return;
-	// 最多三条按时间顺序纵向堆叠（最早在上、最新在下）
-	std::wstring text;
-	for (const auto& line : keyOverlayLines_) {
-		if (!text.empty()) text += L'\n';
-		text += line;
-	}
-	auto layout = Ling::D2D::makeTextLayout(text, 18.f * dpi);
-	if (!layout) return;
-	DWRITE_TEXT_METRICS tm{};
-	if (FAILED(layout->GetMetrics(&tm))) return;
+	auto* st = Setting::get();
+	const int pos = st ? st->getKeyOverlayPos() : Setting::kKeyOverlayNone;
+	if (pos == Setting::kKeyOverlayNone) return;
+
+	const float fontH = 18.f * dpi;
 	const float padX = 14.f * dpi, padY = 9.f * dpi;
-	// 画在选区左下角内侧；没有选区时贴屏幕左下角
-	float anchorLeft = 20.f * dpi;
-	float anchorBottom = h - 20.f * dpi;
+	const float gap = 6.f * dpi;
+	const float radius = 8.f * dpi;
+
+	// 每一条单独一个圆角框（分体式），整摞贴选区左侧或右侧、底部对齐；
+	// 没有选区时贴屏幕（窗口）对应的底角。
+	float areaLeft = 20.f * dpi, areaRight = w - 20.f * dpi, areaBottom = h - 20.f * dpi;
 	if (cutMask && cutMask->hasRect()) {
-		anchorLeft = cutMask->maskRect.left + 14.f * dpi;
-		anchorBottom = cutMask->maskRect.bottom - 14.f * dpi;
+		areaLeft = cutMask->maskRect.left + 14.f * dpi;
+		areaRight = cutMask->maskRect.right - 14.f * dpi;
+		areaBottom = cutMask->maskRect.bottom - 14.f * dpi;
 	}
-	D2D1_RECT_F rect{
-		anchorLeft,
-		anchorBottom - (tm.height + padY * 2.f),
-		anchorLeft + tm.width + padX * 2.f,
-		anchorBottom
-	};
-	const float r = 8.f * dpi;
-	ctx->FillRoundedRectangle(D2D1::RoundedRect(rect, r, r), brushBg.Get());
-	ctx->DrawTextLayout(D2D1::Point2F(rect.left + padX, rect.top + padY), layout.Get(), brushText.Get());
+
+	// 先量一遍所有条目：从下往上排（最新的在最下面），整摞底边对齐 areaBottom
+	struct Item { ComPtr<IDWriteTextLayout> layout; DWRITE_TEXT_METRICS m; };
+	std::vector<Item> items;
+	items.reserve(keyOverlayLines_.size());
+	float totalH = 0.f;
+	for (const auto& line : keyOverlayLines_) {
+		auto layout = Ling::D2D::makeTextLayout(line, fontH);
+		if (!layout) continue;
+		DWRITE_TEXT_METRICS tm{};
+		if (FAILED(layout->GetMetrics(&tm))) continue;
+		if (tm.width <= 0.f || tm.height <= 0.f) continue;
+		totalH += tm.height + padY * 2.f;
+		if (!items.empty()) totalH += gap;
+		items.push_back({ layout, tm });
+	}
+	if (items.empty()) return;
+
+	float y = areaBottom - totalH;
+	for (auto& it : items) {
+		const float boxW = it.m.width + padX * 2.f;
+		const float boxH = it.m.height + padY * 2.f;
+		const float x = (pos == Setting::kKeyOverlayRight) ? (areaRight - boxW) : areaLeft;
+		const D2D1_RECT_F rect{ x, y, x + boxW, y + boxH };
+		ctx->FillRoundedRectangle(D2D1::RoundedRect(rect, radius, radius), brushBg.Get());
+		ctx->DrawTextLayout(D2D1::Point2F(rect.left + padX, rect.top + padY), it.layout.Get(), brushText.Get());
+		y += boxH + gap;
+	}
 }
 
 void WinCap::compositeCursor(std::vector<BYTE>& pixels, int w, int h, int originX, int originY)
@@ -4773,3 +4967,4 @@ void WinCap::compositeCursor(std::vector<BYTE>& pixels, int w, int h, int origin
         }
     }
 }
+

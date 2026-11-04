@@ -128,6 +128,9 @@ ToolSub::ToolSub(AnnotHost* win) : ToolbarWindow(), win(win)
 
 ToolSub::~ToolSub()
 {
+	// WinBase 析构不销毁 HWND：正常路径由 WinCap::onClosed 先 close，
+	// 这里是兜底 —— 漏了就会留下"幽灵窗"，系统发 WM_DPICHANGED 时重入已释放对象
+	if (hwnd) { close(); hwnd = nullptr; }
 }
 
 void ToolSub::onCreated()

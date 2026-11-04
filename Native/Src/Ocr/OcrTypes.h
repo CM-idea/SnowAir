@@ -20,6 +20,12 @@ struct OcrRegion {
 	bool vertical{ false };
 	// 大字号粗体估测：重绘识别结果时用（默认 OCR / 翻译）；小字不猜（置 false）。
 	bool bold{ false };
+	// 段落号：OCR 给出来的是"视觉行"，同一段的折行会被切成多行（续行还带缩进）。
+	// 翻译按**段**下发与排版（见 ocrResultMergedToLines）；OCR 重绘仍按行用，不受影响。
+	int para{ 0 };
+	// 段首是不是"圆点条目"（• · ▪ …）。翻译时圆点不交给引擎：不同条目被保留/丢掉
+	// 不一致，译文左端就会参差；统一在排版时由程序补。
+	bool bullet{ false };
 };
 
 struct OcrResult {

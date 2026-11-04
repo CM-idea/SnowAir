@@ -39,6 +39,8 @@ public:
 	void refreshLabel();
 	// 开始调整：记下方向和起始矩形。按的是边或角时，这一下就把那条边吸到光标处
 	void startAdjust(POINT pos);
+	// 从任意位置起拖"整体平移"（画幅锁定时拖边框没有缩放语义，按挪动处理）
+	void startDragMove(POINT pos);
 	// 调整中：按 startAdjust 记下的方向改选区
 	void adjust(POINT pos);
 	// 抬手结束调整（清 adjusting 状态，阴影等可恢复）

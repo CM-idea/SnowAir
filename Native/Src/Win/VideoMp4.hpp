@@ -349,11 +349,90 @@ inline HRESULT MFTrs(DWORD, DWORD iid, DWORD ood, CComPtr<IMFTransform> trs, CCo
 class CAPTURE
 {
 public:
+    // 没走桌面复制时给 GDI 用的那套 DC/位图。位图按 32bpp、正高度（自下而上）建，
+    // 抓下来的行序与桌面复制一致，后面的缩放/编码链路不用区分来源。
+    ~CAPTURE()
+    {
+        if (gdiMem && gdiOld) SelectObject(gdiMem, gdiOld);
+        if (gdiBmp) DeleteObject(gdiBmp);
+        if (gdiMem) DeleteDC(gdiMem);
+        if (gdiScreen) ReleaseDC(nullptr, gdiScreen);
+    }
+
+    bool PrepareGdi(const RECT& deskRect)
+    {
+        gdiW = (int)(deskRect.right - deskRect.left);
+        gdiH = (int)(deskRect.bottom - deskRect.top);
+        if (gdiW <= 0 || gdiH <= 0) return false;
+        gdiScreen = GetDC(nullptr);
+        if (!gdiScreen) return false;
+        gdiMem = CreateCompatibleDC(gdiScreen);
+        if (!gdiMem) return false;
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = gdiW;
+        // 正高度 = 自下而上的行序：GDI 位图与 MFVideoFormat_RGB32 的输入口径相同
+        bmi.bmiHeader.biHeight = gdiH;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        bmi.bmiHeader.biSizeImage = (DWORD)gdiW * (DWORD)gdiH * 4u;
+        gdiBmp = CreateDIBSection(gdiScreen, &bmi, DIB_RGB_COLORS, &gdiBits, nullptr, 0);
+        if (!gdiBmp || !gdiBits) return false;
+        gdiOld = SelectObject(gdiMem, gdiBmp);
+        gdiRect = deskRect;
+        gdiMode = true;
+        InHDR = DXGI_FORMAT_UNKNOWN;   // GDI 只有 8 位 SDR
+        return true;
+    }
+
+    // 抓一帧（deskRect 是桌面坐标）并合成光标。CAPTUREBLT 把分层窗口也带上 ——
+    // 鼠标穿透时本程序的标注层就是分层窗口，不带它录出来会缺标注。
+    bool GrabGdi(bool withCursor, const RECT& deskRect)
+    {
+        if (!gdiScreen || !gdiMem || !gdiBits) return false;
+        if (!BitBlt(gdiMem, 0, 0, gdiW, gdiH, gdiScreen, deskRect.left, deskRect.top,
+                SRCCOPY | CAPTUREBLT))
+            return false;
+        if (withCursor)
+        {
+            CURSORINFO ci{ sizeof(ci) };
+            if (GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING))
+            {
+                ICONINFO info{};
+                // GetIconInfo 失败时 hot spot 是栈上垃圾，下面不能拿它定位
+                if (GetIconInfo(ci.hCursor, &info))
+                {
+                    const int cx = ci.ptScreenPos.x - deskRect.left - (int)info.xHotspot;
+                    const int cy = ci.ptScreenPos.y - deskRect.top - (int)info.yHotspot;
+                    if (cx > -64 && cy > -64 && cx < gdiW && cy < gdiH)
+                        DrawIconEx(gdiMem, cx, cy, ci.hCursor, 0, 0, 0, nullptr,
+                            DI_NORMAL | DI_DEFAULTSIZE);
+                }
+                if (info.hbmMask) DeleteObject(info.hbmMask);
+                if (info.hbmColor) DeleteObject(info.hbmColor);
+                // 光标句柄是系统共享的，不能 DestroyIcon
+            }
+        }
+        const size_t need = (size_t)gdiW * (size_t)gdiH * 4;
+        if (buf.size() != need) buf.resize(need);
+        memcpy(buf.data(), gdiBits, need);
+        return true;
+    }
 
     DXGI_FORMAT InHDR = DXGI_FORMAT_UNKNOWN;
     int ConvertHDR = 2; // 0 no convert, 1 convert, 1 convert and go updown
     // 是否成功要到了"系统帮我转成 8 位"的桌面复制，见 Prepare
     bool SDRForced = false;
+    // —— GDI 兜底（见 DESKTOPCAPTUREPARAMS::GdiFallback）——
+    bool gdiMode = false;
+    HDC gdiScreen = nullptr;
+    HDC gdiMem = nullptr;
+    HBITMAP gdiBmp = nullptr;
+    HGDIOBJ gdiOld = nullptr;
+    void* gdiBits = nullptr;
+    int gdiW = 0, gdiH = 0;
+    RECT gdiRect{};
     HRESULT CreateDirect3DDevice(IDXGIAdapter1* g)
     {
         HRESULT hr = S_OK;
@@ -802,6 +881,15 @@ struct DESKTOPCAPTUREPARAMS
     HWND hWnd = 0;
     IDXGIAdapter1* ad = 0;
     UINT nOutput = 0;
+    // —— 桌面复制不可用时的 GDI 兜底 ——
+    // 混合显卡（独显跑本程序、画面由核显输出）、虚拟显示器（远程桌面 / 云桌面 / 投屏）、
+    // 部分老驱动上，IDXGIOutput1::DuplicateOutput 会直接失败（DXGI_ERROR_UNSUPPORTED）。
+    // 那不是设置问题，改「省电」也未必有用 —— 这条路仍能录，只是走 BitBlt，没有 HDR。
+    bool GdiFallback = false;
+    // GDI 兜底用的裁剪区（**桌面坐标**，不是显示器局部坐标）
+    RECT rxDesk = { 0,0,0,0 };
+    // 上一次采集是不是 HDR（FP16）那条路：编码器失败时据此退回 GDI（8 位 SDR）再试一次
+    bool LastCapturedHdr = false;
 
     unsigned long long StartMS = 0; // 0, none
     unsigned long long EndMS = 0; // 0, none
@@ -1104,6 +1192,9 @@ inline void scaleBGRABox(const BYTE* src, int sw, int sh, BYTE* dst, int dw, int
 inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
 {
     HRESULT hr = S_OK;
+    // 每次尝试都从零计帧：换适配器 / 换编码器 / 换 GDI 兜底时重来一遍，
+    // 上一次尝试写进去的帧数不能带到这一次（否则"一帧没写成"的判断会失灵）
+    dp.framesWritten = 0;
     struct AUDIOIN
     {
     private:
@@ -1259,19 +1350,32 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
     int wi = 0, he = 0;
     if (dp.HasVideo)
     {
-        if (FAILED(cap.CreateDirect3DDevice(dp.ad)))
-            return -1;
-        if (!cap.Prepare(dp.nOutput))
-            return -2;
-        // 桌面复制退回到 FP16 那条路时（Prepare 里要不到 BGRA8），只有 HEVC 收 10 位输入
-        if (cap.InHDR)
-            dp.VIDEO_ENCODING_FORMAT = MFVideoFormat_HEVC;
-        wi = cap.lOutputDuplDesc.ModeDesc.Width;
-        he = cap.lOutputDuplDesc.ModeDesc.Height;
-        if (dp.rx.right && dp.rx.bottom)
+        dp.LastCapturedHdr = false;
+        if (dp.GdiFallback)
         {
-            wi = dp.rx.right - dp.rx.left;
-            he = dp.rx.bottom - dp.rx.top;
+            // 桌面复制在所有候选适配器上都拿不到 → 换 GDI 抓屏，画质/帧率略降但能录
+            if (!cap.PrepareGdi(dp.rxDesk))
+                return -2;
+            wi = cap.gdiW;
+            he = cap.gdiH;
+        }
+        else
+        {
+            if (FAILED(cap.CreateDirect3DDevice(dp.ad)))
+                return -1;
+            if (!cap.Prepare(dp.nOutput))
+                return -2;
+            // 桌面复制退回到 FP16 那条路时（Prepare 里要不到 BGRA8），只有 HEVC 收 10 位输入
+            dp.LastCapturedHdr = cap.InHDR != DXGI_FORMAT_UNKNOWN;
+            if (cap.InHDR)
+                dp.VIDEO_ENCODING_FORMAT = MFVideoFormat_HEVC;
+            wi = cap.lOutputDuplDesc.ModeDesc.Width;
+            he = cap.lOutputDuplDesc.ModeDesc.Height;
+            if (dp.rx.right && dp.rx.bottom)
+            {
+                wi = dp.rx.right - dp.rx.left;
+                he = dp.rx.bottom - dp.rx.top;
+            }
         }
     }
 
@@ -1284,15 +1388,25 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
     long lastWantX = LONG_MIN, lastWantY = 0;
     if (dp.HasVideo)
     {
-        followCropW = dp.rx.right - dp.rx.left;
-        followCropH = dp.rx.bottom - dp.rx.top;
-        if (dp.followOn.load(std::memory_order_relaxed))
+        if (cap.gdiMode)
         {
-            const long long packed = dp.wantOrigin.load(std::memory_order_relaxed);
-            lastWantX = (long)(int)(packed >> 32);
-            lastWantY = (long)(int)(packed & 0xFFFFFFFFll);
-            followBiasX = (dp.rx.left + cap.monRect.left) - lastWantX;
-            followBiasY = (dp.rx.top + cap.monRect.top) - lastWantY;
+            // GDI 直接抓桌面坐标的裁剪区，没有「显示器局部坐标」这一层
+            followCropW = cap.gdiW;
+            followCropH = cap.gdiH;
+            cap.gdiRect = dp.rxDesk;
+        }
+        else
+        {
+            followCropW = dp.rx.right - dp.rx.left;
+            followCropH = dp.rx.bottom - dp.rx.top;
+            if (dp.followOn.load(std::memory_order_relaxed))
+            {
+                const long long packed = dp.wantOrigin.load(std::memory_order_relaxed);
+                lastWantX = (long)(int)(packed >> 32);
+                lastWantY = (long)(int)(packed & 0xFFFFFFFFll);
+                followBiasX = (dp.rx.left + cap.monRect.left) - lastWantX;
+                followBiasY = (dp.rx.top + cap.monRect.top) - lastWantY;
+            }
         }
     }
 
@@ -1852,96 +1966,126 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
         HRESULT hrf = S_FALSE;
         if (dp.HasVideo)
         {
-            // 换屏跟随：选区移到别的显示器时切换采集目标继续录制（只平移，帧尺寸不变）。
-            // 位置必须在 AcquireNextFrame **之前** —— 换屏会释放并重建复制对象，此刻不能持有上一帧，
-            // 否则随后的 ReleaseFrame 会作用到新对象上，帧数据也可能取自另一块屏。
-            // 目标屏挂在别的适配器上时无法切换 → 保持当前屏，不做部分跟随。
-            if (dp.followOn.load(std::memory_order_relaxed))
+            if (cap.gdiMode)
             {
-                const long long packed = dp.wantOrigin.load(std::memory_order_relaxed);
-                const long wx = (long)(int)(packed >> 32);
-                const long wy = (long)(int)(packed & 0xFFFFFFFFll);
-                if (wx != lastWantX || wy != lastWantY)
+                // GDI 兜底：跟随只平移抓取原点（帧尺寸不可变），抓帧本身没有任何 COM 调用
+                if (dp.followOn.load(std::memory_order_relaxed))
                 {
-                    lastWantX = wx;
-                    lastWantY = wy;
-                    const long dx = wx + followBiasX;   // 期望的裁剪原点（虚拟桌面坐标）
-                    const long dy = wy + followBiasY;
-                    POINT mid{ (LONG)(dx + followCropW / 2), (LONG)(dy + followCropH / 2) };
-                    HMONITOR hm = MonitorFromPoint(mid, MONITOR_DEFAULTTONEAREST);
-                    MONITORINFO mi{ sizeof(MONITORINFO) };
-                    if (hm && GetMonitorInfoW(hm, &mi))
+                    const long long packed = dp.wantOrigin.load(std::memory_order_relaxed);
+                    const long wx = (long)(int)(packed >> 32);
+                    const long wy = (long)(int)(packed & 0xFFFFFFFFll);
+                    if (wx != lastWantX || wy != lastWantY)
                     {
-                        // 采集帧尺寸不可变：目标屏装不下裁剪框就**不换**（换过去必然裁到屏外）。
-                        // 选区那侧同一条取舍（CutMask::clampToSingleMonitor）—— 两边行为一致。
-                        const bool fits = followCropW <= (mi.rcMonitor.right - mi.rcMonitor.left)
-                            && followCropH <= (mi.rcMonitor.bottom - mi.rcMonitor.top);
-                        if (fits && !EqualRect(&mi.rcMonitor, &cap.monRect))
-                        {
-                            UINT idx = 0;
-                            if (CAPTURE::FindOutputOnDeviceAdapter(cap.device, mi.rcMonitor, idx)
-                                && cap.Prepare(idx))
-                            {
-                                cap.monRect = mi.rcMonitor;
-                                dp.nOutput = idx;   // ACCESS_LOST 后的重建沿用该索引
-                            }
-                            else
-                            {
-                                // 切换失败：记录该显示器，UI 侧随后会禁止选区再移向这里
-                                dp.switchBlocked.store(
-                                    ((long long)(int)mi.rcMonitor.left << 32)
-                                    | (long long)(unsigned int)(int)mi.rcMonitor.top,
-                                    std::memory_order_relaxed);
-                                dp.hasBlocked.store(true, std::memory_order_relaxed);
-                            }
-                        }
-                        if (EqualRect(&mi.rcMonitor, &cap.monRect))
-                        {
-                            // 换算成当前屏的局部裁剪框并夹进复制纹理（尺寸仍是开录时定下的）
-                            long l = dx - cap.monRect.left;
-                            long t = dy - cap.monRect.top;
-                            const long maxL = (long)cap.lOutputDuplDesc.ModeDesc.Width - followCropW;
-                            const long maxT = (long)cap.lOutputDuplDesc.ModeDesc.Height - followCropH;
-                            if (l < 0) l = 0; else if (l > maxL) l = maxL > 0 ? maxL : 0;
-                            if (t < 0) t = 0; else if (t > maxT) t = maxT > 0 ? maxT : 0;
-                            dp.rx = { l, t, l + followCropW, t + followCropH };
-                        }
+                        lastWantX = wx;
+                        lastWantY = wy;
+                        const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+                        const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+                        const int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+                        const int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+                        long l = wx, t = wy;
+                        if (l < vx) l = vx;
+                        if (t < vy) t = vy;
+                        if (vw >= followCropW && l > vx + vw - followCropW) l = vx + vw - followCropW;
+                        if (vh >= followCropH && t > vy + vh - followCropH) t = vy + vh - followCropH;
+                        cap.gdiRect = { l, t, l + followCropW, t + followCropH };
                     }
                 }
-            }
-
-            hr = cap.lDeskDupl->AcquireNextFrame(
-                0,
-                &lFrameInfo,
-                &lDesktopResource);
-            if (hr == DXGI_ERROR_WAIT_TIMEOUT)
-                hr = S_OK;
-            if (hr == DXGI_ERROR_ACCESS_LOST)
-            {
-                cap.lDeskDupl = 0;
-                bool C = false;
-                for (int i = 0; i < 10; i++)
-                {
-                    if (cap.Prepare(dp.nOutput))
-                    {
-                        C = true;
-                        break;
-                    }
-                    Sleep(250);
-                }
-                if (!C)
+                if (!cap.GrabGdi(dp.Cursor, cap.gdiRect))
                     break;
-                hr = S_OK;
             }
-            if (FAILED(hr))
-                break;
+            else
+            {
+                // 换屏跟随：选区移到别的显示器时切换采集目标继续录制（只平移，帧尺寸不变）。
+                // 位置必须在 AcquireNextFrame **之前** —— 换屏会释放并重建复制对象，此刻不能持有上一帧，
+                // 否则随后的 ReleaseFrame 会作用到新对象上，帧数据也可能取自另一块屏。
+                // 目标屏挂在别的适配器上时无法切换 → 保持当前屏，不做部分跟随。
+                if (dp.followOn.load(std::memory_order_relaxed))
+                {
+                    const long long packed = dp.wantOrigin.load(std::memory_order_relaxed);
+                    const long wx = (long)(int)(packed >> 32);
+                    const long wy = (long)(int)(packed & 0xFFFFFFFFll);
+                    if (wx != lastWantX || wy != lastWantY)
+                    {
+                        lastWantX = wx;
+                        lastWantY = wy;
+                        const long dx = wx + followBiasX;   // 期望的裁剪原点（虚拟桌面坐标）
+                        const long dy = wy + followBiasY;
+                        POINT mid{ (LONG)(dx + followCropW / 2), (LONG)(dy + followCropH / 2) };
+                        HMONITOR hm = MonitorFromPoint(mid, MONITOR_DEFAULTTONEAREST);
+                        MONITORINFO mi{ sizeof(MONITORINFO) };
+                        if (hm && GetMonitorInfoW(hm, &mi))
+                        {
+                            // 采集帧尺寸不可变：目标屏装不下裁剪框就**不换**（换过去必然裁到屏外）。
+                            // 选区那侧同一条取舍（CutMask::clampToSingleMonitor）—— 两边行为一致。
+                            const bool fits = followCropW <= (mi.rcMonitor.right - mi.rcMonitor.left)
+                                && followCropH <= (mi.rcMonitor.bottom - mi.rcMonitor.top);
+                            if (fits && !EqualRect(&mi.rcMonitor, &cap.monRect))
+                            {
+                                UINT idx = 0;
+                                if (CAPTURE::FindOutputOnDeviceAdapter(cap.device, mi.rcMonitor, idx)
+                                    && cap.Prepare(idx))
+                                {
+                                    cap.monRect = mi.rcMonitor;
+                                    dp.nOutput = idx;   // ACCESS_LOST 后的重建沿用该索引
+                                }
+                                else
+                                {
+                                    // 切换失败：记录该显示器，UI 侧随后会禁止选区再移向这里
+                                    dp.switchBlocked.store(
+                                        ((long long)(int)mi.rcMonitor.left << 32)
+                                        | (long long)(unsigned int)(int)mi.rcMonitor.top,
+                                        std::memory_order_relaxed);
+                                    dp.hasBlocked.store(true, std::memory_order_relaxed);
+                                }
+                            }
+                            if (EqualRect(&mi.rcMonitor, &cap.monRect))
+                            {
+                                // 换算成当前屏的局部裁剪框并夹进复制纹理（尺寸仍是开录时定下的）
+                                long l = dx - cap.monRect.left;
+                                long t = dy - cap.monRect.top;
+                                const long maxL = (long)cap.lOutputDuplDesc.ModeDesc.Width - followCropW;
+                                const long maxT = (long)cap.lOutputDuplDesc.ModeDesc.Height - followCropH;
+                                if (l < 0) l = 0; else if (l > maxL) l = maxL > 0 ? maxL : 0;
+                                if (t < 0) t = 0; else if (t > maxT) t = maxT > 0 ? maxT : 0;
+                                dp.rx = { l, t, l + followCropW, t + followCropH };
+                            }
+                        }
+                    }
+                }
+
+                hr = cap.lDeskDupl->AcquireNextFrame(
+                    0,
+                    &lFrameInfo,
+                    &lDesktopResource);
+                if (hr == DXGI_ERROR_WAIT_TIMEOUT)
+                    hr = S_OK;
+                if (hr == DXGI_ERROR_ACCESS_LOST)
+                {
+                    cap.lDeskDupl = 0;
+                    bool C = false;
+                    for (int i = 0; i < 10; i++)
+                    {
+                        if (cap.Prepare(dp.nOutput))
+                        {
+                            C = true;
+                            break;
+                        }
+                        Sleep(250);
+                    }
+                    if (!C)
+                        break;
+                    hr = S_OK;
+                }
+                if (FAILED(hr))
+                    break;
 
 
 
-            // take a time stamp here
-            // Get the current time point
-            if (lDesktopResource && !cap.Get(lDesktopResource, dp.Cursor, dp.rx.right && dp.rx.bottom ? &dp.rx : 0))
-                break;
+                // take a time stamp here
+                // Get the current time point
+                if (lDesktopResource && !cap.Get(lDesktopResource, dp.Cursor, dp.rx.right && dp.rx.bottom ? &dp.rx : 0))
+                    break;
+            }
 
             if (isFirstFrame)
             {
@@ -2046,7 +2190,8 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
             hr = pVideoSample->AddBuffer(pVideoBuffer);
             if (FAILED(hr)) break;
 
-            cap.lDeskDupl->ReleaseFrame();
+            if (cap.lDeskDupl)
+                cap.lDeskDupl->ReleaseFrame();
 
 
 

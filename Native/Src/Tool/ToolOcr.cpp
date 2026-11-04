@@ -9,6 +9,38 @@
 #include "ToolbarTheme.h"
 
 namespace {
+	// 去掉段首圆点（• · ● …）及其后的空白：翻译前后都自己管圆点，左右才齐
+	void stripLeadingBullet(std::wstring& t)
+	{
+		size_t k = 0;
+		while (k < t.size() && (t[k] == L' ' || t[k] == L'\t')) ++k;
+		if (k >= t.size()) return;
+		switch (t[k]) {
+		case L'•': case L'·': case L'●': case L'○': case L'▪': case L'◦':
+		case L'※': case L'◆': case L'◇': case L'■': case L'□':
+			t.erase(0, k + 1);
+			while (!t.empty() && (t.front() == L' ' || t.front() == L'\t')) t.erase(0, 1);
+			break;
+		default:
+			break;
+		}
+	}
+
+	// 取出段首圆点字符（没有就返回 0）：文本重排时统计哪种圆点用得最多
+	wchar_t leadingBulletChar(const std::wstring& t)
+	{
+		size_t k = 0;
+		while (k < t.size() && (t[k] == L' ' || t[k] == L'\t')) ++k;
+		if (k >= t.size()) return 0;
+		switch (t[k]) {
+		case L'•': case L'·': case L'●': case L'○': case L'▪': case L'◦':
+		case L'※': case L'◆': case L'◇': case L'■': case L'□':
+			return t[k];
+		default:
+			return 0;
+		}
+	}
+
 	// Microsoft YaHei 的 CJK 字形墨迹高 / 字号 ≈ 0.875（实测）。用它把"字号"和"文字实际占多高"互相换算。
 	constexpr float kYaheiInkRatio = 0.875f;
 	// 收框时文字纵向允许占到的框高比例。识别框本身就是贴着文字的，取 1.0 才等于"还原原来的大小"，
@@ -32,6 +64,14 @@ namespace {
 				|| (c >= 0xFF00 && c <= 0xFFEF)) return true;
 		}
 		return false;
+	}
+
+	// 单个字符是不是方块字（合并折行时决定要不要补空格：中文之间不用，西文之间要）
+	bool isCjkChar(wchar_t c)
+	{
+		return (c >= 0x3000 && c <= 0x303F) || (c >= 0x3040 && c <= 0x30FF)
+			|| (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0xAC00 && c <= 0xD7AF)
+			|| (c >= 0xFF00 && c <= 0xFFEF);
 	}
 
 	// 叠加用文字块：把文字**按真实排版尺寸**等比缩放并居中到识别框。
@@ -65,7 +105,9 @@ namespace {
 			// 竖排是"每字一行"的多行文本，行距由排版决定、不能再用 inkH 估算，直接按整列自然高度缩放。
 			const float s = vertical
 				? std::min(std::min(fitW / w, fitH * 0.98f / h), 1.f)
-				: std::min(std::min(fitW / w, fitH * vFill / inkH), 1.f);
+				// 横排：允许 6% 以内的横向溢出，不为了几像素再缩一次 ——
+				// 逐行缩放会让同一段里的字（包括圆点）大小忽大忽小，看着不齐
+				: std::min(std::min((w > fitW * 1.06f ? fitW / w : 1.f), fitH * vFill / inkH), 1.f);
 			scale_ = s;
 			// 水平按原文对齐摆放：译文比原文短、装不满框时，居左/居中/居右的差别才看得出来。
 			// 居左 = 和原文一样从同一列起排；居中/居右照原样还原。
@@ -552,6 +594,12 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 	// 右上角按钮的显示/隐藏靠轮询：面板除文字块外全穿透，空白处的悬停事件收不到
 	onTimer.add([this](UINT id) {
 		if (id == kHoverTimerId) updateButtonsHover();
+		if (id == kTypingTimerId) {
+			// 点动画：0 → 1 → 2 → 3 循环，让提示条一直"在动"，不打字
+			busyDots_ = (busyDots_ + 1) % 4;
+			if (bannerLabel) bannerLabel->setText(busyBase_ + std::wstring((size_t)busyDots_, L'.'));
+			repaint();
+		}
 	});
 }
 
@@ -696,6 +744,51 @@ void ToolOcr::refreshCompareBtnState()
 	compareBtn->setHoverColor(color);
 }
 
+// 把一段译文按"原文各行宽度"逐行塞满：方块字逐字、西文按词，塞不下（行数不够）返回 false。
+// 成功时 out 的每一行正好对应原文的一行，可以直接贴回原位。
+bool fitTextToSlots(const std::wstring& text, float fontLogical, float dpi, bool bold,
+	const std::vector<float>& slotWidths, std::vector<std::wstring>& out)
+{
+	out.clear();
+	if (slotWidths.empty() || text.empty()) return false;
+	size_t pos = 0;
+	for (size_t k = 0; k < slotWidths.size() && pos < text.size(); ++k) {
+		const float lim = std::max(8.f, slotWidths[k]);
+		std::wstring line;
+		while (pos < text.size()) {
+			// 取一个排版单元：方块字一个字；西文一个词（连同后面的空格）
+			size_t next = pos + 1;
+			if (!isCjkChar(text[pos])) {
+				while (next < text.size() && !isCjkChar(text[next]) && text[next] != L' ') ++next;
+				while (next < text.size() && text[next] == L' ') ++next;
+			}
+			const std::wstring cand = text.substr(pos, next - pos);
+			float w = 0.f, h = 0.f;
+			if (!measureTextSize(line + cand, fontLogical, dpi, bold, w, h)) { out.clear(); return false; }
+			if (!line.empty() && w > lim) break;
+			if (line.empty() && w > lim) {
+				// 单元本身比整行还宽：退回按字硬断
+				std::wstring cut;
+				for (size_t t = pos; t < next; ++t) {
+					float cw = 0.f, ch = 0.f;
+					if (!measureTextSize(cut + text[t], fontLogical, dpi, bold, cw, ch)) break;
+					if (cw > lim && !cut.empty()) break;
+					cut += text[t];
+				}
+				if (cut.empty()) return false;
+				line = cut;
+				pos += cut.size();
+				break;
+			}
+			line += cand;
+			pos = next;
+		}
+		out.push_back(line);
+	}
+	if (pos < text.size()) { out.clear(); return false; }   // 行数不够，交给整段排版
+	return !out.empty();
+}
+
 void ToolOcr::rebuildEditors()
 {
 	builtDpi_ = dpi;   // 这一版编辑框是用当前 dpi 排的（换屏后 syncToMask 据此判断要不要重排）
@@ -736,34 +829,80 @@ void ToolOcr::rebuildEditors()
 	// 算就会"一行大一行小"。做法：取偏低分位当**正文基准**（大标题会把均值/中位抬高，偏低分位对
 	// 少数大框不敏感），正文行一律用正文框高的**平均值**定字号；明显更大的行（标题）保留自身高度。
 	std::vector<float> hEff(result_.regions.size(), 0.f);
+	// 译文定字号用的「墨迹高」（真实字身高度，物理像素）。
+	std::vector<float> inkEff(result_.regions.size(), 0.f);
 	{
 		const size_t n = result_.regions.size();
-		std::vector<float> hs(n);
-		for (size_t i = 0; i < n; i++)
-			hs[i] = std::max(1.f, result_.regions[i].h * scaleY);
-		std::vector<float> sorted = hs;
+		// 一律按墨迹高度定字号，不再用检测框高度：表格单元的框含内边距，框高参差不齐，
+		// 用框高会把普通单元格误判成"标题"放大。
+		std::vector<float> ik(n, 0.f);
+		for (size_t i = 0; i < n; i++) {
+			const auto& r = result_.regions[i];
+			ik[i] = estimateInkHeight(srcImage_, imgW, imgH, r.x, r.y, r.w, r.h) * scaleY;
+			if (ik[i] < 3.f) ik[i] = std::max(1.f, r.h * scaleY) * 0.72f;
+		}
+		std::vector<float> sorted = ik;
 		std::sort(sorted.begin(), sorted.end());
-		const float bodyRef = sorted.empty() ? 0.f : sorted[sorted.size() / 4];
+		const float bodyRef = sorted.empty() ? 0.f : sorted[sorted.size() / 2];
 		const float headingThresh = bodyRef * 1.45f;
 		float bodySum = 0.f;
 		int bodyN = 0;
 		for (size_t i = 0; i < n; i++) {
-			if (hs[i] < headingThresh) { bodySum += hs[i]; ++bodyN; }
+			if (ik[i] < headingThresh) { bodySum += ik[i]; ++bodyN; }
 		}
-		const float bodyAvg = (bodyN > 0) ? bodySum / (float)bodyN : bodyRef;
-		for (size_t i = 0; i < n; i++)
-			hEff[i] = (hs[i] < headingThresh) ? bodyAvg : hs[i];
+		float bodyInk = (bodyN > 0) ? bodySum / (float)bodyN : bodyRef;
+		// 可读性下限：正文换算成字号后如果太小，按方块字 13px / 西文 12px 兜底。
+		// 例外：整块**确实全是小字**（八成以上的正文行都在下限以下）时就按实际来 ——
+		// 那种截图（整页密集小字）强行放大会全部溢出重叠。
+		{
+			const bool hasCjk = [&] {
+				for (const auto& r : result_.regions)
+					for (wchar_t c : r.text)
+						if (c >= 0x3400 && c <= 0x9FFF) return true;
+				return false;
+			}();
+			const float minReadPx = hasCjk ? 13.f : 12.f;
+			const float bodyPx = bodyInk / (kCjkInkRatio * dpi);
+			if (bodyPx > 0.f && bodyPx < minReadPx && bodyN > 0) {
+				int tiny = 0;
+				for (size_t i = 0; i < n; i++) {
+					if (ik[i] >= headingThresh) continue;
+					if (ik[i] / (kCjkInkRatio * dpi) < minReadPx) ++tiny;
+				}
+				// 不到八成的小字 → 说明是"个别行偏小"，抬到可读下限
+				if (tiny * 100 < bodyN * 80) bodyInk = minReadPx * kCjkInkRatio * dpi;
+			}
+		}
+		for (size_t i = 0; i < n; i++) {
+			hEff[i] = (ik[i] < headingThresh) ? bodyInk : ik[i];
+			inkEff[i] = hEff[i];
+		}
+		// 表格里的"高个子"不是标题：标题独占一行，表格一行里有好几个格子。
+		// 带图标的格子墨迹会被图标撑高，不压回正文就会比同排其他格子大一圈。
+		for (size_t i = 0; i < n; i++) {
+			if (ik[i] < headingThresh) continue;
+			const auto& a = result_.regions[i];
+			for (size_t j = 0; j < n; j++) {
+				if (j == i) continue;
+				const auto& b = result_.regions[j];
+				const float hh = std::max(1.f, std::min(a.h, b.h));
+				if (std::fabs(b.y - a.y) <= hh * 0.5f) {
+					hEff[i] = bodyInk;
+					inkEff[i] = bodyInk;
+					break;
+				}
+			}
+		}
 	}
-
 	// 原文对齐检测：译文比原文短、装不满框时才有观感差别 —— 居中的标题要跟着居中、
 	// 右对齐的日期/页码要跟着靠右。判据基于"**行与行之间的共识**"（只看单行的左右留白会被
 	// 整段缩进 / 选区没框正带偏）：
-	//   ① 先定整块的主导对齐：比较左边界/中线/右边界各自"最多有几行共用"。若中线共用的行数
-	//      **严格多于**左右、且至少 2 行，就判定整块居中，所有行一律居中 —— 避免同一段文字里
-	//      出现"一行居左一行居中"（各行长度不同时，中线重合才是真的居中）。
+	//   ① 整块是否居中：比较左边界/中线/右边界各自"最多有几行共用"，且左右两侧都明显内缩、
+	//      内缩量接近 —— 三条都满足才整块居中。
 	//   ② 否则逐行：贴"多行共用的左边界"→居左；贴多行共用的右边界、或顶到整块最右且明显短→居右；
-	//      与"多行共用的中线"重合且两侧都明显内缩→居中；都不像→居左。
+	//      **其余一律居左**（不再逐行猜居中：那样一段左对齐的列表很容易被误判成居中）。
 	std::vector<int> aligns(result_.regions.size(), 0);
+	float blockLeftPx = 0.f;   // 整块的左边界（译文行首齐头用，见下面的翻译排版）
 	{
 		const size_t n = result_.regions.size();
 		if (n > 0) {
@@ -780,7 +919,6 @@ void ToolOcr::rebuildEditors()
 			const float blockW = std::max(1.f, maxR - minL);
 			const float tol = std::max(2.f, blockW * 0.03f);      // 聚簇容差
 			const float tolEdge = std::max(3.f, blockW * 0.05f);  // "同一列"的容差（OCR 框本就有几像素抖动）
-			const float inset = std::max(4.f, blockW * 0.08f);    // 居中要求两侧都明显内缩
 
 			// 聚簇：返回每行所属簇 id；sizes 记录各簇大小（= 有多少行共用这条边）
 			auto cluster = [tol](const std::vector<float>& v, std::vector<int>& sizes) {
@@ -800,58 +938,211 @@ void ToolOcr::rebuildEditors()
 			std::vector<int> szL, szR, szC;
 			const auto idL = cluster(ls, szL);
 			const auto idR = cluster(rs, szR);
-			const auto idC = cluster(cs, szC);
+			cluster(cs, szC);   // 中线簇只用于"整块居中"判定
 			int bestL = 0, bestR = 0, bestC = 0;
 			for (int s : szL) bestL = std::max(bestL, s);
 			for (int s : szR) bestR = std::max(bestR, s);
 			for (int s : szC) bestC = std::max(bestC, s);
-			// ① 整块居中：中线共用的行数严格多于左右，且至少两行
-			const bool blockCentered = (bestC >= 2 && bestC > bestL && bestC > bestR);
+			// ① 整块居中：中线共用的行数严格多于左右、至少两行，**再**加一道几何闸 ——
+			//    左右两侧都要明显内缩、且内缩量接近。只靠中线聚簇不够：每行宽度差不多、
+			//    左边界又被 OCR 抖成两个簇时，中线会挤成一簇，一整段左对齐的列表就被判成居中，
+			//    译文每行都跟着缩进，看着就是"没对齐"（用户反馈的正是这个）。
+			std::vector<float> lin(n), rin(n);
+			for (size_t i = 0; i < n; i++) { lin[i] = ls[i] - minL; rin[i] = maxR - rs[i]; }
+			std::sort(lin.begin(), lin.end());
+			std::sort(rin.begin(), rin.end());
+			const float medL = lin[n / 2], medR = rin[n / 2];
+			const float insetMin = std::max(3.f, blockW * 0.06f);
+			const bool symmetric = std::fabs(medL - medR) <= std::max(blockW * 0.10f, 6.f);
+			const bool blockCentered = (bestC >= 2 && bestC > bestL && bestC > bestR)
+				&& medL > insetMin && medR > insetMin && symmetric;
+			// 整块左边界取**偏左分位**：多数行贴在这里；个别行因为圆点没被并进文字会偏右
+			// 一两个字符宽，取中位数会被这种行带偏（一半行偏右时基准也跟着偏右）。
+			{
+				std::vector<float> lsorted = ls;
+				std::sort(lsorted.begin(), lsorted.end());
+				blockLeftPx = lsorted[n / 4];
+			}
 
 			for (size_t i = 0; i < n; i++) {
 				if (blockCentered) { aligns[i] = 1; continue; }
 				const float lineW = rs[i] - ls[i];
 				const bool multiLeft = idL[i] >= 0 && szL[idL[i]] >= 2;
 				const bool multiRight = idR[i] >= 0 && szR[idR[i]] >= 2;
-				const bool multiCenter = idC[i] >= 0 && szC[idC[i]] >= 2;
 				if (multiLeft) {
 					aligns[i] = 0;                                   // 贴着多行共用的左边界
 				}
 				else if (multiRight || (maxR - rs[i] <= tolEdge && lineW < blockW * 0.85f)) {
 					aligns[i] = 2;                                   // 多行共用右边界 / 顶右且不是满行
 				}
-				else if (multiCenter && (ls[i] - minL) > inset && (maxR - rs[i]) > inset) {
-					aligns[i] = 1;                                   // 与多行共用的中线重合，且两侧内缩
-				}
 				else {
-					aligns[i] = 0;                                   // 都不像 → 仍按居左
+					aligns[i] = 0;                                   // 其余一律居左，不再逐行猜居中
 				}
 			}
 		}
 	}
 
-	// 翻译：译文**不压缩进原框**，而是按原文行宽折行、字号取原文行高（西文再收 5%）；
-	// 折行后行高增加，后面的行依次顺延。整段超出选区时滚轮上下滚动（不画滚动条）。
+	// 翻译：译文按**段**排版 —— 同一段的折行（OCR 的视觉行、续行还带缩进）先并成一个框，
+	// 再按原段宽折行、字号取原文行高。整段超出选区时滚轮上下滚动（不画滚动条）。
 	if (translateMode_ && !result_.regions.empty()) {
 		// 译文不再原位覆盖原文，行被推开后空档会露出原字 —— 整块用采样底色盖死
 		body->setBg(palBg_);
-		float cursorY = 0.f;   // 物理像素：下一行允许的最上端
-		for (size_t i = 0; i < result_.regions.size(); ++i) {
-			auto& reg = result_.regions[i];
-			const std::wstring text = reg.displayText.empty() ? reg.text : reg.displayText;
+		float cursorY = 0.f;   // 物理像素：下一段允许的最上端
+		const size_t n = result_.regions.size();
+		// 全块字身中位：判断"这段是不是大字标题"用
+		float bodyInkAll = 0.f;
+		{
+			std::vector<float> vs;
+			for (float v : inkEff) if (v >= 3.f) vs.push_back(v);
+			std::sort(vs.begin(), vs.end());
+			if (!vs.empty()) bodyInkAll = vs[vs.size() / 2];
+		}
+		std::vector<size_t> paras;   // 每段的段首 region 下标
+		for (size_t k = 0; k < n; ++k)
+			if (k == 0 || result_.regions[k].para != result_.regions[k - 1].para) paras.push_back(k);
+		// 整块是不是"圆点列表"：过半左对齐段落带圆点。是的话，中段被 OCR 漏掉圆点的条目
+		// 也按条目补一个 —— 否则它比上下条目左移一个"• "的宽度，看着就是"中间不齐"。
+		int bulletParas = 0, leftParas = 0;
+		for (size_t k = 0; k < paras.size(); ++k) {
+			if (aligns[paras[k]] != 0) continue;
+			++leftParas;
+			if (result_.regions[paras[k]].bullet) ++bulletParas;
+		}
+		const bool isBulletList = (bulletParas > 0 && bulletParas * 2 >= leftParas);
+		for (size_t p = 0; p < paras.size(); ++p) {
+			// 本段范围 [i, j)：同 para 的行算一段（段落归并在 ocrResultMergedToLines 里做）
+			const size_t i = paras[p];
+			const size_t j = (p + 1 < paras.size()) ? paras[p + 1] : n;
+			const auto& reg = result_.regions[i];
+			const bool betweenBullets = p > 0 && p + 1 < paras.size()
+				&& result_.regions[paras[p - 1]].bullet && result_.regions[paras[p + 1]].bullet;
+			const bool bullet = reg.bullet || (isBulletList && betweenBullets);
+			std::wstring text = reg.displayText;
+			if (text.empty()) {
+				// 没有译文（例如目标语言与原文相同）：退回原文，按行拼起来（原文自带圆点）
+				for (size_t k = i; k < j; ++k) {
+					if (!text.empty()) text += L' ';
+					text += result_.regions[k].text;
+				}
+			}
+			else if (bullet) {
+				// 圆点自己补：引擎对"•"保留/丢弃不一致，补上后所有条目左端才在同一列
+				stripLeadingBullet(text);
+				text = std::wstring(L"\u2022  ") + text;   // 圆点后留两个空格：和正文拉开一点
+			}
 			if (text.empty()) continue;
-			const float px = reg.x * scaleX;
 			const float py = reg.y * scaleY;
-			const float pw = std::max(1.f, reg.w * scaleX);
 			const float ph = (hEff[i] > 0.f) ? hEff[i] : std::max(1.f, reg.h * scaleY);
-			// 折行宽度：右边有空间就伸到选区右边界，只被同一行带上的右侧文本挡住
-			// （左右分栏时才保留原列宽，免得跟邻栏打架）；居中/右对齐保持原框宽，避免对齐跑偏。
+			float rightMost = (reg.x + reg.w) * scaleX;   // 段内最右（段宽按它算）
+			for (size_t k = i + 1; k < j; ++k) {
+				const auto& rk = result_.regions[k];
+				rightMost = std::max(rightMost, (rk.x + rk.w) * scaleX);
+			}
+			const bool wide = hasWideGlyph(text);
+			const bool srcWide = hasWideGlyph(reg.text);
+			// 字号完全沿用 OCR 原位的口径：先按行框定一个字号，再像 OcrText 那样按真实排版尺寸缩进框里。
+			// 这样翻译出来的大小和 OCR 结果一一对应（标题大、正文小），只是换了语言。
+			const float srcBoxH = (hEff[i] > 0.f) ? hEff[i] : std::max(1.f, reg.h * scaleY);
+			const float srcBoxW = std::max(1.f, reg.w * scaleX);
+			const float srcInkRatio = srcWide ? kCjkInkRatio : kYaheiInkRatio;
+			const float srcVFill = srcWide ? kCjkVFill : 1.f;
+			float f = std::clamp(srcBoxH * srcVFill / (srcInkRatio * dpi), 7.f / dpi, 300.f / dpi);
+			{
+				float nw = 0.f, nh = 0.f;
+				if (measureTextSize(reg.text, f, dpi, reg.bold, nw, nh)) {
+					const float inkH = f * dpi * srcInkRatio;
+					const float s = std::min(nw > 0.f ? srcBoxW / nw : 1.f,
+						inkH > 0.f ? srcBoxH * srcVFill / inkH : 1.f);
+					f *= std::clamp(s, 0.5f, 1.f);
+				}
+			}
+			// 目标语言的字形大小补偿：英→中放一点、中→英收一点
+			const float scriptAdj = (wide && !srcWide) ? 1.0f : (!wide && srcWide) ? 0.95f : 1.f;
+			const float fLogical = std::max(7.f / dpi, f * scriptAdj);
+			// 方案一：把译文按原文各行的槽位贴回去 —— 每行贴在自己的原位置、原宽度里，
+			// 行数够且每行都塞得下才成功；否则落到下面的整段排版。
+			if (aligns[i] == 0 && j > i) {
+				std::vector<float> slotW;
+				slotW.reserve(j - i);
+				for (size_t k = i; k < j; ++k) {
+				// 元素查找到的选区：宽度按**元素外框**满排（右边到面板右边界），
+				// 译文正好铺满元素，和原布局严丝合缝；手拖的选区仍按每行框宽。
+				const float lineW = elementBlock_
+					? std::max(8.f, w * dpi - result_.regions[k].x * scaleX - 4.f * dpi)
+					: std::max(8.f, result_.regions[k].w * scaleX);
+				slotW.push_back(lineW);
+				}
+				std::vector<std::wstring> slotLines;
+				// 字号不再为塞进槽位而缩小：排不下就退回整段排版，字号保持一致
+				const float slotFont = fitTextToSlots(text, fLogical, dpi, reg.bold, slotW, slotLines) ? fLogical : 0.f;
+				if (slotFont > 0.f) {
+					const float lineH = slotFont * dpi * 1.2f;
+					// 行距沿原文的行距；译文行数比原文少时**往上收**，不留空洞
+					// （原文那一行由面板底色盖住，不会露出残影）。
+					float pitch = lineH;
+					if (j - i > 1) {
+						const float y0 = result_.regions[i].y * scaleY;
+						const float y1 = result_.regions[j - 1].y * scaleY;
+						pitch = std::max(lineH, (y1 - y0) / (float)(j - i - 1));
+					}
+					// 段落起点：原文位置和"紧接上一段"取更靠上的那个 —— 译文比原文短时
+					// 后面不会空出一大块；比原文长时也不会压到上一段。
+					const float want = result_.regions[i].y * scaleY;
+					float paraGap = lineH * 0.45f;
+					if (i > 0) {
+						const auto& prev = result_.regions[i - 1];
+						const float g = std::max(0.f, want - (prev.y + prev.h) * scaleY);
+						paraGap = std::clamp(g, lineH * 0.25f, lineH * 0.8f);
+					}
+					// 段落起点：只有"接在上一段下面"（同一列往下走）才做上下压缩；
+					// 并排的表格单元 want 和上一段几乎相同，必须保持原位 —— 否则每格都被
+					// "紧接上一段"往下推一格，整行表格就挤成一团。
+					float top0 = want;
+					if (cursorY > 1.f && want >= cursorY - lineH * 0.6f) {
+						top0 = std::min(want, cursorY + paraGap);
+					}
+					for (size_t k = i; k < j && (k - i) < slotLines.size(); ++k) {
+						const auto& rk = result_.regions[k];
+						const float sx = rk.x * scaleX;
+						const float sy = top0 + (float)(k - i) * pitch;
+						auto* box = body->makeChild<Ling::TextBox>();
+						box->setPositionType(Ling::Position::Absolute);
+						box->setPosition(Ling::Edge::Left, sx / dpi);
+						box->setPosition(Ling::Edge::Top, (sy + (std::max(rk.h * scaleY, lineH) - lineH) * 0.5f) / dpi);
+						box->setSize(std::max(slotW[k - i], 1.f) / dpi, lineH / dpi);
+						box->setColor(palFg_);
+						box->setPadding(0.f);
+						box->setFontSize(slotFont);
+						if (reg.bold) box->setBold(true);
+						box->setScrollBarVisible(false);
+						box->setSelectionBgColor(0x1890FFFF);
+						box->setSelectionTextColor(0xFFFFFFFF);
+						box->setMouseSelectionEnabled(false);
+						box->setText(slotLines[k - i]);
+						editors.push_back(box);
+						trBoxes_.push_back(box);
+						trTops_.push_back(sy);
+					}
+					cursorY = top0 + (float)(slotLines.size() - 1) * pitch + lineH;
+					continue;
+				}
+			}
+			// 段首对齐：整段用**第一行**的起点（续行的缩进是同一段的折行，不能再带出来）；
+			// 圆点没被并进文字的行会偏出一两个字符宽，按整块左边界吸一下。
+			float px = reg.x * scaleX;
+			if (aligns[i] == 0 && px > blockLeftPx && px - blockLeftPx <= 3.0f * fLogical * dpi)
+				px = blockLeftPx;
+			const float pw = std::max(1.f, rightMost - px);
+			// 折行宽度：右边有空间就伸到选区右边界，只被同一段高度上的右侧文本挡住
+			// （左右分栏时才保留原列宽，免得跟邻栏打架）；居中/右对齐保持原段宽，避免对齐跑偏。
 			float rightLimit = w;
-			if (aligns[i] == 0) {
-				const float iy0 = reg.y * scaleY, iy1 = (reg.y + reg.h) * scaleY;
-				for (size_t j = 0; j < result_.regions.size(); ++j) {
-					if (j == i) continue;
-					const auto& o = result_.regions[j];
+			if (aligns[i] == 0 && !elementBlock_) {
+				const float iy0 = reg.y * scaleY;
+				const auto& last = result_.regions[j - 1];
+				const float iy1 = (last.y + last.h) * scaleY;
+				for (size_t k = 0; k < n; ++k) {
+					if (k >= i && k < j) continue;
+					const auto& o = result_.regions[k];
 					const float ox = o.x * scaleX;
 					if (ox <= px + 0.5f) continue;   // 只受右侧文本限制
 					const float oy0 = o.y * scaleY, oy1 = (o.y + o.h) * scaleY;
@@ -863,23 +1154,53 @@ void ToolOcr::rebuildEditors()
 				rightLimit = px + pw;
 			}
 			const float boxW = std::max(pw, std::min(rightLimit, w) - px);
-			const bool wide = hasWideGlyph(text);
-			const float inkRatio = wide ? kCjkInkRatio : kYaheiInkRatio;
-			const float vFill = wide ? kCjkVFill : 1.f;
-			const float fLogical = std::clamp(ph * vFill / (inkRatio * dpi), 7.f / dpi, 300.f / dpi)
-				* (wide ? 1.f : 0.95f);   // 西文字形偏小，同字号看着略小，收一点更贴近原文
-			const float measured = measureTextHeight(text, fLogical, boxW / dpi, dpi, reg.bold);
+			// 右/居中段落：原框可能比译文窄（一行日期被折成两行）。按译文实际宽度朝外侧撑开，
+			// 右对齐的右边界、居中的中线保持不动。
+			float boxX = px;
+			float boxWidth = boxW;
+			if (aligns[i] != 0) {
+				float nw = 0.f, nh = 0.f;
+				if (measureTextSize(text, fLogical, dpi, reg.bold, nw, nh) && nw + 2.f > boxW) {
+					const float extra = nw + 2.f - boxW;
+					boxWidth = nw + 2.f;
+					boxX = (aligns[i] == 2) ? px - extra : px - extra * 0.5f;
+					if (boxX < 0.f) { boxWidth += boxX; boxX = 0.f; }
+				}
+			}
+			const float measured = measureTextHeight(text, fLogical, boxWidth / dpi, dpi, reg.bold);
 			const float boxH = std::max(1.f, measured > 0.f ? measured + 1.f : ph);
-			const float top = std::max(py, cursorY);
+			// 段与段之间的空隙：英文比中文长，一段常折成多行，把下一段顶下来后两段就贴死了。
+			// 被顶下来时按原文行距补一点空隙（至少 0.3 行、最多 0.8 行）。
+			float origGap = 0.f;
+			if (i > 0) {
+				const auto& prev = result_.regions[i - 1];
+				origGap = std::max(0.f, py - (prev.y + prev.h) * scaleY);
+			}
+			const float lineH = fLogical * dpi;
+			const float paraGap = std::clamp(origGap, lineH * 0.30f, lineH * 0.80f);
+			const float top = (cursorY > py) ? cursorY + paraGap : py;
 			auto* box = body->makeChild<Ling::TextBox>();
 			box->setPositionType(Ling::Position::Absolute);
-			box->setPosition(Ling::Edge::Left, px / dpi);
+			box->setPosition(Ling::Edge::Left, boxX / dpi);
 			box->setPosition(Ling::Edge::Top, top / dpi);
-			box->setSize(boxW / dpi, boxH / dpi);
+			box->setSize(boxWidth / dpi, boxH / dpi);
 			box->setColor(palFg_);
 			box->setPadding(0.f);
 			box->setFontSize(fLogical);
-			if (reg.bold) box->setBold(true);   // 大字标题估出的加粗；小字不猜
+			// 加粗只给整段都是大字的段落：OCR 把标题和正文并成一段时，不能因为首行是标题
+			// 就把整段都加粗（否则正文看着比标题还重）
+			bool paraBold = false;
+			if (reg.bold) {
+				if (j - i == 1) paraBold = true;
+				else {
+					std::vector<float> pis;
+					for (size_t t = i; t < j; ++t) if (inkEff[t] >= 3.f) pis.push_back(inkEff[t]);
+					std::sort(pis.begin(), pis.end());
+					const float pi = pis.empty() ? 0.f : pis[pis.size() / 2];
+					paraBold = pi > 3.f && bodyInkAll > 3.f && pi > bodyInkAll * 1.2f;
+				}
+			}
+			if (paraBold) box->setBold(true);
 			box->setScrollBarVisible(false);   // 单个框不滚（高度已按内容给足），滚动只发生在整层
 			box->setTextAlignCenter(aligns[i] == 1);
 			box->setSelectionBgColor(0x1890FFFF);
@@ -894,7 +1215,7 @@ void ToolOcr::rebuildEditors()
 		trMaxScroll_ = std::max(0.f, cursorY - h);
 	}
 
-	// 文本重排：跳过逐框覆盖，走下面「整段文本框」分支
+	// 文本重排：整段落进一个可编辑文本框（见下面的智能排版分支）
 	const size_t regionCount = (reflow_ || translateMode_) ? 0 : result_.regions.size();
 	for (size_t i = 0; i < regionCount; ++i) {
 		auto& reg = result_.regions[i];
@@ -928,7 +1249,13 @@ void ToolOcr::rebuildEditors()
 		// 2) 文字：字号按"字形高度 = 识别框高"取，再交给 OcrText 在 layout() 里
 		//    按**真实排版尺寸**缩放并居中到识别框（字形与框上下齐平、左右拉满）。
 		//    墨迹比按脚本分：方块字占 em 的比例比西文大，用同一个比会把中文算大、与上下行叠在一起。
-		const std::wstring text = reg.displayText.empty() ? reg.text : reg.displayText;
+		std::wstring text = reg.displayText.empty() ? reg.text : reg.displayText;
+		// 圆点统一成「• 」：引擎有时给 ·（小中点）、有时给 •、有时干脆不认，
+		// 直接画出来大小不一，看着就像"没带圆点"。这里统一成一个字形。
+		if (reg.bullet && !text.empty()) {
+			stripLeadingBullet(text);
+			text = std::wstring(L"\u2022  ") + text;   // 圆点后留两个空格：和正文拉开一点
+		}
 		const float boxW = std::max(1.f, reg.w * scaleX);   // 面板物理像素
 		// 竖排列高各不相同（长列 679、短列 111…），不能用横排那套"统一正文行高"，
 		// 否则长列被缩短上移、短列被撑高、字距拉大。竖排一律用它自己的框高。
@@ -1032,31 +1359,110 @@ void ToolOcr::rebuildEditors()
 			bgNode->setBg(palBg_);
 			bgs_.push_back(bgNode);
 		}
-		auto* box = body->makeChild<Ling::TextBox>();
-		box->setPositionType(Ling::Position::Absolute);
-		box->setPosition(Ling::Edge::Left, 8.f);
-		box->setPosition(Ling::Edge::Top, 40.f);
-		box->setSize(std::max(80.f, w / dpi - 16.f), std::max(40.f, h / dpi - 48.f));
-		box->setBg(palBg_);
-		box->setColor(palFg_);
-		box->setSelectionBgColor(0x1890FFFF);   // 拖选文字背景色统一 #1890FF
-		box->setSelectionTextColor(0xFFFFFFFF);   // 拖选反白
-		box->setText(fullText);
-		// 文本重排可编辑：每次文字变化记一步，Ctrl+Z / Ctrl+Y 由本类处理（TextBox 没有 undo）
-		reflowHistory_.assign(1, fullText);
-		reflowHistPos_ = 0;
-		box->onTextChanged.add([this](Ling::TextBox*, const std::wstring& t) {
-			if (reflowHistGuard_) return;
-			// 在历史中间又编辑：丢掉 redo 分支再追加
-			reflowHistory_.resize((size_t)reflowHistPos_ + 1);
-			reflowHistory_.push_back(t);
-			reflowHistPos_ = (int)reflowHistory_.size() - 1;
-			if (reflowHistory_.size() > 200) {
-				reflowHistory_.erase(reflowHistory_.begin());
-				reflowHistPos_ = (int)reflowHistory_.size() - 1;
+		{
+			// 文本重排：一行对一行，保留识别出的换行；不合并折行、不额外插空行。
+			// 全篇一个字号（带可读下限），圆点统一成识别结果里出现最多的那种。
+			constexpr float kMinFontCjk = 13.f;    // 中文最小字号（逻辑像素）
+			constexpr float kMinFontLatin = 12.f;  // 西文最小字号
+			std::vector<float> inkOf(result_.regions.size(), 0.f);
+			for (size_t i = 0; i < result_.regions.size(); ++i) {
+				const auto& r = result_.regions[i];
+				inkOf[i] = estimateInkHeight(srcImage_, imgW, imgH, r.x, r.y, r.w, r.h) * scaleY;
 			}
-		});
-		editors.push_back(box);
+			std::vector<float> bodyInks;
+			for (float v : inkOf) if (v >= 3.f) bodyInks.push_back(v);
+			std::sort(bodyInks.begin(), bodyInks.end());
+			const float bodyInk = bodyInks.empty() ? 0.f : bodyInks[bodyInks.size() / 2];
+
+			// 圆点多数表决：OCR 可能混着 • · ●，取出现最多的；票数相同用先出现的
+			wchar_t bulletChar = 0;
+			{
+				std::vector<wchar_t> order;
+				std::vector<int> counts;
+				for (const auto& r : result_.regions) {
+					const std::wstring& t = r.displayText.empty() ? r.text : r.displayText;
+					const wchar_t c = leadingBulletChar(t);
+					if (!c) continue;
+					auto it = std::find(order.begin(), order.end(), c);
+					if (it == order.end()) { order.push_back(c); counts.push_back(1); }
+					else ++counts[(size_t)(it - order.begin())];
+				}
+				if (!order.empty()) {
+					size_t best = 0;
+					for (size_t k = 1; k < order.size(); ++k) if (counts[k] > counts[best]) best = k;
+					bulletChar = order[best];
+				}
+			}
+
+			std::wstring text;
+			float bx0 = 1e9f, by0 = 1e9f;
+			for (const auto& r : result_.regions) {
+				std::wstring t = r.displayText.empty() ? r.text : r.displayText;
+				if (t.empty()) continue;
+				const wchar_t lead = leadingBulletChar(t);
+				if (lead) {
+					// 圆点后留两个空格：和正文拉开一点，读起来不黏
+					stripLeadingBullet(t);
+					t = std::wstring(1, bulletChar ? bulletChar : lead) + L"  " + t;
+				}
+				if (!text.empty()) text += L'\n';
+				text += t;
+				bx0 = std::min(bx0, r.x);
+				by0 = std::min(by0, r.y);
+			}
+			if (!text.empty()) {
+				// 统一字号：识别字身（墨迹高中位）换算后再 +1 —— 同字号下重排出来的观感偏小，
+				// 抬 1 号更好读；再夹在 13/12 下限与 21 上限之间。
+				const bool cjk = hasWideGlyph(text);
+				const float ratio = cjk ? kCjkInkRatio : kYaheiInkRatio;
+				const float minFont = cjk ? kMinFontCjk : kMinFontLatin;
+				const float bodyFont = std::clamp(bodyInk / (ratio * dpi) + 1.f, minFont, 21.f);
+				const float pad = 2.f * dpi;
+				const float left = std::max(0.f, bx0 * scaleX - pad);
+				const float top = std::max(0.f, by0 * scaleY - pad);
+				auto* box = body->makeChild<Ling::TextBox>();
+				box->setPositionType(Ling::Position::Absolute);
+				box->setPosition(Ling::Edge::Left, left / dpi);
+				box->setPosition(Ling::Edge::Top, top / dpi);
+				box->setSize(std::max(80.f, w - left / dpi - 2.f), std::max(40.f, h - top / dpi - 2.f));
+				box->setPadding(0.f);
+				box->setFontSize(bodyFont);
+				box->setLineSpacing(bodyFont * 1.75f);
+				box->setBg(palBg_);
+				box->setColor(palFg_);
+				box->setSelectionBgColor(0x1890FFFF);
+				box->setSelectionTextColor(0xFFFFFFFF);
+				box->setText(text);
+				reflowHistory_.assign(1, text);
+				reflowHistPos_ = 0;
+				box->onTextChanged.add([this](Ling::TextBox*, const std::wstring& t) {
+					if (reflowHistGuard_) return;
+					reflowHistory_.resize((size_t)reflowHistPos_ + 1);
+					reflowHistory_.push_back(t);
+					reflowHistPos_ = (int)reflowHistory_.size() - 1;
+					if (reflowHistory_.size() > 200) {
+						reflowHistory_.erase(reflowHistory_.begin());
+						reflowHistPos_ = (int)reflowHistory_.size() - 1;
+					}
+				});
+				editors.push_back(box);
+			}
+		}
+		if (editors.empty()) {
+			// 兜底（没有区域信息）：整段一个框
+			auto* box = body->makeChild<Ling::TextBox>();
+			box->setPositionType(Ling::Position::Absolute);
+			box->setPosition(Ling::Edge::Left, 8.f);
+			box->setPosition(Ling::Edge::Top, 40.f);
+			box->setSize(std::max(80.f, w / dpi - 16.f), std::max(40.f, h / dpi - 48.f));
+			box->setPadding(0.f);
+			box->setBg(palBg_);
+			box->setColor(palFg_);
+			box->setSelectionBgColor(0x1890FFFF);
+			box->setSelectionTextColor(0xFFFFFFFF);
+			box->setText(fullText);
+			editors.push_back(box);
+		}
 	}
 	// 选区状态跟着重建作废；镜像层保持在最上层
 	selActive_ = false;
@@ -1077,17 +1483,28 @@ void ToolOcr::rebuildEditors()
 
 void ToolOcr::applyTranslateLines(const std::vector<std::wstring>& lines)
 {
+	// lines 是**按段**来的（WinCap 已把同段的折行拼好）：回填到每段的首行，其余行清空；
+	// 排版按段取首行的 displayText（见 rebuildEditors 的翻译分支）。
+	size_t seg = 0;
 	for (size_t i = 0; i < result_.regions.size(); i++) {
-		if (i < lines.size() && !lines[i].empty())
-			result_.regions[i].displayText = lines[i];
-		else if (result_.regions.size() == 1 && !lines.empty())
-			result_.regions[i].displayText = lines[0];
+		const bool newPara = (i == 0) || result_.regions[i].para != result_.regions[i - 1].para;
+		if (newPara) {
+			result_.regions[i].displayText = (seg < lines.size()) ? lines[seg] : std::wstring();
+			++seg;
+		}
+		else {
+			result_.regions[i].displayText.clear();
+		}
 	}
+	// 兜底：只回来一条译文（引擎按整段返回）时落到第一段上
+	if (lines.size() == 1 && !result_.regions.empty() && result_.regions[0].displayText.empty())
+		result_.regions[0].displayText = lines[0];
+
 	result_.text.clear();
-	for (size_t i = 0; i < result_.regions.size(); i++) {
-		if (i) result_.text += L'\n';
-		result_.text += result_.regions[i].displayText.empty()
-			? result_.regions[i].text : result_.regions[i].displayText;
+	for (const auto& r : result_.regions) {
+		if (r.displayText.empty()) continue;
+		if (!result_.text.empty()) result_.text += L'\n';
+		result_.text += r.displayText;
 	}
 }
 
@@ -1101,12 +1518,20 @@ void ToolOcr::setTranslatedResult(OcrResult result, const std::vector<std::wstri
 {
 	result_ = std::move(result);
 	applyTranslateLines(lines);
+	// 翻译面板是先用**空结果**建的（识别在后台跑），那一步采样不到区域，底色只能是默认白。
+	// 结果一到就按真实区域重采一次底色/文字色 —— 否则深色、彩色底图上会糊一块白板，
+	// 和 OCR 识别模式的观感完全对不上。
+	if (!srcImage_.empty())
+		sampleLayerPalette(srcImage_, imgW, imgH, result_.regions, palBg_, palFg_);
 	rebuildEditors();
 }
 
 void ToolOcr::setResult(OcrResult result)
 {
 	result_ = std::move(result);
+	// 同上：结果后到的路径也要重采底色（面板先建、识别后填）
+	if (!srcImage_.empty())
+		sampleLayerPalette(srcImage_, imgW, imgH, result_.regions, palBg_, palFg_);
 	rebuildEditors();
 }
 
@@ -1125,13 +1550,24 @@ void ToolOcr::showBanner(const std::wstring& msg, bool error)
 void ToolOcr::clearBanner()
 {
 	banner_.clear();
+	busyBase_.clear();
+	busyDots_ = 0;
+	killTimer(kTypingTimerId);
 	if (bannerNode) bannerNode->hide();
 }
 
 void ToolOcr::setBusy(const std::wstring& msg)
 {
+	// 识别/翻译可能几秒才出结果：提示条末尾循环点点（正在识别 → . → .. → ...），
+	// 让人一眼看出还在跑，而不是一条静止的文字。
 	busyMsg_ = msg;
-	showBanner(msg, false);
+	busyBase_ = msg;
+	while (!busyBase_.empty() && (busyBase_.back() == L'.' || busyBase_.back() == L'\u2026' ||
+		busyBase_.back() == L' '))
+		busyBase_.pop_back();
+	busyDots_ = 0;
+	showBanner(busyBase_, false);
+	setTimer(kTypingTickMs, kTypingTimerId);
 }
 
 void ToolOcr::clearBusy()
@@ -1156,13 +1592,20 @@ void ToolOcr::copyAll()
 	// 有选区就只复制选中的部分；没有就整段
 	std::wstring text = selectedText();
 	if (text.empty()) {
-		for (size_t i = 0; i < editors.size(); i++) {
-			if (i) text += L'\n';
-			auto* ot = dynamic_cast<OcrText*>(editors[i]);
-			text += (ot && ot->vertical) ? ot->logical : editors[i]->getText();
+		if (reflow_ && !result_.text.empty()) {
+			// 文本重排：复制**原始识别文本**（不补圆点、不改字符），出去就是纯文本
+			text = result_.text;
+		}
+		else {
+			for (size_t i = 0; i < editors.size(); i++) {
+				if (i) text += L'\n';
+				auto* ot = dynamic_cast<OcrText*>(editors[i]);
+				text += (ot && ot->vertical) ? ot->logical : editors[i]->getText();
+			}
 		}
 	}
 	if (text.empty()) text = result_.text;
+	// 只写 CF_UNICODETEXT：不带 RTF/HTML，粘贴出去没有任何样式
 	if (OpenClipboard(hwnd)) {
 		EmptyClipboard();
 		size_t bytes = (text.size() + 1) * sizeof(wchar_t);

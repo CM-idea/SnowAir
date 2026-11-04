@@ -13,6 +13,10 @@
 using Microsoft::WRL::ComPtr;
 
 namespace {
+	// 编辑插入符的颜色：主题绿（与选中控点的描边同一支绿 0x34C759）。
+	// 用文字自身的颜色（白/黑）在深浅底图上都不够显眼，绿色一眼能看见。
+	constexpr uint32_t kCaretColor{ 0x34C759 };
+
 	// 把 GetGlyphRunOutline 吐出的字形轮廓平移到该 run 的 baseline 位置。
 	// IDWriteGeometrySink 就是 ID2D1SimplifiedGeometrySink；这里只做点坐标平移。
 	class OffsetGeometrySink final : public ID2D1SimplifiedGeometrySink
@@ -561,8 +565,11 @@ void ShapeText::paint(ID2D1DeviceContext* ctx)
 		if (!selectAll_ && ((GetTickCount64() / 500) & 1) == 0) {
 			float lineH = 0.f;
 			const auto p = editCaretPos(lineH);
+			// 绿色插入符：主题绿与选中控点同色，比文字色显眼；建不出刷子才退回文字色
+			ComPtr<ID2D1SolidColorBrush> caretBrush;
+			ctx->CreateSolidColorBrush(D2D1::ColorF(kCaretColor), caretBrush.GetAddressOf());
 			ctx->DrawLine(D2D1::Point2F(p.x, p.y), D2D1::Point2F(p.x, p.y + lineH),
-				textBrush.Get(), std::max(1.f, 1.5f * win->dpi));
+				caretBrush ? caretBrush.Get() : textBrush.Get(), std::max(1.f, 1.5f * win->dpi));
 		}
 		ctx->SetTransform(old);
 		return;
@@ -791,21 +798,52 @@ void ShapeText::mouseDrag(const float x, const float y)
 		return;
 	}
 	if (hoverDraggerIndex >= 0 && hoverDraggerIndex <= 3) {
-		const float cx = (resizeStartRect.left + resizeStartRect.right) * 0.5f;
-		const float cy = (resizeStartRect.top + resizeStartRect.bottom) * 0.5f;
-		const float dx0 = std::max(1.f, std::hypot(pressX - cx, pressY - cy));
-		const float dx1 = std::max(1.f, std::hypot(x - cx, y - cy));
+		// 字号只保底、不设上限：可以继续放大到 333 以上
 		const float minPx = 8.f * win->dpi;
-		// 拖角只保底，不设上限：可以继续放大到 333 以上
-		fontSize = std::max(minPx, resizeStartFont * (dx1 / dx0));
+		const float cx0 = (resizeStartRect.left + resizeStartRect.right) * 0.5f;
+		const float cy0 = (resizeStartRect.top + resizeStartRect.bottom) * 0.5f;
+		if (attachTo) {
+			// 线上文字钉在线段中点：它的"中心"就是线的中点，缩放围绕中点（不做对角锚定）
+			const float dx0 = std::max(1.f, std::hypot(pressX - cx0, pressY - cy0));
+			const float dx1 = std::max(1.f, std::hypot(x - cx0, y - cy0));
+			fontSize = std::max(minPx, resizeStartFont * (dx1 / dx0));
+			makeTextLayout();
+			syncRectFromLayout();
+			const float w = rect.right - rect.left;
+			const float h = rect.bottom - rect.top;
+			rect = D2D1::RectF(cx0 - w * 0.5f, cy0 - h * 0.5f, cx0 + w * 0.5f, cy0 + h * 0.5f);
+			updateDraggers();
+			if (win->toolSub) win->toolSub->setShapeSliderVal(L"text", fontSize);
+			return;
+		}
+		// 普通文字：拖哪个角就钉住它**对角**那个角（和矩形/气泡一致）。
+		// 字号只能等比变、盒子尺寸由排版决定，所以缩放系数按"光标到锚点的距离"算；
+		// 新尺寸定了之后再反推中心，让锚点在**世界坐标**里原地不动（旋转过的文字同样成立）。
+		// 下标：0=左上 1=右上 2=左下 3=右下（见 updateDraggers / mouseMove 的映射）
+		const bool dragLeft = (hoverDraggerIndex == 0 || hoverDraggerIndex == 2);
+		const bool dragTop = (hoverDraggerIndex == 0 || hoverDraggerIndex == 1);
+		const float ca = std::cos(angle), sa = std::sin(angle);
+		// 锚点 = 起始矩形的对角，按当前角度转到世界坐标
+		const float ax = dragLeft ? resizeStartRect.right : resizeStartRect.left;
+		const float ay = dragTop ? resizeStartRect.bottom : resizeStartRect.top;
+		const float adx = ax - cx0, ady = ay - cy0;
+		const D2D1_POINT_2F anchor{ cx0 + adx * ca - ady * sa, cy0 + adx * sa + ady * ca };
+		const float d0 = std::max(1.f, std::hypot(pressX - anchor.x, pressY - anchor.y));
+		const float d1 = std::max(1.f, std::hypot(x - anchor.x, y - anchor.y));
+		fontSize = std::max(minPx, resizeStartFont * (d1 / d0));
 		makeTextLayout();
 		syncRectFromLayout();
 		const float w = rect.right - rect.left;
 		const float h = rect.bottom - rect.top;
-		rect.left = cx - w * 0.5f;
-		rect.right = cx + w * 0.5f;
-		rect.top = cy - h * 0.5f;
-		rect.bottom = cy + h * 0.5f;
+		// 光标越过锚点就翻到另一侧（和矩形拖角一致）：拖动方向取"锚点 → 光标"在形状自身
+		// 两条轴上的分量，盒子朝光标那一侧展开。文字本身不镜像，只是换个盒子重新排。
+		const float du = (x - anchor.x) * ca + (y - anchor.y) * sa;
+		const float dv = -(x - anchor.x) * sa + (y - anchor.y) * ca;
+		const float ox = (du >= 0.f ? 0.5f : -0.5f) * w;
+		const float oy = (dv >= 0.f ? 0.5f : -0.5f) * h;
+		const float ncx = anchor.x + ca * ox - sa * oy;
+		const float ncy = anchor.y + sa * ox + ca * oy;
+		rect = D2D1::RectF(ncx - w * 0.5f, ncy - h * 0.5f, ncx + w * 0.5f, ncy + h * 0.5f);
 		updateDraggers();
 		// 拖角缩放时实时同步属性条数值
 		if (win->toolSub) win->toolSub->setShapeSliderVal(L"text", fontSize);
@@ -1040,6 +1078,19 @@ bool ShapeText::hitErase(const float x, const float y)
 	return hitLabelBox(x, y);
 }
 
+D2D1_POINT_2F ShapeText::editTextOrigin() const
+{
+	DWRITE_TEXT_METRICS m{};
+	if (textLayout) textLayout->GetMetrics(&m);
+	if (isFrame()) {
+		// 气泡/爆裂：文字在框内居中（与 paint 里画的位置同一套算式）
+		return D2D1::Point2F(
+			rect.left + ((rect.right - rect.left) - m.widthIncludingTrailingWhitespace) * 0.5f,
+			rect.top + ((rect.bottom - rect.top) - m.height) * 0.5f);
+	}
+	return D2D1::Point2F(rect.left + borderPadding, rect.top + borderPadding);
+}
+
 D2D1_POINT_2F ShapeText::editCaretPos(float& lineH) const
 {
 	lineH = fontSize * 1.1f;
@@ -1051,33 +1102,37 @@ D2D1_POINT_2F ShapeText::editCaretPos(float& lineH) const
 			if (hm.height > 0.5f) lineH = hm.height;
 		}
 	}
-	if (isFrame()) {
-		DWRITE_TEXT_METRICS m{};
-		if (textLayout) textLayout->GetMetrics(&m);
-		const float rw = rect.right - rect.left, rh = rect.bottom - rect.top;
-		return D2D1::Point2F(
-			rect.left + (rw - m.widthIncludingTrailingWhitespace) * 0.5f + cx,
-			rect.top + (rh - m.height) * 0.5f + cy);
-	}
-	return D2D1::Point2F(rect.left + borderPadding + cx, rect.top + borderPadding + cy);
+	const auto origin = editTextOrigin();
+	return D2D1::Point2F(origin.x + cx, origin.y + cy);
 }
 
-bool ShapeText::hitCaretArea(float x, float y) const
+// 编辑中单击文字框：把插入符挪到点击处继续编辑。
+// 命中交给 IDWriteTextLayout::HitTestPoint —— 它自己处理换行/行首行尾/字符簇，
+// 气泡的文字居中、旋转过的普通文字都只要先把点变换回排版坐标系即可。
+// 点在文字排版之外（比如气泡框内的留白）时 DWrite 给最近的位置，手感和文本编辑器一致。
+void ShapeText::placeCaretAt(float x, float y)
 {
+	if (!isEditing || !textLayout) return;
 	float lx = x, ly = y;
 	if (std::fabs(angle) > 1e-6f) {
+		// 屏幕 → 文字自己的坐标系（与 hitLabelBox 同一套逆变换）
 		const float cx = (rect.left + rect.right) * 0.5f;
 		const float cy = (rect.top + rect.bottom) * 0.5f;
-		const float c = std::cos(-angle), s = std::sin(-angle);
-		const float dx = x - cx, dy = y - cy;
-		lx = cx + dx * c - dy * s;
-		ly = cy + dx * s + dy * c;
+		const float c = std::cos(angle), s = std::sin(angle);
+		const float dx = lx - cx, dy = ly - cy;
+		lx = cx + dx * c + dy * s;
+		ly = cy - dx * s + dy * c;
 	}
-	float lineH = 0.f;
-	const auto p = editCaretPos(lineH);
-	const float pad = 4.f * win->dpi;
-	return lx >= p.x - pad && lx <= p.x + pad
-		&& ly >= p.y - pad && ly <= p.y + lineH + pad;
+	const auto origin = editTextOrigin();
+	BOOL trailing = FALSE, inside = FALSE;
+	DWRITE_HIT_TEST_METRICS hm{};
+	if (FAILED(textLayout->HitTestPoint(lx - origin.x, ly - origin.y, &trailing, &inside, &hm)))
+		return;
+	// 插入符位置 = 命中字符的起点；落在字符后半边（trailing）就挪到它后面
+	int idx = (int)hm.textPosition + (trailing ? (int)hm.length : 0);
+	caretIndex_ = std::clamp(idx, 0, (int)text.size());
+	selectAll_ = false;   // 落了插入符就不再是全选态
+	win->refresh();
 }
 
 // 命中文字区域（含周围少量边距）。线上文字恒为横排（angle==0），普通文字可能带旋转，

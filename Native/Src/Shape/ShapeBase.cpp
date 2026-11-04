@@ -310,9 +310,13 @@ D2D1_RECT_F ShapeBase::dragScale(float x, float y, bool keepAspect) const
 
 bool ShapeBase::applyUnselectedHoverCursor()
 {
-	// 文本工具停在线上（**选中与否都算**）：一律工字型。
-	// 这段必须排在 isSelected() 之前 —— 否则"已选中的线段"会走子类的移动/缩放光标（↔），
-	// 二次编辑线上文字时鼠标就变成双向箭头了
+	// 二次选中之后整块就是"可拖的东西"：光标跟着走位（移动 / 缩放 / 控点），
+	// **哪怕当前是文字工具也一样** —— 想进文字编辑就双击，编辑态由子类给回工字型。
+	// 这条必须在下面"文字工具一律工字型"之前判，否则选中的文字/线段会被 I 形光标盖掉，
+	// 拖得动却看着像"这里只能打字"。
+	if (isSelected()) return false;
+	// 未选中 + 文字工具 + 光标确实落在内容上：工字型，提示"点一下就能改/加字"。
+	// （线上文字挂在箭头/线段上，也走这条 —— 点它们就是打字）
 	if (win && win->getCurToolId() == L"text") {
 		POINT p{};
 		if (GetCursorPos(&p) && ScreenToClient(win->hwnd, &p)) {
@@ -323,7 +327,7 @@ bool ShapeBase::applyUnselectedHoverCursor()
 			}
 		}
 	}
-	if (isSelected() || hoverDraggerIndex < 0) return false;
+	if (hoverDraggerIndex < 0) return false;
 	// 未选中标注上提示可点选二次编辑
 	SetCursor(LoadCursor(nullptr, IDC_HAND));
 	return true;

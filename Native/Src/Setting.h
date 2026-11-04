@@ -174,8 +174,14 @@ public:
 	void setHwAccel(bool on);
 	bool getHideToolbarInRecord();
 	void setHideToolbarInRecord(bool on);
-	bool getShowKeystrokes();
-	void setShowKeystrokes(bool on);
+	// 「记录操作按键」：录制中把按键/鼠标操作显示在录制画面里。
+	// 0 = 视窗左侧，1 = 视窗右侧，2 = 不显示（关闭，默认）
+	// 老配置只有布尔 showKeystrokes：开过的按「视窗左侧」迁移，没开过就是关闭
+	static constexpr int kKeyOverlayLeft{ 0 };
+	static constexpr int kKeyOverlayRight{ 1 };
+	static constexpr int kKeyOverlayNone{ 2 };
+	int getKeyOverlayPos();
+	void setKeyOverlayPos(int pos);
 	// 「选框鼠标跟随」（视频录制）：录制中处于穿透态时，光标贴近选区边缘就让选区自动平移跟随
 	bool getSelFollowMouse();
 	void setSelFollowMouse(bool on);

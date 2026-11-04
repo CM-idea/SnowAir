@@ -43,6 +43,8 @@ public:
 	void deleteForward();
 	void moveCaret(int delta);
 	void moveCaretTo(bool end);
+	// 编辑中单击文字：把插入符挪到点击处（多行 / 气泡居中 / 旋转文字都走 DWrite 自己的命中）
+	void placeCaretAt(float x, float y);
 	// 「尺寸」：挂到线段上时初始化一段默认文字（固定字号，随后 setAttachPose 摆到中点）
 	void initAttachedText(const std::wstring& t, float px);
 	// 自动文字（角度测量）：用户手动编辑过之后就不再自动改写
@@ -56,8 +58,6 @@ public:
 	bool hitLabelBox(float x, float y) const;
 	// 气泡 / 爆裂：框内（含旋转）。只给"已选中时双击进文字编辑"用，不参与单击命中
 	bool frameContainsPoint(float x, float y) const override;
-	// 编辑时唯一"不退出"的点击区域：插入符那一小条（点其它任何地方都提交退出）
-	bool hitCaretArea(float x, float y) const;
 	float stylePrimarySize() const override { return fontSize; }
 	std::vector<float> editSnapshot() const override;
 	void applyEditSnapshot(const std::vector<float>& state) override;
@@ -80,6 +80,8 @@ private:
 	Microsoft::WRL::ComPtr<ID2D1PathGeometry> buildTextOutline();
 	// 编辑中插入符在标注坐标系里的位置 / 行高（文字矩形 + 排版内 hit-test）
 	D2D1_POINT_2F editCaretPos(float& lineH) const;
+	// 排版左上角在标注坐标系里的位置：普通文字贴 rect 内边，气泡/爆裂在框内居中
+	D2D1_POINT_2F editTextOrigin() const;
 	void paintPunch(ID2D1DeviceContext* ctx);
 	void setAttr();
 	void syncRectFromLayout();

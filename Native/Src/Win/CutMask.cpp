@@ -1975,6 +1975,15 @@ void CutMask::startAdjust(POINT pos)
 	}
 }
 
+// 画幅锁定（录屏开录）时拖边框：没有"改大小"这件事，按整体平移起拖。
+// 强制把方向记成 Inside，adjust() 走的是平移分支。
+void CutMask::startDragMove(POINT pos)
+{
+	adjustHit = MaskHit::Inside;
+	adjustPressPos = pos;
+	adjustStartRect = maskRect;
+}
+
 void CutMask::adjust(POINT pos)
 {
 	if (adjustHit == MaskHit::None) return;

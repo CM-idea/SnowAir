@@ -64,6 +64,9 @@ void ToolVideo::refreshSize()
 
 ToolVideo::~ToolVideo()
 {
+	// WinBase 析构不销毁 HWND：正常路径由 CapVideo::dispose() 先 close，
+	// 这里是兜底 —— 漏了就会留下"幽灵窗"，系统发 WM_DPICHANGED 时重入已释放对象
+	if (hwnd) { close(); hwnd = nullptr; }
 }
 
 float ToolVideo::iconSideInset() const
@@ -355,7 +358,12 @@ void ToolVideo::makeSlot(const std::wstring& id)
 
 void ToolVideo::onDragDown(POINT pos, bool isRight)
 {
-	if (isRight) return;
+	if (isRight) {
+		// 工具栏右键与截图栏一致：只做分层取消（属性开关 → 工具），不重框选、不退出。
+		// 已开录时 WinCap::handleLayerCancel 自己会停在「取消工具选择」，不会收掉录制。
+		if (win) win->handleLayerCancel(true);
+		return;
+	}
 	if (!dragHandle || !dragHandle->isPosIn(pos)) return;
 	killTimer(peekTimerId);
 	draggingBar = true;

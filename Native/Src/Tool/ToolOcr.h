@@ -52,6 +52,8 @@ public:
 	// 非空表示拖选后按 Ctrl+C 的那一段 —— host 只复制这段并退出。
 	// 浮层是独立置顶窗口，双击/快捷键本来只会落到文字上，截图窗收不到。
 	void setOnConfirm(std::function<void(const std::wstring&)> fn) { onConfirm_ = std::move(fn); }
+	// 选区是"单击元素"得到的：此时选区就是元素外框，排版可以按这个宽度满排
+	void setElementBlock(bool v) { elementBlock_ = v; }
 	// 宿主注入：把（截图/贴图的）标注画到识别文字**之上**。识别结果浮层是独立置顶窗口，
 	// 而标注画在宿主窗口里，两个窗口没法互相穿插 —— 于是把标注"镜像"到本窗口顶层，
 	// 视觉上就变成"标注盖在识别结果上面"。
@@ -96,6 +98,7 @@ private:
 	D2D1_RECT_F maskRect_{};
 	bool hasMask_{ false };
 	bool pinOverlay_{ false };
+	bool elementBlock_{ false };   // 选区来自元素查找（单击元素）：宽度按元素外框满排
 	// 上次建编辑框时的面板物理尺寸：仅尺寸变化才重建（拖动只挪窗口，不必重建）。
 	int panelW_{ 0 };
 	int panelH_{ 0 };
@@ -113,6 +116,10 @@ private:
 	bool bannerError_{ false };
 	// 非空 = 正在翻译：提示条在此期间必须一直可见（见 setBusy）
 	std::wstring busyMsg_;
+	// 忙等提示的点动画：识别/翻译可能几秒没有结果，静止文字看起来像卡住。
+	// busyBase_ 是不带点的基础文案，busyDots_ 是当前点数（0~3），定时器循环推进。
+	std::wstring busyBase_;
+	int busyDots_{ 0 };
 	Ling::Node* bannerNode{ nullptr };
 	Ling::Label* bannerLabel{ nullptr };
 	std::vector<Ling::TextBox*> editors;
@@ -128,6 +135,10 @@ private:
 	// 与其它窗口的定时器 id 错开（属性栏 0x5000 / 系统按键 0x5100）
 	static constexpr UINT kHoverTimerId{ 0x5200 };
 	static constexpr UINT kHoverPollMs{ 100 };
+	// 忙等提示的点动画：每 100ms 多一个点，0~3 循环（正在识别 → . → .. → ...），
+	// 节奏要快一点才有"还在跑"的感觉。
+	static constexpr UINT kTypingTimerId{ 0x5300 };
+	static constexpr UINT kTypingTickMs{ 100 };
 	int hostX_{ 0 }, hostY_{ 0 };   // 宿主窗口位置（覆盖矩形是宿主客户坐标）
 	// 上次建编辑框时的 dpi：换屏 / 改缩放后 DPI 变了，字号和坐标都得按新 dpi 重排。
 	float builtDpi_{ 0.f };

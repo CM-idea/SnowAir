@@ -55,6 +55,11 @@ ToolColorPanel::ToolColorPanel(ToolSub* owner) : Ling::WinBase(), owner(owner)
 
 ToolColorPanel::~ToolColorPanel()
 {
+	// WinBase 析构不销毁 HWND：本窗由 ToolSub 持有时只被 hide()/closePanel()，从没 DestroyWindow，
+	// ToolSub 析构后就会留下一个隐藏的"幽灵窗"。此后系统一旦给它发 WM_DPICHANGED（睡眠唤醒、
+	// 改缩放时会有），窗口过程会重入已经释放的 ToolColorPanel → 读到的 body 为空 → 崩溃在
+	// Ling::Node::applyDpiChange（0xC0000005 / 0xC000041D，见 issue #76）。析构时必须真正关窗。
+	if (hwnd) { close(); hwnd = nullptr; }
 }
 
 void ToolColorPanel::onCreated()

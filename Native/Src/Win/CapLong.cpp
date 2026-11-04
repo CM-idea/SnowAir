@@ -1153,13 +1153,14 @@ void CapLong::copyToClipboard()
 {
 	std::vector<BYTE> pixels;
 	if (!exportPixels(pixels)) return;
-	// 与区域截图收工一致：按「截图完成执行」三档决定存不存文件、剪贴板放位图还是文件
+	// 与区域截图收工一致：按「截图完成执行」四档决定存不存文件、剪贴板放位图还是文件
 	auto* st = Setting::get();
 	const int action = st ? st->getCaptureFinishAction() : 0;
-	const std::wstring saved = (action != 2)
+	const std::wstring saved = (action != 3)
 		? Util::saveCompletedCapture(pixels, imgW, resultH, win ? win->focusAppName() : L"")
 		: std::wstring{};
 	if (!saved.empty() && action == 1) Util::addFileToClipboard(saved);
+	else if (!saved.empty() && action == 2) Util::addFileToClipboardCut(saved);
 	else Util::saveToClipboard(imgW, resultH, pixels.data());
 	if (!saved.empty()) st->addHistoryFile(saved, imgW, resultH, L"long");
 }

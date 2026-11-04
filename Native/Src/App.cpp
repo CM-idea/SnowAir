@@ -141,11 +141,12 @@ void App::captureFullScreenSilent()
 	auto* st = Setting::get();
 	const int action = st->getCaptureFinishAction();
 	const std::wstring ext = Util::extensionFromSaveFormat(st->getSaveFormat());
-	const std::wstring path = (action != 2) ? Util::buildSavePath(
+	const std::wstring path = (action != 3) ? Util::buildSavePath(
 		st->getManualSaveFormat(), Setting::defaultManualSaveFormat(), ext) : std::wstring{};
 	const bool saved = !path.empty() && Util::saveToFile(path, sw, sh, pixels.data());
 
 	if (action == 1 && saved) Util::addFileToClipboard(path);
+	else if (action == 2 && saved) Util::addFileToClipboardCut(path);
 	else Util::saveToClipboard(sw, sh, pixels.data());
 	st->setLastCaptureRect(sx, sy, sw, sh);
 	if (saved) st->addHistoryFile(path, sw, sh, L"fullscreen");
@@ -179,12 +180,13 @@ void App::captureFocusedWindowSilent()
 	const std::wstring ext = Util::extensionFromSaveFormat(Setting::get()->getSaveFormat());
 	// 文件名走「手动保存文件名格式」（已并入原焦点窗口格式），仍支持 {{FOCUS_WINDOW_APP_NAME}}
 	// 「仅复制图片」档不落盘
-	const bool saveFile = Setting::get()->getCaptureFinishAction() != 2;
+	const bool saveFile = Setting::get()->getCaptureFinishAction() != 3;
 	const std::wstring path = saveFile ? Util::buildSavePath(
 		Setting::get()->getManualSaveFormat(), Setting::defaultManualSaveFormat(), ext, appName) : std::wstring{};
 	const bool saved = !path.empty() && Util::saveToFile(path, w, h, pixels.data());
 
 	if (Setting::get()->getCaptureFinishAction() == 1 && saved) Util::addFileToClipboard(path);
+	else if (Setting::get()->getCaptureFinishAction() == 2 && saved) Util::addFileToClipboardCut(path);
 	else Util::saveToClipboard(w, h, pixels.data());
 	Setting::get()->setLastCaptureRect(rc.left, rc.top, w, h);
 	if (saved) Setting::get()->addHistoryFile(path, w, h, L"focused");
@@ -210,8 +212,9 @@ void App::captureLastRegionSilent()
 
 	// 与区域截图收工一致：按「截图完成执行」三档决定存不存文件、剪贴板放位图还是文件
 	const int action = Setting::get()->getCaptureFinishAction();
-	const auto saved = (action != 2) ? Util::saveCompletedCapture(pixels, rw, rh) : std::wstring{};
+	const auto saved = (action != 3) ? Util::saveCompletedCapture(pixels, rw, rh) : std::wstring{};
 	if (!saved.empty() && action == 1) Util::addFileToClipboard(saved);
+	else if (!saved.empty() && action == 2) Util::addFileToClipboardCut(saved);
 	else Util::saveToClipboard(rw, rh, pixels.data());
 	if (!saved.empty()) Setting::get()->addHistoryFile(saved, rw, rh, L"capture");
 }

@@ -56,6 +56,9 @@ void ToolLong::refreshSize()
 
 ToolLong::~ToolLong()
 {
+	// WinBase 析构不销毁 HWND：正常路径由 CapLong::dispose() 先 close，
+	// 这里是兜底 —— 漏了就会留下"幽灵窗"，系统发 WM_DPICHANGED 时重入已释放对象
+	if (hwnd) { close(); hwnd = nullptr; }
 }
 
 void ToolLong::syncCaptureState(bool capturing, bool paused, bool finished)

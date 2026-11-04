@@ -31,6 +31,61 @@ namespace {
 		return !ec && it != std::filesystem::directory_iterator();
 	}
 
+	// 大小写无关、去掉末尾分隔符的目录键（C:\Foo\ 与 c:\foo 视为同一个目录）
+	std::wstring pathKey(const std::filesystem::path& p)
+	{
+		std::error_code ec;
+		auto canon = std::filesystem::weakly_canonical(p, ec);
+		std::wstring key = (ec ? p : canon).native();
+		for (auto& c : key) c = (wchar_t)towlower(c);
+		while (key.size() > 3 && (key.back() == L'\\' || key.back() == L'/')) key.pop_back();
+		return key;
+	}
+
+	// child 与 parent 相同，或 child 在 parent 之下
+	bool sameOrInside(const std::wstring& child, const std::wstring& parent)
+	{
+		if (child.empty() || parent.empty()) return false;
+		if (child == parent) return true;
+		if (child.size() <= parent.size()) return false;
+		if (child.compare(0, parent.size(), parent) != 0) return false;
+		if (parent.back() == L'\\' || parent.back() == L'/') return true;   // 盘符根 / UNC 根
+		const wchar_t next = child[parent.size()];
+		return next == L'\\' || next == L'/';
+	}
+
+	bool sameName(const std::wstring& a, const wchar_t* b)
+	{
+		return _wcsicmp(a.c_str(), b) == 0;
+	}
+
+	// 用户选的是「放插件的父目录」，真正的插件根目录统一收在 <父目录>\SnowAir\plugin：
+	// 只在自己新建的这一层里读写组件，父目录（哪怕就是桌面、文档）里用户自己的文件
+	// 永远不会被当成插件组件搬走或删掉。默认位置 %AppData%\SnowAir\plugin 也是这个形状。
+	std::filesystem::path pluginRootUnder(const std::filesystem::path& picked)
+	{
+		const std::wstring name = picked.filename().wstring();
+		const std::wstring parentName = picked.parent_path().filename().wstring();
+		// 已经指到 SnowAir\plugin 这一层：就用它自己
+		if (sameName(name, L"plugin") && sameName(parentName, L"SnowAir")) return picked;
+		// 指到 SnowAir 这一层：在它下面建 plugin，别出现 SnowAir\SnowAir\plugin
+		if (sameName(name, L"SnowAir")) return picked / L"plugin";
+		return picked / L"SnowAir" / L"plugin";
+	}
+
+	// 目录选择框的起始位置：当前根目录是 <父目录>\SnowAir\plugin 时回到那个父目录，
+	// 老配置（根目录记在别处）就用根目录自己。
+	std::filesystem::path pluginParentFor(const std::filesystem::path& root)
+	{
+		const std::wstring name = root.filename().wstring();
+		const std::wstring parentName = root.parent_path().filename().wstring();
+		if (sameName(name, L"plugin") && sameName(parentName, L"SnowAir")) {
+			const auto up = root.parent_path().parent_path();
+			if (!up.empty()) return up;
+		}
+		return root;
+	}
+
 	// 晾衣架插件包：版本与下载地址（与 SnowAir-Rack 的 release 资源同名）
 	constexpr wchar_t kRackVersion[] = L"0.1.0";
 	std::wstring rackDownloadUrl(const std::wstring& version)
@@ -618,7 +673,7 @@ void WinSettingPlugins::build()
 	dirBtn->setMarginRight(SettingTheme::sp2);
 	// 与设置页其它悬停说明共用同一套气泡（无系统 tooltip 的 1 秒延迟）
 	if (auto* ht = SettingUi::helpTip())
-		ht->bind(dirBtn, Lang::get(L"setting.pluginsCustomDir"));
+		ht->bind(dirBtn, Lang::get(L"setting.pluginsCustomDirTip"));
 
 	SettingUi::btnOutline(row, Lang::get(L"setting.pluginsOpenDir"), []() {
 		auto dir = PluginPaths::root();
@@ -649,7 +704,8 @@ namespace {
 	}
 }
 
-// 选一个目录作为插件根目录：先把已下载的组件复制过去，成功了再切换配置并清理旧目录。
+// 选一个父目录作为插件的存放位置：真正的根目录固定收在 <所选目录>\SnowAir\plugin，
+// 先把已下载的组件复制过去，成功了再切换配置并清理旧目录。
 // 复制失败时旧目录保持原样、配置不变，不会出现"组件只搬了一半"的坏状态。
 // 复制动辄几百 MB，必须放到后台线程：同步做会把 UI 线程堵死（窗口「未响应」，用户只能
 // 强杀，而配置是复制成功后才写的，于是重启又回到默认目录）。卸载/重新加载插件仍留在
@@ -669,36 +725,44 @@ void WinSettingPlugins::choosePluginDir()
 	}
 
 	const fs::path oldRoot = PluginPaths::root();
-	std::wstring initial = oldRoot.wstring();
+	std::wstring initial = pluginParentFor(oldRoot).wstring();
 	{
 		std::error_code ec;
-		if (!fs::is_directory(oldRoot, ec)) initial = s->getDataPath().wstring();
+		if (!fs::is_directory(fs::path{ initial }, ec)) initial = s->getDataPath().wstring();
 	}
 	const std::wstring picked = pickFolder(win->hwnd, initial);
 	if (picked.empty()) return;   // 取消
 
-	const fs::path newRoot{ picked };
+	// 用户选的是「放插件的父目录」，真正的根目录统一收进 <父目录>\SnowAir\plugin：
+	// 只在自己这一层里建目录、搬组件，父目录（哪怕就是桌面、文档）里用户自己的文件
+	// 永远不会被当成插件组件搬走或删掉。
+	const fs::path pickedPath{ picked };
+	const fs::path newRoot = pluginRootUnder(pickedPath);
 	// 规范化后按 Windows 规则做大小写无关比较（path 自身的 == / lexically_relative
-	// 是大小写敏感的，C:\Foo 与 c:\foo 会被当成两个目录）
-	auto lowerKey = [](const fs::path& p) {
-		std::wstring s = p.native();
-		for (auto& c : s) c = (wchar_t)towlower(c);
-		if (s.empty() || (s.back() != L'\\' && s.back() != L'/')) s += L'\\';
-		return s;
-	};
-	std::error_code e1, e2;
-	const fs::path oldCanon = fs::weakly_canonical(oldRoot, e1);
-	const fs::path newCanon = fs::weakly_canonical(newRoot, e2);
-	if (!e1 && !e2) {
-		const std::wstring oldKey = lowerKey(oldCanon);
-		const std::wstring newKey = lowerKey(newCanon);
-		if (oldKey == newKey) {              // 已经是这个目录：固定下来即可
-			s->setPluginDir(newRoot.wstring());
-			return;
-		}
-		// 不能选当前插件目录的子目录：否则会把自己复制进自己
-		if (newKey.compare(0, oldKey.size(), oldKey) == 0) {
-			SettingUi::ConfirmDialog::ask(win, Lang::get(L"setting.pluginsDirNested"), nullptr,
+	// 是大小写敏感的，C:\Foo 与 c:\foo 会被当成两个目录；见 pathKey）
+	const std::wstring oldKey = pathKey(oldRoot);
+	const std::wstring pickedKey = pathKey(pickedPath);
+	const std::wstring newKey = pathKey(newRoot);
+	// 已经就是这里（比如对话框停在当前根目录上直接点确定）：固定下来即可，不迁移
+	if (!oldKey.empty() && (pickedKey == oldKey || newKey == oldKey)) {
+		s->setPluginDir(oldRoot.wstring());
+		return;
+	}
+
+	// 不能选当前插件目录的子目录：否则会把自己复制进自己
+	if (!oldKey.empty() && sameOrInside(newKey, oldKey)) {
+		SettingUi::ConfirmDialog::ask(win, Lang::get(L"setting.pluginsDirNested"), nullptr,
+			Lang::get(L"setting.confirm"), L"", true);
+		return;
+	}
+
+	// 先把目标目录建出来：没写权限（Program Files 之类）在这一步就报出来，
+	// 不会走到「搬到一半失败」。
+	{
+		std::error_code ec;
+		std::filesystem::create_directories(newRoot, ec);
+		if (ec) {
+			SettingUi::ConfirmDialog::ask(win, Lang::get(L"setting.pluginsDirCreateFailed"), nullptr,
 				Lang::get(L"setting.confirm"), L"", true);
 			return;
 		}

@@ -1242,16 +1242,21 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 	const bool isDblClick = (now - annotLastDownTime <= GetDoubleClickTime())
 		&& std::abs(screenPos.x - annotLastDownPos.x) <= GetSystemMetrics(SM_CXDOUBLECLK)
 		&& std::abs(screenPos.y - annotLastDownPos.y) <= GetSystemMetrics(SM_CYDOUBLECLK);
-	// 编辑中点到插入符以外：先结束编辑，但**不吞掉这次点击** ——
-	// 同一个点击继续去命中其它标注/落笔，不需要用户再点第二次。
+	// 编辑中点到文字框内：仍然在编辑 —— 单击把插入符挪到点击处，双击（未全选时）全选。
+	// 以前只有"插入符那一小条"不退出，点别处一律提交退出：想改一段话中间的一个字，
+	// 只能把整段重打，用起来是割裂的（文本编辑器的公认手感是点哪插哪）。
 	if (editingText) {
 		const auto ip = toImgPos(pos);
-		// 编辑中再次双击（点在文字框内）= 全选；第一次双击进编辑时只把插入符放到末尾
-		if (isDblClick && editingText->hitLabelBox((float)ip.x, (float)ip.y)) {
-			editingText->selectAllText();
+		if (editingText->hitLabelBox((float)ip.x, (float)ip.y)) {
+			// 已经全选时不再按双击处理：双击进编辑后紧跟的那一下单击要落插入符，
+			// 否则这一下等于什么都没发生（用户看到的就是"点了没反应"）
+			if (isDblClick && !editingText->selectAll_) editingText->selectAllText();
+			else editingText->placeCaretAt((float)ip.x, (float)ip.y);
+			// 这一下也记进双击序列：编辑中连点两下（双击）要能被识别成全选
+			annotLastDownTime = now;
+			annotLastDownPos = screenPos;
 			return true;
 		}
-		if (editingText->hitCaretArea((float)ip.x, (float)ip.y)) return true;
 		editingText->finishEdit(false);
 	}
 	// finishEdit 可能因失焦先于本事件完成；吞掉紧随其后的点选/新建
