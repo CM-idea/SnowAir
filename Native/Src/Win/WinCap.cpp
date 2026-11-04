@@ -3790,14 +3790,14 @@ void WinCap::startGif()
     if (Setting::get()->getKeyOverlayPos() != Setting::kKeyOverlayNone) startKeyOverlay();
 }
 
-std::wstring WinCap::stopRecord()
+std::wstring WinCap::stopRecord(bool userAbort)
 {
 	// 工具栏已先 hide；属性栏是独立顶层窗，须在 join 编码线程前立刻收掉，否则会空挂一阵
 	if (toolSub) toolSub->hideTools();
 	clearForcedToolId();
 	annotLive = false;
 	stopKeyOverlay();
-	return capVideo ? capVideo->stop() : L"";
+	return capVideo ? capVideo->stop(true, userAbort) : L"";
 }
 
 void WinCap::layoutLongTool()

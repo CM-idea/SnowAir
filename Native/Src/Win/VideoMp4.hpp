@@ -894,6 +894,8 @@ struct DESKTOPCAPTUREPARAMS
     unsigned long long StartMS = 0; // 0, none
     unsigned long long EndMS = 0; // 0, none
     bool MustEnd = false;
+    // 用户主动取消（✕ / Esc / 退出）：这段录制本来就要丢弃，收尾阶段再失败也不必弹框
+    bool UserAbort = false;
     bool Pause = false;
 
     // 真正 WriteSample 成功的视频帧数。一帧都没写就不是有效视频，函数末尾据此报错 ——

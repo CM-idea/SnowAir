@@ -134,7 +134,7 @@ public:
 	bool isAnnotating() const { return annotLive; }
 	void startMp4(bool useSpeaker, bool useMic);
 	void startGif();
-	std::wstring stopRecord();
+	std::wstring stopRecord(bool userAbort = false);
 	// 录屏收工（点 ✓ / 保存）时先隐藏屏幕上的那层：编码收尾要 join 采集线程，
 	// 别让用户看着选框和遮罩多停留几百毫秒
 	void hideRecordOverlay();

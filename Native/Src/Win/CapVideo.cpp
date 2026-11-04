@@ -151,7 +151,8 @@ void CapVideo::dispose()
 void CapVideo::discard()
 {
     // stop() 会把参数置空，重复调用返回空串（dispose 再进来也安全）
-    const std::wstring path = stop();
+    // userAbort = true：用户主动放弃，收尾阶段的失败不该再弹「录屏失败」
+    const std::wstring path = stop(true, true);
     if (!path.empty()) DeleteFileW(path.c_str());
 }
 
@@ -418,7 +419,10 @@ void CapVideo::startMp4(bool useSpeaker, bool useMic)
             // 只有这两个码是"这台机器认不了这个编码器"，换编码器才有意义
             if (code != -5 && code != -10) break;
         }
-        if (code != 0) {
+        // 用户主动取消（✕ / Esc / 退出）：这段录制本来就要丢弃，收尾失败（例如一帧都没写，
+        // Finalize 会失败）不必再弹「录屏失败」—— 取消后弹报错既没用又吓人。
+        // 只有"录制自己挂了"（没人点停止）才需要把失败原因告诉用户。
+        if (code != 0 && !mp4Param->UserAbort) {
             // 以前不管停在哪一步都甩「请设为省电模式」，把编码器缺失、临时文件写不进去
             // 这类完全无关的失败也指到显卡设置上。按失败环节给不同的说明，并带上错误码，
             // 用户反馈时能直接看出停在哪一步。
@@ -503,13 +507,14 @@ bool CapVideo::onSaveKey(bool toClipboard)
     return tool ? tool->onSaveKey(toClipboard) : false;
 }
 
-std::wstring CapVideo::stop(bool hideHost)
+std::wstring CapVideo::stop(bool hideHost, bool userAbort)
 {
     if (!mp4Param && !gifParam) return L"";
     // 遮罩也别留在屏幕上，录完这一帧就该收工了（演示画布内录屏时不能隐藏宿主）
     if (hideHost) win->hide();
     std::wstring filePath;
     if (mp4Param) {
+        mp4Param->UserAbort = userAbort;
         mp4Param->MustEnd = true;
         filePath = mp4Param->f;
     }

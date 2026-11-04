@@ -727,7 +727,8 @@ void ToolVideo::finishRecord(bool toClipboard)
 	killTimer(tickTimerId);
 	// 同 saveFile：先收屏幕上的选框/遮罩，再等编码收尾
 	win->hideRecordOverlay();
-	auto srcPath = win->stopRecord();
+	// 取消（✕）= 放弃这次录制（userAbort）：收尾阶段的失败不再弹「录屏失败」
+	auto srcPath = toClipboard ? win->stopRecord() : win->stopRecord(true);
 	if (toClipboard) {
 		if (!srcPath.empty()) {
 			// 剪贴板里要贴的是落在「录屏文件路径」里的成片，不是临时目录里的半成品
