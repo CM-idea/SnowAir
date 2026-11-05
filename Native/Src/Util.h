@@ -6,6 +6,13 @@
 #include <string>
 #include <utility>
 
+// 一个被识别出来的二维码/条码：文本 + 格式名 + 在输入图里的包围盒（物理像素，相对输入图左上角）
+struct CodeHit
+{
+	std::wstring text;
+	RECT rect{};
+};
+
 // 图像输出相关的工具函数。data 一律要求 BGRA、top-down、行紧凑（步长 = w*4），
 // 这也是 WinPin::getImagePixels 交出来的格式。
 class Util
@@ -50,9 +57,14 @@ public:
 	// 同目录找，再找 %appdata%\SnowAir\plugin，都找不到就用默认浏览器打开它的
 	// release 页面让用户自己下。缓存图由插件读完后自己删。
 	static bool openWithImageReader(const int w, const int h, BYTE* data);
-	// 用 ZXing 识别二维码与常见一维条码（Code128/EAN/UPC 等）。
-	// 图里有多个码时用换行拼在一起
-	static std::wstring decodeQrCode(const int w, const int h, BYTE* data);
+	// 只认二维码 + 常见零售/书本条码（EAN-13/8、UPC-A/E、Code128、Code39、ITF），
+	// 每个码单独返回文本与包围盒。thorough=true 时开 tryHarder / tryRotate（手动入口用），
+	// false 时只要"屏幕上看得很清楚"的那一遍（框选定格后的自动预扫用，快一个量级）。
+	// qrOnly=true 只扫二维码 —— 一维码是**逐行**扫的，混在同一次里会拖慢最常见的那种情况；
+	// 自动预扫先用它跑一遍，没找到码再补一次带一维码的。
+	// 输入超过 1080p 会先缩一次再解，坐标按比例换算回原图。
+	static std::vector<CodeHit> readCodes(const int w, const int h, const BYTE* data, bool thorough,
+		bool qrOnly = false);
 
 	// —— 光标 ——
 	// 当前光标图形的"实体"中心相对热点的偏移，单位物理像素。

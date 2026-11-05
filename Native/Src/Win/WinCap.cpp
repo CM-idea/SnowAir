@@ -12,8 +12,8 @@
 #include "CapVideo.h"
 #include "../Tool/ToolCap.h"
 #include "../Tool/ToolSub.h"
-#include "../Tool/ToolQrcode.h"
 #include "../Tool/ToolOcr.h"
+#include "../Tool/ToolQrcode.h"
 #include "../Ocr/OcrService.h"
 #include "../Ocr/OcrInk.h"
 #include "../Translate/TranslateService.h"
@@ -51,6 +51,7 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "oleaut32.lib")
 using namespace Microsoft::WRL;
+
 
 // 选区矩形 → 截图像素矩形：左/上向下取整，右/下向上取整。
 // 选区在 DPI 换算或补间后可能带小数，按宽度截断会丢掉右/下边那一列像素；
@@ -208,14 +209,31 @@ namespace
 		return s;
 	}
 
+	// 录屏期间挂在全局钩子上的「临时全局键」（开始/暂停录制、鼠标穿透等）是控制键，
+	// 不属于教程内容；按键覆盖层要把它们漏掉。按当前录屏界面 + 用户实际键位判断。
+	bool isRecordingGlobalHotkey(UINT vk)
+	{
+		for (const auto& group : CommandKeys::groupOrder()) {
+			for (const auto& id : CommandKeys::idsInGroup(group)) {
+				if (CommandKeys::scopeOf(id) != CommandKeys::Scope::Global) continue;
+				if ((CommandKeys::surfaceMaskForId(id) & CommandKeys::SurfaceRecord) == 0) continue;
+				if (CommandKeys::keyHits(id, vk)) return true;
+			}
+		}
+		return false;
+	}
+
 	LRESULT CALLBACK keyHookProc(int code, WPARAM wp, LPARAM lp)
 	{
 		if (code == HC_ACTION && (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN)) {
 			auto* kb = reinterpret_cast<KBDLLHOOKSTRUCT*>(lp);
 			if (kb && !(kb->flags & LLKHF_INJECTED)) {
-				std::wstring t = keyComboText(kb->vkCode);
-				if (!t.empty()) {
-					if (auto* cap = WinCap::get()) cap->onGlobalKeyCombo(t);
+				auto* cap = WinCap::get();
+				// 只有鼠标穿透时才代表用户在操作被录制的程序；没穿透时按键属于本软件，
+				// 不应出现在按键覆盖层里。临时全局键同理，哪怕正处于穿透状态也跳过。
+				if (cap && cap->mouseTransparent() && !isRecordingGlobalHotkey(kb->vkCode)) {
+					std::wstring t = keyComboText(kb->vkCode);
+					if (!t.empty()) cap->onGlobalKeyCombo(t);
 				}
 			}
 		}
@@ -239,7 +257,9 @@ namespace
 				default: break;
 				}
 				if (t) {
-					if (auto* cap = WinCap::get()) cap->onGlobalKeyCombo(t);
+					// 鼠标穿透后点击才是操作被录程序；点本软件工具栏/选区不计入
+					if (auto* cap = WinCap::get(); cap && cap->mouseTransparent())
+						cap->onGlobalKeyCombo(t);
 				}
 			}
 		}
@@ -264,6 +284,12 @@ WinCap::WinCap() : AnnotHost()
     onKeyUp.add([this](UINT key) { if (this->modToggleHeld_ == key) this->modToggleHeld_ = 0; });
     onChar.add([this](UINT ch) { annotChar(ch); });
     onTimer.add([this](UINT id) {
+		// 框选定格后的自动扫码去抖到期：真的扫一遍（后台线程，不占 UI）
+		if (id == codeScanTimerId) {
+			killTimer(codeScanTimerId);
+			startCodeScan();
+			return;
+		}
 		// 未框选时 Ctrl+C 只取色：提示显示完后退出截图（期间用户开始框选/按下则取消）
 		if (id == colorCopyCloseTimerId) {
 			killTimer(colorCopyCloseTimerId);
@@ -1604,7 +1630,6 @@ void WinCap::layout()
         cutMask->showHandles = stage != CapStage::Long && !editingSel && !longEdit
 			&& (stage == CapStage::Adjust || videoCanAdjust());
 		cutMask->showBorder = true;
-        cutMask->drawQrcodeFill = (toolQrcode != nullptr);
         cutMask->paint(ctx, !predim);
     }
     if (capLong) capLong->paint(ctx);
@@ -1702,8 +1727,9 @@ bool WinCap::beginMaskResize(POINT pos)
 	}
 
 	if (hit == MaskHit::Inside) {
-		// 识别/二维码结果面板开着：整体拖移会把结果一起带走，禁用（边/角缩放仍保留）
-		if (toolOcr || toolQrcode) return false;
+		// 识别结果面板开着：整体拖移会把结果一起带走，禁用（边/角缩放仍保留）。
+		// 码卡片不拦 —— 它贴在码旁边，不跟着选区走，选区照常能拖。
+		if (toolOcr) return false;
 		// 区内平移：要求未选中标注工具；截图与长图还要求未绘制标注，录屏开录后不作要求
 		if (!getCurToolId().empty()) return false;
 		if (sizeLocked) {
@@ -1794,8 +1820,9 @@ BOOL WinCap::setCursor()
 	POINT pos{};
 	GetCursorPos(&pos);
 	ScreenToClient(hwnd, &pos);
-	// 识别/二维码结果面板开着时选区已定：不再给拖移/调边光标，与 beginMaskResize 的闸门一致
-	const bool panelLocked = (toolOcr != nullptr || toolQrcode != nullptr);
+	// 识别结果面板开着时选区已定：不再给拖移/调边光标，与 beginMaskResize 的闸门一致。
+	// 码卡片不在此列 —— 它只是贴在码旁边的一张小卡，不挡画面，选区照常能调。
+	const bool panelLocked = (toolOcr != nullptr);
 
 	// 演示画布调整背景：缩放光标优先于当前绘图工具的光标（画笔/橡皮等会把它盖掉）
 	if (demoMode && demoBoardActive() && demoBoard_.adjust) {
@@ -1811,6 +1838,13 @@ BOOL WinCap::setCursor()
 			else SetCursor(LoadCursor(nullptr, IDC_SIZENS));
 			return TRUE;
 		}
+	}
+
+	// 码角标：指上去给手型 —— 它是这一版里唯一"浮在画面上还能点"的东西，
+	// 没有光标反馈就会被当成装饰
+	if (!demoMode && !isPress && !hasAnnotShapes() && cutMask && cutMask->codeHover() >= 0) {
+		SetCursor(LoadCursor(nullptr, IDC_HAND));
+		return TRUE;
 	}
 
 	if (annotLive) {
@@ -2043,8 +2077,7 @@ bool WinCap::magnifierVisible() const
 	const bool framing = (stage == CapStage::Select && isPress && selectDragging_);
 	const bool resizing = cutMask->isResizingEdge()
 		&& (maskDragging || ((stage == CapStage::Adjust || videoCanAdjust()) && isPress));
-	const bool elementHover = stage == CapStage::Select && !isPress && !demoMode
-		&& Setting::get()->getFindWindowElements();
+	const bool elementHover = stage == CapStage::Select && !isPress && !demoMode;
 	// 还没开始框选（Select 且没有按住鼠标）时按 Ctrl+C 取色：
 	// 让放大镜临时露出来显示「复制成功」，随后自动退出
 	const bool colorFlash = stage == CapStage::Select && !isPress
@@ -2162,6 +2195,16 @@ bool WinCap::commandFromChord(const std::wstring& chord)
 bool WinCap::runCommand(const std::wstring& id)
 {
 	if (editingText) return false;
+	// 码卡片开着时：「完成 / 复制」= 复制二维码结果并收工（Enter、Ctrl+C、工具栏 ✓ 都走这里）；
+	// 其余命令照常执行，但先把卡片收掉。
+	if (qrCardOpen()) {
+		if (id == L"cmd_done" || id == L"cmd_copy") {
+			finishWithQrCard();
+			return true;
+		}
+		closeQrcodeCard();
+		refresh();
+	}
 	// 「删除标注」为只读行，scan 不会返回它，此处再兜一层
 	if (id == L"cmd_delete_sel") return false;
 	// 「切换色值」只在查找元素阶段有意义（见 onKey 里按阶段判的那一段）；
@@ -2324,6 +2367,12 @@ void WinCap::onKey(UINT key)
 {
     // 自带文字编辑：所有按键先给标注文字（字符走 onChar），不让命令表/选区抢
     if (editingText) { annotKey(key); return; }
+    // 码卡片开着时 Esc 只收卡片 —— 否则用户想关掉那张小卡，整次截图都没了
+    if (key == VK_ESCAPE && qrCardOpen() && !isMouseTransparent) {
+        closeQrcodeCard();
+        refresh();
+        return;
+    }
     // 演示画布 + 白板：PgUp/PgDn 翻页（多图）或转发给 PPT 放映
     if (demoMode && demoBoardActive() && (key == VK_PRIOR || key == VK_NEXT)) {
         demoBoardStepPage(key == VK_NEXT ? 1 : -1);
@@ -2343,8 +2392,7 @@ void WinCap::onKey(UINT key)
     // 查找元素阶段：切换放大镜的色值口径（#RRGGBB ⇄ rgb(r, g, b)）。
     // 键位默认 Tab，可在「设置 → 系统按键 → 常规」里改，也可以清空成不绑；
     // 只认"完全一致"的组合：带别的修饰键仍走命令表，不抢用户自定义的键位。
-    const bool elementLookup = stage == CapStage::Select && !isPress && !demoMode
-        && Setting::get()->getFindWindowElements();
+    const bool elementLookup = stage == CapStage::Select && !isPress && !demoMode;
     if (elementLookup && CommandKeys::keyHits(L"cmd_toggle_pix_color", key)) {
         // 纯修饰键（Alt / Ctrl / Shift）按住时系统会反复发 keydown：按下到松开之间只切一次
         if (CommandKeys::isModifierOnlyBinding(L"cmd_toggle_pix_color")) {
@@ -2420,8 +2468,8 @@ bool WinCap::nudgeSelectionByArrow(int dx, int dy)
 	if (demoMode) return false;
 	// 长图滚动中：方向键同样不挪选区（与鼠标拖动同一规则，见 maskMoveLocked）
 	if (maskMoveLocked()) return false;
-	// 识别/二维码面板开着时选区已定，不让它带着结果一起挪
-	if (toolOcr || toolQrcode) return false;
+	// 识别面板开着时选区已定，不让它带着结果一起挪（码卡片是贴在码上的小卡，不跟着走）
+	if (toolOcr) return false;
 	if (stage != CapStage::Adjust && !annotLive && !videoCanAdjust()) return false;
 	if (maskDragging || isPress) return false;
 	// 已有标注时方向键不挪选区
@@ -2634,6 +2682,29 @@ void WinCap::onDown(POINT pos, bool isRight)
     // 按下即结束"查找元素"：作废在途查询，免得悬停高亮的结果回来再改矩形、和下面的拖框打架。
     // 查询本身不碰遮罩样式与鼠标捕获，所以这里不需要为输入做任何补救。
     if (cutMask) cutMask->cancelHoverQuery();
+    // 点码角标：开着就收、没开就开（同一个角标再点一次 = 收回）。
+    // 必须放在"点到卡外就收卡"之前 —— 否则第二次点角标会先把卡收掉、再重新开一张。
+    if (!isRight && !demoMode && stage == CapStage::Adjust && !hasAnnotShapes() && cutMask) {
+        const int badge = cutMask->hitCodeBadge(pos);
+        if (badge >= 0) {
+            if (qrCardOpen() && qrCardBadge_ == badge) {
+                closeQrcodeCard();
+            }
+            else {
+                openCodeCard(badge);
+            }
+            refresh();
+            return;
+        }
+    }
+    // 卡片是独立窗口（WS_EX_NOACTIVATE）：能收到这一下就说明点在卡外。
+    // 这一下只做一件事 —— 收卡，然后吞掉：不启动选区拖移、不触发双击完成。
+    // 想继续操作，点第二次即可。
+    if (toolQrcode) {
+        closeQrcodeCard();
+        refresh();
+        return;
+    }
     if (isRight) {
         if (handleLayerCancel(false))
             requestExitAfterRightUp();
@@ -2743,10 +2814,10 @@ void WinCap::onDown(POINT pos, bool isRight)
         refresh();
     }
     else if (stage == CapStage::Adjust) {
-        // 识别/二维码结果面板开着时，选区内部整体拖移会把结果面板一起带走（"拖着结果走"）。
+        // 识别结果面板开着时，选区内部整体拖移会把面板一起带走（"拖着结果走"）。
         // beginMaskResize 里已经挡了，但无标注时 annotLive 为 false，会从这条分支溜过去；
         // 这里同样只放行边/角缩放，选区内部按下不启动调整。
-        if ((toolOcr || toolQrcode) && cutMask->hitTest(pos) == MaskHit::Inside) return;
+        if (toolOcr && cutMask->hitTest(pos) == MaskHit::Inside) return;
         isPress = true;
         cutMask->startAdjust(pos);
         setPixPos(pos);
@@ -2812,7 +2883,14 @@ void WinCap::onMove(POINT pos)
 {
     // 光标离开窗口时 Ling 会投递一个 INT_MAX 的哨兵位置（其它浮层也是这么判的）。
     // 不能拿它当真实坐标：setPixPos 会把它夹到窗口右下角，放大镜就闪到右下角去了。
-    if (pos.x == INT_MAX || pos.y == INT_MAX) return;
+    if (pos.x == INT_MAX || pos.y == INT_MAX) {
+        // 光标离开窗口：把角标的停悬态清掉，否则它会一直亮着
+        if (cutMask && cutMask->codeHover() >= 0) {
+            cutMask->setCodeHover(-1);
+            refresh();
+        }
+        return;
+    }
     // 白板：正在拖背景边/角
     if (demoMode && demoBoard_.dragging) { demoBoardUpdateResize(pos); return; }
     if (cutMask && cutMask->infoInteracting()) {
@@ -2821,6 +2899,14 @@ void WinCap::onMove(POINT pos)
     }
     // 演示画布不画信息栏（也不该能命中它），别再弹那圈的悬停提示
     if (!demoMode) updateInfoBarTip(pos);
+    // 码角标停悬：纯矩形命中，不再解码（解码早在框选定格时做完了）
+    if (!demoMode && !isPress && !annotLive && cutMask && stage == CapStage::Adjust) {
+        const int badge = cutMask->hitCodeBadge(pos);
+        if (badge != cutMask->codeHover()) {
+            cutMask->setCodeHover(badge);
+            refresh();
+        }
+    }
     // 长截图：预览交互优先于标注（编辑态也要能拖/悬停预览）
     if (stage == CapStage::Long && capLong) {
         capLong->onMove(pos);
@@ -2873,9 +2959,11 @@ void WinCap::onMove(POINT pos)
             refresh();
         }
         else {
-            cutMask->highlight(pos);
-            // 查找元素阶段：悬停即显示放大镜并跟随光标
-            if (Setting::get()->getFindWindowElements() && !demoMode) {
+            // 「查找窗口元素」只控制**悬停吸附**：highlight() 才是发元素查询、
+            // 把选框吸到窗口/控件上的那一步。放大镜是独立能力 ——
+            // 关掉查找元素也照常跟随光标，取色/看像素不受影响。
+            if (!demoMode && Setting::get()->getFindWindowElements()) cutMask->highlight(pos);
+            if (!demoMode) {
                 setPixPos(pos);
                 refresh();
             }
@@ -3016,6 +3104,8 @@ void WinCap::onUp(POINT pos, bool isRight)
         }
         stage = CapStage::Adjust;
         refresh();
+        // 框选定格：立刻扫一遍（不等去抖），有码的话角标几乎立刻浮出来
+        scheduleCodeScan(true);
         // 托盘「屏幕录制」进来的一次会话：框完直接进录屏，不再弹截图工具栏
         if (pendingRecord) {
             pendingRecord = false;
@@ -3030,6 +3120,8 @@ void WinCap::onUp(POINT pos, bool isRight)
         if (cutMask) cutMask->endAdjust();
         setToolChromeHidden(false);
         syncQrcodePanel();
+        // 拖完边角松手：选区定格了，重新扫一遍
+        scheduleCodeScan();
         refresh();
     }
     else if (videoCanAdjust()) {
@@ -3053,6 +3145,7 @@ void WinCap::onClosed()
     CaptureEsc::release(hwnd);
     killTimer(recCursorTimerId);
     killTimer(demoRecTickTimerId);
+    killTimer(codeScanTimerId);
     demoRecRunning_ = false;
     demoRecPaused_ = false;
     annotLive = false;
@@ -3070,7 +3163,7 @@ void WinCap::onClosed()
     stopKeyOverlay();
     if (capVideo) capVideo->dispose();
     if (capLong) capLong->dispose();
-    if (toolQrcode) { toolQrcode->close(); toolQrcode.reset(); }
+    closeQrcodeCard();
     if (toolCap) toolCap->close();
     if (toolSub) toolSub->close();
     // OCR/翻译结果面板也一起收掉：它跟其它子工具一样挂在会话上，之前漏了这一句，
@@ -3210,6 +3303,11 @@ void WinCap::enterLiveStage()
     // 选区这时已经定死了，标签也没什么可看的，直接不画 —— 这样选区内就真的什么都不画了，
     // 不必再拿 WDA_EXCLUDEFROMCAPTURE 去摘整块屏幕大小的宿主窗口
     cutMask->hideLabel = true;
+    // 进录屏/长图：角标和卡片都得走 —— 它们会被录进视频 / 拼进长图（录制侧还可能被排除捕获，
+    // 那就会出现"屏幕上有点，录出来没有"的怪异感）
+    if (qrCardOpen()) closeQrcodeCard();
+    cutMask->clearCodeBadges();
+    killTimer(codeScanTimerId);
     if (toolCap) toolCap->hide();
     SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     refresh();
@@ -3350,10 +3448,13 @@ void WinCap::onMaskRectChanged()
 	// 识别/翻译浮层是按**旧选区**裁出来的：选区只要动了（挪位置或改大小），
 	// 旧结果就和当前画面/选区对不上，继续跟着走只会让文字错位。直接收起，要看得重新识别。
 	// 选区内部整体拖动已在 onDown 里挡住；拖边/方向键/滚轮改到这里时一并作废。
-	if (toolOcr) {
-		clearOcrPanel();
-		return;
+	if (toolOcr) clearOcrPanel();
+	// 码卡片和角标同理：都是按旧选区里的码摆的，选区一变就撤掉，等停稳后重扫
+	if (qrCardOpen()) {
+		closeQrcodeCard();
+		refresh();
 	}
+	scheduleCodeScan();
 }
 
 bool WinCap::annotRightClick()
@@ -3572,6 +3673,11 @@ void WinCap::startAnnotate(const std::wstring& toolId)
 	restoreLaserOnBoardBarClose_ = false;
 	if (toolSub) toolSub->bindOwner(hwnd);
 	annotLive = true;
+	// 换工具不等于画了东西：角标由 onHistoryChanged 按"有没有标注"来收放，这里只把结果卡收掉
+	if (qrCardOpen()) {
+		closeQrcodeCard();
+		refresh();
+	}
 	// 标注阶段仍显示选区尺寸信息栏；长图/录屏才在 enterLiveStage 里隐藏
 	cutMask->hideLabel = false;
 	// 全屏同表面：不挖洞、不建选区 Pin；只换笔；保留已选标注
@@ -3639,6 +3745,17 @@ void WinCap::onHistoryChanged()
 	AnnotHost::onHistoryChanged();
 	if (capVideo) capVideo->notifyHistoryChanged();
 	if (capLong) capLong->notifyHistoryChanged();
+	// 角标只在"选区里没有标注"时存在：画上第一笔就退场，全部撤销/删除后要自己回来。
+	// 这条规则只看"有没有标注"，不看有没有选中画笔 —— 否则选过一次工具就再也回不来了。
+	if (stage != CapStage::Adjust) return;
+	if (hasAnnotShapes()) {
+		clearCodeBadges();
+		if (qrCardOpen()) { closeQrcodeCard(); refresh(); }
+		return;
+	}
+	// 标注被清空：让"同一选区不重扫"的短路失效，然后立刻重扫一次
+	codeScanRect_ = D2D1::RectF(-1.f, -1.f, -1.f, -1.f);
+	scheduleCodeScan(true);
 }
 
 bool WinCap::queryMainBarAnchor(MainBarAnchor& out) const
@@ -4257,6 +4374,10 @@ OcrResult splitParagraphsByInk(OcrResult r, const std::vector<BYTE>& px, int w, 
 void WinCap::startOcrInternal(bool translateMode)
 {
 	if (!cutMask || !cutMask->hasRect()) return;
+	// 用户要看/翻译文字：角标先退场，否则会被镜像到识别浮层上（见 setAnnotPainter）；
+	// 已经开着的码卡片也一起收掉 —— 两块浮层不该同时挂在屏幕上
+	clearCodeBadges();
+	closeQrcodeCard();
 	const D2D1_RECT_F sel = cutMask->maskRect;
 
 	std::vector<BYTE> pixels;
@@ -4267,7 +4388,7 @@ void WinCap::startOcrInternal(bool translateMode)
 
 	// 建面板（含建窗、标注镜像、对齐选区）；翻译模式会先建一次空壳，识别完再填内容
 	auto makePanel = [&](OcrResult res, std::vector<BYTE> px) {
-		toolQrcode.reset();
+		closeQrcodeCard();   // 与识别面板互斥
 		toolOcr = std::make_unique<ToolOcr>(this, std::move(res), translateMode, std::move(px), cw, ch);
 		toolOcr->setElementBlock(selectionFromElement_);
 		toolOcr->createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP);
@@ -4522,38 +4643,263 @@ void WinCap::clearOcrPanel()
 	refresh();
 }
 
-void WinCap::syncQrcodePanel()
+// 两个矩形是不是"同一块选区"（亚像素抖动不算变）
+static bool rectNearlyEqual(const D2D1_RECT_F& a, const D2D1_RECT_F& b)
 {
-	if (!toolQrcode || !cutMask || !cutMask->hasRect() || !toolQrcode->hwnd) return;
-	toolQrcode->syncToMask(cutMask->maskRect, x, y, dpi);
+	return std::fabs(a.left - b.left) < 0.5f && std::fabs(a.top - b.top) < 0.5f
+		&& std::fabs(a.right - b.right) < 0.5f && std::fabs(a.bottom - b.bottom) < 0.5f;
 }
 
+// 网址判定：整体是一个 http(s) URL，不是"正文里含链接"
+static bool isHttpUrl(const std::wstring& text)
+{
+	if (text.size() >= 8 && _wcsnicmp(text.c_str(), L"https://", 8) == 0) return true;
+	if (text.size() >= 7 && _wcsnicmp(text.c_str(), L"http://", 7) == 0) return true;
+	return false;
+}
+
+bool WinCap::qrCardOpen() const
+{
+	return toolQrcode != nullptr;
+}
+
+void WinCap::syncQrcodePanel()
+{
+	// 卡片是按"当时那个码的位置"摆的，选区一动它就和画面脱节 —— 收掉。
+	// 但拖动选区时光标每动一下都会走到这里：选区真的变了才收，
+	// 否则刚点开的卡片会在抬手那一下被自己收掉。
+	if (!toolQrcode) return;
+	if (!cutMask || !rectNearlyEqual(codeCardRect_, cutMask->maskRect)) closeQrcodeCard();
+}
+
+// 手动入口（快捷键 Q）：完整的一遍（tryHarder + tryRotate），
+// 识别不到就摆一张"未识别到二维码"的空卡，不要静默失败。
 void WinCap::startQrcode()
 {
 	std::vector<BYTE> pixels;
 	int cw{ 0 }, ch{ 0 };
-	if (!exportSelection(pixels, cw, ch)) return;
-	auto text = Util::decodeQrCode(cw, ch, pixels.data());
-	// 结果直接盖在选区上，不弹系统框；主工具栏保持可见
-	if (!cutMask || !cutMask->hasRect()) {
-		close();
-		return;
+	if (!exportSelection(pixels, cw, ch, false, false)) return;
+	if (!cutMask || !cutMask->hasRect()) { close(); return; }
+
+	const D2D1_RECT_U crop = pixelAlignedRect(cutMask->maskRect);
+	auto hits = Util::readCodes(cw, ch, pixels.data(), true);
+
+	// 选一个主码：优先最大的那个（用户框了一片时，最大的最像他想要的）
+	int best = -1;
+	long long bestArea = -1;
+	for (size_t i = 0; i < hits.size(); ++i) {
+		const auto& r = hits[i].rect;
+		const long long area = (long long)(r.right - r.left) * (r.bottom - r.top);
+		if (area > bestArea) { bestArea = area; best = (int)i; }
 	}
-	toolQrcode = std::make_unique<ToolQrcode>(this, std::move(text));
-	const int left = (int)std::lround(cutMask->maskRect.left);
-	const int top = (int)std::lround(cutMask->maskRect.top);
-	const int right = (int)std::lround(cutMask->maskRect.right);
-	const int bottom = (int)std::lround(cutMask->maskRect.bottom);
-	const int pw = (std::max)(1, right - left);
-	const int ph = (std::max)(1, bottom - top);
-	toolQrcode->setSize((float)pw / dpi, (float)ph / dpi);
-	toolQrcode->setPosition(x + left, y + top);
-	toolQrcode->createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP);
-	SetWindowLongPtr(toolQrcode->hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(hwnd));
-	syncQrcodePanel();
-	syncOcrPanel();
+
+	closeQrcodeCard();
+	D2D1_RECT_F anchor{};
+	std::wstring text;
+	bool url = false;
+	if (best >= 0) {
+		const auto& h = hits[(size_t)best];
+		anchor = D2D1::RectF((float)(crop.left + h.rect.left), (float)(crop.top + h.rect.top),
+			(float)(crop.left + h.rect.right), (float)(crop.top + h.rect.bottom));
+		text = h.text;
+		url = isHttpUrl(h.text);
+	}
+	else {
+		const auto& m = cutMask->maskRect;
+		anchor = D2D1::RectF((m.left + m.right) * 0.5f - 1.f, (m.top + m.bottom) * 0.5f - 1.f,
+			(m.left + m.right) * 0.5f + 1.f, (m.top + m.bottom) * 0.5f + 1.f);
+	}
+	showQrCardAt(anchor, text, url);
+	qrCardBadge_ = -1;   // 手动入口：不对应任何角标
+	codeCardRect_ = cutMask->maskRect;
 	refresh();
 }
+
+// 建卡片窗口。WS_EX_NOACTIVATE：点它不会抢焦点，键盘始终留在截图窗口，
+// 也就不存在"卡片收到按键再转给截图窗口"这条会误触发命令的路。
+void WinCap::showQrCardAt(const D2D1_RECT_F& anchor, const std::wstring& text, bool url)
+{
+	toolQrcode = std::make_unique<ToolQrcode>(this, text, url, anchor);
+	toolQrcode->applyGeometry();
+	// 网址卡：不抢焦点（点正文直接开链接，键盘始终在截图窗）。
+	// 文本卡：允许激活 —— 拖选 / Ctrl+C 才能走 TextBox 自己那套，和文字识别浮层一致。
+	DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+	if (url) ex |= WS_EX_NOACTIVATE;
+	toolQrcode->createNativeWindow(ex, WS_POPUP);
+	SetWindowLongPtr(toolQrcode->hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(hwnd));
+}
+
+void WinCap::closeQrcodeCard()
+{
+	qrCardBadge_ = -1;
+	if (!toolQrcode) return;
+	toolQrcode->close();
+	toolQrcode.reset();
+}
+
+void WinCap::openCodeCard(int badgeIndex)
+{
+	if (!cutMask) return;
+	const auto& badges = cutMask->codeBadges();
+	if (badgeIndex < 0 || badgeIndex >= (int)badges.size()) return;
+	// 结果卡和识别面板都挂在同一块选区上，同时出现只会互相打架 —— 开卡前把识别面板收掉
+	if (toolOcr) clearOcrPanel();
+	const CodeBadge badge = badges[(size_t)badgeIndex];
+	closeQrcodeCard();
+	// 左对齐按钮、尖角对准它中心
+	showQrCardAt(badge.rect, badge.text, isHttpUrl(badge.text));
+	// 卡片开着时角标保持在停悬态，一眼能看出"这张卡是哪个码的"
+	cutMask->setCodeHover(badgeIndex);
+	qrCardBadge_ = badgeIndex;
+	codeCardRect_ = cutMask->maskRect;
+	refresh();
+}
+
+// 「完成 / 复制 / Enter / Ctrl+C」：卡开着时这几个动作都是"复制二维码结果并收工"
+void WinCap::finishWithQrCard()
+{
+	if (!toolQrcode) return;
+	const std::wstring text = toolQrcode->text();
+	if (!text.empty()) Ling::Util::setTextToClipboard(text);
+	closeQrcodeCard();
+	close();
+}
+
+// 卡片正文（网址）被单击：先把网址写进剪贴板，再关会话，最后交给浏览器。
+// 这个顺序是有意的 —— 写剪贴板是本地操作，关窗立刻生效，
+// 启动浏览器最慢、放在最后，观感上就是"点了就没了"。
+void WinCap::openQrCardLink()
+{
+	if (!toolQrcode) return;
+	const std::wstring url = toolQrcode->text();
+	if (!url.empty()) Ling::Util::setTextToClipboard(url);
+	close();
+	ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+// 把一个码的包围盒换算成盖在它**中心**的小按钮：位置不随画面边缘漂，
+// 用户一眼就知道"这个码可以点"。尺寸固定 —— 这个按钮是"提示"不是"主角"，
+// 跟着码放大反而会盖住码本身。
+static D2D1_RECT_F codeBadgeRect(const D2D1_RECT_F& symbol, float dpi, float hostW, float hostH)
+{
+	const float size = 36.f * dpi;
+	const float margin = 2.f * dpi;
+	const float cx = (symbol.left + symbol.right) * 0.5f;
+	const float cy = (symbol.top + symbol.bottom) * 0.5f;
+	float x = std::clamp(cx - size * 0.5f, margin, (std::max)(margin, hostW - size - margin));
+	float y = std::clamp(cy - size * 0.5f, margin, (std::max)(margin, hostH - size - margin));
+	return D2D1::RectF(x, y, x + size, y + size);
+}
+
+void WinCap::clearCodeBadges()
+{
+	// 代际号自增：在途的扫码结果回来时会被丢掉
+	++codeScanGen_;
+	// 记住的选区一并作废：下次 scheduleCodeScan 才会重新扫（不然"选区没动"那条会把它挡掉）
+	codeScanRect_ = D2D1::RectF(-1.f, -1.f, -1.f, -1.f);
+	if (!cutMask) return;
+	if (!cutMask->hasCodeBadges()) return;
+	cutMask->clearCodeBadges();
+	refresh();
+}
+
+// 选区变了/刚框完：撤掉旧角标，等停稳再扫。
+// 录屏、长图、演示画布都不做 —— 那些场景里画面是"要录/要拼"的，浮按钮只会碍事。
+void WinCap::scheduleCodeScan(bool immediate)
+{
+	if (!cutMask || !hwnd) return;
+	// 录屏、长图、演示画布都不做 —— 那些场景里画面是要录/要拼的，浮按钮只会碍事
+	if (demoMode || stage == CapStage::Video || stage == CapStage::Long) {
+		return;
+	}
+	if (!cutMask->hasRect() || hasAnnotShapes()) {
+		clearCodeBadges();
+		return;
+	}
+	// 选区没动（例如只是点了一下）：既不用重扫，也不用把角标刷掉
+	if (rectNearlyEqual(codeScanRect_, cutMask->maskRect)) {
+		return;
+	}
+	++codeScanGen_;          // 选区变了：在途结果作废
+	codeScanRect_ = cutMask->maskRect;
+	const auto& mr = cutMask->maskRect;
+	if (cutMask->hasCodeBadges()) {
+		cutMask->clearCodeBadges();
+		refresh();
+	}
+	// 框选定格那一下不去抖：用户这时候已经在盯着屏幕等结果了。
+	// 只有"拖边改大小 / 挪选区"这种连续动作才走定时器。
+	if (immediate) startCodeScan();
+	else setTimer(codeScanDelayMs, codeScanTimerId);
+}
+
+void WinCap::startCodeScan()
+{
+	if (!cutMask || !cutMask->hasRect() || !hwnd) return;
+	if (demoMode || stage != CapStage::Adjust || hasAnnotShapes()) {
+		return;
+	}
+
+	std::vector<BYTE> pixels;
+	int cw{ 0 }, ch{ 0 };
+	// 只要原始像素：不带标注（会把码盖掉）、不要导出效果（阴影加边会偏移坐标）
+	if (!exportSelection(pixels, cw, ch, false, false)) {
+		return;
+	}
+	if (cw < 8 || ch < 8) return;
+	const uint64_t gen = ++codeScanGen_;
+	const D2D1_RECT_F crop = cutMask->maskRect;
+	const int cropL = (int)std::floor(crop.left);
+	const int cropT = (int)std::floor(crop.top);
+	const float dpiNow = dpi;
+	const float hostW = w;
+	const float hostH = h;
+	HWND host = hwnd;
+
+	// 手动入口的缓存：解码在后台线程，抓好的像素直接搬家过去
+	std::shared_ptr<std::vector<BYTE>> px = std::make_shared<std::vector<BYTE>>(std::move(pixels));
+	std::thread([host, gen, cw, ch, cropL, cropT, dpiNow, hostW, hostH, px]() {
+		// 两遍：先只扫二维码（快），一个都没找到才补一遍带一维码的。
+		// 一维码是逐行扫的，混在同一次里会让"屏幕上就一个二维码"这种最常见的情况白付那份钱。
+		auto hits = Util::readCodes(cw, ch, px->data(), false, true);
+		if (hits.empty()) hits = Util::readCodes(cw, ch, px->data(), false, false);
+		std::vector<CodeBadge> badges;
+		badges.reserve(hits.size());
+		for (auto& h : hits) {
+			CodeBadge badge;
+			badge.text = std::move(h.text);
+			badge.symbol = D2D1::RectF((float)(cropL + h.rect.left), (float)(cropT + h.rect.top),
+				(float)(cropL + h.rect.right), (float)(cropT + h.rect.bottom));
+			badge.rect = codeBadgeRect(badge.symbol, dpiNow, hostW, hostH);
+			badges.push_back(std::move(badge));
+		}
+		Ling::App::get()->dq.TryEnqueue([host, gen, badges = std::move(badges)]() {
+			auto* cap = WinCap::get();
+			if (!cap || cap->hwnd != host) return;   // 会话已结束
+			cap->applyCodeScan(gen, badges);
+		});
+	}).detach();
+}
+
+void WinCap::applyCodeScan(uint64_t gen, std::vector<CodeBadge> badges)
+{
+	// 结果过期（选区又动了 / 又开始画标注了）：直接丢
+	if (gen != codeScanGen_) return;
+	if (!cutMask || demoMode || stage != CapStage::Adjust || hasAnnotShapes()) return;
+	// 同内容的多个码只留一个（重复水印 / 九宫格海报），否则会摆一排一模一样的按钮
+	std::vector<CodeBadge> unique;
+	unique.reserve(badges.size());
+	for (auto& b : badges) {
+		bool dup = false;
+		for (const auto& u : unique) {
+			if (u.text == b.text) { dup = true; break; }
+		}
+		if (!dup) unique.push_back(std::move(b));
+	}
+	if (unique.empty()) return;
+	cutMask->setCodeBadges(std::move(unique));
+	refresh();
+}
+
 
 // 记住本次选区（屏幕坐标）→ 全局热键「重复截图」据此再抓一块。
 // 只在真正的截图收工时调用（keepOpen 的预览 / 演示画布不算）。
@@ -4911,6 +5257,8 @@ void WinCap::stopKeyOverlay()
 void WinCap::onGlobalKeyCombo(const std::wstring& text)
 {
 	if (text.empty()) return;
+	// 覆盖层只记录"鼠标穿透后操作被录程序"的那段时间
+	if (!isMouseTransparent) return;
 	if (!keyOverlayLines_.empty()) {
 		const std::wstring& prev = keyOverlayLines_.back();
 		// 同一个组合在补全（"Ctrl + " → "Ctrl + C"）：替换最后一条，不新增历史。

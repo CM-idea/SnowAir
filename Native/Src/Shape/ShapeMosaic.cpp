@@ -90,6 +90,14 @@ void ShapeMosaic::paintHint(ID2D1DeviceContext* ctx)
 	ctx->FillGeometry(geo.Get(), brush.Get());
 }
 
+void ShapeMosaic::syncToolFromShape() const
+{
+	auto* ts = win->toolSub.get();
+	if (!ts) return;
+	ts->isMosaicBlur = isBlur;
+	ts->setShapeSliderVal(L"mosaic", strokeWidth);
+}
+
 void ShapeMosaic::onGeometryChanged()
 {
 	resetMosaic();

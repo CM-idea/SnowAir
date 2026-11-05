@@ -1505,8 +1505,8 @@ void WinSettingQuickTranslate::loadSessions()
 			}
 		}
 	}
-	// 直接新建一条空记录：快捷翻译没有"自动创建新会话"之类的开关
-	if (sessions.empty()) {
+	// 每次打开快捷翻译：按设置决定是否从空白会话开始；关闭时沿用上次会话
+	if (Setting::get()->getQuickTranslateNewSession() || sessions.empty()) {
 		startNewSession();
 	}
 	else {

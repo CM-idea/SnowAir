@@ -269,6 +269,7 @@
         "fnTransBaidu": "Baidu Перевод",
         "fnTransOffline": "Офлайн-перевод",
         "fnDictMode": "Словарный режим",
+        "quickNewSession": "Новый сеанс при открытии",
         "fnSourceLang": "Исходный язык",
         "fnLangAuto": "Автоопределение",
         "fnLangZh": "Китайский упрощ.",

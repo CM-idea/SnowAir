@@ -19,8 +19,11 @@
 #include "../Shape/ShapePatina.h"
 #include "../Shape/ShapeWatermark.h"
 #include "../Shape/ShapeHighlight.h"
+#include "../Shape/AnnotCursor.h"
 #include "../Tool/SerialEmoji.h"
 #include "../Util.h"
+#include <imm.h>
+#include <cstdio>
 
 using namespace Microsoft::WRL;
 
@@ -34,7 +37,13 @@ namespace {
 	}
 }
 
-AnnotHost::AnnotHost() = default;
+AnnotHost::AnnotHost()
+{
+	// 标注文字是画布内自绘的，没有系统插入符；输入法的组字窗/候选框位置只能由宿主
+	// 通过 IMM 告知。不订阅这个事件，输入法就按窗口默认原点摆 —— 截图窗口是全屏的，
+	// 表现就是「打字时输入法候选框跑到屏幕左上角」。
+	onIME.add([this] { positionImeWindow(); });
+}
 
 AnnotHost::~AnnotHost()
 {
@@ -48,10 +57,18 @@ void AnnotHost::ensureHistory()
 	if (!toolSub) toolSub = std::make_unique<ToolSub>(this);
 }
 
+void AnnotHost::onHistoryUndoRedo()
+{
+	// 组框缓存的是变换前的几何：撤销/重做把标注换回去后必须重新包一遍
+	if (hasMultiSelection()) syncGroupBoxFromSelection();
+	refresh();
+}
+
 void AnnotHost::onHistoryChanged()
 {
 	// 撤销/重做/删除都会改变下层内容：上层滤镜重算一遍
 	refreshFiltersAbove(nullptr);
+	pruneAnnotSelection();
 	if (toolCap) toolCap->updateUndoEnabled();
 }
 
@@ -238,35 +255,485 @@ ShapeBase* AnnotHost::hitShapeAt(float x, float y)
 
 bool AnnotHost::nudgeSelectedAnnot(float dx, float dy)
 {
-	if (!history || !hasSelectedAnnot()) return false;
+	if (!history) return false;
 	// 落笔中/拖动中/编辑文字时不存在"选中标注微调"
 	if (annotMouseDown || newShape || editingText) return false;
-	ShapeBase* s = shapeHover;
-	const auto before = s->editSnapshot();
-	if (!s->translateBy(dx, dy)) return false;
+	const auto targets = selectedShapes();
+	if (targets.empty()) return false;
+	std::vector<std::vector<float>> before;
+	before.reserve(targets.size());
+	for (auto* s : targets) before.push_back(s->editSnapshot());
+	bool moved = false;
+	for (auto* s : targets) {
+		if (s->translateBy(dx, dy)) moved = true;
+	}
+	if (!moved) return false;
 	// 连线跟着贴回新位置（与鼠标拖动同一口径）
 	for (auto& o : history->shapes) {
-		if (o && !o->isUndo && o.get() != s) o->syncLinks();
+		if (o && !o->isUndo) o->syncLinks();
 	}
-	refreshFiltersAbove(s);
-	const auto after = s->editSnapshot();
-	if (!before.empty() && after != before) history->addEditStep(s, before, after);
+	refreshFiltersAbove(nullptr);
+	std::vector<std::vector<float>> after;
+	after.reserve(targets.size());
+	for (auto* s : targets) after.push_back(s->editSnapshot());
+	history->addEditSteps(targets, before, after);
 	refresh();
 	return true;
 }
 
 void AnnotHost::clearAnnotSelection(bool keepStylePreview)
 {
-	if (!shapeHover) return;
+	if (!shapeHover && extraSelection_.empty()) return;
 	if (auto* a = dynamic_cast<ShapeArrow*>(shapeHover)) a->resetFree();
 	else if (auto* l = dynamic_cast<ShapeLine*>(shapeHover)) l->resetFree();
 	shapeHover = nullptr;
+	extraSelection_.clear();
+	groupBox_ = D2D1::RectF(0.f, 0.f, -1.f, -1.f);
+	groupAngle_ = 0.f;
+	groupScaleActive_ = false;
 	styleLoadCandidate = nullptr;
+	marqueeActive_ = false;
+	groupMoveActive_ = false;
+	groupRotateActive_ = false;
+	groupTargets_.clear();
+	groupBefore_.clear();
 	if (toolSub) {
+		toolSub->endMultiStyle();
 		toolSub->clearSelectedNumberValue();
 	// 取消选中：属性栏还原为工具默认值；开始绘制新标注时传入 true，保留已载入的样式。
 		if (!keepStylePreview) toolSub->endShapeStylePreview();
 	}
+	refresh();
+}
+
+bool AnnotHost::isShapeSelected(ShapeBase* s) const
+{
+	if (!s) return false;
+	if (s == shapeHover) return true;
+	return std::find(extraSelection_.begin(), extraSelection_.end(), s) != extraSelection_.end();
+}
+
+std::vector<ShapeBase*> AnnotHost::selectedShapes() const
+{
+	std::vector<ShapeBase*> out;
+	if (!history) return out;
+	auto alive = [this](ShapeBase* s) {
+		if (!s) return false;
+		for (auto& o : history->shapes) {
+			if (o.get() == s && !o->isUndo) return true;
+		}
+		return false;
+	};
+	if (alive(shapeHover)) out.push_back(shapeHover);
+	for (auto* s : extraSelection_) {
+		if (s == shapeHover || !alive(s)) continue;
+		if (std::find(out.begin(), out.end(), s) == out.end()) out.push_back(s);
+	}
+	return out;
+}
+
+std::vector<ShapeBase*> AnnotHost::selectedShapesForTool(const std::wstring& toolId) const
+{
+	std::vector<ShapeBase*> out;
+	if (toolId.empty() || !toolSub) return out;
+	for (auto* s : selectedShapes()) {
+		if (!s || toolIdOfShape(s) != toolId) continue;
+		if (toolId == L"arrow") {
+			// 「标注」栏：按当前形态只取同一类（大箭头/普通箭头/线段/气泡/爆裂/尺寸/角度）
+			if (toolSub->isLine) {
+				const int want = toolSub->lineKind;
+				if (auto* t = dynamic_cast<ShapeText*>(s)) {
+					if (!t->isFrame()) continue;
+					if (want == ToolSub::LineBubble && !t->isBubble()) continue;
+					if (want == ToolSub::LineBurst && !t->isBurst()) continue;
+					if (want != ToolSub::LineBubble && want != ToolSub::LineBurst) continue;
+				}
+				else if (auto* l = dynamic_cast<ShapeLine*>(s)) {
+					if (want == ToolSub::LineStraight && l->lineKind() != ShapeLine::Straight) continue;
+					if (want == ToolSub::LineWave && l->lineKind() != ShapeLine::Wave) continue;
+					if (want == ToolSub::LineAngle && l->lineKind() != ShapeLine::Angle) continue;
+					if (want == ToolSub::LineBubble || want == ToolSub::LineBurst
+						|| want == ToolSub::LineDimension) continue;
+				}
+				else if (auto* a = dynamic_cast<ShapeArrow*>(s)) {
+					if (!a->isDimension() || want != ToolSub::LineDimension) continue;
+				}
+				else continue;
+			}
+			else {
+				auto* a = dynamic_cast<ShapeArrow*>(s);
+				if (!a || a->isDimension()) continue;
+				if (a->arrowHeadStyle() != toolSub->arrowHead) continue;
+			}
+		}
+		else if (toolId == L"rect") {
+			if (toolSub->isEllipse) {
+				if (!dynamic_cast<ShapeEllipse*>(s)) continue;
+			}
+			else {
+				auto* r = dynamic_cast<ShapeRect*>(s);
+				if (!r) continue;
+				const int want = toolSub->rectKind == ToolSub::PolygonShape ? ShapeRect::Polygon
+					: toolSub->rectKind == ToolSub::StarShape ? ShapeRect::Star : ShapeRect::Rect;
+				if (r->kind() != want) continue;
+			}
+		}
+		else if (toolId == L"text") {
+			auto* t = dynamic_cast<ShapeText*>(s);
+			if (!t || t->isFrame()) continue;
+		}
+		else if (toolId == L"number") {
+			// 数字/字母/Emoji 是不同形态：只改当前形态，避免改样式时把别的形态也拢进来
+			auto* n = dynamic_cast<ShapeNumber*>(s);
+			if (!n || n->style() != toolSub->numberStyle) continue;
+		}
+		out.push_back(s);
+	}
+	return out;
+}
+
+void AnnotHost::pruneAnnotSelection()
+{
+	if (!history) {
+		shapeHover = nullptr;
+		extraSelection_.clear();
+		return;
+	}
+	auto alive = [this](ShapeBase* s) {
+		if (!s) return false;
+		for (auto& o : history->shapes) {
+			if (o.get() == s && !o->isUndo) return true;
+		}
+		return false;
+	};
+	bool changed = false;
+	if (shapeHover && !alive(shapeHover)) { shapeHover = nullptr; changed = true; }
+	std::vector<ShapeBase*> keep;
+	for (auto* s : extraSelection_) {
+		if (s == shapeHover || !alive(s)) { changed = true; continue; }
+		if (std::find(keep.begin(), keep.end(), s) == keep.end()) keep.push_back(s);
+	}
+	extraSelection_.swap(keep);
+	// 主选中没了但还有其它选中：提一个当主选中，属性栏/控点才有落点
+	if (!shapeHover && !extraSelection_.empty()) {
+		shapeHover = extraSelection_.back();
+		extraSelection_.pop_back();
+		changed = true;
+	}
+	if (changed) syncGroupBoxFromSelection();
+}
+
+bool AnnotHost::hasSelectableShapes() const
+{
+	if (!history) return false;
+	const bool bg = boardBackgroundEditing();
+	for (auto& s : history->shapes) {
+		if (!s || s->isUndo || s->isViewportFilter() || s->isEphemeral()) continue;
+		if (s->backgroundLayer && !bg) continue;
+		if (auto* t = dynamic_cast<ShapeText*>(s.get()); t && t->attachTo) continue;
+		if (!ShapeBase::rectEmpty(s->bounds())) return true;
+	}
+	return false;
+}
+
+D2D1_RECT_F AnnotHost::selectionBounds() const
+{
+	D2D1_RECT_F out = D2D1::RectF(0.f, 0.f, -1.f, -1.f);
+	for (auto* s : selectedShapes()) out = ShapeBase::unionRect(out, s->bounds());
+	if (ShapeBase::rectEmpty(out)) return out;
+	// 与 ShapeBase::selectionRect 同口径：控件相对本体外扩 2px
+	const float pad = 2.f * dpi;
+	return D2D1::RectF(out.left - pad, out.top - pad, out.right + pad, out.bottom + pad);
+}
+
+void AnnotHost::syncGroupBoxFromSelection()
+{
+	if (!hasMultiSelection()) {
+		groupBox_ = D2D1::RectF(0.f, 0.f, -1.f, -1.f);
+		groupAngle_ = 0.f;
+		return;
+	}
+	groupBox_ = selectionBounds();
+	groupAngle_ = 0.f;
+}
+
+bool AnnotHost::groupBoxContains(float x, float y) const
+{
+	if (!hasMultiSelection() || ShapeBase::rectEmpty(groupBox_)) return false;
+	const auto p = ShapeBase::boxToLocalPoint(groupBox_, groupAngle_, x, y);
+	return p.x >= groupBox_.left && p.x <= groupBox_.right
+		&& p.y >= groupBox_.top && p.y <= groupBox_.bottom;
+}
+
+int AnnotHost::hitGroupHandle(float x, float y) const
+{
+	if (!hasMultiSelection() || ShapeBase::rectEmpty(groupBox_)) return -1;
+	const auto p = ShapeBase::boxToLocalPoint(groupBox_, groupAngle_, x, y);
+	const auto& r = groupBox_;
+	const float band = 8.f * dpi;
+	const float corner = (std::max)(band * 1.2f, 7.f * dpi);
+	const bool nearL = p.x >= r.left - band && p.x <= r.left + corner;
+	const bool nearR = p.x >= r.right - corner && p.x <= r.right + band;
+	const bool nearT = p.y >= r.top - band && p.y <= r.top + corner;
+	const bool nearB = p.y >= r.bottom - corner && p.y <= r.bottom + band;
+	const bool inX = p.x >= r.left - band && p.x <= r.right + band;
+	const bool inY = p.y >= r.top - band && p.y <= r.bottom + band;
+	if (nearL && nearT) return 0;
+	if (nearR && nearT) return 2;
+	if (nearR && nearB) return 4;
+	if (nearL && nearB) return 6;
+	if (nearT && inX) return 1;
+	if (nearB && inX) return 5;
+	if (nearL && inY) return 7;
+	if (nearR && inY) return 3;
+	return -1;
+}
+
+int AnnotHost::hitGroupRotateCorner(float x, float y) const
+{
+	if (!hasMultiSelection() || ShapeBase::rectEmpty(groupBox_)) return -1;
+	const auto p = ShapeBase::boxToLocalPoint(groupBox_, groupAngle_, x, y);
+	const auto& r = groupBox_;
+	if (p.x >= r.left && p.x <= r.right && p.y >= r.top && p.y <= r.bottom) return -1;
+	const float inner = 4.f * dpi, outer = 26.f * dpi;
+	const D2D1_POINT_2F corners[4]{
+		{ r.left, r.top }, { r.right, r.top }, { r.right, r.bottom }, { r.left, r.bottom }
+	};
+	const int idx[4]{ 0, 2, 4, 6 };
+	for (int i = 0; i < 4; ++i) {
+		const float d = std::hypot(p.x - corners[i].x, p.y - corners[i].y);
+		if (d > inner && d <= outer) return idx[i];
+	}
+	return -1;
+}
+
+void AnnotHost::toggleShapeInSelection(ShapeBase* s)
+{
+	if (!s) return;
+	if (s == shapeHover) {
+		if (extraSelection_.empty()) clearAnnotSelection();
+		else {
+			shapeHover = extraSelection_.back();
+			extraSelection_.pop_back();
+			syncGroupBoxFromSelection();
+			refresh();
+		}
+		return;
+	}
+	auto it = std::find(extraSelection_.begin(), extraSelection_.end(), s);
+	if (it != extraSelection_.end()) extraSelection_.erase(it);
+	else if (!shapeHover) shapeHover = s;
+	else extraSelection_.push_back(s);
+	syncGroupBoxFromSelection();
+	refresh();
+}
+
+void AnnotHost::beginMarquee(const POINT& imgPos)
+{
+	marqueeActive_ = true;
+	marqueeStart_ = D2D1::Point2F((float)imgPos.x, (float)imgPos.y);
+	marqueeRect_ = D2D1::RectF(marqueeStart_.x, marqueeStart_.y, marqueeStart_.x, marqueeStart_.y);
+	hasDragged = false;
+	refresh();
+}
+
+void AnnotHost::updateMarquee(const POINT& imgPos)
+{
+	if (!marqueeActive_) return;
+	const float x = (float)imgPos.x, y = (float)imgPos.y;
+	marqueeRect_ = D2D1::RectF(
+		(std::min)(marqueeStart_.x, x), (std::min)(marqueeStart_.y, y),
+		(std::max)(marqueeStart_.x, x), (std::max)(marqueeStart_.y, y));
+	if (std::abs(x - marqueeStart_.x) > 2.f || std::abs(y - marqueeStart_.y) > 2.f) hasDragged = true;
+}
+
+void AnnotHost::finishMarquee()
+{
+	const auto r = marqueeRect_;
+	marqueeActive_ = false;
+	if (ShapeBase::rectEmpty(r) || r.right - r.left < 3.f * dpi || r.bottom - r.top < 3.f * dpi) {
+		clearAnnotSelection();
+		return;
+	}
+	std::vector<ShapeBase*> picked;
+	const bool bg = boardBackgroundEditing();
+	for (auto& s : history->shapes) {
+		if (!s || s->isUndo || s->isViewportFilter() || s->isEphemeral()) continue;
+		if (s->backgroundLayer && !bg) continue;
+		// 线上文字跟着宿主走，不单独进多选（宿主会一起被框进来）
+		if (auto* t = dynamic_cast<ShapeText*>(s.get()); t && t->attachTo) continue;
+		const auto b = s->bounds();
+		if (ShapeBase::rectEmpty(b)) continue;
+		if (b.right < r.left || b.left > r.right || b.bottom < r.top || b.top > r.bottom) continue;
+		picked.push_back(s.get());
+	}
+	clearAnnotSelection();
+	if (picked.empty()) {
+		refresh();
+		return;
+	}
+	shapeHover = picked.back();   // 最上层那个当主选中
+	for (size_t i = 0; i + 1 < picked.size(); ++i) extraSelection_.push_back(picked[i]);
+	syncGroupBoxFromSelection();
+	refresh();
+}
+
+void AnnotHost::beginGroupTransform(bool rotate, const POINT& imgPos)
+{
+	if (ShapeBase::rectEmpty(groupBox_)) syncGroupBoxFromSelection();
+	groupTargets_ = selectedShapes();
+	if (groupTargets_.empty()) return;
+	groupBefore_.clear();
+	for (auto* s : groupTargets_) groupBefore_.push_back(s->editSnapshot());
+	hasDragged = false;
+	annotDragIndex = -1;
+	if (rotate) {
+		groupPivot_ = D2D1::Point2F((groupBox_.left + groupBox_.right) * 0.5f,
+			(groupBox_.top + groupBox_.bottom) * 0.5f);
+		groupRotateStartAngle_ = std::atan2((float)imgPos.y - groupPivot_.y, (float)imgPos.x - groupPivot_.x);
+		groupRotateLastDelta_ = 0.f;
+		groupRotateActive_ = true;
+	}
+	else {
+		groupTransformStart_ = D2D1::Point2F((float)imgPos.x, (float)imgPos.y);
+		groupLastDelta_ = D2D1::Point2F(0.f, 0.f);
+		groupMoveActive_ = true;
+	}
+}
+
+void AnnotHost::updateGroupTransform(const POINT& imgPos, bool rotate)
+{
+	if (groupTargets_.empty()) return;
+	if (rotate && groupRotateActive_) {
+		const float a = std::atan2((float)imgPos.y - groupPivot_.y, (float)imgPos.x - groupPivot_.x);
+		float delta = a - groupRotateStartAngle_;
+		if (GetKeyState(VK_SHIFT) & 0x8000) {
+			constexpr float kStep = 3.14159265358979323846f / 4.f;
+			delta = std::round(delta / kStep) * kStep;
+		}
+		const float step = delta - groupRotateLastDelta_;
+		if (std::fabs(step) < 1e-5f) return;
+		for (auto* s : groupTargets_) s->rotateBy(groupPivot_.x, groupPivot_.y, step);
+		groupAngle_ += step;
+		groupRotateLastDelta_ = delta;
+		hasDragged = true;
+		for (auto& s : history->shapes) if (s && !s->isUndo) s->syncLinks();
+		refreshFiltersAbove(nullptr);
+		refresh();
+		return;
+	}
+	if (groupMoveActive_) {
+		const D2D1_POINT_2F delta{ (float)imgPos.x - groupTransformStart_.x,
+			(float)imgPos.y - groupTransformStart_.y };
+		const D2D1_POINT_2F step{ delta.x - groupLastDelta_.x, delta.y - groupLastDelta_.y };
+		if (std::fabs(step.x) < 0.01f && std::fabs(step.y) < 0.01f) return;
+		for (auto* s : groupTargets_) s->translateBy(step.x, step.y);
+		groupBox_ = D2D1::RectF(groupBox_.left + step.x, groupBox_.top + step.y,
+			groupBox_.right + step.x, groupBox_.bottom + step.y);
+		groupLastDelta_ = delta;
+		if (std::fabs(delta.x) > 2.f || std::fabs(delta.y) > 2.f) hasDragged = true;
+		for (auto& s : history->shapes) if (s && !s->isUndo) s->syncLinks();
+		refreshFiltersAbove(nullptr);
+		refresh();
+	}
+}
+
+void AnnotHost::beginGroupScale(int handle, const POINT& imgPos)
+{
+	(void)imgPos;
+	if (ShapeBase::rectEmpty(groupBox_)) syncGroupBoxFromSelection();
+	groupTargets_ = selectedShapes();
+	if (groupTargets_.empty()) return;
+	groupBefore_.clear();
+	for (auto* s : groupTargets_) groupBefore_.push_back(s->editSnapshot());
+	groupScaleStartRect_ = groupBox_;
+	groupScaleHandle_ = handle;
+	groupScaleStartCenter_ = D2D1::Point2F(
+		(groupBox_.left + groupBox_.right) * 0.5f,
+		(groupBox_.top + groupBox_.bottom) * 0.5f);
+	groupScaleLastCenter_ = groupScaleStartCenter_;
+	groupScaleLastSx_ = 1.f;
+	groupScaleLastSy_ = 1.f;
+	groupScaleActive_ = true;
+	hasDragged = false;
+	annotDragIndex = -1;
+}
+
+void AnnotHost::updateGroupScale(const POINT& imgPos)
+{
+	if (!groupScaleActive_ || groupTargets_.empty()) return;
+	const auto start = groupScaleStartRect_;
+	if (ShapeBase::rectEmpty(start)) return;
+	const auto p = ShapeBase::boxToLocalPoint(start, groupAngle_, (float)imgPos.x, (float)imgPos.y);
+	auto r = start;
+	const float minSize = 10.f * dpi;
+	switch (groupScaleHandle_) {
+	case 0: r.left = (std::min)(p.x, r.right - minSize); r.top = (std::min)(p.y, r.bottom - minSize); break;
+	case 1: r.top = (std::min)(p.y, r.bottom - minSize); break;
+	case 2: r.right = (std::max)(p.x, r.left + minSize); r.top = (std::min)(p.y, r.bottom - minSize); break;
+	case 3: r.right = (std::max)(p.x, r.left + minSize); break;
+	case 4: r.right = (std::max)(p.x, r.left + minSize); r.bottom = (std::max)(p.y, r.top + minSize); break;
+	case 5: r.bottom = (std::max)(p.y, r.top + minSize); break;
+	case 6: r.left = (std::min)(p.x, r.right - minSize); r.bottom = (std::max)(p.y, r.top + minSize); break;
+	case 7: r.left = (std::min)(p.x, r.right - minSize); break;
+	default: return;
+	}
+	const float oldW = start.right - start.left, oldH = start.bottom - start.top;
+	const float newW = r.right - r.left, newH = r.bottom - r.top;
+	if (oldW < 1.f || oldH < 1.f) return;
+	const float sx = std::max(0.01f, newW / oldW);
+	const float sy = std::max(0.01f, newH / oldH);
+	// 新组框中心：局部偏移绕 groupAngle 转回世界坐标
+	const float scx = (start.left + start.right) * 0.5f, scy = (start.top + start.bottom) * 0.5f;
+	const float mcx = (r.left + r.right) * 0.5f, mcy = (r.top + r.bottom) * 0.5f;
+	const float ca = std::cos(groupAngle_), sa = std::sin(groupAngle_);
+	const float offx = mcx - scx, offy = mcy - scy;
+	const D2D1_POINT_2F newCenter{
+		groupScaleStartCenter_.x + offx * ca - offy * sa,
+		groupScaleStartCenter_.y + offx * sa + offy * ca };
+	// 每次从按下前的几何重算：先按累计倍率以起始中心缩放，再整体平移到新中心。
+	// 避免"围绕已移动过的中心做增量缩放"在非等比时产生漂移。
+	for (size_t i = 0; i < groupTargets_.size() && i < groupBefore_.size(); ++i) {
+		if (!groupBefore_[i].empty()) groupTargets_[i]->applyEditSnapshot(groupBefore_[i]);
+	}
+	for (auto* s : groupTargets_) {
+		s->scaleBy(groupScaleStartCenter_.x, groupScaleStartCenter_.y, groupAngle_, sx, sy);
+	}
+	const D2D1_POINT_2F move{ newCenter.x - groupScaleStartCenter_.x,
+		newCenter.y - groupScaleStartCenter_.y };
+	for (auto* s : groupTargets_) s->translateBy(move.x, move.y);
+	groupBox_ = D2D1::RectF(newCenter.x - newW * 0.5f, newCenter.y - newH * 0.5f,
+		newCenter.x + newW * 0.5f, newCenter.y + newH * 0.5f);
+	groupScaleLastCenter_ = newCenter;
+	groupScaleLastSx_ = sx;
+	groupScaleLastSy_ = sy;
+	hasDragged = true;
+	for (auto& s : history->shapes) if (s && !s->isUndo) s->syncLinks();
+	refreshFiltersAbove(nullptr);
+	refresh();
+}
+
+void AnnotHost::finishGroupScale()
+{
+	finishGroupTransform();
+}
+
+void AnnotHost::finishGroupTransform()
+{
+	if (!groupMoveActive_ && !groupRotateActive_ && !groupScaleActive_) return;
+	std::vector<std::vector<float>> after;
+	after.reserve(groupTargets_.size());
+	for (auto* s : groupTargets_) after.push_back(s->editSnapshot());
+	if (history) history->addEditSteps(groupTargets_, groupBefore_, after);
+	for (auto* s : groupTargets_) s->transformSettled();
+	groupTargets_.clear();
+	groupBefore_.clear();
+	groupMoveActive_ = false;
+	groupRotateActive_ = false;
+	groupScaleActive_ = false;
+	groupScaleHandle_ = -1;
+	annotDragIndex = -1;
+	refreshFiltersAbove(nullptr);
 	refresh();
 }
 
@@ -282,6 +749,16 @@ void AnnotHost::clearAllShapes(bool keepBackground)
 	pendingEditText = nullptr;
 	pendingAngle = nullptr;
 	shapeHover = nullptr;
+	extraSelection_.clear();
+	groupBox_ = D2D1::RectF(0.f, 0.f, -1.f, -1.f);
+	groupAngle_ = 0.f;
+	groupScaleActive_ = false;
+	marqueeActive_ = false;
+	groupMoveActive_ = false;
+	groupRotateActive_ = false;
+	groupTargets_.clear();
+	groupBefore_.clear();
+	if (toolSub) toolSub->endMultiStyle();
 	lastCreatedShape_ = nullptr;
 	styleLoadCandidate = nullptr;
 	linkBtn = nullptr;        // 连线叉指向的 shape 也要先归零，别留悬垂指针
@@ -352,11 +829,33 @@ void AnnotHost::presentSelectedAnnotStyle()
 	if (!toolSub) return;
 	if (!hasSelectedAnnot() || !shapeHover) {
 		toolSub->clearSelectedNumberValue();
+		toolSub->endMultiStyle();
 		toolSub->endShapeStylePreview();
 		return;
 	}
-	const auto sid = toolIdOfShape(shapeHover);
 	const auto cur = getCurToolId();
+	const auto sid = toolIdOfShape(shapeHover);
+	// 多选：属性栏按"当前工具 + 形态"筛出目标集合，逐项比较后统一展示/置灰。
+	if (hasMultiSelection()) {
+		if (cur.empty() || !toolSub->chromeVisible()) {
+			toolSub->clearSelectedNumberValue();
+			toolSub->endMultiStyle();
+			toolSub->endShapeStylePreview();
+			return;
+		}
+		const auto targets = selectedShapesForTool(cur);
+		if (targets.empty()) {
+			toolSub->clearSelectedNumberValue();
+			toolSub->endMultiStyle();
+			toolSub->endShapeStylePreview();
+			return;
+		}
+		toolSub->beginShapeStylePreview();
+		toolSub->beginMultiStyle(targets);
+		toolSub->clearSelectedNumberValue();
+		return;
+	}
+	toolSub->endMultiStyle();
 	// 属性栏未打开，或当前工具与该标注不匹配：不展示，也不修改工具状态。
 	if (sid.empty() || cur.empty() || cur != sid || !toolSub->chromeVisible()) {
 		toolSub->clearSelectedNumberValue();
@@ -381,6 +880,8 @@ void AnnotHost::presentSelectedAnnotStyle()
 void AnnotHost::applySelectedAnnotStyleToTool()
 {
 	if (!toolSub || !shapeHover) return;
+	// 多选由 presentSelectedAnnotStyle 统一处理，不把某一个标注的样式载入工具默认值
+	if (hasMultiSelection()) return;
 	const auto sid = toolIdOfShape(shapeHover);
 	if (sid.empty() || getCurToolId() != sid) {
 		toolSub->endShapeStylePreview();
@@ -419,6 +920,16 @@ void AnnotHost::discardDraft()
 	if (newShape && history) history->removeShape(newShape);
 	newShape = nullptr;
 	shapeHover = nullptr;
+	extraSelection_.clear();
+	groupBox_ = D2D1::RectF(0.f, 0.f, -1.f, -1.f);
+	groupAngle_ = 0.f;
+	groupScaleActive_ = false;
+	marqueeActive_ = false;
+	groupMoveActive_ = false;
+	groupRotateActive_ = false;
+	groupTargets_.clear();
+	groupBefore_.clear();
+	if (toolSub) toolSub->endMultiStyle();
 	annotMouseDown = false;
 	annotDragIndex = -1;
 	ReleaseCapture();
@@ -453,6 +964,7 @@ void AnnotHost::paintShapes(ID2D1DeviceContext* ctx, bool withChrome, bool skipE
 {
 	if (!history) return;
 	dropStaleEditingText();
+	pruneAnnotSelection();
 	std::vector<ShapeHighlight*> highlights;
 	for (auto& shape : history->shapes) {
 		if (shape->isUndo) continue;
@@ -489,12 +1001,93 @@ void AnnotHost::paintShapes(ID2D1DeviceContext* ctx, bool withChrome, bool skipE
 	if (!withChrome) return;
 	// 临时范围提示属于控件层：画在标注之上，导出（withChrome=false）时不带
 	if (shapeHover) shapeHover->paintHint(ctx);
-	// 共用：仅「已选中且非落笔、非文字编辑」时画控点
-	if (shouldPaintAnnotHandles())
-		shapeHover->paintDragger(ctx);
+	// 共用：仅「已选中且非落笔、非文字编辑」时画控点。
+	// 多选时不再画单个标注的缩放控点，改画每个标注的虚线框 + 一个组选框/旋转柄。
+	if (extraSelection_.empty()) {
+		if (shouldPaintAnnotHandles())
+			shapeHover->paintDragger(ctx);
+	}
+	else {
+		paintSelectionChrome(ctx);
+	}
+	if (marqueeActive_) paintMarquee(ctx);
 	paintSerialCursor(ctx);
 	paintTextMidHint(ctx);
 	paintLinkHints(ctx);
+}
+
+void AnnotHost::paintSelectionChrome(ID2D1DeviceContext* ctx)
+{
+	if (!ctx || !hasMultiSelection()) return;
+	if (ShapeBase::rectEmpty(groupBox_)) syncGroupBoxFromSelection();
+	if (ShapeBase::rectEmpty(groupBox_)) return;
+	if (!brushGroupStroke) {
+		ctx->CreateSolidColorBrush(D2D1::ColorF(0x34C759u), brushGroupStroke.GetAddressOf());
+	}
+	if (!brushGroupHandleFill) {
+		ctx->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFFFFu), brushGroupHandleFill.GetAddressOf());
+	}
+	if (!brushGroupHandleShadow) {
+		ctx->CreateSolidColorBrush(D2D1::ColorF(0.f, 0.f, 0.f, 64.f / 255.f),
+			brushGroupHandleShadow.GetAddressOf());
+	}
+	if (!groupDashStyle) {
+		float dashes[] = { 4.f, 3.f };
+		auto factory = Ling::D2D::get()->d2dFactory;
+		if (factory) {
+			factory->CreateStrokeStyle(
+				D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT,
+					D2D1_LINE_JOIN_MITER, 10.f, D2D1_DASH_STYLE_CUSTOM, 0.f),
+				dashes, ARRAYSIZE(dashes), groupDashStyle.GetAddressOf());
+		}
+	}
+	if (!brushGroupStroke) return;
+	brushGroupStroke->SetColor(D2D1::ColorF(0x34C759u));
+	const float cx = (groupBox_.left + groupBox_.right) * 0.5f;
+	const float cy = (groupBox_.top + groupBox_.bottom) * 0.5f;
+	D2D1_MATRIX_3X2_F old{};
+	ctx->GetTransform(&old);
+	if (std::fabs(groupAngle_) > 1e-6f)
+		ctx->SetTransform(D2D1::Matrix3x2F::Rotation(groupAngle_ * 180.f / 3.14159265f, { cx, cy }) * old);
+	ctx->DrawRectangle(groupBox_, brushGroupStroke.Get(), 1.f * dpi, groupDashStyle.Get());
+	ctx->SetTransform(old);
+
+	// 严格跟随矩形控件：只画 4 个角柄（四边中点不画、但仍可拖），
+	// 样式用和 ShapeBase::paintHandle 完全相同的"黑阴影 + 绿底 + 白描边"。
+	const float l = groupBox_.left, t = groupBox_.top, r = groupBox_.right, b = groupBox_.bottom;
+	const D2D1_POINT_2F corners[4]{ { l, t }, { r, t }, { r, b }, { l, b } };
+	const float rOuter = 5.f * dpi;
+	const float rInner = 4.f * dpi;
+	for (const auto& lp : corners) {
+		const auto p = ShapeBase::rotatePoint(lp.x, lp.y, cx, cy, groupAngle_);
+		if (brushGroupHandleShadow)
+			ctx->FillEllipse(D2D1::Ellipse(p, rOuter, rOuter), brushGroupHandleShadow.Get());
+		ctx->FillEllipse(D2D1::Ellipse(p, rInner, rInner), brushGroupStroke.Get());
+		if (brushGroupHandleFill)
+			ctx->DrawEllipse(D2D1::Ellipse(p, rInner, rInner), brushGroupHandleFill.Get(), 1.5f * dpi);
+	}
+}
+
+void AnnotHost::paintMarquee(ID2D1DeviceContext* ctx)
+{
+	if (!ctx || !marqueeActive_ || ShapeBase::rectEmpty(marqueeRect_)) return;
+	if (!brushGroupStroke) {
+		ctx->CreateSolidColorBrush(D2D1::ColorF(0x34C759u), brushGroupStroke.GetAddressOf());
+	}
+	if (!groupDashStyle) {
+		float dashes[] = { 4.f, 3.f };
+		auto factory = Ling::D2D::get()->d2dFactory;
+		if (factory) {
+			factory->CreateStrokeStyle(
+				D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT,
+					D2D1_LINE_JOIN_MITER, 10.f, D2D1_DASH_STYLE_CUSTOM, 0.f),
+				dashes, ARRAYSIZE(dashes), groupDashStyle.GetAddressOf());
+		}
+	}
+	if (!brushGroupStroke) return;
+	// 批量拖选框与标注选中框统一：1px 主题绿虚线，不加蓝色底/蓝边
+	brushGroupStroke->SetColor(D2D1::ColorF(0x34C759u));
+	ctx->DrawRectangle(marqueeRect_, brushGroupStroke.Get(), 1.f * dpi, groupDashStyle.Get());
 }
 
 // 文本工具悬停在线段/箭头中间：在那儿开一块空白（底图抠回来），示意"可以在这儿打字"。
@@ -801,6 +1394,9 @@ void AnnotHost::requestEditText(ShapeText* shape)
 
 void AnnotHost::beginTextEdit()
 {
+	// TSF 输入法（Win11 微软拼音）不一定会发 WM_IME_STARTCOMPOSITION：
+	// 进编辑时先把组字/候选框摆到插入符，别等组字开始才摆。
+	positionImeWindow();
 	// 插入符闪烁：定时刷新画布
 	setTimer(500, 212);
 }
@@ -817,7 +1413,38 @@ void AnnotHost::annotChar(UINT ch)
 	if (ch >= 32 && ch != 0x7F) {
 		const wchar_t buf[2]{ (wchar_t)ch, 0 };
 		editingText->insertText(buf);
+		positionImeWindow();
 	}
+}
+
+void AnnotHost::positionImeWindow()
+{
+	if (!editingText || !hwnd || !editingText->isEditingNow()) return;
+	HIMC himc = ImmGetContext(hwnd);
+	if (!himc) return;
+	float lineH = 0.f;
+	const auto p = editingText->imeCaretPos(lineH);
+	const auto c = annotToClientPt(p.x, p.y);
+	const float sc = scale > 0.001f ? scale : 1.f;
+	const float caretH = (std::max)(1.f, lineH * sc);
+	const float caretW = (std::max)(1.f, 2.f * dpi);
+	const float maxX = (std::max)(0.f, w - 1.f);
+	const float maxY = (std::max)(0.f, h - 1.f);
+	// 微软拼音的组字窗内部自带约 8~10px 左内边距：向左让出这段，组字文字才和插入符对齐。
+	// 自绘文字没有"行内组字"能力，组字窗只能作为一个悬浮框：放在**整行下面**，
+	// 不能盖住正在编辑的标注文字（用户要的是"候选栏在文字下面"）。
+	const LONG compX = (LONG)std::lround(std::clamp(c.x - 2.f * dpi, 0.f, maxX));
+	const LONG compY = (LONG)std::lround(std::clamp(c.y + caretH - 12.f * dpi, 0.f, maxY));
+	COMPOSITIONFORM comp{};
+	comp.dwStyle = CFS_FORCE_POSITION;
+	comp.ptCurrentPos = { compX, compY };
+	ImmSetCompositionWindow(himc, &comp);
+	CANDIDATEFORM cand{};
+	cand.dwStyle = CFS_EXCLUDE;
+	cand.ptCurrentPos = { compX, compY };
+	cand.rcArea = { compX, compY, compX + (LONG)std::lround(caretW), compY + (LONG)std::lround(caretH) };
+	ImmSetCandidateWindow(himc, &cand);
+	ImmReleaseContext(hwnd, himc);
 }
 
 void AnnotHost::syncViewportFilters()
@@ -829,6 +1456,13 @@ void AnnotHost::syncViewportFilters()
 void AnnotHost::onToolStyleChanged()
 {
 	dropStaleEditingText();
+	// 多选：按"一致属性才下发"的规则批量应用，混合属性保留各标注自己的值
+	if (!editingText && toolSub && toolSub->multiStyleActive()) {
+		toolSub->applyMultiStyle();
+		refreshFiltersAbove(nullptr);
+		refresh();
+		return;
+	}
 	// 二次选中或编辑中的标注：统一走虚函数，把工具条当前样式应用到该形状。
 	// 此前只有文字与滤镜在此处理，矩形 / 箭头 / 画笔修改虚线时对选中标注无效。
 	if (editingText) editingText->applyStyle();
@@ -892,6 +1526,24 @@ ShapeBase* AnnotHost::probeShapeUnder(float x, float y, ShapeBase* preferFirst)
 void AnnotHost::applyAnnotCursor()
 {
 	numberCursorFollow = false;
+	auto groupHandleCursor = [this](int h) {
+		// 与矩形控件统一：上下边给上下箭头、左右边给左右箭头，只有四角给对角箭头。
+		switch (h) {
+		case 0: case 4: SetCursor(LoadCursor(nullptr, IDC_SIZENWSE)); break;
+		case 2: case 6: SetCursor(LoadCursor(nullptr, IDC_SIZENESW)); break;
+		case 1: case 5: SetCursor(LoadCursor(nullptr, IDC_SIZENS)); break;
+		case 3: case 7: SetCursor(LoadCursor(nullptr, IDC_SIZEWE)); break;
+		default: SetCursor(LoadCursor(nullptr, IDC_ARROW)); break;
+		}
+	};
+	if (groupRotateActive_) {
+		if (HCURSOR c = AnnotCursor::rotate(0, groupAngle_)) SetCursor(c);
+		else SetCursor(LoadCursor(nullptr, IDC_SIZEALL));
+		return;
+	}
+	if (groupScaleActive_) { groupHandleCursor(groupScaleHandle_); return; }
+	if (groupMoveActive_) { SetCursor(LoadCursor(nullptr, IDC_SIZEALL)); return; }
+	if (marqueeActive_) { SetCursor(LoadCursor(nullptr, IDC_CROSS)); return; }
 	// 文本工具停在线段中间那块"空白"里：一律工字型（比"悬停到已有图形"的移动/缩放光标优先，
 	// 不然在箭头上悬停时会被箭头自己的光标盖掉，看着就不像能打字）
 	if (textMidHintActive && !annotMouseDown) {
@@ -937,6 +1589,20 @@ void AnnotHost::applyAnnotCursor()
 	ScreenToClient(hwnd, &pos);
 	const auto img = toImgPos(pos);
 	const float ix = (float)img.x, iy = (float)img.y;
+
+	// 多选：和普通矩形控件一样 —— 8 个柄给缩放光标、角外圈给旋转、框内给移动
+	if (!annotMouseDown && hasMultiSelection()) {
+		if (ShapeBase::rectEmpty(groupBox_)) syncGroupBoxFromSelection();
+		const int handle = hitGroupHandle(ix, iy);
+		if (handle >= 0) { groupHandleCursor(handle); return; }
+		const int rot = hitGroupRotateCorner(ix, iy);
+		if (rot >= 0) {
+			if (HCURSOR c = AnnotCursor::rotate(rot, groupAngle_)) SetCursor(c);
+			else SetCursor(LoadCursor(nullptr, IDC_SIZEALL));
+			return;
+		}
+		if (groupBoxContains(ix, iy)) { SetCursor(LoadCursor(nullptr, IDC_SIZEALL)); return; }
+	}
 
 	// 已选中：边缘缩放 / 区内移动（按住 Alt 时让位给落笔，见 altForceDraw）
 	if (!altForceDraw() && shapeHover && !shapeHover->isUndo && shapeHover != newShape
@@ -1252,6 +1918,7 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 			// 否则这一下等于什么都没发生（用户看到的就是"点了没反应"）
 			if (isDblClick && !editingText->selectAll_) editingText->selectAllText();
 			else editingText->placeCaretAt((float)ip.x, (float)ip.y);
+			positionImeWindow();
 			// 这一下也记进双击序列：编辑中连点两下（双击）要能被识别成全选
 			annotLastDownTime = now;
 			annotLastDownPos = screenPos;
@@ -1287,6 +1954,8 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 	// 插不进光标就是这个）。用悬停提示标志判断，它在按下前已经算好了；跳过这里之后，
 	// 下面通用路径会自己处理"已有文字就编辑、没有就落笔"
 	if (isDblClick && !editingText && !textMidHintActive) {
+		// 双击是"针对某一个标注"的动作：多选先收成单选
+		extraSelection_.clear();
 		// 先判断"这一下双击是不是落在线上文字上"再决定撤不撤上一次落笔 ——
 		// 顺序反了的话，双击箭头里的文字会先把箭头（或文字）undo 掉，表现就是
 		// "重复编辑箭头里的文字，箭头整个不见了，只剩文字"
@@ -1358,6 +2027,46 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 
 	const auto tool = getCurToolId();
 	auto imgPos = toImgPos(pos);
+	const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+	const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+
+	// 多选：组旋转柄优先；按在任一已选标注上 = 整组移动。空工具才有多选手势。
+	if (tool.empty() && hasMultiSelection()) {
+		if (ShapeBase::rectEmpty(groupBox_)) syncGroupBoxFromSelection();
+		const float ix = (float)imgPos.x, iy = (float)imgPos.y;
+		// 和普通矩形控件同一套：先命中 8 个缩放柄，再判角外旋转圈，最后框内移动
+		const int handle = hitGroupHandle(ix, iy);
+		if (handle >= 0) {
+			beginGroupScale(handle, imgPos);
+			return true;
+		}
+		if (hitGroupRotateCorner(ix, iy) >= 0) {
+			beginGroupTransform(true, imgPos);
+			return true;
+		}
+		if (auto* hit = hitShapeAt(ix, iy); hit && isShapeSelected(hit)) {
+			// 多选下 Ctrl/Shift+点已选标注：从选择里去掉，不进入整组拖动
+			if (ctrlDown || shiftDown) {
+				toggleShapeInSelection(hit);
+				annotMouseDown = false;
+				ReleaseCapture();
+				return true;
+			}
+			beginGroupTransform(false, imgPos);
+			return true;
+		}
+		else if (hit && (ctrlDown || shiftDown)) {
+			// 组框内部压着的未选标注：Ctrl/Shift+点仍可加选
+			toggleShapeInSelection(hit);
+			annotMouseDown = false;
+			ReleaseCapture();
+			return true;
+		}
+		if (groupBoxContains(ix, iy)) {
+			beginGroupTransform(false, imgPos);
+			return true;
+		}
+	}
 
 	// 角度三点式：上一笔没画完时，下一次点击/拖拽继续给这条角度（点、拖都行）
 	if (pendingAngle) {
@@ -1482,8 +2191,16 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 			const bool rectIgnored = dimensionToolActive() && dynamic_cast<ShapeRect*>(hit);
 			if (!textToolIgnoresShape(tool, hit) && !rectIgnored) {
 				newShape = nullptr;
-				const bool wasSelected = (shapeHover == hit);
+				const bool wasSelected = isShapeSelected(hit);
 				if (!wasSelected) {
+					// 空工具 + Ctrl/Shift：加选/减选，不进入拖动
+					if (tool.empty() && (ctrlDown || shiftDown)) {
+						toggleShapeInSelection(hit);
+						annotMouseDown = false;
+						ReleaseCapture();
+						return true;
+					}
+					extraSelection_.clear();
 					if (auto* a = dynamic_cast<ShapeArrow*>(shapeHover)) a->resetFree();
 					else if (auto* l = dynamic_cast<ShapeLine*>(shapeHover)) l->resetFree();
 					shapeHover = hit;
@@ -1515,10 +2232,15 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 	newShape = nullptr;
 
 	if (tool.empty()) {
-		if (!annotEmptyToolDrag(pos)) {
-			annotMouseDown = false;
-			ReleaseCapture();
+		// 贴图挪窗 / 长图平移等宿主手势优先；没人接管且有标注可框时才开始框选。
+		// 画布上没有任何标注 → 保持原行为（不起框）。
+		if (annotEmptyToolDrag(pos)) return true;
+		if (hasSelectableShapes()) {
+			beginMarquee(imgPos);
+			return true;
 		}
+		annotMouseDown = false;
+		ReleaseCapture();
 		return true;
 	}
 
@@ -1562,6 +2284,22 @@ void AnnotHost::annotMove(POINT pos)
 	if (editingText && textBox && textBox->isPosIn(pos)) return;
 	auto imgPos = toImgPos(pos);
 	const auto tool = getCurToolId();
+
+	if (marqueeActive_) {
+		updateMarquee(imgPos);
+		refresh();
+		return;
+	}
+	if (groupScaleActive_) {
+		updateGroupScale(imgPos);
+		applyAnnotCursor();
+		return;
+	}
+	if (groupMoveActive_ || groupRotateActive_) {
+		updateGroupTransform(imgPos, groupRotateActive_);
+		applyAnnotCursor();
+		return;
+	}
 
 	if (annotMouseDown) {
 		if (tool.empty() && !shapeHover) {
@@ -1611,6 +2349,22 @@ void AnnotHost::annotMove(POINT pos)
 void AnnotHost::annotUp(POINT pos, BOOL isRight)
 {
 	if (isRight) return;
+	if (marqueeActive_) {
+		finishMarquee();
+		annotMouseDown = false;
+		annotDragIndex = -1;
+		ReleaseCapture();
+		applyAnnotCursor();
+		return;
+	}
+	if (groupMoveActive_ || groupRotateActive_ || groupScaleActive_) {
+		finishGroupTransform();
+		annotMouseDown = false;
+		annotDragIndex = -1;
+		ReleaseCapture();
+		applyAnnotCursor();
+		return;
+	}
 	// 取走本次按下的编辑快照：早退路径也不会留下陈旧状态
 	ShapeBase* editTarget = editStepTarget;
 	std::vector<float> editBefore = std::move(editStepBefore);
@@ -1707,7 +2461,11 @@ void AnnotHost::annotKey(UINT key)
 {
 	dropStaleEditingText();
 	if (editingText) {
-		if (key == VK_ESCAPE) editingText->finishEdit();
+		// 与双击全选同一套状态（selectAll_ 蓝底白字）；编辑态所有键都先到这里，
+		// 不会落到命令表里被当成"截图工具"的 Ctrl+A。
+		const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+		if (ctrl && key == 'A') editingText->selectAllText();
+		else if (key == VK_ESCAPE) editingText->finishEdit();
 		else if (key == VK_BACK) editingText->backspace();
 		else if (key == VK_DELETE) editingText->deleteForward();
 		else if (key == VK_LEFT) editingText->moveCaret(-1);
@@ -1715,13 +2473,34 @@ void AnnotHost::annotKey(UINT key)
 		else if (key == VK_HOME) editingText->moveCaretTo(false);
 		else if (key == VK_END) editingText->moveCaretTo(true);
 		else if (key == VK_RETURN) editingText->insertText(L"\n");
+		if (editingText && editingText->isEditingNow()) positionImeWindow();
 		return;
 	}
 	if (!history) return;
 	bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 	if (ctrl && key == 'Z') history->undo();
 	else if (ctrl && key == 'Y') history->redo();
-	else if (key == VK_DELETE || key == VK_BACK) history->removeHoverShape();
+	else if (key == VK_DELETE || key == VK_BACK) {
+		// 序号尾巴被拖出控制圈：先把尾巴收回圈上，这一次按键不当"删除"
+		if (!hasMultiSelection() && shapeHover && shapeHover->retractTail()) return;
+		if (!hasMultiSelection()) {
+			history->removeHoverShape();
+		}
+		else {
+			const auto targets = selectedShapes();
+			clearAnnotSelection();
+			for (auto* t : targets) {
+				// 前一个目标可能把线上文字/宿主一起带走了：先确认还在列表里，避免对已释放对象做虚调用
+				bool alive = false;
+				for (auto& s : history->shapes) {
+					if (s.get() == t && !s->isUndo) { alive = true; break; }
+				}
+				if (alive) history->removeShapeGroup(t);
+			}
+			pruneAnnotSelection();
+			refresh();
+		}
+	}
 	else if (key == VK_ESCAPE) clearAnnotSelection();
 }
 

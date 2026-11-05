@@ -26,6 +26,8 @@ public:
 	void beginTextEdit();
 	void endTextEdit();
 	void annotChar(UINT ch);
+	// 把输入法组字窗贴到插入符、候选框摆到插入符下方（见 .cpp 注释）
+	void positionImeWindow();
 	void onToolStyleChanged();
 	// 清理已退出编辑状态的 editingText 残留（见 .cpp 注释）
 	void dropStaleEditingText();
@@ -51,8 +53,17 @@ public:
 	void presentSelectedAnnotStyle();
 	// 二次选中后将标注属性载入工具与属性栏（延后一拍调用，避免在鼠标按下中重建属性栏）
 	void applySelectedAnnotStyleToTool();
+	// —— 多选（shapeHover 是主选中，extraSelection_ 是其余选中）——
+	bool hasMultiSelection() const { return !extraSelection_.empty(); }
+	// 当前选中的全部标注，主选中在前；已按历史表校验存活
+	std::vector<ShapeBase*> selectedShapes() const;
+	bool isShapeSelected(ShapeBase* s) const;
+	// 当前工具对应的目标集合：按工具 id + 形态（大箭头/普通箭头/线段/气泡…）过滤
+	std::vector<ShapeBase*> selectedShapesForTool(const std::wstring& toolId) const;
 	virtual void layoutTools() = 0;
 	virtual void onHistoryChanged();
+	// 撤销/重做后：多选组框要按恢复后的几何重新包一遍（否则框停在旧位置）
+	void onHistoryUndoRedo();
 	// 属性栏锚定主工具条（截图 ToolCap / 录屏 ToolVideo）
 	struct MainBarAnchor {
 		float x{ 0 }, y{ 0 }, w{ 0 }, h{ 0 };
@@ -139,6 +150,27 @@ protected:
 	// 尺寸自带文字：按屏幕 DPI 把线长换算成物理尺寸（cm）；用户双击改过之后不再自动改写
 	std::wstring dimensionTextFor(ShapeBase* host) const;
 	void clearAnnotSelection(bool keepStylePreview = false);
+	// —— 多选：框选 / 组变换 ——
+	bool hasSelectableShapes() const;          // 有没有可被框选的标注（决定要不要起框）
+	void beginMarquee(const POINT& imgPos);
+	void updateMarquee(const POINT& imgPos);
+	void finishMarquee();
+	void toggleShapeInSelection(ShapeBase* s);
+	void pruneAnnotSelection();                // 撤销/删除后丢掉悬空指针
+	D2D1_RECT_F selectionBounds() const;
+	// 组控件：和普通矩形控件同一套（8 个缩放柄 + 角外旋转圈），整体一个角度
+	void syncGroupBoxFromSelection();
+	bool groupBoxContains(float x, float y) const;
+	int  hitGroupHandle(float x, float y) const;        // 0..7，未命中 -1
+	int  hitGroupRotateCorner(float x, float y) const;  // 0/2/4/6，未命中 -1
+	void beginGroupTransform(bool rotate, const POINT& imgPos);
+	void updateGroupTransform(const POINT& imgPos, bool rotate);
+	void finishGroupTransform();
+	void beginGroupScale(int handle, const POINT& imgPos);
+	void updateGroupScale(const POINT& imgPos);
+	void finishGroupScale();
+	void paintSelectionChrome(ID2D1DeviceContext* ctx);
+	void paintMarquee(ID2D1DeviceContext* ctx);
 	// 清空全部标注：**必须先断开 shapeHover / newShape / editingText 这些裸指针再释放**
 	// （否则它们悬垂，下一次 hasSelectedAnnot()/paint 就会在已释放对象上做虚调用 → 闪退）
 	// keepBackground：保留「背景层」标注（白板未开启编辑背景时的重置画布）
@@ -199,6 +231,33 @@ protected:
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushLinkHintFg;
 	ULONGLONG annotLastDownTime{ 0 };
 	POINT annotLastDownPos{ 0, 0 };
+	// —— 多选状态 ——
+	std::vector<ShapeBase*> extraSelection_;   // 不含 shapeHover
+	bool marqueeActive_{ false };
+	D2D1_POINT_2F marqueeStart_{ 0.f, 0.f };
+	D2D1_RECT_F marqueeRect_{};
+	bool groupMoveActive_{ false };
+	bool groupRotateActive_{ false };
+	bool groupScaleActive_{ false };
+	int groupScaleHandle_{ -1 };
+	D2D1_RECT_F groupBox_{};
+	float groupAngle_{ 0.f };
+	D2D1_RECT_F groupScaleStartRect_{};
+	D2D1_POINT_2F groupScaleStartCenter_{ 0.f, 0.f };
+	D2D1_POINT_2F groupScaleLastCenter_{ 0.f, 0.f };
+	float groupScaleLastSx_{ 1.f }, groupScaleLastSy_{ 1.f };
+	D2D1_POINT_2F groupTransformStart_{ 0.f, 0.f };
+	D2D1_POINT_2F groupLastDelta_{ 0.f, 0.f };
+	D2D1_POINT_2F groupPivot_{ 0.f, 0.f };
+	float groupRotateStartAngle_{ 0.f };
+	float groupRotateLastDelta_{ 0.f };
+	std::vector<ShapeBase*> groupTargets_;
+	std::vector<std::vector<float>> groupBefore_;
+	// 组选框/框选的画刷（懒建）
+	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushGroupStroke;
+	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushGroupHandleFill;
+	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushGroupHandleShadow;
+	Microsoft::WRL::ComPtr<ID2D1StrokeStyle> groupDashStyle;
 	std::wstring forcedToolId;
 	bool mainToolUserPlaced{ false };
 };

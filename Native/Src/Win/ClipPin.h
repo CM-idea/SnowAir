@@ -11,6 +11,9 @@ class ClipPin : public Ling::WinBase
 public:
 	static void showText(const std::wstring& text);
 	static void showFiles(const std::vector<std::wstring>& files);
+	/* 指定左上角落点；批量贴屏 / 晾衣架夹子用，避免贴到光标下方。 */
+	static void showTextAt(const std::wstring& text, POINT topLeft);
+	static void showFilesAt(const std::vector<std::wstring>& files, POINT topLeft);
 	// 「隐藏/显示贴图」热键：贴屏卡片与钉图属于同一组，必须一起隐藏 / 放回
 	static bool hasAny();
 	static void hideAll();

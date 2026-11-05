@@ -725,6 +725,77 @@ bool ShapeText::translateBy(float dx, float dy)
 	return true;
 }
 
+D2D1_RECT_F ShapeText::bounds() const
+{
+	auto r = rotatedBounds(rect, angle);
+	// 气泡尾巴伸出框外：把它并进包围盒，框选/组选框才不会漏掉尾巴
+	if (bubble_ && !rectEmpty(r)) {
+		const float tx = bubbleTail_.x, ty = bubbleTail_.y;
+		r = D2D1::RectF((std::min)(r.left, tx), (std::min)(r.top, ty),
+			(std::max)(r.right, tx), (std::max)(r.bottom, ty));
+	}
+	const float pad = 2.f * win->dpi;
+	return D2D1::RectF(r.left - pad, r.top - pad, r.right + pad, r.bottom + pad);
+}
+
+bool ShapeText::scaleBy(float pivotX, float pivotY, float angleRad, float sx, float sy)
+{
+	if (attachTo) return false;
+	const float cx = (rect.left + rect.right) * 0.5f;
+	const float cy = (rect.top + rect.bottom) * 0.5f;
+	const auto nc = scalePoint(cx, cy, pivotX, pivotY, angleRad, sx, sy);
+	float lsx = 1.f, lsy = 1.f;
+	localScaleFor(angle, angleRad, sx, sy, lsx, lsy);
+	if (!isFrame()) {
+		// 普通文字靠字号缩放；比例取两个轴的均值，非等比时字不会被拉成扁片
+		fontSize = std::max(2.f, fontSize * (lsx + lsy) * 0.5f);
+		makeTextLayout();
+		syncRectFromLayout();
+		const float w = rect.right - rect.left;
+		const float h = rect.bottom - rect.top;
+		rect = D2D1::RectF(nc.x - w * 0.5f, nc.y - h * 0.5f, nc.x + w * 0.5f, nc.y + h * 0.5f);
+	}
+	else {
+		const float w = std::max(2.f, (rect.right - rect.left) * lsx);
+		const float h = std::max(2.f, (rect.bottom - rect.top) * lsy);
+		rect = D2D1::RectF(nc.x - w * 0.5f, nc.y - h * 0.5f, nc.x + w * 0.5f, nc.y + h * 0.5f);
+	}
+	if (bubble_) {
+		if (tailCustom_) {
+			bubbleTail_ = scalePoint(bubbleTail_.x, bubbleTail_.y, pivotX, pivotY, angleRad, sx, sy);
+		}
+		else {
+			updateBubbleTail();
+		}
+	}
+	updateDraggers();
+	return true;
+}
+
+bool ShapeText::rotateBy(float pivotX, float pivotY, float deltaRad)
+{
+	// 挂在箭头/线段上的文字跟着宿主走：宿主旋转时会重摆文字，这里不能再单独转
+	if (attachTo) return false;
+	const float cx = (rect.left + rect.right) * 0.5f;
+	const float cy = (rect.top + rect.bottom) * 0.5f;
+	const auto nc = rotatePoint(cx, cy, pivotX, pivotY, deltaRad);
+	const float hw = (rect.right - rect.left) * 0.5f;
+	const float hh = (rect.bottom - rect.top) * 0.5f;
+	rect = D2D1::RectF(nc.x - hw, nc.y - hh, nc.x + hw, nc.y + hh);
+	angle += deltaRad;
+	if (bubble_) {
+		if (tailCustom_) {
+			const auto nt = rotatePoint(bubbleTail_.x, bubbleTail_.y, pivotX, pivotY, deltaRad);
+			bubbleTail_ = nt;
+		}
+		else {
+			updateBubbleTail();
+		}
+	}
+	updateDraggers();
+	return true;
+}
+
 void ShapeText::mouseDrag(const float x, const float y)
 {
 	if (bubble_ && hoverDraggerIndex >= 10 && hoverDraggerIndex <= 13) {
@@ -962,6 +1033,7 @@ void ShapeText::mouseWheel(const float /*x*/, const float /*y*/, const short del
 void ShapeText::mouseMove(const float x, const float y)
 {
 	hoverDraggerIndex = -1;
+	hoverEdge_ = -1;
 	updateDraggers();
 	// 气泡尾巴尖：选中时优先命中（它在框外，比角控点更远）
 	if (bubble_ && isSelected() && std::hypot(x - bubbleTail_.x, y - bubbleTail_.y) <= 8.f * win->dpi) {
@@ -992,6 +1064,7 @@ void ShapeText::mouseMove(const float x, const float y)
 	const int z = hitBoxEdgeOrCorner(lx, ly, rect, band);
 	if (z >= 0 && !(isFrame() && (z & 1))) {
 		scaleHandle_ = z;
+		hoverEdge_ = z;
 		// Area 索引 → Text 四角：0=TL 2=TR 4=BR 6=BL → 0,1,3,2
 		if (z == 0 || z == 1 || z == 7) hoverDraggerIndex = 0;
 		else if (z == 2 || z == 3) hoverDraggerIndex = 1;
@@ -1040,7 +1113,12 @@ void ShapeText::setCursor()
 		return;
 	}
 	if (applyUnselectedHoverCursor()) return;
-	if (hoverDraggerIndex == 0 || hoverDraggerIndex == 3)
+	// 边中点与矩形控件一致：上下边给上下箭头、左右边给左右箭头；只有四角给对角箭头。
+	if (hoverEdge_ == 1 || hoverEdge_ == 5)
+		SetCursor(LoadCursor(nullptr, IDC_SIZENS));
+	else if (hoverEdge_ == 3 || hoverEdge_ == 7)
+		SetCursor(LoadCursor(nullptr, IDC_SIZEWE));
+	else if (hoverDraggerIndex == 0 || hoverDraggerIndex == 3)
 		SetCursor(LoadCursor(nullptr, IDC_SIZENWSE));
 	else if (hoverDraggerIndex == 1 || hoverDraggerIndex == 2)
 		SetCursor(LoadCursor(nullptr, IDC_SIZENESW));
@@ -1104,6 +1182,22 @@ D2D1_POINT_2F ShapeText::editCaretPos(float& lineH) const
 	}
 	const auto origin = editTextOrigin();
 	return D2D1::Point2F(origin.x + cx, origin.y + cy);
+}
+
+// 输入法组字窗/候选框要贴着的插入符位置。editCaretPos 给的是排版坐标，
+// 普通文字可能被用户转过角度（paint 里绕 rect 中心做 Rotation），这里补上同一个旋转变换，
+// 否则旋转后的文字一打字，组字窗会落在没转过的位置上。
+D2D1_POINT_2F ShapeText::imeCaretPos(float& lineH) const
+{
+	auto p = editCaretPos(lineH);
+	if (std::fabs(angle) > 1e-6f) {
+		const float cx = (rect.left + rect.right) * 0.5f;
+		const float cy = (rect.top + rect.bottom) * 0.5f;
+		const float c = std::cos(angle), s = std::sin(angle);
+		const float dx = p.x - cx, dy = p.y - cy;
+		p = D2D1::Point2F(cx + dx * c - dy * s, cy + dx * s + dy * c);
+	}
+	return p;
 }
 
 // 编辑中单击文字框：把插入符挪到点击处继续编辑。

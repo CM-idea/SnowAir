@@ -45,6 +45,9 @@ public:
 	void moveCaretTo(bool end);
 	// 编辑中单击文字：把插入符挪到点击处（多行 / 气泡居中 / 旋转文字都走 DWrite 自己的命中）
 	void placeCaretAt(float x, float y);
+	// 插入符在标注坐标里的位置（含文字自身的旋转），供宿主摆输入法组字/候选框。
+	// lineH 返回当前行高（标注坐标），没有排版时用字号估算。
+	D2D1_POINT_2F imeCaretPos(float& lineH) const;
 	// 「尺寸」：挂到线段上时初始化一段默认文字（固定字号，随后 setAttachPose 摆到中点）
 	void initAttachedText(const std::wstring& t, float px);
 	// 自动文字（角度测量）：用户手动编辑过之后就不再自动改写
@@ -62,6 +65,9 @@ public:
 	std::vector<float> editSnapshot() const override;
 	void applyEditSnapshot(const std::vector<float>& state) override;
 	bool translateBy(float dx, float dy) override;
+	D2D1_RECT_F bounds() const override;
+	bool rotateBy(float pivotX, float pivotY, float deltaRad) override;
+	bool scaleBy(float pivotX, float pivotY, float angleRad, float sx, float sy) override;
 public:
 	bool isEditing{ false };
 	int caretIndex_{ 0 };
@@ -158,6 +164,9 @@ private:
 	bool scaling_{ false };
 	int scaleHandle_{ 0 };
 	int rotateCorner{ 0 }; // 光标按角挑字形（0=左上 2=右上 4=右下 6=左下）
+	// 本次命中的是"边"还是"角"：边中点 1/3/5/7 用上下/左右箭头，四角用对角箭头。
+	// hoverDraggerIndex 为了缩放逻辑仍映射到四角，光标方向单独记这里。
+	int hoverEdge_{ -1 };
 	float rotateStartAngle{ 0.f };
 	float rotateStartAtan{ 0.f };
 };

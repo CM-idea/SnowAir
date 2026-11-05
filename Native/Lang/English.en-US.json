@@ -410,6 +410,7 @@
     "fnTransBaidu": "Baidu Translate",
     "fnTransOffline": "Offline Translate",
     "fnDictMode": "Dictionary mode",
+    "quickNewSession": "New session on open",
     "fnSourceLang": "Source language",
     "fnLangAuto": "Auto detect",
     "fnLangZh": "Simplified Chinese",

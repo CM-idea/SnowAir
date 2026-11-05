@@ -29,6 +29,9 @@ public:
 	std::vector<float> editSnapshot() const override;
 	void applyEditSnapshot(const std::vector<float>& state) override;
 	bool translateBy(float dx, float dy) override;
+	D2D1_RECT_F bounds() const override;
+	bool rotateBy(float pivotX, float pivotY, float deltaRad) override;
+	bool scaleBy(float pivotX, float pivotY, float angleRad, float sx, float sy) override;
 private:
 	void updateDraggers();
 	void syncEllipseFromRect();

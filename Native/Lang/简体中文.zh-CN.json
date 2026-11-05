@@ -417,6 +417,7 @@
     "fnTransBaidu": "百度翻译",
     "fnTransOffline": "离线翻译",
     "fnDictMode": "字典模式",
+    "quickNewSession": "每次打开新建会话",
     "fnSourceLang": "源语言",
     "fnLangAuto": "自动检测",
     "fnLangZh": "简体中文",

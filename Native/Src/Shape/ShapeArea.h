@@ -17,6 +17,12 @@ public:
 	void setCursor() override;
 	bool hitErase(const float x, const float y) override;
 	bool translateBy(float dx, float dy) override;
+	D2D1_RECT_F bounds() const override;
+	bool rotateBy(float pivotX, float pivotY, float deltaRad) override;
+	bool scaleBy(float pivotX, float pivotY, float angleRad, float sx, float sy) override;
+	void transformSettled() override { onGeometrySettled(); }
+	std::vector<float> editSnapshot() const override;
+	void applyEditSnapshot(const std::vector<float>& state) override;
 	// 带旋转的区几何（高亮并集挖洞/描边）
 	Microsoft::WRL::ComPtr<ID2D1Geometry> makeAreaGeometry(bool asEllipse) const;
 protected:

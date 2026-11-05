@@ -4,8 +4,8 @@
 
 class CapLong;
 class CapVideo;
-class ToolQrcode;
 class ToolOcr;
+class ToolQrcode;
 // 录制期的选框层：独立的透明置顶窗，只画选框描边/控点/标签，并用 WDA_EXCLUDEFROMCAPTURE
 // 排除在录制画面之外（主窗口还要录标注/鼠标高亮，不能整窗排除）。定义见 WinCap.cpp。
 class SelectionChrome;
@@ -129,6 +129,17 @@ public:
 	bool isOcrPanel() const;
 	void startQrcode();
 	void syncQrcodePanel();
+	// 点开某个码的卡片（badgeIndex 是 cutMask->codeBadges() 的下标）
+	void openCodeCard(int badgeIndex);
+	// 按锚点建卡片窗口（anchor 是按钮/码的客户区物理矩形）
+	void showQrCardAt(const D2D1_RECT_F& anchor, const std::wstring& text, bool url);
+	// 卡开着时的"完成/复制 / Enter / Ctrl+C"：复制二维码文本并退出截图（卡片按钮也会调它）
+	void finishWithQrCard();
+	// 卡片正文（网址）被单击：先关会话，再交给默认浏览器
+	void openQrCardLink();
+	// 收起码卡片（不抢焦点的浮层窗口；不刷新，调用方自己 refresh）
+	void closeQrcodeCard();
+	bool qrCardOpen() const;
 	void syncOcrPanel();
 	// keepOpen：演示画布用 —— 复制/保存后不关窗（画布只由 ✕ / Esc 退出）
 	void saveToFile(bool keepOpen = false);
@@ -191,6 +202,13 @@ private:
 	void copyCurrentStage();
 	void onDown(POINT pos, bool isRight);
 	void startOcrInternal(bool translateMode);
+	// —— 框选后自动扫码 ——
+	// 选区停稳一小会儿才扫（拖动过程中每一下都扫纯属浪费）；结果回投时用代际号丢弃过期的。
+	// immediate=true：框选定格那一下直接开扫，不等去抖 —— 这是用户感知最强的一步。
+	void scheduleCodeScan(bool immediate = false);
+	void startCodeScan();
+	void applyCodeScan(uint64_t gen, std::vector<CodeBadge> badges);
+	void clearCodeBadges();
 	void finishOcrTranslate(const struct OcrResult& merged, const struct TranslateResult& tr);
 	// 记录"上一次识别结果"缓存（只允许在 UI 线程调用：后台识别线程通过 toUi 回投）
 	void storeOcrCache(const struct OcrResult& r, const D2D1_RECT_F& rect);
@@ -249,8 +267,8 @@ private:
 	CapStage stage{ CapStage::Select };
 	std::unique_ptr<CapLong> capLong;
 	std::unique_ptr<CapVideo> capVideo;
-	std::unique_ptr<ToolQrcode> toolQrcode;
 	std::unique_ptr<ToolOcr> toolOcr;
+	std::unique_ptr<ToolQrcode> toolQrcode;
 	std::unique_ptr<SelectionChrome> chrome_;
 	Ling::Canvas* canvas{ nullptr };
 	POINT pixPos{}, pixFocus{};
@@ -350,6 +368,16 @@ private:
 	static constexpr UINT recCursorTimerId{ 0x5302 };
 	// 还没框选时 Ctrl+C 只取色：成功提示显示一会儿后自动退出截图
 	static constexpr UINT colorCopyCloseTimerId{ 0x5501 };
+	// 框选定格后的自动扫码去抖：只有「拖边/挪选区」这种连续动作才需要，定格那一下直接扫
+	static constexpr UINT codeScanTimerId{ 0x5701 };
+	static constexpr UINT codeScanDelayMs{ 140 };
+	uint64_t codeScanGen_{ 0 };   // 选区每变一次 +1；后台结果回来时对不上就丢弃
+	// 上一次"安排过扫码/扫过"的选区：选区没动就不必重扫（点一下也算一次 onUp，别让它把角标刷没）
+	D2D1_RECT_F codeScanRect_{};
+	// 码卡片是按哪个选区开的：选区真变了才收卡（同一个 rect 上的普通点击不该收掉它）
+	D2D1_RECT_F codeCardRect_{};
+	// 卡片正对着哪个角标（-1 = 手动入口开的 / 没开）。再点同一个角标 = 收起
+	int qrCardBadge_{ -1 };
 	static constexpr UINT recCursorTickMs{ 16 };
 	static constexpr float selFollowMargin{ 24.f };   // 判定"贴近边缘"的带宽（逻辑像素）
 	// 跟随平移的平滑参数：每帧只走剩余越界距离的 ease 倍，并限制单帧最大位移

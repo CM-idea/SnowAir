@@ -2683,13 +2683,29 @@ void WinSettingHistory::refreshGrid()
 		const auto tags = clip ? Setting::get()->getClipboardTags(it.id)
 			: Setting::get()->getHistoryTags(it.filePath);
 		std::vector<TagChip> chips;
-		if (clip) chips.push_back({ clipTypeTag(it), false });
+		// 便签卡片只留「便签」一个标签：不再叠一层类型标签（文字 / 链接 / SVG…）。
+		// 搜索不受影响 —— 关键词本来就先匹配正文，用文字一样能搜到。
+		bool noteItem = false;
+		for (auto& t : tags) if (t.find(L"便签") != std::wstring::npos) { noteItem = true; break; }
+		if (clip && !noteItem) chips.push_back({ clipTypeTag(it), false });
 		for (auto& t : tags) chips.push_back({ t, true });
 		if (chips.empty()) {
 			chips.push_back({ it.id == it.filePath
 				? Lang::get(isMedia ? L"setting.tagVideo" : L"setting.tagImage")
 				: sourceLabel(it.source), false });
 		}
+		auto openTagEditor = [this, clip, id = it.id, item = it]() {
+			if (this->overlayOpen()) return;
+			if (clip) {
+				this->showTagDialogFor(id, Setting::get()->getClipboardTags(id),
+					[id](const std::vector<std::wstring>& tags) {
+						Setting::get()->setClipboardTags(id, tags);
+					});
+			}
+			else {
+				this->showTagDialog(item);
+			}
+		};
 		for (auto& chipDef : chips) {
 			// 所有分类的标签都可点击：类型标签 / 来源标签点开就是该条目的自定义标签编辑
 			auto* chip = metaRow->makeChild<Ling::Button>();
@@ -2700,30 +2716,38 @@ void WinSettingHistory::refreshGrid()
 			chip->setBg(SettingTheme::secondary);
 			chip->setHoverBg(SettingTheme::accent);
 			chip->setHeight(16.f);
-			chip->setPadding(4.f, 0.f, 4.f, 0.f);
+			chip->setPadding(4.f, 0.f, 4.f, 1.f);
 			chip->setBorderRadius(4.f);
 			chip->setBorder(0.f, 0);
 			chip->setMarginLeft(4.f);
 			chip->setFlexShrink(0.f);
 			chip->setJustifyContent(Ling::Justify::Center);
 			chip->setAlignItems(Ling::Align::Center);
-			if (clip) {
-				chip->onClick.add([this, id = it.id](Ling::Button*) {
-					if (this->overlayOpen()) return;
-					this->showTagDialogFor(id, Setting::get()->getClipboardTags(id),
-						[id](const std::vector<std::wstring>& tags) {
-							Setting::get()->setClipboardTags(id, tags);
-						});
-					});
-			}
-			else {
-				chip->onClick.add([this, item = it](Ling::Button*) {
-					if (this->overlayOpen()) return;   // 气泡/弹窗盖住卡片时不再响应
-					this->showTagDialog(item);
-				});
-			}
+			chip->onClick.add([openTagEditor](Ling::Button*) { openTagEditor(); });
 			if (tip) tip->bind(chip, Lang::get(L"setting.filterTagEdit"));
 		}
+
+		/* 标签末尾常驻一个「+」：提示这里可以继续添加标签。 */
+		auto* addTag = metaRow->makeChild<Ling::Button>();
+		addTag->setText(Icon::Add);
+		addTag->setFontFamily(Icon::Family);
+		addTag->setFontSize(12.f);
+		addTag->setColor(SettingTheme::textTertiary);
+		addTag->setHoverColor(SettingTheme::textPrimary);
+		addTag->setBg(SettingTheme::secondary);
+		addTag->setHoverBg(SettingTheme::accent);
+		addTag->setWidth(16.f);
+		addTag->setHeight(16.f);
+		/* 在上一版基础上往下 0.5px：底部留 1px，内容区中心上移 0.5px。 */
+		addTag->setPadding(0.f, 0.f, 0.f, 1.f);
+		addTag->setBorderRadius(4.f);
+		addTag->setBorder(0.f, 0);
+		addTag->setMarginLeft(4.f);
+		addTag->setFlexShrink(0.f);
+		addTag->setJustifyContent(Ling::Justify::Center);
+		addTag->setAlignItems(Ling::Align::Center);
+		addTag->onClick.add([openTagEditor](Ling::Button*) { openTagEditor(); });
+		if (tip) tip->bind(addTag, Lang::get(L"setting.filterTagEdit"));
 
 		lastRowCells++;
 		builtIds.push_back(it.id);

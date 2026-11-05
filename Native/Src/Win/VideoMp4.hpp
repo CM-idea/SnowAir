@@ -37,6 +37,9 @@
 #include <chrono>
 #include <audiosessiontypes.h>
 #include <atomic>
+#include <array>
+#include <cmath>
+#include <cstring>
 
 
 namespace VideoMp4{
@@ -46,6 +49,87 @@ inline static const GUID MyFakeFmt = { 0x1884e6dc, 0x2ae3, 0x4499, { 0xa3, 0xd7,
 // {7F478D2D-9EBF-4B9A-B2F3-83800263BB86}
 inline static const GUID MFVideoFormat_RGB10 = { 0x7f478d2d, 0x9ebf, 0x4b9a, { 0xb2, 0xf3, 0x83, 0x80, 0x2, 0x63, 0xbb, 0x86 } };
 
+// —— HDR(scRGB) → SDR sRGB 的统一转换 ——
+// 截图/录屏共用同一套口径：scRGB 1.0 = 80 尼特，按当前显示器的 SDR 白点缩放后
+// 再做 linear→sRGB。录屏不再走 RGB10/HEVC 那条没有色调映射的旧路。
+inline float halfToFloat(unsigned short h)
+{
+    const unsigned int sign = (unsigned int)(h & 0x8000u) << 16;
+    unsigned int exp = (h >> 10) & 0x1F;
+    unsigned int mant = h & 0x3FF;
+    unsigned int bits = 0;
+    if (exp == 0) {
+        if (mant == 0) bits = sign;
+        else {
+            exp = 127 - 15 + 1;
+            while ((mant & 0x400u) == 0) { mant <<= 1; --exp; }
+            mant &= 0x3FFu;
+            bits = sign | (exp << 23) | (mant << 13);
+        }
+    }
+    else if (exp == 31) {
+        bits = sign | 0x7F800000u | (mant << 13);
+    }
+    else {
+        bits = sign | ((exp + (127 - 15)) << 23) | (mant << 13);
+    }
+    float f = 0.f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+inline unsigned char linearToSrgbByte(float v)
+{
+    if (!(v > 0.f)) return 0;
+    if (v >= 1.f) return 255;
+    const float s = (v <= 0.0031308f) ? v * 12.92f : 1.055f * std::pow(v, 1.f / 2.4f) - 0.055f;
+    const int n = (int)std::lround(s * 255.f);
+    return (unsigned char)(n < 0 ? 0 : (n > 255 ? 255 : n));
+}
+
+// 当前显示器的"SDR 内容亮度"（尼特）。非高级颜色 / 查询失败按 80 尼特。
+inline float querySdrWhiteNits(HMONITOR mon)
+{
+    MONITORINFOEXW mi{};
+    mi.cbSize = sizeof(mi);
+    if (!mon || !GetMonitorInfoW(mon, &mi)) return 80.f;
+
+    UINT32 pathCount = 0, modeCount = 0;
+    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS)
+        return 80.f;
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr) != ERROR_SUCCESS)
+        return 80.f;
+
+    for (UINT32 i = 0; i < pathCount; ++i) {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME src{};
+        src.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        src.header.size = sizeof(src);
+        src.header.adapterId = paths[i].sourceInfo.adapterId;
+        src.header.id = paths[i].sourceInfo.id;
+        if (DisplayConfigGetDeviceInfo(&src.header) != ERROR_SUCCESS) continue;
+        if (_wcsicmp(src.viewGdiDeviceName, mi.szDevice) != 0) continue;
+
+        DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO color{};
+        color.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
+        color.header.size = sizeof(color);
+        color.header.adapterId = paths[i].targetInfo.adapterId;
+        color.header.id = paths[i].targetInfo.id;
+        if (DisplayConfigGetDeviceInfo(&color.header) != ERROR_SUCCESS || !color.advancedColorEnabled)
+            return 80.f;
+
+        DISPLAYCONFIG_SDR_WHITE_LEVEL white{};
+        white.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
+        white.header.size = sizeof(white);
+        white.header.adapterId = paths[i].targetInfo.adapterId;
+        white.header.id = paths[i].targetInfo.id;
+        if (DisplayConfigGetDeviceInfo(&white.header) == ERROR_SUCCESS && white.SDRWhiteLevel > 0)
+            return (float)white.SDRWhiteLevel * 80.f / 1000.f;
+        return 80.f;
+    }
+    return 80.f;
+}
 
 class AHANDLE
 {
@@ -421,9 +505,77 @@ public:
     }
 
     DXGI_FORMAT InHDR = DXGI_FORMAT_UNKNOWN;
-    int ConvertHDR = 2; // 0 no convert, 1 convert, 1 convert and go updown
     // 是否成功要到了"系统帮我转成 8 位"的桌面复制，见 Prepare
     bool SDRForced = false;
+    // —— 统一 HDR→SDR：所有帧出口都是 BGRA8(sRGB) ——
+    float sdrWhiteNits{ 80.f };
+    std::array<unsigned char, 65536> srgbLut{};
+    float srgbLutWhite{ 0.f };
+    bool srgbLutValid{ false };
+    std::vector<BYTE> sdrBuf;
+    ULONGLONG lastWhiteRefresh{ 0 };
+
+    void ensureSrgbLut()
+    {
+        const float white = (sdrWhiteNits > 1.f) ? sdrWhiteNits : 80.f;
+        if (srgbLutValid && std::fabs(srgbLutWhite - white) < 0.5f) return;
+        const float inv = 80.f / white;
+        for (int bits = 0; bits < 65536; ++bits) {
+            float v = halfToFloat((unsigned short)bits) * inv;
+            srgbLut[(size_t)bits] = linearToSrgbByte(v);
+        }
+        srgbLutWhite = white;
+        srgbLutValid = true;
+    }
+
+    void refreshSdrWhite()
+    {
+        lastWhiteRefresh = GetTickCount64();
+        const HMONITOR mon = MonitorFromRect(&monRect, MONITOR_DEFAULTTONEAREST);
+        const float next = querySdrWhiteNits(mon);
+        if (std::fabs(next - sdrWhiteNits) >= 0.5f) {
+            sdrWhiteNits = next;
+            srgbLutValid = false;
+        }
+    }
+
+    // FP16(scRGB) / RGBA32F → BGRA8(sRGB)。输入 buf 是自下而上的行序，输出保持一致，
+    // 直接满足 MFVideoFormat_RGB32 的输入口径。
+    bool toneMapHdrToBgra(int w, int h)
+    {
+        if (w <= 0 || h <= 0 || buf.empty()) return false;
+        const size_t need = (size_t)w * (size_t)h * 4;
+        if (sdrBuf.size() != need) sdrBuf.resize(need);
+        ensureSrgbLut();
+        if (InHDR == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+            const unsigned short* src = reinterpret_cast<const unsigned short*>(buf.data());
+            if ((size_t)w * h * 4 > buf.size() / 2) return false;
+            for (size_t i = 0, n = (size_t)w * h; i < n; ++i) {
+                const unsigned short* p = src + i * 4;
+                BYTE* d = sdrBuf.data() + i * 4;
+                d[0] = srgbLut[p[2]];   // B
+                d[1] = srgbLut[p[1]];   // G
+                d[2] = srgbLut[p[0]];   // R
+                d[3] = 255;
+            }
+            return true;
+        }
+        if (InHDR == DXGI_FORMAT_R32G32B32A32_FLOAT) {
+            const float* src = reinterpret_cast<const float*>(buf.data());
+            if ((size_t)w * h * 4 > buf.size() / 4) return false;
+            const float inv = 80.f / ((sdrWhiteNits > 1.f) ? sdrWhiteNits : 80.f);
+            for (size_t i = 0, n = (size_t)w * h; i < n; ++i) {
+                const float* p = src + i * 4;
+                BYTE* d = sdrBuf.data() + i * 4;
+                d[0] = linearToSrgbByte(p[2] * inv);
+                d[1] = linearToSrgbByte(p[1] * inv);
+                d[2] = linearToSrgbByte(p[0] * inv);
+                d[3] = 255;
+            }
+            return true;
+        }
+        return false;
+    }
     // —— GDI 兜底（见 DESKTOPCAPTUREPARAMS::GdiFallback）——
     bool gdiMode = false;
     HDC gdiScreen = nullptr;
@@ -694,6 +846,10 @@ public:
         DXGI_OUTPUT_DESC lOutputDesc;
         hr = lDxgiOutput->GetDesc(&lOutputDesc);
         monRect = lOutputDesc.DesktopCoordinates;   // 换屏跟随的判据
+        // HDR→SDR 的基准：当前这块屏的 Windows「SDR 内容亮度」
+        sdrWhiteNits = querySdrWhiteNits(lOutputDesc.Monitor);
+        srgbLutValid = false;
+        lastWhiteRefresh = GetTickCount64();
 
         // QI for Output 1
         CComPtr<IDXGIOutput1> lDxgiOutput1;
@@ -1367,10 +1523,8 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
                 return -1;
             if (!cap.Prepare(dp.nOutput))
                 return -2;
-            // 桌面复制退回到 FP16 那条路时（Prepare 里要不到 BGRA8），只有 HEVC 收 10 位输入
+            // HDR 帧在采集出口统一色调映射成 BGRA8，编码器不再强制 HEVC
             dp.LastCapturedHdr = cap.InHDR != DXGI_FORMAT_UNKNOWN;
-            if (cap.InHDR)
-                dp.VIDEO_ENCODING_FORMAT = MFVideoFormat_HEVC;
             wi = cap.lOutputDuplDesc.ModeDesc.Width;
             he = cap.lOutputDuplDesc.ModeDesc.Height;
             if (dp.rx.right && dp.rx.bottom)
@@ -1413,9 +1567,9 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
     }
 
     // 「视频质量」输出分辨率上限：只缩不放，宽对齐 4、高对齐 2（与选区对齐要求一致）。
-    // HDR(FP16) 那条路像素格式特殊且极少用，不做缩放，保持原生。
+    // 出口已经是 BGRA8，HDR/SDR 都能走同一套缩放。
     int encW = wi, encH = he;
-    if (dp.HasVideo && !cap.InHDR && dp.MaxOutHeight > 0 && he > dp.MaxOutHeight)
+    if (dp.HasVideo && dp.MaxOutHeight > 0 && he > dp.MaxOutHeight)
     {
         const double f = (double)dp.MaxOutHeight / (double)he;
         encW = std::max(4, (int)(wi * f + 0.5) & ~3);
@@ -1704,28 +1858,11 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
     if (!NV12)
         pMediaTypeVideoIn->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
 
-    // FP16 那条路才要给编码器喂 10 位输入，下面这套门道也只在那时候走
-    const bool hdr10 = cap.InHDR != DXGI_FORMAT_UNKNOWN;
-
-    if (hdr10)
-    {
-        // Force our Nvidia MFT encoder to load by calling first our fake guid
-        pMediaTypeVideoIn->SetGUID(MF_MT_SUBTYPE, MyFakeFmt);
-    }
-
+    // 色彩统一在采集出口做完了：编码器永远收 BGRA8(sRGB)/RGB32，不再有 RGB10 分支
     if (dp.HasVideo && !dp.Framer)
     {
         hr = pSinkWriter->SetInputMediaType(OutVideoStreamIndex, pMediaTypeVideoIn, NULL);
         if (FAILED(hr)) return -10;
-
-
-        if (hdr10)
-        {
-            // Now put the real value
-            pMediaTypeVideoIn->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB10);
-            hr = pSinkWriter->SetInputMediaType(OutVideoStreamIndex, pMediaTypeVideoIn, NULL);
-            if (FAILED(hr)) return -10;
-        }
 
         CComPtr<ICodecAPI> ca;
         hr = pSinkWriter->GetServiceForStream(OutVideoStreamIndex, GUID_NULL, __uuidof(ICodecAPI), (void**)&ca);
@@ -1802,9 +1939,8 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
     }
 
 
-    int multi = 4;
-    if (cap.InHDR != DXGI_FORMAT_UNKNOWN)
-        multi = 16;
+    // 出口统一 BGRA8：无论 HDR 还是 SDR，编码器输入都是 4 字节/像素
+    const int multi = 4;
 
     if (!dp.Framer)
     {
@@ -1838,6 +1974,11 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
             Sleep((DWORD)msloop);
         if (dp.MustEnd)
             break;
+
+        // Windows 的「SDR 内容亮度」可能在录制中被调整；定期刷新，避免整段录屏沿用旧白点。
+        if (cap.InHDR != DXGI_FORMAT_UNKNOWN
+            && GetTickCount64() - cap.lastWhiteRefresh > 2000)
+            cap.refreshSdrWhite();
 
         unsigned long long ThisDurA = 0;
         unsigned long long ThisDurV = 0;
@@ -2107,45 +2248,6 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
             }
 
 
-            std::vector<DWORD> hdrout;
-
-
-            if (cap.InHDR == DXGI_FORMAT_R32G32B32A32_FLOAT)
-            {
-                // This is a 16-bit 4xfloat sample
-                void* fld = cap.buf.data();
-                auto hr2 = cap.Convert(fld, wi, he, hdrout, GUID_WICPixelFormat128bppPRGBAFloat);
-                if (FAILED(hr2))
-                    break;
-                VideoBufferSize = (DWORD)(hdrout.size() * 4);
-            }
-            if (cap.InHDR == DXGI_FORMAT_R16G16B16A16_FLOAT && cap.ConvertHDR)
-            {
-                // 64-bit float 16 bit each float, convert
-                void* fld = cap.buf.data();
-                auto hr2 = cap.Convert(fld, wi, he, hdrout, GUID_WICPixelFormat64bppRGBAHalf);
-                if (FAILED(hr2))
-                    break;
-                VideoBufferSize = (DWORD)(hdrout.size() * 4);
-                // Up down
-
-                if (cap.ConvertHDR == 2)
-                {
-                    std::vector<DWORD> raw3;
-                    raw3.resize(wi);
-                    for (int y = 0; y < he / 2; y++)
-                    {
-                        DWORD* d = hdrout.data() + y * wi;
-                        DWORD* d2 = hdrout.data() + (he - y - 1) * wi;
-                        memcpy(raw3.data(), d, wi * sizeof(DWORD));
-                        memcpy(d, d2, wi * sizeof(DWORD));
-                        memcpy(d2, raw3.data(), wi * sizeof(DWORD));
-                    }
-                }
-            }
-
-
-
             if (!pVideoBuffer)
             {
                 hr = MFCreateMemoryBuffer(VideoBufferSize, &pVideoBuffer);
@@ -2157,9 +2259,16 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
             if (FAILED(hr))
                 break;
 
+            // 采集出口已经统一成 BGRA8：HDR 帧先按当前 SDR 白点做色调映射，
+            // 再和普通帧一样缩放/拷贝——编码器只认这一种格式。
             if (cap.InHDR != DXGI_FORMAT_UNKNOWN)
             {
-                memcpy(pData, hdrout.data(), VideoBufferSize);
+                if (!cap.toneMapHdrToBgra(wi, he))
+                    break;
+                if (encW != wi || encH != he)
+                    scaleBGRABox(cap.sdrBuf.data(), wi, he, (BYTE*)pData, encW, encH);
+                else
+                    memcpy(pData, cap.sdrBuf.data(), std::min(cap.sdrBuf.size(), (size_t)VideoBufferSize));
             }
             else if (encW != wi || encH != he)
             {
@@ -2170,8 +2279,14 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
             {
                 memcpy(pData, cap.buf.data(), std::min(cap.buf.size(), (size_t)VideoBufferSize));
             }
-            if (dp.Framer)
-                hrf = dp.Framer(cap.InHDR,wi,he,pData, std::min(cap.buf.size(), (size_t)VideoBufferSize), dp.cb);
+            if (dp.Framer) {
+                const DXGI_FORMAT fmt = (cap.InHDR != DXGI_FORMAT_UNKNOWN)
+                    ? DXGI_FORMAT_B8G8R8A8_UNORM : cap.InHDR;
+                const size_t sz = (cap.InHDR != DXGI_FORMAT_UNKNOWN)
+                    ? (size_t)VideoBufferSize
+                    : std::min(cap.buf.size(), (size_t)VideoBufferSize);
+                hrf = dp.Framer(fmt, wi, he, pData, sz, dp.cb);
+            }
             hr = pVideoBuffer->Unlock();
             if (FAILED(hr)) break;
 

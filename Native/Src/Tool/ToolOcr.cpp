@@ -506,7 +506,7 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 		}
 		const SelPoint sp = hitSelPoint(pos);
 		if (sp.line < 0) return;
-		selActive_ = true;
+		selDragging_ = true;
 		selALine_ = selBLine_ = sp.line;
 		selAIdx_ = selBIdx_ = sp.index;
 		SetFocus(hwnd);
@@ -514,7 +514,7 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 		applySelection();
 	});
 	onMouseMove.add([this](POINT pos) {
-		if (!selActive_) return;
+		if (!selDragging_) return;
 		const SelPoint sp = hitSelPoint(pos);
 		if (sp.line < 0) return;
 		selBLine_ = sp.line;
@@ -522,8 +522,8 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 		applySelection();
 	});
 	onMouseUp.add([this](POINT, bool) {
-		if (!selActive_) return;
-		selActive_ = false;
+		if (!selDragging_) return;
+		selDragging_ = false;
 		ReleaseCapture();
 		applySelection();
 	});
@@ -541,7 +541,9 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 		}
 		if (ctrl && key == 'A') {   // 全选（跨行）
 			if (!editors.empty()) {
-				selActive_ = true;
+				// 全选不是"正在拖选"：这里只设端点。之前把 selActive_ 也置真，
+				// 于是全选后鼠标只是划过文字，onMouseMove 就把终点改到光标处。
+				selDragging_ = false;
 				selALine_ = 0; selAIdx_ = 0;
 				selBLine_ = (int)editors.size() - 1;
 				selBIdx_ = (int)editors.back()->getText().size();
@@ -572,7 +574,11 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 	});
 	// 拖选中保持 I 形光标：此时鼠标可能已经离开某些行，各行的 hover 态不生效。
 	onCursor.add([this](bool* handled) {
-		if (selActive_) { SetCursor(LoadCursor(nullptr, IDC_IBEAM)); *handled = true; }
+		// 拖选/全选后都保持 I 形光标；全选没有拖选状态，按端点是否有效判断。
+		if (selDragging_ || (selALine_ >= 0 && selBLine_ >= 0)) {
+			SetCursor(LoadCursor(nullptr, IDC_IBEAM));
+			*handled = true;
+		}
 	});
 	// 翻译：译文折行后整段可能超出选区，滚轮上下滚动（不画滚动条）。
 	// 贴图宿主不接管 —— 滚轮要留给贴图缩放。
@@ -1465,7 +1471,7 @@ void ToolOcr::rebuildEditors()
 		}
 	}
 	// 选区状态跟着重建作废；镜像层保持在最上层
-	selActive_ = false;
+	selDragging_ = false;
 	selALine_ = selBLine_ = -1;
 	selAIdx_ = selBIdx_ = 0;
 	if (annotCanvas_) body->bringToFront(annotCanvas_);
@@ -1712,7 +1718,7 @@ void ToolOcr::applySelection()
 void ToolOcr::clearSelection()
 {
 	for (auto* e : editors) if (e) e->setSelectionRange(0, 0);
-	selActive_ = false;
+	selDragging_ = false;
 	selALine_ = selBLine_ = -1;
 	selAIdx_ = selBIdx_ = 0;
 }

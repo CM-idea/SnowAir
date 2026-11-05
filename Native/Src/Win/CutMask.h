@@ -10,6 +10,15 @@ enum class MaskHit { None, Inside, Left, Top, Right, Bottom, TopLeft, TopRight, 
 // 信息栏控件命中：锁 / 选区圆角 / 滑条 / 选区阴影 / 阴影色块
 enum class InfoHit { None, Lock, Radius, RadiusSlider, Shadow, ShadowSwatch };
 
+// 框选里自动扫出来的码：symbol 是码的包围盒，rect 是盖在它中心的小按钮。
+// 两者的坐标都是宿主客户区物理像素；按钮由宿主在 setCodeBadges 前算好。
+struct CodeBadge
+{
+	D2D1_RECT_F symbol{};
+	D2D1_RECT_F rect{};
+	std::wstring text;
+};
+
 // 框选遮罩。四块半透明遮罩 + 蓝色选区边框 + 左上角尺寸标签。
 // 自己不持有绘制目标，paint 时由宿主窗口把当前的 context 传进来。
 // 所有坐标都是宿主窗口的客户区坐标。
@@ -87,6 +96,16 @@ public:
 	int selShadowW() const { return selShadowW_; }
 	// 导出时套圆角裁切 + 外阴影；无效果则原样返回 true
 	bool applyExportEffects(std::vector<BYTE>& pixels, int& cw, int& ch) const;
+	// —— 自动识别出来的码的角标 ——
+	// 只画在 chrome 层：导出是 screenImg + 标注合成，不含 chrome，所以这些按钮永远不会进截图。
+	void setCodeBadges(std::vector<CodeBadge> badges);
+	void clearCodeBadges();
+	bool hasCodeBadges() const { return !codeBadges_.empty(); }
+	const std::vector<CodeBadge>& codeBadges() const { return codeBadges_; }
+	// 光标落在哪个角标上（-1 = 没有）
+	int hitCodeBadge(POINT pos) const;
+	void setCodeHover(int index) { codeHover_ = index; }
+	int codeHover() const { return codeHover_; }
 public:
 	D2D1_RECT_F maskRect{};
 	float strokeWidth{ 2.f };
@@ -96,8 +115,6 @@ public:
 	bool showDim{ true };
 	bool showHandles{ true };
 	bool showBorder{ true }; // 长图编辑态可关，只留内容区
-	// 识别结果白底：画在描边/控点/信息栏之下
-	bool drawQrcodeFill{ false };
 	// 查找元素高亮补间（指数追赶 + 查询节流，去掉重开顿挫）
 	void onHoverAnimTick(UINT timerId);
 	void snapHoverTarget();
@@ -130,6 +147,8 @@ private:
 	void paintDim(ID2D1DeviceContext* ctx) const;
 	void paintInfoIcons(ID2D1DeviceContext* ctx);
 	Microsoft::WRL::ComPtr<IDWriteTextLayout> makeIconLayout(const wchar_t* code, float slot);
+	// 码角标：二维码画图标字形，一维码画几根竖条
+	void paintCodeBadges(ID2D1DeviceContext* ctx);
 	void setHoverTarget(const D2D1_RECT_F& target, bool animate);
 	void clearHoverAnim();
 	void scheduleHoverRefine();
@@ -152,6 +171,9 @@ private:
 	Microsoft::WRL::ComPtr<IDWriteTextLayout> lockLayout, unlockLayout;
 	Microsoft::WRL::ComPtr<IDWriteTextLayout> radiusLayout;
 	Microsoft::WRL::ComPtr<IDWriteTextLayout> shadowLayout;
+	Microsoft::WRL::ComPtr<IDWriteTextLayout> codeIconLayout;
+	std::vector<CodeBadge> codeBadges_;
+	int codeHover_{ -1 };
 	D2D1_RECT_F layoutRect{};
 	D2D1_RECT_F lockBtnRect{};
 	D2D1_RECT_F radiusBtnRect{};

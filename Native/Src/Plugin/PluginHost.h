@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <string>
+#include <vector>
 #include "SnowAirPlugin.h"
 
 /*
@@ -23,6 +24,8 @@ public:
 
     void onCapture(const std::wstring& path);
     void hangQuickPin(const std::wstring& path);
+    bool hangQuickPinText(const std::wstring& text);
+    bool hangQuickPinPaths(const std::vector<std::wstring>& paths);
     void onSettingChanged(const std::wstring& key);
 
     int historyCount();

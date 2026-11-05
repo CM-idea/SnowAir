@@ -2209,23 +2209,115 @@ void CutMask::paint(ID2D1DeviceContext* ctx, bool withDim)
 	if (!hasRect()) return;
 	if (withDim && showDim) paintDim(ctx);
 	if (showBorder) paintSelShadow(ctx);
-	if (drawQrcodeFill) {
-		ComPtr<ID2D1SolidColorBrush> fill;
-		if (SUCCEEDED(ctx->CreateSolidColorBrush(
-			Ling::Color(ToolbarTheme::background).getD2DColor(), fill.GetAddressOf())) && fill) {
-			const float ww = maskRect.right - maskRect.left;
-			const float hh = maskRect.bottom - maskRect.top;
-			const float rad = clampRadiusToRect(selRadius_ * win->dpi, ww, hh);
-			if (rad > 0.5f)
-				ctx->FillRoundedRectangle(D2D1::RoundedRect(maskRect, rad, rad), fill.Get());
-			else
-				ctx->FillRectangle(maskRect, fill.Get());
-		}
-	}
 	if (showBorder) paintBorder(ctx);
 	if (showHandles) paintHandles(ctx);
 	paintLabel(ctx);
+	// 码角标画在最上层：它要能点，压住信息栏一点也比"看得见点不着"强
+	paintCodeBadges(ctx);
 }
+
+void CutMask::setCodeBadges(std::vector<CodeBadge> badges)
+{
+	codeBadges_ = std::move(badges);
+	if (codeHover_ >= (int)codeBadges_.size()) codeHover_ = -1;
+}
+
+void CutMask::clearCodeBadges()
+{
+	codeBadges_.clear();
+	codeHover_ = -1;
+}
+
+int CutMask::hitCodeBadge(POINT pos) const
+{
+	// 角标本体以外再放宽 2 DIP：小按钮不好点，手一抖就点空
+	const float pad = 2.f * win->dpi;
+	for (size_t i = 0; i < codeBadges_.size(); ++i) {
+		const auto& r = codeBadges_[i].rect;
+		if ((float)pos.x >= r.left - pad && (float)pos.x < r.right + pad
+			&& (float)pos.y >= r.top - pad && (float)pos.y < r.bottom + pad)
+			return (int)i;
+	}
+	return -1;
+}
+
+void CutMask::paintCodeBadges(ID2D1DeviceContext* ctx)
+{
+	if (codeBadges_.empty()) return;
+	// 实色绿底 + 纯白字形：不跟主题走，也不做半透明。二维码本身是黑白高对比图，
+	// 任何半透明色落在模块上都会被"吃掉"一半，看起来就像没渲染。绿是应用自己的强调色，
+	// 和选框同色，用户一看就知道这是"本软件的东西"，不是截图内容。
+	constexpr uint32_t kFill = 0x2FB24FFF;      // 常态
+	constexpr uint32_t kFillHot = 0x36C95AFF;   // 停悬
+	constexpr uint32_t kGlyph = 0xFFFFFFFFu;
+
+	auto d2d = Ling::D2D::get();
+	auto* iconFormat = d2d->getTextFormat(Icon::Family);
+	ComPtr<ID2D1SolidColorBrush> brush;
+	ComPtr<ID2D1SolidColorBrush> shadow;
+	ComPtr<ID2D1SolidColorBrush> ring;
+
+	// 字形容器固定 26 DIP（字号 21 DIP）—— 跟按钮尺寸解耦，换多大的底都不改字形观感
+	const float iconSlot = 26.f * win->dpi;
+	if (!codeIconLayout) {
+		d2d->dwriteFactory->CreateTextLayout(Icon::Qrcode, 1, iconFormat,
+			iconSlot, iconSlot, codeIconLayout.GetAddressOf());
+		if (codeIconLayout) {
+			codeIconLayout->SetFontSize(21.f * win->dpi, { 0, 1 });
+			codeIconLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+			codeIconLayout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+		}
+	}
+
+	for (size_t i = 0; i < codeBadges_.size(); ++i) {
+		const auto& badge = codeBadges_[i];
+		const float bw = badge.rect.right - badge.rect.left;
+		const float bh = badge.rect.bottom - badge.rect.top;
+		if (bw < 2.f || bh < 2.f) continue;
+		const bool hover = ((int)i == codeHover_);
+		const float radius = (std::min)(12.f * win->dpi, bw * 0.28f);
+
+		if (!brush) {
+			if (FAILED(ctx->CreateSolidColorBrush(Ling::Color(hover ? kFillHot : kFill).getD2DColor(),
+				brush.GetAddressOf())))
+				return;
+		}
+		brush->SetColor(Ling::Color(hover ? kFillHot : kFill).getD2DColor());
+		// 落下的一点影子：按钮压在黑白模块上，没有它就像画在码里的一个洞
+		if (!shadow)
+			ctx->CreateSolidColorBrush(Ling::Color(0x00000059u).getD2DColor(), shadow.GetAddressOf());
+		if (shadow) {
+			const float s = 2.f * win->dpi;
+			ctx->FillRoundedRectangle(
+				D2D1::RoundedRect(D2D1::RectF(badge.rect.left, badge.rect.top + s,
+					badge.rect.right, badge.rect.bottom + s), radius, radius), shadow.Get());
+		}
+		// 直接实心填充：paintInfoBar 走的是"2× 超采样再缩回来"那套（给半透明栏用的），
+		// 实色按钮不需要，而且那条路会把颜色按混合算一遍，落在这张画布上偏灰。
+		ctx->FillRoundedRectangle(D2D1::RoundedRect(badge.rect, radius, radius), brush.Get());
+
+		// 一圈白色描边：贴着底边外沿画，让按钮在深色画面/绿色画面上都能和背景切开
+		if (!ring)
+			ctx->CreateSolidColorBrush(Ling::Color(0xFFFFFFFFu).getD2DColor(), ring.GetAddressOf());
+		if (ring) {
+			const float sw = 2.f * win->dpi;
+			const float hw = sw * 0.5f;
+			const D2D1_RECT_F edge{
+				badge.rect.left + hw, badge.rect.top + hw, badge.rect.right - hw, badge.rect.bottom - hw };
+			ctx->DrawRoundedRectangle(
+				D2D1::RoundedRect(edge, (std::max)(0.f, radius - hw), (std::max)(0.f, radius - hw)), ring.Get(), sw);
+		}
+
+		// 二维码和条码用同一个字形：这是"这里有码，点一下看内容"的入口，
+		// 不靠图标区分码型 —— 内容出来自然就看见了。
+		brush->SetColor(Ling::Color(kGlyph).getD2DColor());
+		if (codeIconLayout)
+			ctx->DrawTextLayout(
+				{ badge.rect.left + (bw - iconSlot) * 0.5f, badge.rect.top + (bh - iconSlot) * 0.5f },
+				codeIconLayout.Get(), brush.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+	}
+}
+
 
 // 录制期：选框描边改由独立的"排除捕获"窗口调用本函数绘制。
 // 主窗口仍然画遮罩、标注、鼠标高亮（这些要被录进视频），于是屏幕上选框还在、视频里没有它。

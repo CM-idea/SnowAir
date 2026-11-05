@@ -7,6 +7,7 @@ public:
 	ShapeHighlight(AnnotHost* win);
 	void paint(ID2D1DeviceContext* ctx) override;
 	void applyStyle();
+	void syncToolFromShape() const override;
 	const D2D1_RECT_F& hole() const { return rect; }
 	bool ellipseHole() const { return isEllipse; }
 	bool bordered() const { return showBorder; }

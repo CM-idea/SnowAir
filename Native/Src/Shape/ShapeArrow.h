@@ -39,7 +39,16 @@ public:
 	std::vector<float> editSnapshot() const override;
 	void applyEditSnapshot(const std::vector<float>& state) override;
 	bool translateBy(float dx, float dy) override;
+	D2D1_RECT_F bounds() const override;
+	bool rotateBy(float pivotX, float pivotY, float deltaRad) override;
+	bool scaleBy(float pivotX, float pivotY, float angleRad, float sx, float sy) override;
 	bool isDimension() const { return isDimension_; }
+	// 当前箭头形态（普通 / 大 / 双 / 标注 / 趣味）：多选按形态筛目标时用
+	int arrowHeadStyle() const { return headStyle; }
+	// 趣味箭头按实际描边路径命中（不是按折线中心线 ±8px）
+	bool hitFunBody(float x, float y) const;
+	bool dashed() const { return isDash; }
+	bool roundCap() const { return isRound; }
 private:
 	void rebuild();
 	void makeBigPath();

@@ -78,6 +78,9 @@ public:
 	void setTranslateTargetLang(const std::wstring& v);
 	bool getTranslateDictMode();
 	void setTranslateDictMode(bool on);
+	// 每次打开快捷翻译页都从空白会话开始（默认关）
+	bool getQuickTranslateNewSession();
+	void setQuickTranslateNewSession(bool on);
 	std::wstring getTranslateMsTone();           // 微软翻译语气：standard / informal / formal
 	void setTranslateMsTone(const std::wstring& v);
 	// 「功能提示」总开关：开则在设置项旁显示说明问号（默认开）

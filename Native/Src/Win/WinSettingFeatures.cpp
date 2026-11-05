@@ -868,14 +868,34 @@ void WinSettingFeatures::buildTranslate(Ling::Node* p)
 	for (int i = 0; i < (int)svcIds.size(); i++)
 		if (_wcsicmp(svcIds[i].c_str(), curP.c_str()) == 0) si = i;
 
-	// 翻译服务 + 字典模式：双栏
-	auto* g = SettingUi::grid2(p);
-	SettingUi::selectRow(g, Lang::get(L"setting.fnTransService"), svcLabs, si,
+	// 与文字识别「模型规格」同一套半栏布局：行 = 两个 50% 列，落单也保持半宽
+	auto makeRow = [p]() {
+		auto* row = p->makeChild<Ling::Node>();
+		row->setFlexDirection(Ling::FlexDirection::Row);
+		row->setWidthPercent(100.f);
+		return row;
+		};
+	auto makeCol = [](Ling::Node* row, bool right) {
+		auto* col = row->makeChild<Ling::Node>();
+		col->setWidthPercent(50.f);
+		col->setFlexDirection(Ling::FlexDirection::Column);
+		if (right) col->setPaddingLeft(SettingTheme::optionGap * 0.5f);
+		else col->setPaddingRight(SettingTheme::optionGap * 0.5f);
+		return col;
+		};
+
+	// 第一行：翻译服务 | 字典模式
+	auto* row1 = makeRow();
+	SettingUi::selectRow(makeCol(row1, false), Lang::get(L"setting.fnTransService"), svcLabs, si,
 		[svcIds](int i, const std::wstring&) {
 			if (i >= 0 && i < (int)svcIds.size())
 				Setting::get()->setTranslateProvider(svcIds[i]);
 		}, true);
-	SettingUi::toggleRow(g, Lang::get(L"setting.fnDictMode"), s->getTranslateDictMode(),
+	SettingUi::toggleRow(makeCol(row1, true), Lang::get(L"setting.fnDictMode"), s->getTranslateDictMode(),
 		[](bool on) { Setting::get()->setTranslateDictMode(on); }, true);
-	SettingUi::grid2Cells(g);
+
+	// 第二行左列：每次打开新建会话（右列留空，保持半栏）
+	auto* row2 = makeRow();
+	SettingUi::toggleRow(makeCol(row2, false), Lang::get(L"setting.quickNewSession"), s->getQuickTranslateNewSession(),
+		[](bool on) { Setting::get()->setQuickTranslateNewSession(on); }, true);
 }

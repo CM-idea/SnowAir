@@ -9,6 +9,7 @@ public:
 	void paint(ID2D1DeviceContext* ctx) override;
 	void paintHint(ID2D1DeviceContext* ctx) override;
 	void applyStyle();
+	void syncToolFromShape() const override;
 	float stylePrimarySize() const override { return strokeWidth; }
 	// 重新采样并生成效果位图：下层标注移动或改样式后必须调用，否则滤镜中仍是旧内容
 	void rebuildEffect() { buildEffectBitmap(); }

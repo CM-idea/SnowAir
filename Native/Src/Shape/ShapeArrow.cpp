@@ -326,6 +326,37 @@ bool ShapeArrow::translateBy(float dx, float dy)
 	return true;
 }
 
+D2D1_RECT_F ShapeArrow::bounds() const
+{
+	if (poly.pts.empty()) return D2D1::RectF(0.f, 0.f, -1.f, -1.f);
+	float l = poly.pts[0].x, t = poly.pts[0].y, r = l, b = t;
+	for (const auto& p : poly.pts) {
+		l = (std::min)(l, p.x); t = (std::min)(t, p.y);
+		r = (std::max)(r, p.x); b = (std::max)(b, p.y);
+	}
+	// 大箭头/趣味箭头的身宽和圈会超出折线本身，按线宽放宽；
+	// 趣味箭头的圈比杆身宽一圈，单独给更大的余量（框选/组选框不裁掉它）
+	const float pad = isFun() ? (std::max)(12.f * win->dpi, strokeWidth * 4.f)
+		: (std::max)(8.f * win->dpi, strokeWidth * 2.5f);
+	return D2D1::RectF(l - pad, t - pad, r + pad, b + pad);
+}
+
+bool ShapeArrow::rotateBy(float pivotX, float pivotY, float deltaRad)
+{
+	if (poly.pts.empty()) return false;
+	for (auto& p : poly.pts) p = rotatePoint(p.x, p.y, pivotX, pivotY, deltaRad);
+	rebuild();
+	return true;
+}
+
+bool ShapeArrow::scaleBy(float pivotX, float pivotY, float angleRad, float sx, float sy)
+{
+	if (poly.pts.empty()) return false;
+	for (auto& p : poly.pts) p = scalePoint(p.x, p.y, pivotX, pivotY, angleRad, sx, sy);
+	rebuild();
+	return true;
+}
+
 void ShapeArrow::mouseDrag(const float x, const float y)
 {
 	if (poly.drag == ArrowPolyState::DragKind::None) return;
@@ -393,9 +424,37 @@ void ShapeArrow::mouseUp(const float x, const float y)
 	rebuild();
 }
 
+bool ShapeArrow::hitFunBody(float x, float y) const
+{
+	if (!isFun() || poly.pts.size() < 2) return false;
+	auto factory = Ling::D2D::get()->d2dFactory.Get();
+	if (!factory) return false;
+	const auto start = poly.front();
+	const auto end = poly.back();
+	const auto endPrev = poly.pts[poly.pts.size() - 2];
+	D2D1_POINT_2F tipFrom = endPrev;
+	const float baseHeadLen = 10.f + strokeWidth * 2.f;
+	const float chordLen = std::hypot(end.x - start.x, end.y - start.y);
+	const float headLen = std::min(baseHeadLen * 1.3f,
+		std::max(chordLen * 0.16f, 14.f + strokeWidth));
+	const float headScale = headLen / std::max(baseHeadLen, 1.f);
+	const float tol = strokeWidth * 0.5f + 6.f * win->dpi;
+	auto test = [&](ID2D1Geometry* geo) {
+		if (!geo) return false;
+		BOOL inside = FALSE;
+		const D2D1_POINT_2F p{ x, y };
+		return geo->StrokeContainsPoint(p, tol, nullptr, nullptr, &inside) == S_OK && inside;
+	};
+	auto shaft = ArrowParts::funShaftPath(factory, poly.pts, funLoopScale, funLoopRot, &tipFrom, headLen);
+	if (test(shaft.Get())) return true;
+	auto head = ArrowParts::openHeadPath(factory, tipFrom, end, strokeWidth, headScale);
+	return test(head.Get());
+}
+
 bool ShapeArrow::hitBody(float x, float y)
 {
-	return poly.hit(x, y, win->dpi, false, false).kind != ArrowHitInfo::None;
+	if (poly.hit(x, y, win->dpi, false, false).kind != ArrowHitInfo::None) return true;
+	return hitFunBody(x, y);
 }
 
 void ShapeArrow::mouseMove(const float x, const float y)
@@ -405,6 +464,10 @@ void ShapeArrow::mouseMove(const float x, const float y)
 	// 大箭头与普通箭头同一套命中/断点逻辑；趣味箭头、尺寸保持两点式，不响应"加点"
 	const bool allowVirtual = isSelected() && !isFun() && !isDimension_;
 	lastHit = poly.hit(x, y, win->dpi, dragging, allowVirtual);
+	// 趣味箭头画出来的杆身/圈比折线粗得多：中心线 ±8px 之外也要能命中，
+	// 否则点着看得见的笔画却选不中/拖不动。
+	if (isFun() && lastHit.kind == ArrowHitInfo::None && hitFunBody(x, y))
+		lastHit.kind = ArrowHitInfo::Move;
 	if (lastHit.kind == ArrowHitInfo::Break && lastHit.insertAfter >= 0)
 		poly.breakHoverKey = lastHit.insertAfter + 1000;
 	else if (lastHit.kind == ArrowHitInfo::Break)

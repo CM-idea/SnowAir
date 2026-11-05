@@ -411,6 +411,34 @@ bool ShapeLine::translateBy(float dx, float dy)
 	return true;
 }
 
+D2D1_RECT_F ShapeLine::bounds() const
+{
+	if (poly.pts.empty()) return D2D1::RectF(0.f, 0.f, -1.f, -1.f);
+	float l = poly.pts[0].x, t = poly.pts[0].y, r = l, b = t;
+	for (const auto& p : poly.pts) {
+		l = (std::min)(l, p.x); t = (std::min)(t, p.y);
+		r = (std::max)(r, p.x); b = (std::max)(b, p.y);
+	}
+	const float pad = strokeWidth * (highlighter ? HighlighterWidthScale : 1.f) + 6.f * win->dpi;
+	return D2D1::RectF(l - pad, t - pad, r + pad, b + pad);
+}
+
+bool ShapeLine::rotateBy(float pivotX, float pivotY, float deltaRad)
+{
+	if (poly.pts.empty()) return false;
+	for (auto& p : poly.pts) p = rotatePoint(p.x, p.y, pivotX, pivotY, deltaRad);
+	if (kind_ == Angle) updateAngleLabel();
+	return true;
+}
+
+bool ShapeLine::scaleBy(float pivotX, float pivotY, float angleRad, float sx, float sy)
+{
+	if (poly.pts.empty()) return false;
+	for (auto& p : poly.pts) p = scalePoint(p.x, p.y, pivotX, pivotY, angleRad, sx, sy);
+	if (kind_ == Angle) updateAngleLabel();
+	return true;
+}
+
 void ShapeLine::mouseDrag(const float x, const float y)
 {
 	if (poly.drag == ArrowPolyState::DragKind::None) return;

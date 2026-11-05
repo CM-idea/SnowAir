@@ -8,6 +8,7 @@
 #include "../Win/WinSetting.h"
 #include "../Win/PinMenu.h"
 #include "../Win/WinPin.h"
+#include "../Win/ClipPin.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -796,6 +797,29 @@ std::filesystem::path exeDir()
 
 } /* namespace */
 
+/*
+ * 可选导出的多文件接口：晾衣架插件通过 GetProcAddress 取全部路径，
+ * 这样不用改 SnowAirEntry 的大小，旧宿主/旧插件都安全。
+ */
+extern "C" __declspec(dllexport) int SnowAirEntryPaths(void*, int index, wchar_t* out,
+                                                       int capacity)
+{
+    if (!out || capacity <= 0) return 0;
+    out[0] = 0;
+    ensureEntries();
+    if (index < 0 || index >= static_cast<int>(g_entries.size())) return 0;
+    const auto& it = g_entries[static_cast<size_t>(index)];
+    std::vector<std::wstring> files = it.files;
+    if (files.empty() && !it.filePath.empty()) files.push_back(it.filePath);
+    std::wstring joined;
+    for (const auto& file : files) {
+        if (!joined.empty()) joined.push_back(L'\n');
+        joined += file;
+    }
+    wcsncpy_s(out, static_cast<size_t>(capacity), joined.c_str(), _TRUNCATE);
+    return static_cast<int>(joined.size());
+}
+
 PluginHost& PluginHost::instance()
 {
     static PluginHost host;
@@ -950,6 +974,35 @@ void PluginHost::hangQuickPin(const std::wstring& path)
     }
 }
 
+namespace {
+using RackQuickHangFn = int (*)(int kind, const wchar_t* text,
+                                 const wchar_t* const* paths, int count);
+RackQuickHangFn rackQuickHang(HMODULE module)
+{
+    return module ? reinterpret_cast<RackQuickHangFn>(
+                        GetProcAddress(module, "SnowAirRackQuickHang"))
+                  : nullptr;
+}
+} /* namespace */
+
+bool PluginHost::hangQuickPinText(const std::wstring& text)
+{
+    const auto fn = rackQuickHang(module_);
+    if (!fn) return false;
+    return fn(SNOWAIR_ENTRY_TEXT, text.c_str(), nullptr, 0) != 0;
+}
+
+bool PluginHost::hangQuickPinPaths(const std::vector<std::wstring>& paths)
+{
+    const auto fn = rackQuickHang(module_);
+    if (!fn || paths.empty()) return false;
+    std::vector<const wchar_t*> raw;
+    raw.reserve(paths.size());
+    for (const auto& path : paths) raw.push_back(path.c_str());
+    return fn(SNOWAIR_ENTRY_FILES, nullptr, raw.data(),
+              static_cast<int>(raw.size())) != 0;
+}
+
 void PluginHost::onSettingChanged(const std::wstring& key)
 {
     if (plugin_ && plugin_->on_setting_changed) {
@@ -1065,6 +1118,110 @@ extern "C" __declspec(dllexport) void SnowAirPinImageFile(const wchar_t* path)
     if (WinPin* pin = WinPin::initFromData(x, y, w, h, px)) {
         if (pin->hwnd) g_rackPinnedImages[key] = pin->hwnd;
     }
+}
+
+/* 指定锚点（卡片正下方）：centerX 为卡片中心，topY 为卡片底边。
+   图片按实际尺寸居中，文字/文件按各自默认宽度居中，并夹在工作区内。 */
+extern "C" __declspec(dllexport) void SnowAirPinImageFileAt(const wchar_t* path, int centerX,
+                                                           int topY)
+{
+    if (!path || !*path) return;
+    const std::wstring key = lowerKey(path);
+    auto it = g_rackPinnedImages.find(key);
+    if (it != g_rackPinnedImages.end()) {
+        if (IsWindow(it->second)) {
+            RECT rc{};
+            GetWindowRect(it->second, &rc);
+            for (int i = 0; i < 8; ++i) {
+                const int offset = (i % 2 == 0) ? 7 : -7;
+                SetWindowPos(it->second, nullptr, rc.left + offset, rc.top, 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                Sleep(26);
+            }
+            SetWindowPos(it->second, nullptr, rc.left, rc.top, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            return;
+        }
+        g_rackPinnedImages.erase(it);
+    }
+    auto [w, h, px] = Util::loadImagePixels(path);
+    if (w <= 0 || h <= 0 || px.empty()) return;
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    const int minX = static_cast<int>(work.left);
+    const int minY = static_cast<int>(work.top);
+    const int maxX = (std::max)(minX, static_cast<int>(work.right) - w);
+    const int maxY = (std::max)(minY, static_cast<int>(work.bottom) - h);
+    const int x = std::clamp(centerX - w / 2, minX, maxX);
+    const int y = std::clamp(topY, minY, maxY);
+    if (WinPin* pin = WinPin::initFromData(x, y, w, h, px)) {
+        if (pin->hwnd) g_rackPinnedImages[key] = pin->hwnd;
+    }
+}
+
+extern "C" __declspec(dllexport) void SnowAirPinTextAt(const wchar_t* text, int centerX, int topY)
+{
+    if (!text || !*text) return;
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    const int minX = static_cast<int>(work.left);
+    const int minY = static_cast<int>(work.top);
+    const int maxX = (std::max)(minX, static_cast<int>(work.right) - 350);
+    const int maxY = (std::max)(minY, static_cast<int>(work.bottom) - 150);
+    const int x = std::clamp(centerX - 175, minX, maxX);
+    const int y = std::clamp(topY, minY, maxY);
+    ClipPin::showTextAt(text, POINT{x, y});
+}
+
+extern "C" __declspec(dllexport) void SnowAirPinFilesAt(const wchar_t* const* paths, int count,
+                                                        int centerX, int topY)
+{
+    if (!paths || count <= 0) return;
+    std::vector<std::wstring> files;
+    files.reserve(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        if (paths[i] && *paths[i]) files.emplace_back(paths[i]);
+    }
+    if (files.empty()) return;
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    const int minX = static_cast<int>(work.left);
+    const int minY = static_cast<int>(work.top);
+    const int maxX = (std::max)(minX, static_cast<int>(work.right) - 350);
+    const int maxY = (std::max)(minY, static_cast<int>(work.bottom) - 75);
+    const int x = std::clamp(centerX - 175, minX, maxX);
+    const int y = std::clamp(topY, minY, maxY);
+    ClipPin::showFilesAt(files, POINT{x, y});
+}
+
+/* 文字 / 文件卡片的普通贴屏。图片走上面的 SnowAirPinImageFile，三者共用
+   宿主原来的贴屏落下动效。 */
+extern "C" __declspec(dllexport) void SnowAirPinText(const wchar_t* text)
+{
+    if (!text || !*text) return;
+    RECT rc{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &rc, 0);
+    const int areaW = static_cast<int>(rc.right - rc.left);
+    const int areaH = static_cast<int>(rc.bottom - rc.top);
+    ClipPin::showTextAt(text, POINT{static_cast<LONG>(rc.left) + (std::max)(0, (areaW - 350) / 2),
+                                    static_cast<LONG>(rc.top) + (std::max)(0, (areaH - 150) / 2)});
+}
+
+extern "C" __declspec(dllexport) void SnowAirPinFiles(const wchar_t* const* paths, int count)
+{
+    if (!paths || count <= 0) return;
+    std::vector<std::wstring> files;
+    files.reserve(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        if (paths[i] && *paths[i]) files.emplace_back(paths[i]);
+    }
+    if (files.empty()) return;
+    RECT rc{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &rc, 0);
+    const int areaW = static_cast<int>(rc.right - rc.left);
+    const int areaH = static_cast<int>(rc.bottom - rc.top);
+    ClipPin::showFilesAt(files, POINT{static_cast<LONG>(rc.left) + (std::max)(0, (areaW - 350) / 2),
+                                      static_cast<LONG>(rc.top) + (std::max)(0, (areaH - 75) / 2)});
 }
 
 int PluginHost::historyCountForHost()

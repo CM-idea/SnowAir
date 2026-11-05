@@ -20,6 +20,7 @@
 #include "ToolbarTheme.h"
 #include "PropSlider.h"
 #include "SerialEmoji.h"
+#include "../Shape/ShapeBase.h"
 #include "../Shape/ShapeNumber.h"
 #include "../Shape/ShapeRect.h"
 #include "../History.h"
@@ -169,6 +170,7 @@ void ToolSub::onCreated()
 
 void ToolSub::beginTool(const std::wstring& id)
 {
+	endMultiStyle();
 	closeColorPanel();
 	closeNestedPanel();
 	tip->hide();
@@ -1412,7 +1414,11 @@ void ToolSub::initColorTrigger()
 	colorTriggerRing = ui.ring;
 	colorTriggerSwatch = ui.swatch;
 	tip->bind(colorTrigger, L"颜色");
-	colorTrigger->onClick.add([this](Ling::Button*) { toggleColorPanel(false); });
+	colorTrigger->onClick.add([this](Ling::Button*) {
+		// 多选且颜色不一致：色块置灰，点开也没有"共同颜色"可改
+		if (multiStyleActive_ && multiMixed_.color) return;
+		toggleColorPanel(false);
+	});
 	updateColorTriggerSwatch();
 }
 
@@ -1588,6 +1594,7 @@ void ToolSub::endShapeStylePreview()
 {
 	if (!stylePreviewActive_) return;
 	stylePreviewActive_ = false;
+	endMultiStyle();
 	auto& s = stylePreview_;
 	isEllipse = s.isEllipse; isRectFill = s.isRectFill; isRectDash = s.isRectDash;
 	isArrowDash = s.isArrowDash; isArrowRound = s.isArrowRound; isLine = s.isLine;
@@ -1623,6 +1630,348 @@ void ToolSub::commitShapeStylePreview()
 {
 	if (!stylePreviewActive_) return;
 	stylePreviewActive_ = false;
+}
+
+ToolSub::StyleState ToolSub::captureStyleState() const
+{
+	StyleState s;
+	s.isEllipse = isEllipse;
+	s.isRectFill = isRectFill;
+	s.isRectDash = isRectDash;
+	s.isArrowDash = isArrowDash;
+	s.isArrowRound = isArrowRound;
+	s.isLine = isLine;
+	s.isPenDash = isPenDash;
+	s.isPenSoft = isPenSoft;
+	s.isPenMarker = isPenMarker;
+	s.isPenFade = isPenFade;
+	s.isTextBold = isTextBold;
+	s.isTextItalic = isTextItalic;
+	s.isTextStroke = isTextStroke;
+	s.isHighlightBorder = isHighlightBorder;
+	s.isHighlightEllipse = isHighlightEllipse;
+	s.isMosaicBlur = isMosaicBlur;
+	s.isArrowFill = isArrowFill;
+	s.isNumberFill = isNumberFill;
+	s.rectKind = rectKind;
+	s.polygonSides = polygonSides;
+	s.starPoints = starPoints;
+	s.arrowHead = arrowHead;
+	s.lineKind = lineKind;
+	s.numberStyle = numberStyle;
+	s.cornerRadius = cornerRadius;
+	s.lastCornerRadius = lastCornerRadius;
+	s.sliderVal = sliderVal;
+	s.sliderMin = sliderMin;
+	s.sliderMax = sliderMax;
+	s.curSliderKey = curSliderKey;
+	s.selectColorIndex = selectColorIndex;
+	s.sessionCustomColor = sessionCustomColor;
+	s.customColor = colors[customColorIndex];
+	s.textStrokeWidth = textStrokeWidth;
+	s.strokeColorIndex = strokeColorIndex;
+	s.sliderMem = sliderMem;
+	s.colorIndexMem = colorIndexMem;
+	return s;
+}
+
+void ToolSub::restoreStyleState(const StyleState& s)
+{
+	isEllipse = s.isEllipse;
+	isRectFill = s.isRectFill;
+	isRectDash = s.isRectDash;
+	isArrowDash = s.isArrowDash;
+	isArrowRound = s.isArrowRound;
+	isLine = s.isLine;
+	isPenDash = s.isPenDash;
+	isPenSoft = s.isPenSoft;
+	isPenMarker = s.isPenMarker;
+	isPenFade = s.isPenFade;
+	isTextBold = s.isTextBold;
+	isTextItalic = s.isTextItalic;
+	isTextStroke = s.isTextStroke;
+	isHighlightBorder = s.isHighlightBorder;
+	isHighlightEllipse = s.isHighlightEllipse;
+	isMosaicBlur = s.isMosaicBlur;
+	isArrowFill = s.isArrowFill;
+	isNumberFill = s.isNumberFill;
+	rectKind = s.rectKind;
+	polygonSides = s.polygonSides;
+	starPoints = s.starPoints;
+	arrowHead = s.arrowHead;
+	lineKind = s.lineKind;
+	numberStyle = s.numberStyle;
+	cornerRadius = s.cornerRadius;
+	lastCornerRadius = s.lastCornerRadius;
+	sliderVal = s.sliderVal;
+	sliderMin = s.sliderMin;
+	sliderMax = s.sliderMax;
+	curSliderKey = s.curSliderKey;
+	selectColorIndex = s.selectColorIndex;
+	sessionCustomColor = s.sessionCustomColor;
+	colors[customColorIndex] = s.customColor;
+	textStrokeWidth = s.textStrokeWidth;
+	strokeColorIndex = s.strokeColorIndex;
+	sliderMem = s.sliderMem;
+	colorIndexMem = s.colorIndexMem;
+}
+
+int ToolSub::multiFormKey() const
+{
+	if (curToolId == L"arrow") {
+		if (isLine) return 1000 + lineKind;
+		return 2000 + arrowHead;
+	}
+	if (curToolId == L"rect") {
+		if (isEllipse) return 3000;
+		return 4000 + rectKind;
+	}
+	if (curToolId == L"pen") {
+		return 5000 + (isPenMarker ? 1 : 0) + (isPenSoft ? 2 : 0) + (isPenFade ? 4 : 0);
+	}
+	if (curToolId == L"number") return 6000 + numberStyle;
+	return 0;
+}
+
+bool ToolSub::styleToggleMixed(const std::wstring& key) const
+{
+	if (!multiStyleActive_) return false;
+	if (key == L"dash") return multiMixed_.dash;
+	if (key == L"round") return multiMixed_.round;
+	if (key == L"fill") return multiMixed_.fill;
+	if (key == L"bold") return multiMixed_.bold;
+	if (key == L"italic") return multiMixed_.italic;
+	if (key == L"stroke") return multiMixed_.textStroke;
+	if (key == L"corner") return multiMixed_.corner;
+	if (key == L"sides") return multiMixed_.sides;
+	if (key == L"blur") return multiMixed_.blur;
+	if (key == L"border") return multiMixed_.border;
+	if (key == L"ellipse") return multiMixed_.ellipse;
+	return false;
+}
+
+void ToolSub::beginMultiStyle(const std::vector<ShapeBase*>& targets)
+{
+	const auto saved = captureStyleState();
+	std::vector<StyleState> states;
+	std::vector<UINT32> cols;
+	states.reserve(targets.size());
+	cols.reserve(targets.size());
+	for (auto* t : targets) {
+		if (!t) continue;
+		t->syncToolFromShape();
+		states.push_back(captureStyleState());
+		cols.push_back(t->styleColorValue());
+	}
+	restoreStyleState(saved);
+	multiMixed_ = {};
+	if (states.empty()) {
+		multiStyleActive_ = false;
+		multiMixed_ = {};
+		refreshStyleToggles();
+		applyMultiStyleUi();
+		return;
+	}
+	multiStyleActive_ = true;
+	multiFormKey_ = multiFormKey();
+	const auto& c = states[0];
+	auto fdiff = [](float a, float b) { return std::fabs(a - b) > 0.01f; };
+	for (size_t i = 1; i < states.size(); ++i) {
+		const auto& s = states[i];
+		if (fdiff(s.sliderVal, c.sliderVal) || s.curSliderKey != c.curSliderKey) multiMixed_.size = true;
+		if (cols[i] != cols[0]) multiMixed_.color = true;
+		if (curToolId == L"arrow") {
+			if (s.isArrowDash != c.isArrowDash) multiMixed_.dash = true;
+			if (s.isArrowRound != c.isArrowRound) multiMixed_.round = true;
+			if (isLine) {
+				if (s.lineKind != c.lineKind) multiMixed_.form = true;
+			}
+			else if (s.arrowHead != c.arrowHead) {
+				multiMixed_.form = true;
+			}
+		}
+		else if (curToolId == L"rect") {
+			if (s.isRectFill != c.isRectFill) multiMixed_.fill = true;
+			if (s.isRectDash != c.isRectDash) multiMixed_.dash = true;
+			if (s.isEllipse != c.isEllipse || s.rectKind != c.rectKind) multiMixed_.form = true;
+			if (s.polygonSides != c.polygonSides || s.starPoints != c.starPoints) multiMixed_.sides = true;
+			if (fdiff(s.cornerRadius, c.cornerRadius)) multiMixed_.corner = true;
+		}
+		else if (curToolId == L"text") {
+			if (s.isTextBold != c.isTextBold) multiMixed_.bold = true;
+			if (s.isTextItalic != c.isTextItalic) multiMixed_.italic = true;
+			if (s.isTextStroke != c.isTextStroke || fdiff(s.textStrokeWidth, c.textStrokeWidth))
+				multiMixed_.textStroke = true;
+		}
+		else if (curToolId == L"pen") {
+			if (s.isPenDash != c.isPenDash) multiMixed_.dash = true;
+			if (s.isPenMarker != c.isPenMarker || s.isPenSoft != c.isPenSoft || s.isPenFade != c.isPenFade)
+				multiMixed_.form = true;
+		}
+		else if (curToolId == L"number") {
+			if (s.isNumberFill != c.isNumberFill) multiMixed_.fill = true;
+			if (s.numberStyle != c.numberStyle) multiMixed_.numberStyle = true;
+		}
+		else if (curToolId == L"mosaic") {
+			if (s.isMosaicBlur != c.isMosaicBlur) multiMixed_.blur = true;
+		}
+		else if (curToolId == L"highlight") {
+			if (s.isHighlightEllipse != c.isHighlightEllipse) multiMixed_.ellipse = true;
+			if (s.isHighlightBorder != c.isHighlightBorder) multiMixed_.border = true;
+		}
+	}
+	restoreStyleState(c);
+	if (slider) {
+		suppressSliderStyleNotify = true;
+		slider->setValue(sliderVal);
+		suppressSliderStyleNotify = false;
+	}
+	refreshStyleToggles();
+	updateSliderValueLabel();
+	updateColorTriggerSwatch();
+	updateTextStrokeControls();
+	refreshNestedTrigger();
+	applyMultiStyleUi();
+	win->refresh();
+}
+
+void ToolSub::endMultiStyle()
+{
+	if (!multiStyleActive_) return;
+	multiStyleActive_ = false;
+	multiMixed_ = {};
+	refreshStyleToggles();
+	applyMultiStyleUi();
+	updateSliderValueLabel();
+	updateColorTriggerSwatch();
+}
+
+void ToolSub::applyUniformStyle(const StyleState& d)
+{
+	if (!multiMixed_.size) {
+		sliderVal = d.sliderVal;
+		sliderMin = d.sliderMin;
+		sliderMax = d.sliderMax;
+		curSliderKey = d.curSliderKey;
+	}
+	if (!multiMixed_.dash) {
+		isArrowDash = d.isArrowDash;
+		isRectDash = d.isRectDash;
+		isPenDash = d.isPenDash;
+	}
+	if (!multiMixed_.round) isArrowRound = d.isArrowRound;
+	if (!multiMixed_.fill) {
+		isRectFill = d.isRectFill;
+		isArrowFill = d.isArrowFill;
+		isNumberFill = d.isNumberFill;
+	}
+	if (!multiMixed_.bold) isTextBold = d.isTextBold;
+	if (!multiMixed_.italic) isTextItalic = d.isTextItalic;
+	if (!multiMixed_.textStroke) {
+		isTextStroke = d.isTextStroke;
+		textStrokeWidth = d.textStrokeWidth;
+		strokeColorIndex = d.strokeColorIndex;
+	}
+	if (!multiMixed_.blur) isMosaicBlur = d.isMosaicBlur;
+	if (!multiMixed_.border) isHighlightBorder = d.isHighlightBorder;
+	if (!multiMixed_.ellipse) isHighlightEllipse = d.isHighlightEllipse;
+	if (!multiMixed_.form) {
+		arrowHead = d.arrowHead;
+		lineKind = d.lineKind;
+		isLine = d.isLine;
+		isPenMarker = d.isPenMarker;
+		isPenSoft = d.isPenSoft;
+		isPenFade = d.isPenFade;
+	}
+	if (!multiMixed_.numberStyle) numberStyle = d.numberStyle;
+	if (!multiMixed_.corner) cornerRadius = d.cornerRadius;
+	if (!multiMixed_.sides) {
+		polygonSides = d.polygonSides;
+		starPoints = d.starPoints;
+	}
+}
+
+void ToolSub::applyMultiStyle()
+{
+	if (!multiStyleActive_ || !win) return;
+	const auto targets = win->selectedShapesForTool(curToolId);
+	if (targets.empty()) {
+		// 形态切到"当前选择里没有的类"：重算成空目标，属性栏回默认但不再套旧值
+		beginMultiStyle(targets);
+		return;
+	}
+	// 形态按钮切换了目标集合：重新比较/展示，不要把上一个形态的值套到新形态上
+	if (multiFormKey() != multiFormKey_) {
+		beginMultiStyle(targets);
+		return;
+	}
+	const auto desired = captureStyleState();
+	const UINT32 desiredColor = getSelectedColorValue();
+	for (auto* t : targets) {
+		if (!t) continue;
+		t->syncToolFromShape();
+		applyUniformStyle(desired);
+		selectColorByValue(multiMixed_.color ? t->styleColorValue() : desiredColor);
+		t->applyStyle();
+	}
+	restoreStyleState(desired);
+	refreshStyleToggles();
+	updateSliderValueLabel();
+	updateColorTriggerSwatch();
+	updateTextStrokeControls();
+	refreshNestedTrigger();
+	applyMultiStyleUi();
+	win->refresh();
+}
+
+void ToolSub::applyMultiStyleUi()
+{
+	auto gray = [](Ling::Button* b) {
+		if (!b) return;
+		b->setBg(0);
+		b->setHoverBg(0);
+		b->setColor(Icon::ColorDisabled);
+		b->setHoverColor(Icon::ColorDisabled);
+	};
+	const bool mixedSize = multiStyleActive_ && multiMixed_.size;
+	if (slider) {
+		slider->setTrackColor(mixedSize ? 0xE5E5E5FFu : ToolbarTheme::sliderTrack);
+		slider->setFillColor(mixedSize ? 0xE5E5E5FFu : ToolbarTheme::sliderFill);
+		slider->setThumbColor(mixedSize ? 0xBDBDBDFFu : ToolbarTheme::sliderThumb);
+		slider->setHoverThumbColor(mixedSize ? 0xBDBDBDFFu : ToolbarTheme::sliderThumb);
+	}
+	if (sliderValue) {
+		sliderValue->setColor(mixedSize ? Icon::ColorDisabled : Icon::ColorNormal);
+		if (mixedSize) sliderValue->setText(L"\u2014");
+	}
+	if (!multiStyleActive_) return;
+	if (multiMixed_.dash) { gray(arrowDashBtn); gray(dashBtn); }
+	if (multiMixed_.round) gray(arrowRoundBtn);
+	if (multiMixed_.fill) gray(fillBtn);
+	if (multiMixed_.bold) gray(boldBtn);
+	if (multiMixed_.italic) gray(italicBtn);
+	if (multiMixed_.textStroke) gray(strokeBtn);
+	if (multiMixed_.corner) gray(roundBtn);
+	if (multiMixed_.sides) { gray(polyBtn); gray(starBtn); }
+	if (multiMixed_.blur) gray(overlayBtn);
+	if (multiMixed_.border) gray(hiBorderBtn);
+	if (multiMixed_.ellipse) { gray(ellipseBtn); gray(hiEllipseBtn); }
+	if (multiMixed_.numberStyle) {
+		for (auto* b : numberStyleBtns) gray(b);
+	}
+	if (multiMixed_.color) {
+		if (colorTriggerSwatch) {
+			colorTriggerSwatch->setBg(0x9A9A9AFFu);
+			colorTriggerSwatch->setBorder(1.f, 0xC0C0C0FFu);
+		}
+		if (colorTrigger) {
+			colorTrigger->setColor(Icon::ColorDisabled);
+			colorTrigger->setHoverColor(Icon::ColorDisabled);
+		}
+	}
+	else if (multiStyleActive_) {
+		updateColorTriggerSwatch();
+	}
 }
 
 void ToolSub::registerStyleToggle(std::function<bool()> active, std::function<void()> reset)
@@ -2353,6 +2702,16 @@ void ToolSub::initSlider()
 	// 与二级属性栏共用 PropSlider（尺寸 / 间距同一套）
 	auto pair = PropSlider::mount(contentNode, sliderMin, sliderMax, sliderVal,
 		[this](float val) {
+			// 多选且粗细/字号不一致：滑条置灰、拖动不生效（回到共同值，数值显示"—"）
+			if (multiStyleActive_ && multiMixed_.size) {
+				if (!resettingMultiSlider_) {
+					resettingMultiSlider_ = true;
+					if (slider) slider->setValue(sliderVal);
+					resettingMultiSlider_ = false;
+				}
+				if (sliderValue) sliderValue->setText(L"\u2014");
+				return;
+			}
 			sliderVal = val;
 			// 贴图「透明度」：直接改画面不透明度（pin 级属性），不走形状样式管线
 			if (curToolId == L"opacity") {
@@ -2371,6 +2730,7 @@ void ToolSub::initSlider()
 
 bool ToolSub::adjustPrimarySize(int dir)
 {
+	if (multiStyleActive_ && multiMixed_.size) return true;   // 多选粗细不一致：滚轮也不改
 	if (curToolId.empty() || dir == 0) return false;
 	auto cfg = findSliderCfg(curToolId);
 	float mn = sliderMin, mx = sliderMax;

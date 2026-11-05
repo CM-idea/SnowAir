@@ -405,7 +405,7 @@ void CapVideo::startMp4(bool useSpeaker, bool useMic)
                 }
                 if (mp4Param->MustEnd) break;
                 if (code == -1 || code == -2) gdiOnly = true;
-                // HDR 屏要不到 8 位桌面复制时只能喂 HEVC；没有 HEVC 就在 GDI 下退 8 位 SDR 再录
+                // HDR 帧已统一色调映射成 BGRA8；编码器仍失败时退回 GDI 再录一次
                 else if ((code == -5 || code == -10) && mp4Param->LastCapturedHdr) gdiOnly = true;
             }
             if (gdiOnly) {

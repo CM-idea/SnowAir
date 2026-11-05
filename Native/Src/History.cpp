@@ -78,6 +78,37 @@ private:
 	bool hasText_{ false };
 };
 
+// 多选整组变换的一步：内部每个目标各存一份 before/after，撤销/重做时一起换回去。
+class ShapeEditGroupStep : public ShapeBase
+{
+public:
+	struct Item {
+		ShapeBase* target{ nullptr };
+		std::vector<float> before;
+		std::vector<float> after;
+	};
+	ShapeEditGroupStep(AnnotHost* win, std::vector<Item> items)
+		: ShapeBase(win), items_(std::move(items)) {}
+	void paint(ID2D1DeviceContext*) override {}
+	void onUndoChanged(bool undone) override
+	{
+		for (auto& it : items_) {
+			if (!it.target) continue;
+			it.target->applyEditSnapshot(undone ? it.before : it.after);
+			it.target->syncLinks();
+		}
+		win->refresh();
+	}
+	// 目标被删除时整步作废，避免撤销时作用到野指针
+	bool references(ShapeBase* target) const
+	{
+		for (const auto& it : items_) if (it.target == target) return true;
+		return false;
+	}
+private:
+	std::vector<Item> items_;
+};
+
 void SetShapeUndo(ShapeBase* shape, bool undone)
 {
 	if (!shape) return;
@@ -328,8 +359,8 @@ void History::undo()
         if (win->shapeHover == cur || win->shapeHover == host) {
             win->shapeHover = nullptr;
         }
-        win->refresh();
         win->onHistoryChanged();
+        win->onHistoryUndoRedo();
         break;
     }
 }
@@ -347,8 +378,8 @@ void History::redo()
             if (auto* t = dynamic_cast<ShapeText*>(s.get()); t && t->attachTo == cur)
                 SetShapeUndo(s.get(), false);
         }
-        win->refresh();
         win->onHistoryChanged();
+        win->onHistoryUndoRedo();
         break;
     }
 }
@@ -416,8 +447,10 @@ void History::removeShape(ShapeBase* target)
     // 目标已删除：引用它的编辑步骤一并丢弃，避免撤销时作用到野指针
     for (auto it2 = shapes.begin(); it2 != shapes.end(); ) {
         auto* step = dynamic_cast<ShapeEditStep*>(it2->get());
-        if (step && step->target() == target) it2 = shapes.erase(it2);
-        else ++it2;
+        if (step && step->target() == target) { it2 = shapes.erase(it2); continue; }
+        auto* group = dynamic_cast<ShapeEditGroupStep*>(it2->get());
+        if (group && group->references(target)) { it2 = shapes.erase(it2); continue; }
+        ++it2;
     }
     win->refresh();
     win->onHistoryChanged();
@@ -462,6 +495,29 @@ void History::addEditStep(ShapeBase* target, const std::vector<float>& before, c
 	// 新操作会丢弃已撤销的重做栈
 	removeUndoShape();
 	shapes.push_back(std::make_unique<ShapeEditStep>(win, target, before, after));
+	win->onHistoryChanged();
+}
+
+void History::addEditSteps(const std::vector<ShapeBase*>& targets,
+	const std::vector<std::vector<float>>& before,
+	const std::vector<std::vector<float>>& after)
+{
+	if (targets.empty() || targets.size() != before.size() || targets.size() != after.size()) return;
+	std::vector<ShapeEditGroupStep::Item> items;
+	for (size_t i = 0; i < targets.size(); ++i) {
+		auto* t = targets[i];
+		if (!t || before[i].empty() || before[i] == after[i]) continue;
+		items.push_back({ t, before[i], after[i] });
+	}
+	if (items.empty()) return;
+	removeUndoShape();
+	if (items.size() == 1) {
+		shapes.push_back(std::make_unique<ShapeEditStep>(
+			win, items[0].target, items[0].before, items[0].after));
+	}
+	else {
+		shapes.push_back(std::make_unique<ShapeEditGroupStep>(win, std::move(items)));
+	}
 	win->onHistoryChanged();
 }
 

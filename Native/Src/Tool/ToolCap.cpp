@@ -393,10 +393,11 @@ namespace {
 			{ L"watermark", Icon::Watermark, L"tool.watermark" },
 			{ L"highlight", Icon::Highlight, L"tool.highlight" },
 		};
-		// 文字识别气泡 = 文字识别 + 识别二维码
+		// 文字识别气泡：只剩「文字识别」一项。
+		// 「识别二维码」不再占位 —— 框选完自动扫，命中就直接在码上浮按钮（见 WinCap::scheduleCodeScan）；
+		// 手动入口保留在快捷键 Q 上（cmd_scan_qrcode），给模糊/反光/竖排条码这类扫不出来的兜底。
 		static const std::vector<ToolPickItem> ocrSubs = {
 			{ L"ocr", Icon::Ocr, L"cap.ocr" },
-			{ L"qrcode", Icon::Qrcode, L"cap.qrcode" },
 		};
 		if (slotId == L"arrow") return arrowSubs;
 		if (slotId == L"mosaic") return mosaicSubs;

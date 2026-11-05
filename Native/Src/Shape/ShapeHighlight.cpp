@@ -22,6 +22,15 @@ void ShapeHighlight::applyStyle()
 	if (brushBorder) brushBorder->SetColor(win->toolSub->getSelectedColor());
 }
 
+void ShapeHighlight::syncToolFromShape() const
+{
+	auto* ts = win->toolSub.get();
+	if (!ts) return;
+	ts->isHighlightEllipse = isEllipse;
+	ts->isHighlightBorder = showBorder;
+	ts->setShapeSliderVal(L"highlight", strokeWidth);
+}
+
 D2D1_RECT_F ShapeHighlight::viewportOf(AnnotHost* win)
 {
 	// 与包浆/水印同一口径：覆盖标注坐标下的整张底图（贴图缩放后也正确）

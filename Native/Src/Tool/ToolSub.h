@@ -6,6 +6,7 @@
 #include "ToolbarWindow.h"
 
 class AnnotHost;
+class ShapeBase;
 class Tip;
 class ToolColorPanel;
 class ToolNestedPanel;
@@ -124,6 +125,43 @@ public:
 	// 用选中的标注属性真正画了一个新标注：样式被采纳，丢弃快照（不再回退）
 	void commitShapeStylePreview();
 	bool stylePreviewActive() const { return stylePreviewActive_; }
+	// —— 多选批量属性 ——
+	// 目标集合里每个标注的样式做逐项比较：一致的可改，不一致的置灰不生效。
+	struct StyleState {
+		bool isEllipse{}, isRectFill{}, isRectDash{}, isArrowDash{}, isArrowRound{};
+		bool isLine{}, isPenDash{}, isPenSoft{}, isPenMarker{}, isPenFade{};
+		bool isTextBold{}, isTextItalic{}, isTextStroke{};
+		bool isHighlightBorder{}, isHighlightEllipse{}, isMosaicBlur{};
+		bool isArrowFill{}, isNumberFill{};
+		int rectKind{}, polygonSides{}, starPoints{}, arrowHead{}, lineKind{}, numberStyle{};
+		float cornerRadius{}, lastCornerRadius{};
+		float sliderVal{}, sliderMin{}, sliderMax{};
+		std::wstring curSliderKey;
+		UINT selectColorIndex{};
+		UINT32 sessionCustomColor{}, customColor{};
+		float textStrokeWidth{};
+		UINT strokeColorIndex{};
+		std::unordered_map<std::wstring, float> sliderMem;
+		std::unordered_map<std::wstring, UINT> colorIndexMem;
+	};
+	struct MultiStyleFlags {
+		bool size{}, color{}, dash{}, round{}, fill{};
+		bool bold{}, italic{}, textStroke{};
+		bool form{}, corner{}, sides{};
+		bool blur{}, border{}, ellipse{}, numberStyle{};
+	};
+	StyleState captureStyleState() const;
+	void restoreStyleState(const StyleState& s);
+	bool multiStyleActive() const { return multiStyleActive_; }
+	// 进入多选展示：targets 已按当前工具/形态过滤，这里只负责比较与置灰
+	void beginMultiStyle(const std::vector<ShapeBase*>& targets);
+	void endMultiStyle();
+	// 一次属性变化后，把"一致的属性"批量应用到目标集合，混合属性保留各自原值
+	void applyMultiStyle();
+	const MultiStyleFlags& multiStyleFlags() const { return multiMixed_; }
+	bool styleToggleMixed(const std::wstring& key) const;
+	// 当前工具形态指纹：多选时形态按钮一变，目标集合就换了，需要重新比较而不是套用旧值
+	int multiFormKey() const;
 	// 关闭工具再打开：属性栏回到「初始属性」（形态/虚线/填充/圆角/颜色/粗细）
 	void resetStyleToDefaults();
 	// 属性栏里是否有开着的属性开关（虚线/填充/圆头/圆角/粗斜体/形态…）：右键分层回退用
@@ -186,6 +224,8 @@ public:
 	float lastCornerRadius{ 10.f }; // 关圆角后再开时恢复
 private:
 	void onCreated() override;
+	void applyUniformStyle(const StyleState& desired);
+	void applyMultiStyleUi();
 	void initColorTrigger();
 	void updateColorTriggerSwatch();
 	void toggleColorPanel(bool stroke);
@@ -272,6 +312,11 @@ private:
 	};
 	bool stylePreviewActive_{ false };
 	StylePreviewSnapshot stylePreview_;
+	// —— 多选批量属性 ——
+	bool multiStyleActive_{ false };
+	MultiStyleFlags multiMixed_;
+	int multiFormKey_{ 0 };
+	bool resettingMultiSlider_{ false };
 	static constexpr float btnSize{ ToolbarTheme::propBtnSize };
 	static constexpr float hoverRadius{ ToolbarTheme::hoverRadius };
 	static constexpr float hoverInset{ 4.f };

@@ -66,6 +66,51 @@ D2D1_POINT_2F ShapeBase::boxCenter(const D2D1_RECT_F& r)
 	return { (r.left + r.right) * 0.5f, (r.top + r.bottom) * 0.5f };
 }
 
+void ShapeBase::localScaleFor(float shapeAngle, float groupAngle, float sx, float sy,
+	float& outSx, float& outSy)
+{
+	const float th = shapeAngle - groupAngle;
+	const float c = std::cos(th), s = std::sin(th);
+	outSx = std::hypot(sx * c, sy * s);
+	outSy = std::hypot(sx * s, sy * c);
+}
+
+D2D1_POINT_2F ShapeBase::boxToLocalPoint(const D2D1_RECT_F& r, float angleRad, float x, float y)
+{
+	if (std::fabs(angleRad) < 1e-6f) return D2D1::Point2F(x, y);
+	const auto c = boxCenter(r);
+	const float dx = x - c.x, dy = y - c.y;
+	const float ca = std::cos(-angleRad), sa = std::sin(-angleRad);
+	return D2D1::Point2F(c.x + dx * ca - dy * sa, c.y + dx * sa + dy * ca);
+}
+
+D2D1_RECT_F ShapeBase::rotatedBounds(const D2D1_RECT_F& r, float angleRad)
+{
+	if (std::fabs(angleRad) < 1e-6f) return r;
+	const auto c = boxCenter(r);
+	const float cs = std::cos(angleRad), sn = std::sin(angleRad);
+	auto rot = [&](float x, float y) {
+		const float dx = x - c.x, dy = y - c.y;
+		return D2D1::Point2F(c.x + dx * cs - dy * sn, c.y + dx * sn + dy * cs);
+	};
+	const auto p0 = rot(r.left, r.top);
+	const auto p1 = rot(r.right, r.top);
+	const auto p2 = rot(r.right, r.bottom);
+	const auto p3 = rot(r.left, r.bottom);
+	return D2D1::RectF(
+		(std::min)({ p0.x, p1.x, p2.x, p3.x }), (std::min)({ p0.y, p1.y, p2.y, p3.y }),
+		(std::max)({ p0.x, p1.x, p2.x, p3.x }), (std::max)({ p0.y, p1.y, p2.y, p3.y }));
+}
+
+D2D1_RECT_F ShapeBase::unionRect(const D2D1_RECT_F& a, const D2D1_RECT_F& b)
+{
+	if (rectEmpty(a)) return b;
+	if (rectEmpty(b)) return a;
+	return D2D1::RectF(
+		(std::min)(a.left, b.left), (std::min)(a.top, b.top),
+		(std::max)(a.right, b.right), (std::max)(a.bottom, b.bottom));
+}
+
 void ShapeBase::boxToLocal(const D2D1_RECT_F& r, float angleRad, float x, float y,
 	float& lx, float& ly)
 {

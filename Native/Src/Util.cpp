@@ -564,40 +564,91 @@ bool Util::openWithImageReader(const int w, const int h, BYTE* data)
 	return true;
 }
 
-std::wstring Util::decodeQrCode(const int w, const int h, BYTE* data)
+std::vector<CodeHit> Util::readCodes(const int w, const int h, const BYTE* data, bool thorough, bool qrOnly)
 {
-	std::wstring result;
-	if (w <= 0 || h <= 0 || !data) return result;
+	std::vector<CodeHit> out;
+	if (w <= 0 || h <= 0 || !data) return out;
 
 	auto utf8ToW = [](const std::string& s) {
 		if (s.empty()) return std::wstring();
 		int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
 		if (n <= 0) return std::wstring();
-		std::wstring out(n, 0);
-		MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), out.data(), n);
-		return out;
+		std::wstring str(n, 0);
+		MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), str.data(), n);
+		return str;
 	};
 
-	// ZXing：二维码 + 常见一维条码
+	// 大图先缩到 ~1080p 再解：解码成本基本跟像素面积走，而屏幕上的码缩一半照样认得出来。
+	// 坐标最后按比例换回原图，调用方拿到的仍是原始像素坐标。
+	static constexpr double kMaxPixels = 1920.0 * 1080.0;
+	int dw = w, dh = h;
+	const double scale = std::sqrt(kMaxPixels / ((double)w * (double)h));
+	if (scale < 1.0) {
+		dw = (std::max)(1, (int)std::floor(w * scale));
+		dh = (std::max)(1, (int)std::floor(h * scale));
+	}
+	std::vector<BYTE> scaled;
+	const BYTE* src = data;
+	if (dw != w || dh != h) {
+		scaled = scaleBGRA(data, w, h, dw, dh);
+		if (!scaled.empty()) src = scaled.data();
+		else { dw = w; dh = h; }
+	}
+	const double invScaleX = (double)w / (double)dw;
+	const double invScaleY = (double)h / (double)dh;
+
+	// 只开这两类：二维码 + 常见零售/书本条码（EAN/UPC）与物流/单据常用的一维码。
+	// 全开线性码会让扫描线数量翻几倍，而截图里几乎见不到 Codabar/Code93/DataBar。
 	try {
-		ZXing::ImageView image(data, w, h, ZXing::ImageFormat::BGRA);
+		ZXing::ImageView image(src, dw, dh, ZXing::ImageFormat::BGRA);
+		ZXing::BarcodeFormats formats =
+			ZXing::BarcodeFormat::QRCode
+			| ZXing::BarcodeFormat::EAN13
+			| ZXing::BarcodeFormat::EAN8
+			| ZXing::BarcodeFormat::UPCA
+			| ZXing::BarcodeFormat::UPCE
+			| ZXing::BarcodeFormat::Code128
+			| ZXing::BarcodeFormat::Code39
+			| ZXing::BarcodeFormat::ITF;
+		if (qrOnly) formats = ZXing::BarcodeFormat::QRCode;
 		ZXing::ReaderOptions opts;
-		opts.setTryHarder(true);
-		opts.setTryRotate(true);
+		opts.setFormats(formats);
+		// 自动预扫只做"一眼就能看出来"的那一遍：屏幕上正对、清晰的码一次就中。
+		// 手动入口（thorough）才付 tryHarder/tryRotate 的钱。
+		opts.setTryHarder(thorough);
+		opts.setTryRotate(thorough);
+		opts.setMaxNumberOfSymbols(16);
 		auto barcodes = ZXing::ReadBarcodes(image, opts);
 		for (const auto& code : barcodes) {
 			if (!code.isValid()) continue;
 			auto text = utf8ToW(code.text());
 			if (text.empty()) continue;
-			if (!result.empty()) result += L'\n';
-			result += text;
+			// 四角 → 包围盒（旋转过的码也能框住）
+			const auto& pos = code.position();
+			int minX = INT_MAX, minY = INT_MAX, maxX = INT_MIN, maxY = INT_MIN;
+			for (const auto& p : pos) {
+				minX = (std::min)(minX, p.x);
+				maxX = (std::max)(maxX, p.x);
+				minY = (std::min)(minY, p.y);
+				maxY = (std::max)(maxY, p.y);
+			}
+			if (maxX <= minX || maxY <= minY) continue;
+			CodeHit hit;
+			hit.text = std::move(text);
+			// 缩过图：坐标换回原始像素
+			hit.rect = RECT{
+				(std::max)(0, (int)std::floor(minX * invScaleX)),
+				(std::max)(0, (int)std::floor(minY * invScaleY)),
+				(std::min)(w - 1, (int)std::ceil(maxX * invScaleX)),
+				(std::min)(h - 1, (int)std::ceil(maxY * invScaleY)) };
+			out.push_back(std::move(hit));
 		}
-		if (!result.empty()) return result;
 	}
 	catch (...) {
 	}
-	return result;
+	return out;
 }
+
 
 void Util::cursorBodyOffset(float& dx, float& dy)
 {

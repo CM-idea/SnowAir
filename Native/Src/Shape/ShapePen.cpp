@@ -409,6 +409,47 @@ bool ShapePen::translateBy(float dx, float dy)
 	return true;
 }
 
+D2D1_RECT_F ShapePen::bounds() const
+{
+	const float pad = strokeWidth * 0.5f + 2.f * win->dpi;
+	const auto r = rotatedBounds(rect, boxAngle);
+	return D2D1::RectF(r.left - pad, r.top - pad, r.right + pad, r.bottom + pad);
+}
+
+bool ShapePen::scaleBy(float pivotX, float pivotY, float angleRad, float sx, float sy)
+{
+	if (isFade || pts.empty()) return false;
+	const auto c = boxCenter();
+	// 先把点转成世界坐标再做分组缩放，最后把 boxAngle 归零（点已是世界坐标）
+	for (auto& p : pts) {
+		const auto wp = rotatePoint(p.x, p.y, c.x, c.y, boxAngle);
+		p = scalePoint(wp.x, wp.y, pivotX, pivotY, angleRad, sx, sy);
+	}
+	boxAngle = 0.f;
+	syncRectFromPts();
+	rebuildPath();
+	updateDraggers();
+	return true;
+}
+
+bool ShapePen::rotateBy(float pivotX, float pivotY, float deltaRad)
+{
+	if (isFade || pts.empty()) return false;
+	const auto c = boxCenter();
+	const auto nc = rotatePoint(c.x, c.y, pivotX, pivotY, deltaRad);
+	const float dx = nc.x - c.x, dy = nc.y - c.y;
+	// pts 是未旋转局部坐标：整体平移 (C'-C) 再叠加 boxAngle 就等于绕 pivot 的刚体旋转
+	rect = offsetRect(rect, dx, dy);
+	for (auto& p : pts) {
+		p.x += dx;
+		p.y += dy;
+	}
+	boxAngle += deltaRad;
+	rebuildPath();
+	updateDraggers();
+	return true;
+}
+
 void ShapePen::mouseDrag(const float x, const float y)
 {
 	if (!settled) {

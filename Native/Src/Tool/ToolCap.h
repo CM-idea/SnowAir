@@ -167,7 +167,7 @@ private:
 		L"tool.showCursor",
 		L"tool.rect",L"tool.arrow",L"tool.pen",L"tool.text",L"tool.number",L"tool.mosaic",L"tool.eraser",L"",
 		L"tool.undo",L"",
-		L"cap.video",L"tool.pin",L"",L"tool.translate",L"cap.long",
+		L"cap.video",L"tool.pin",L"cap.ocr",L"tool.translate",L"cap.long",
 		L"tool.save",L"tool.close",L"tool.clipboard"
 	};
 	std::vector<Ling::Button*> btns;

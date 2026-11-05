@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "ClipPin.h"
 #include "PinMenu.h"
 #include "../Lang.h"
@@ -130,30 +130,40 @@ void ClipPin::showAll()
 
 void ClipPin::showText(const std::wstring& text)
 {
-	if (text.empty()) return;
 	POINT cur{};
 	GetCursorPos(&cur);
+	showTextAt(text, POINT{cur.x + 16, cur.y + 16});
+}
+
+void ClipPin::showTextAt(const std::wstring& text, POINT topLeft)
+{
+	if (text.empty()) return;
 	auto ptr = std::unique_ptr<ClipPin>(new ClipPin(false, text, std::vector<std::wstring>{}));
 	ClipPin* raw = ptr.get();
 	g_clipPins.push_back(std::move(ptr));
 	raw->w = 350.f;
 	raw->h = 150.f;
-	raw->setPosition(cur.x + 16, cur.y + 16);
+	raw->setPosition(topLeft.x, topLeft.y);
 	raw->createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP);
 	raw->show();
 }
 
 void ClipPin::showFiles(const std::vector<std::wstring>& files)
 {
-	if (files.empty()) return;
 	POINT cur{};
 	GetCursorPos(&cur);
+	showFilesAt(files, POINT{cur.x + 16, cur.y + 16});
+}
+
+void ClipPin::showFilesAt(const std::vector<std::wstring>& files, POINT topLeft)
+{
+	if (files.empty()) return;
 	auto ptr = std::unique_ptr<ClipPin>(new ClipPin(true, L"", files));
 	ClipPin* raw = ptr.get();
 	g_clipPins.push_back(std::move(ptr));
 	raw->w = 350.f;
 	raw->h = 75.f;
-	raw->setPosition(cur.x + 16, cur.y + 16);
+	raw->setPosition(topLeft.x, topLeft.y);
 	raw->createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP);
 	raw->show();
 }

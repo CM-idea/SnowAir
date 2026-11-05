@@ -51,6 +51,52 @@ public:
 	virtual void applyEditSnapshot(const std::vector<float>& state) { (void)state; }
 	// 整体平移（方向键微调）：返回 false 表示这个形状不支持单独移动
 	virtual bool translateBy(float dx, float dy) { (void)dx; (void)dy; return false; }
+	// 轴对齐包围盒（标注坐标）：框选命中、组选框、组旋转中心都用它。
+	// 返回空矩形（left > right）表示这个标注不参与框选/分组。
+	virtual D2D1_RECT_F bounds() const { return D2D1::RectF(0.f, 0.f, -1.f, -1.f); }
+	// 绕标注坐标里的 pivot 旋转 delta 弧度（正 = 屏幕上顺时针）。
+	// 返回 false 表示该形状不支持旋转（视口滤镜等）。
+	virtual bool rotateBy(float pivotX, float pivotY, float deltaRad)
+	{
+		(void)pivotX; (void)pivotY; (void)deltaRad;
+		return false;
+	}
+	// 分组缩放：以 pivot 为锚，在 angleRad 的局部轴上分别缩放 sx/sy。
+	// 返回 false 表示该形状不支持（视口滤镜等）。
+	virtual bool scaleBy(float pivotX, float pivotY, float angleRad, float sx, float sy)
+	{
+		(void)pivotX; (void)pivotY; (void)angleRad; (void)sx; (void)sy;
+		return false;
+	}
+	// 非等比缩放沿形状自身轴线的等效倍率（忽略剪切，仅用于有自身角度的矩形系）
+	static void localScaleFor(float shapeAngle, float groupAngle, float sx, float sy,
+		float& outSx, float& outSy);
+	static D2D1_POINT_2F scalePoint(float x, float y, float pivotX, float pivotY,
+		float angleRad, float sx, float sy)
+	{
+		const float c = std::cos(angleRad), s = std::sin(angleRad);
+		const float dx = x - pivotX, dy = y - pivotY;
+		const float lx = dx * c + dy * s;
+		const float ly = -dx * s + dy * c;
+		const float nx = lx * sx, ny = ly * sy;
+		return D2D1::Point2F(pivotX + nx * c - ny * s, pivotY + nx * s + ny * c);
+	}
+	// 序号：尾巴被拖出控制圈后，Delete/Backspace 先把尾巴收回圈上而不是删标注。
+	// 返回 true 表示这次按键已被消费。
+	virtual bool retractTail() { return false; }
+	// 分组变换结束（抬手）：马赛克/模糊这类需要重采样的形状在这里收尾
+	virtual void transformSettled() {}
+	static D2D1_POINT_2F rotatePoint(float x, float y, float cx, float cy, float rad)
+	{
+		const float c = std::cos(rad), s = std::sin(rad);
+		const float dx = x - cx, dy = y - cy;
+		return D2D1::Point2F(cx + dx * c - dy * s, cy + dx * s + dy * c);
+	}
+	// 旋转后的轴对齐包围盒（以矩形中心为旋转中心，与各形状的 angle 语义一致）
+	static D2D1_RECT_F rotatedBounds(const D2D1_RECT_F& r, float angleRad);
+	static D2D1_RECT_F unionRect(const D2D1_RECT_F& a, const D2D1_RECT_F& b);
+	static D2D1_POINT_2F boxToLocalPoint(const D2D1_RECT_F& r, float angleRad, float x, float y);
+	static bool rectEmpty(const D2D1_RECT_F& r) { return r.right < r.left || r.bottom < r.top; }
 	// —— 连线：能被吸附的一侧（矩形/椭圆） ——
 	// 能不能当连线目标
 	virtual bool isLinkTarget() const { return false; }

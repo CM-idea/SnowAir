@@ -1135,6 +1135,8 @@ void Setting::setTranslateSourceLang(const std::wstring& v) { setFeatStr(L"trans
 std::wstring Setting::getTranslateTargetLang() { return featStr(L"translateTargetLang", L"en"); }
 void Setting::setTranslateTargetLang(const std::wstring& v) { setFeatStr(L"translateTargetLang", v); }
 bool Setting::getTranslateDictMode() { return featBool(L"translateDictMode", false); }
+bool Setting::getQuickTranslateNewSession() { return featBool(L"quickTranslateNewSession", false); }
+void Setting::setQuickTranslateNewSession(bool on) { setFeatBool(L"quickTranslateNewSession", on); }
 // 微软翻译语气（仅微软在线翻译用）：standard 标准 / informal 非正式 / formal 正式
 std::wstring Setting::getTranslateMsTone() { return featStr(L"translateMsTone", L"standard"); }
 void Setting::setTranslateMsTone(const std::wstring& v) { setFeatStr(L"translateMsTone", v); }
@@ -1349,6 +1351,7 @@ void Setting::restoreFunctionTranslateDefaults()
 	setTranslateProvider(L"microsoft");
 	setTranslateDictMode(false);
 	setTranslateMsTone(L"standard");
+	setQuickTranslateNewSession(false);
 }
 
 // —— 与上面的 restore* 成对：判断该子页是否**仍是出厂值**（供「恢复默认」按钮置灰）——
@@ -1393,7 +1396,7 @@ bool Setting::functionOcrAtDefaults()
 bool Setting::functionTranslateAtDefaults()
 {
 	return getTranslateProvider() == L"microsoft" && !getTranslateDictMode()
-		&& getTranslateMsTone() == L"standard";
+		&& getTranslateMsTone() == L"standard" && !getQuickTranslateNewSession();
 }
 
 int Setting::getVideoQuality() { return featInt(L"videoQuality", 4); }
@@ -1503,6 +1506,15 @@ void Setting::applyHotkeys()
 //   ② 前台窗口里拖选的一段文字（UIA 选区，不需要先复制）
 //   ③ 否则贴当前剪贴板内容（文字 / 图片 / 文件）
 namespace {
+    /* 快速贴屏上绳开关 + 插件在场时，快速贴屏整体交给晾衣架接管。
+       图片仍走插件原有的 on_quick_hang；文字和文件走新的可选导出。 */
+    bool rackQuickHangEnabled()
+    {
+        auto* s = Setting::get();
+        return s && s->getRackFlag(L"rack.quick_pin_hang", false) &&
+               PluginHost::instance().loaded();
+    }
+
     bool quickPinIsImagePath(const std::wstring& path)
     {
         const auto dot = path.find_last_of(L'.');
@@ -1554,6 +1566,10 @@ namespace {
                 quickPinImage(w, h, px, paths.front());
                 return;
             }
+        }
+        if (rackQuickHangEnabled() &&
+            PluginHost::instance().hangQuickPinPaths(paths)) {
+            return;
         }
         ClipPin::showFiles(paths);
     }
@@ -1792,11 +1808,25 @@ namespace {
         if (!files.empty()) { quickPinPaths(files); return; }
         // ② 前台窗口里拖选的文字
         const std::wstring selected = foregroundSelectedText();
-        if (!selected.empty()) { ClipPin::showText(selected); return; }
+        if (!selected.empty()) {
+            if (rackQuickHangEnabled() &&
+                PluginHost::instance().hangQuickPinText(selected)) {
+                return;
+            }
+            ClipPin::showText(selected);
+            return;
+        }
         // ③ 默认：剪贴板内容
         auto payload = readClipboardForPin();
         if (!payload.files.empty()) { quickPinPaths(payload.files); return; }
-        if (!payload.text.empty()) { ClipPin::showText(payload.text); return; }
+        if (!payload.text.empty()) {
+            if (rackQuickHangEnabled() &&
+                PluginHost::instance().hangQuickPinText(payload.text)) {
+                return;
+            }
+            ClipPin::showText(payload.text);
+            return;
+        }
         if (payload.w > 0 && payload.h > 0) quickPinImage(payload.w, payload.h, payload.pixels);
     }
 }

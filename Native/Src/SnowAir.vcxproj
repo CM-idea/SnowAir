@@ -261,9 +261,9 @@
     <ClCompile Include="Tool\ToolLong.cpp" />
     <ClCompile Include="Tool\ToolNestedPanel.cpp" />
     <ClCompile Include="Tool\ToolOcr.cpp" />
+    <ClCompile Include="Tool\ToolQrcode.cpp" />
     <ClCompile Include="Tool\ToolOcrCompare.cpp" />
     <ClCompile Include="Tool\ToolPicker.cpp" />
-    <ClCompile Include="Tool\ToolQrcode.cpp" />
     <ClCompile Include="Tool\ToolSub.cpp" />
     <ClCompile Include="Tool\ToolVideo.cpp" />
     <ClCompile Include="Translate\BergamotEngine.cpp" />
@@ -373,9 +373,9 @@
     <ClInclude Include="Tool\ToolLong.h" />
     <ClInclude Include="Tool\ToolNestedPanel.h" />
     <ClInclude Include="Tool\ToolOcr.h" />
+    <ClInclude Include="Tool\ToolQrcode.h" />
     <ClInclude Include="Tool\ToolOcrCompare.h" />
     <ClInclude Include="Tool\ToolPicker.h" />
-    <ClInclude Include="Tool\ToolQrcode.h" />
     <ClInclude Include="Tool\ToolSub.h" />
     <ClInclude Include="Tool\ToolVideo.h" />
     <ClInclude Include="Translate\BergamotEngine.h" />

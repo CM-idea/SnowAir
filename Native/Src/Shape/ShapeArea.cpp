@@ -96,6 +96,58 @@ bool ShapeArea::translateBy(float dx, float dy)
 	return true;
 }
 
+std::vector<float> ShapeArea::editSnapshot() const
+{
+	return { rect.left, rect.top, rect.right, rect.bottom, angle,
+		radius[0], radius[1], radius[2], radius[3] };
+}
+
+void ShapeArea::applyEditSnapshot(const std::vector<float>& s)
+{
+	if (s.size() < 5) return;
+	rect = D2D1::RectF(s[0], s[1], s[2], s[3]);
+	angle = s[4];
+	if (s.size() >= 9) {
+		for (int i = 0; i < 4; ++i) radius[i] = s[5 + i];
+	}
+	updateDraggers();
+	onGeometryChanged();
+	onGeometrySettled();
+}
+
+D2D1_RECT_F ShapeArea::bounds() const
+{
+	const float pad = strokeHitPad();
+	const auto r = rotatedBounds(rect, angle);
+	return D2D1::RectF(r.left - pad, r.top - pad, r.right + pad, r.bottom + pad);
+}
+
+bool ShapeArea::rotateBy(float pivotX, float pivotY, float deltaRad)
+{
+	const auto c = center();
+	const auto nc = rotatePoint(c.x, c.y, pivotX, pivotY, deltaRad);
+	rect = offsetRect(rect, nc.x - c.x, nc.y - c.y);
+	angle += deltaRad;
+	updateDraggers();
+	// 与拖动旋转同一套收尾：马赛克/模糊要按旋转后的取样区重新采样
+	onGeometryChanged();
+	return true;
+}
+
+bool ShapeArea::scaleBy(float pivotX, float pivotY, float angleRad, float sx, float sy)
+{
+	const auto c = center();
+	const auto nc = scalePoint(c.x, c.y, pivotX, pivotY, angleRad, sx, sy);
+	float lsx = 1.f, lsy = 1.f;
+	localScaleFor(angle, angleRad, sx, sy, lsx, lsy);
+	const float w = std::max(2.f, (rect.right - rect.left) * lsx);
+	const float h = std::max(2.f, (rect.bottom - rect.top) * lsy);
+	rect = D2D1::RectF(nc.x - w * 0.5f, nc.y - h * 0.5f, nc.x + w * 0.5f, nc.y + h * 0.5f);
+	updateDraggers();
+	onGeometryChanged();
+	return true;
+}
+
 float ShapeArea::strokeHitPad() const
 {
 	return 6.f * win->dpi;

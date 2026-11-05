@@ -164,6 +164,40 @@ bool ShapeEllipse::translateBy(float dx, float dy)
 	return true;
 }
 
+D2D1_RECT_F ShapeEllipse::bounds() const
+{
+	const float pad = strokeWidth * 0.5f + 2.f * win->dpi;
+	const auto r = rotatedBounds(rect, angle);
+	return D2D1::RectF(r.left - pad, r.top - pad, r.right + pad, r.bottom + pad);
+}
+
+bool ShapeEllipse::rotateBy(float pivotX, float pivotY, float deltaRad)
+{
+	const auto c = centerPt();
+	const auto nc = rotatePoint(c.x, c.y, pivotX, pivotY, deltaRad);
+	const float hw = (rect.right - rect.left) * 0.5f;
+	const float hh = (rect.bottom - rect.top) * 0.5f;
+	rect = D2D1::RectF(nc.x - hw, nc.y - hh, nc.x + hw, nc.y + hh);
+	angle += deltaRad;
+	syncEllipseFromRect();
+	updateDraggers();
+	return true;
+}
+
+bool ShapeEllipse::scaleBy(float pivotX, float pivotY, float angleRad, float sx, float sy)
+{
+	const auto c = centerPt();
+	const auto nc = scalePoint(c.x, c.y, pivotX, pivotY, angleRad, sx, sy);
+	float lsx = 1.f, lsy = 1.f;
+	localScaleFor(angle, angleRad, sx, sy, lsx, lsy);
+	const float w = std::max(2.f, (rect.right - rect.left) * lsx);
+	const float h = std::max(2.f, (rect.bottom - rect.top) * lsy);
+	rect = D2D1::RectF(nc.x - w * 0.5f, nc.y - h * 0.5f, nc.x + w * 0.5f, nc.y + h * 0.5f);
+	syncEllipseFromRect();
+	updateDraggers();
+	return true;
+}
+
 void ShapeEllipse::mouseDrag(const float x, const float y)
 {
 	if (hoverDraggerIndex == 9) {

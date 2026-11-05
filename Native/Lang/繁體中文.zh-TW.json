@@ -301,6 +301,7 @@
     "fnTransBaidu": "百度翻譯",
     "fnTransOffline": "離線翻譯",
     "fnDictMode": "字典模式",
+    "quickNewSession": "每次開啟新建會話",
     "fnSourceLang": "來源語言",
     "fnLangAuto": "自動偵測",
     "fnLangZh": "簡體中文",

@@ -144,7 +144,9 @@ private:
 	float builtDpi_{ 0.f };
 	int imgW{ 1 }, imgH{ 1 };
 	// —— 跨行选区状态（阅读顺序：行优先；index = 行内字符偏移）——
-	bool selActive_{ false };
+	// selDragging_ 只表示"鼠标正按着拖选"；Ctrl+A 全选只设端点、不进入拖选，
+	// 否则鼠标只是移动（没有按下）也会被 onMouseMove 当成扩选，选区跟着光标跑。
+	bool selDragging_{ false };
 	int selALine_{ -1 }, selAIdx_{ 0 }, selBLine_{ -1 }, selBIdx_{ 0 };
 	// —— 标注镜像层：盖在识别文字之上的画布 ——
 	Ling::Canvas* annotCanvas_{ nullptr };
