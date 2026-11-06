@@ -1,6 +1,5 @@
 name: "【BUG反馈】"
 description: 报告一个问题或异常
-title: "【BUG反馈】"
 labels: ["bug"]
 body:
   - type: dropdown
@@ -15,7 +14,7 @@ body:
   - type: input
     id: os
     attributes:
-      label: 系统版本
+      label: 电脑系统版本
     validations:
       required: true
   - type: textarea
