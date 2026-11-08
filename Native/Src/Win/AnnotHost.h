@@ -15,6 +15,11 @@ public:
 	~AnnotHost();
 	std::wstring getCurToolId() const;
 	virtual void forwardKey(UINT key);
+	// 嵌入到别的窗口时：鼠标捕获 / IME 用哪个 HWND（默认就是自己的窗口）。
+	// 图片编辑器的标注宿主是一个隐藏窗口，需要把捕获与输入法都交给宿主窗口。
+	virtual HWND annotInputHwnd() const { return hwnd; }
+	// 供嵌入画布把标注画到自己的 D2D 上下文里（坐标系由调用方先设好）
+	void paintAnnotPublic(ID2D1DeviceContext* ctx) { paintShapes(ctx); }
 	Ling::TextBox* getTextBox();
 	void setEditingText(ShapeText* shape);
 	// 属性滑条实时作用的形状：优先二次选中的；否则是刚画完、且仍属于当前工具的标注
@@ -29,6 +34,7 @@ public:
 	// 把输入法组字窗贴到插入符、候选框摆到插入符下方（见 .cpp 注释）
 	void positionImeWindow();
 	void onToolStyleChanged();
+	virtual void onToolChanged() {}
 	// 清理已退出编辑状态的 editingText 残留（见 .cpp 注释）
 	void dropStaleEditingText();
 	// 贴图「画面不透明度」（百分比）。仅 WinPin 有意义；ToolSub 的「透明度」属性栏通过它读写。
@@ -58,6 +64,10 @@ public:
 	// 当前选中的全部标注，主选中在前；已按历史表校验存活
 	std::vector<ShapeBase*> selectedShapes() const;
 	bool isShapeSelected(ShapeBase* s) const;
+	// 用画板像素矩形做框选（图片编辑器的橡皮筋同时选容器与标注）
+	void selectShapesInRect(const D2D1_RECT_F& rect, bool additive);
+	bool hasAnyAnnotSelection() const;
+	void clearAnnotSelectionPublic() { clearAnnotSelection(true); }
 	// 当前工具对应的目标集合：按工具 id + 形态（大箭头/普通箭头/线段/气泡…）过滤
 	std::vector<ShapeBase*> selectedShapesForTool(const std::wstring& toolId) const;
 	virtual void layoutTools() = 0;
@@ -84,6 +94,8 @@ public:
 	// 标注坐标 → 窗口客户区（钉图乘 scale；长图按选区视口映射）
 	virtual D2D1_POINT_2F annotToClientPt(float ax, float ay) const;
 	virtual D2D1_POINT_2F clientToAnnotPt(float cx, float cy) const;
+	// 标注坐标下的底图范围（视口滤镜铺满用）。空矩形表示由 History 按窗口/底图尺寸推断。
+	virtual D2D1_RECT_F annotContentRect() const { return D2D1::RectF(0.f, 0.f, -1.f, -1.f); }
 	// 按当前工具/选中态设置光标（WinCap/WinPin::setCursor 调用）
 	void applyAnnotCursor();
 	void applyToolDrawCursor();
@@ -118,6 +130,8 @@ public:
 	ShapeBase* lastCreatedShape_{ nullptr };
 	// 角度三点式：基线画完后等第三点的形状（下一次点击/拖拽继续给它）
 	ShapeLine* pendingAngle{ nullptr };
+	// 钢笔式点按：箭头/线段已经落下锚点、等下一次左键或右键收笔
+	ShapeBase* pendingPen{ nullptr };
 	// 按下后锁定的控点索引；拖动全程强制使用，避免重探命中把旋转/缩放打断成移动
 	int annotDragIndex{ -1 };
 	// 结束文字编辑后短暂吞掉下一次点选/落笔（失焦可能先于 annotDown）
@@ -138,6 +152,11 @@ protected:
 	bool annotDown(POINT pos, BOOL isRight);
 	void annotMove(POINT pos);
 	void annotUp(POINT pos, BOOL isRight);
+	// —— 钢笔式点按（箭头/线段）——
+	bool penPendingAlive() const;
+	void finalizePendingPen();
+	// 右键收笔：不追加锚点，收在最后一次单击的落点；返回 true 表示这次右键已被收笔消费
+	bool finishPenStroke(const POINT& pos);
 	void annotKey(UINT key);
 	void annotTimer(UINT id);
 	virtual POINT toImgPos(const POINT& pos) const;

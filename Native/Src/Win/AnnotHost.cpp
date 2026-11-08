@@ -313,6 +313,31 @@ bool AnnotHost::isShapeSelected(ShapeBase* s) const
 	return std::find(extraSelection_.begin(), extraSelection_.end(), s) != extraSelection_.end();
 }
 
+bool AnnotHost::hasAnyAnnotSelection() const
+{
+	return shapeHover != nullptr || !extraSelection_.empty();
+}
+
+void AnnotHost::selectShapesInRect(const D2D1_RECT_F& rect, bool additive)
+{
+	if (!history) return;
+	if (!additive) clearAnnotSelection(true);
+	if (ShapeBase::rectEmpty(rect)) { refresh(); return; }
+	for (auto& sp : history->shapes) {
+		ShapeBase* s = sp.get();
+		if (!s || s->isUndo) continue;
+		auto b = s->bounds();
+		if (ShapeBase::rectEmpty(b)) continue;
+		if (b.right < rect.left || b.left > rect.right || b.bottom < rect.top || b.top > rect.bottom) continue;
+		if (isShapeSelected(s)) continue;
+		if (!shapeHover) shapeHover = s;
+		else extraSelection_.push_back(s);
+	}
+	syncGroupBoxFromSelection();
+	if (toolSub && hasMultiSelection()) toolSub->beginMultiStyle(selectedShapes());
+	refresh();
+}
+
 std::vector<ShapeBase*> AnnotHost::selectedShapes() const
 {
 	std::vector<ShapeBase*> out;
@@ -396,6 +421,7 @@ void AnnotHost::pruneAnnotSelection()
 {
 	if (!history) {
 		shapeHover = nullptr;
+		pendingPen = nullptr;
 		extraSelection_.clear();
 		return;
 	}
@@ -407,6 +433,7 @@ void AnnotHost::pruneAnnotSelection()
 		return false;
 	};
 	bool changed = false;
+	if (pendingPen && !alive(pendingPen)) { pendingPen = nullptr; changed = true; }
 	if (shapeHover && !alive(shapeHover)) { shapeHover = nullptr; changed = true; }
 	std::vector<ShapeBase*> keep;
 	for (auto* s : extraSelection_) {
@@ -748,6 +775,7 @@ void AnnotHost::clearAllShapes(bool keepBackground)
 	newShape = nullptr;
 	pendingEditText = nullptr;
 	pendingAngle = nullptr;
+	pendingPen = nullptr;
 	shapeHover = nullptr;
 	extraSelection_.clear();
 	groupBox_ = D2D1::RectF(0.f, 0.f, -1.f, -1.f);
@@ -1325,7 +1353,7 @@ void AnnotHost::paintSerialCursor(ID2D1DeviceContext* ctx)
 	POINT screen{};
 	GetCursorPos(&screen);
 	POINT client = screen;
-	ScreenToClient(hwnd, &client);
+	ScreenToClient(annotInputHwnd(), &client);
 	if (client.x < 0 || client.y < 0 || client.x >= (int)w || client.y >= (int)h) return;
 
 	const auto img = toImgPos(client);
@@ -1420,7 +1448,7 @@ void AnnotHost::annotChar(UINT ch)
 void AnnotHost::positionImeWindow()
 {
 	if (!editingText || !hwnd || !editingText->isEditingNow()) return;
-	HIMC himc = ImmGetContext(hwnd);
+	HIMC himc = ImmGetContext(annotInputHwnd());
 	if (!himc) return;
 	float lineH = 0.f;
 	const auto p = editingText->imeCaretPos(lineH);
@@ -1444,7 +1472,7 @@ void AnnotHost::positionImeWindow()
 	cand.ptCurrentPos = { compX, compY };
 	cand.rcArea = { compX, compY, compX + (LONG)std::lround(caretW), compY + (LONG)std::lround(caretH) };
 	ImmSetCandidateWindow(himc, &cand);
-	ImmReleaseContext(hwnd, himc);
+	ImmReleaseContext(annotInputHwnd(), himc);
 }
 
 void AnnotHost::syncViewportFilters()
@@ -1455,6 +1483,7 @@ void AnnotHost::syncViewportFilters()
 
 void AnnotHost::onToolStyleChanged()
 {
+	onToolChanged();
 	dropStaleEditingText();
 	// 多选：按"一致属性才下发"的规则批量应用，混合属性保留各标注自己的值
 	if (!editingText && toolSub && toolSub->multiStyleActive()) {
@@ -1586,7 +1615,7 @@ void AnnotHost::applyAnnotCursor()
 
 	POINT pos{};
 	GetCursorPos(&pos);
-	ScreenToClient(hwnd, &pos);
+	ScreenToClient(annotInputHwnd(), &pos);
 	const auto img = toImgPos(pos);
 	const float ix = (float)img.x, iy = (float)img.y;
 
@@ -1893,6 +1922,45 @@ bool AnnotHost::dimensionToolActive() const
 	return toolSub->isLine && toolSub->lineKind == ToolSub::LineDimension;
 }
 
+bool AnnotHost::penPendingAlive() const
+{
+	if (!pendingPen || !history) return false;
+	for (auto& s : history->shapes) {
+		if (s.get() == pendingPen && !s->isUndo) return true;
+	}
+	return false;
+}
+
+void AnnotHost::finalizePendingPen()
+{
+	if (!pendingPen) return;
+	ShapeBase* shape = pendingPen;
+	pendingPen = nullptr;
+	shape->penClearPreview();
+	// 只落了一个锚点时不保留退化形状
+	if (shape->penPointCount() < 2 && history) history->removeShapeGroup(shape);
+	refresh();
+}
+
+// 右键收笔：不追加锚点，直接以最后一次单击落下的锚点结束。
+// 若按右键位置落点，末段方向会跟着右键位置随机改变，收笔处容易多出一段弯钩。
+bool AnnotHost::finishPenStroke(const POINT& pos)
+{
+	(void)pos;
+	if (!pendingPen) return false;
+	if (!penPendingAlive()) {
+		pendingPen = nullptr;
+		return false;
+	}
+	ShapeBase* shape = pendingPen;
+	pendingPen = nullptr;
+	shape->penClearPreview();
+	if (shape->penPointCount() < 2 && history) history->removeShapeGroup(shape);
+	refresh();
+	applyAnnotCursor();
+	return true;
+}
+
 bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 {
 	ensureHistory();
@@ -1932,9 +2000,27 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 		clearAnnotSelection();
 		return true;
 	}
-	if (isRight) return annotRightClick();
+	if (isRight) {
+		// 钢笔式笔画还没收笔：右键先把它收掉，不进入"逐层退出"
+		if (finishPenStroke(pos)) return true;
+		return annotRightClick();
+	}
 	annotLastDownTime = now;
 	annotLastDownPos = screenPos;
+
+	// 钢笔式点按：后续左键继续落锚点（Shift = 最近一段直线），不进入拖拽/点选
+	if (pendingPen) {
+		if (penPendingAlive() && getCurToolId() == L"arrow") {
+			const auto penImg = toImgPos(pos);
+			pendingPen->penAddPoint((float)penImg.x, (float)penImg.y,
+				(GetKeyState(VK_SHIFT) & 0x8000) != 0);
+			annotMouseDown = false;
+			refresh();
+			applyAnnotCursor();
+			return true;
+		}
+		finalizePendingPen();
+	}
 
 	// 连线：点中线上的叉 —— 直接删掉这条箭头/线段。
 	// 优先于其它命中，否则这一下会被当成拖动这条线
@@ -2023,7 +2109,7 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 	annotMouseDown = true;
 	hasDragged = false;
 	annotDragIndex = -1;
-	SetCapture(hwnd);
+	SetCapture(annotInputHwnd());
 
 	const auto tool = getCurToolId();
 	auto imgPos = toImgPos(pos);
@@ -2285,6 +2371,18 @@ void AnnotHost::annotMove(POINT pos)
 	auto imgPos = toImgPos(pos);
 	const auto tool = getCurToolId();
 
+	// 钢笔式笔画：未收笔前，鼠标位置只作为预览落点（Shift = 预览为直线）
+	if (pendingPen) {
+		if (!penPendingAlive() || tool != L"arrow") {
+			finalizePendingPen();
+		}
+		else if (!annotMouseDown) {
+			pendingPen->penPreviewPoint((float)imgPos.x, (float)imgPos.y,
+				(GetKeyState(VK_SHIFT) & 0x8000) != 0);
+			refresh();
+		}
+	}
+
 	if (marqueeActive_) {
 		updateMarquee(imgPos);
 		refresh();
@@ -2392,6 +2490,19 @@ void AnnotHost::annotUp(POINT pos, BOOL isRight)
 	const bool tinyMove = std::abs((float)(pos.x - annotPressPos.x)) <= jitter
 		&& std::abs((float)(pos.y - annotPressPos.y)) <= jitter;
 	if (shapeHover == justCreated && (tinyMove || !hasDragged) && !shapeHover->isValidWithoutDrag()) {
+		// 左键点按（没拖）：箭头/线段进入钢笔式点按，等后续锚点与右键收笔
+		if (!linkPressTarget) {
+			const auto penPos = toImgPos(annotPressPos);
+			if (shapeHover->penBegin((float)penPos.x, (float)penPos.y)) {
+				pendingPen = shapeHover;
+				lastCreatedShape_ = shapeHover;
+				shapeHover = nullptr;
+				newShape = nullptr;
+				refresh();
+				applyAnnotCursor();
+				return;
+			}
+		}
 		// 整体删：拖拽中可能已经挂了自带文字（尺寸），空线不能把文字孤零零留下
 		history->removeShapeGroup(shapeHover);
 		// 这一下本来是"从形状里起笔连线"但没拖（就是单击）：那条空线删掉，改成**选中那个形状**。
@@ -2478,8 +2589,12 @@ void AnnotHost::annotKey(UINT key)
 	}
 	if (!history) return;
 	bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-	if (ctrl && key == 'Z') history->undo();
-	else if (ctrl && key == 'Y') history->redo();
+	const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+	if (ctrl && key == 'Z') {
+		// 与「系统按键」约定一致：Ctrl+Z 撤销、Ctrl+Shift+Z 重做
+		if (shift) history->redo();
+		else history->undo();
+	}
 	else if (key == VK_DELETE || key == VK_BACK) {
 		// 序号尾巴被拖出控制圈：先把尾巴收回圈上，这一次按键不当"删除"
 		if (!hasMultiSelection() && shapeHover && shapeHover->retractTail()) return;

@@ -258,9 +258,9 @@ void Util::saveToClipboard(const int w, const int h, BYTE* data)
 	GlobalUnlock(hDibV5);
 
 	// ---------- 3) 构造 CF_DIB（24bpp、BI_RGB、自下而上） ----------
-	// 老软件（比如 Illustrator 2020）只认最传统的这一种 DIB：注册格式 PNG 它不查，
+	// 部分老软件只认最传统的这一种 DIB：注册格式 PNG 它不查，
 	// CF_DIBV5 它不认，32bpp + BI_BITFIELDS 和 top-down 也读不了。系统虽然能从 CF_DIBV5
-	// 合成出 CF_DIB，合成出来的仍是那份带 alpha 的 32 位数据，一样不合它的口味。
+	// 合成出 CF_DIB，合成出来的仍是那份带 alpha 的 32 位数据，一样不合它的要求。
 	// 所以显式再放一份最保守的：丢掉 alpha 写成 24 位，行按 4 字节对齐，自下而上排列
 	DWORD dibRowBytes = ((DWORD)w * 3 + 3) & ~3u;
 	DWORD dibImgBytes = dibRowBytes * (DWORD)h;
@@ -387,6 +387,32 @@ std::wstring Util::getSaveFilePath(HWND hwnd, const std::wstring& ext, const std
 	result = filePath;
 	CoTaskMemFree(filePath);
 	return result;
+}
+
+std::wstring Util::lastSaveDir(bool video)
+{
+	const wchar_t* value = video ? L"LastVideoDir" : L"LastShotDir";
+	wchar_t buf[MAX_PATH * 2]{};
+	DWORD cb = (DWORD)sizeof(buf);
+	if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\SnowAir\\SaveDir", value,
+		RRF_RT_REG_SZ, nullptr, buf, &cb) == ERROR_SUCCESS && buf[0]) {
+		return buf;
+	}
+	return desktopDir().wstring();
+}
+
+void Util::rememberSaveDir(bool video, const std::wstring& filePath)
+{
+	const auto slash = filePath.find_last_of(L"\\/");
+	if (slash == std::wstring::npos || slash == 0) return;
+	const std::wstring dir = filePath.substr(0, slash);
+	HKEY key{};
+	if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\SnowAir\\SaveDir", 0, nullptr,
+		0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) return;
+	const wchar_t* value = video ? L"LastVideoDir" : L"LastShotDir";
+	RegSetValueExW(key, value, 0, REG_SZ, reinterpret_cast<const BYTE*>(dir.c_str()),
+		(DWORD)((dir.size() + 1) * sizeof(wchar_t)));
+	RegCloseKey(key);
 }
 
 std::wstring Util::createFileName(const std::wstring& ext)
@@ -545,6 +571,11 @@ bool Util::openWithImageReader(const int w, const int h, BYTE* data)
 		// 插件没装，直接把用户带到下载页，不再多弹一层提示
 		ShellExecute(nullptr, L"open", L"https://github.com/xland/ImageReader/releases", nullptr, nullptr, SW_SHOWNORMAL);
 		return false;
+	}
+	// 数据目录「用到才建」（见 Setting::initDataPath）；这个缓存图也往那儿落，先补建一级
+	{
+		std::error_code ec;
+		std::filesystem::create_directories(Setting::get()->getDataPath(), ec);
 	}
 	auto imgPath = Setting::get()->getDataPath().append(L"ocr_" + createFileName(L"png")).wstring();
 	if (!saveToFile(imgPath, w, h, data)) return false;

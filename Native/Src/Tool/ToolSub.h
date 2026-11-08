@@ -58,6 +58,15 @@ public:
 	void refreshBoardState();
 
 	void hideTools();
+	// 显示属性栏但不抢激活（宿主是普通窗口时保持宿主标题栏/焦点不变灰）
+	void showNoActivate();
+	// 图片编辑器等嵌入场景：固定位置的无箭头平底板属性栏（不画气泡尖角/描边）
+	void setFlatPopup(bool on);
+	bool isFlatPopup() const { return flatPopup_; }
+	// 图片编辑器专用：气泡保持尖角但去掉外描边
+	void setBubbleBorderless(bool on);
+	// 气泡优先摆到主栏上方（图片编辑器：主栏贴窗口底部，下方是桌面，不该往下弹）
+	void setBubbleAbove(bool on) { bubbleAbove_ = on; }
 	// 拖选区时临时藏起（不拆内容）；抬手 resume 再跟新位置
 	void suspendChrome();
 	void resumeChrome(const RECT& workArea);
@@ -92,6 +101,9 @@ public:
 	float setShapeSliderVal(const std::wstring& tool, float px);
 	static constexpr float mainGap{ 2.f };
 	void bindOwner(HWND ownerHwnd);
+	// 是否置顶：截图/钉图里属性栏要压在遮罩之上；图片编辑器里它属于普通窗口，
+	// 不能浮在别的应用上面（切走时必须跟着窗口一起隐藏）
+	void setTopmost(bool on);
 	// 复用属性栏的「颜色」色块组件（主栏填充色与二级描边色共用）
 	struct ColorTriggerUi {
 		Ling::Button* btn{ nullptr };
@@ -331,6 +343,9 @@ private:
 	AnnotHost* win;
 	bool isVisible{ false };
 	bool hasTools{ false };
+	bool flatPopup_{ false };
+	bool bubbleBorderless_{ false };
+	bool bubbleAbove_{ false };
 	bool centerOnBtn{ false };
 	bool dpiChanged{ false };
 	bool sliderHover{ false };

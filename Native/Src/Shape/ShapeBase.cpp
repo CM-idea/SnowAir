@@ -364,7 +364,7 @@ bool ShapeBase::applyUnselectedHoverCursor()
 	// （线上文字挂在箭头/线段上，也走这条 —— 点它们就是打字）
 	if (win && win->getCurToolId() == L"text") {
 		POINT p{};
-		if (GetCursorPos(&p) && ScreenToClient(win->hwnd, &p)) {
+		if (GetCursorPos(&p) && ScreenToClient(win->annotInputHwnd(), &p)) {
 			const auto img = win->clientToAnnotPt((float)p.x, (float)p.y);
 			if (hitErase((float)img.x, (float)img.y)) {
 				SetCursor(LoadCursor(nullptr, IDC_IBEAM));

@@ -55,6 +55,47 @@ ShapeLine::~ShapeLine()
 {
 }
 
+bool ShapeLine::penBegin(float x, float y)
+{
+	// 只有直线段参与钢笔式点按；波浪线、角度、荧光笔保持原交互
+	if (highlighter || kind_ != Straight) return false;
+	poly.endDrag();
+	poly.linkStart = ArrowLink{};
+	poly.linkEnd = ArrowLink{};
+	poly.pen = true;
+	poly.penStraight.clear();
+	poly.penPreview = false;
+	poly.pts.assign(1, D2D1::Point2F(x, y));
+	creating = false;
+	return true;
+}
+
+void ShapeLine::penAddPoint(float x, float y, bool straight)
+{
+	if (!poly.pen || poly.pts.empty()) return;
+	// 落点与预览共用同一套死区：按下瞬间指针与最后一帧预览的微小偏差被吸收，
+	// 落下的坐标就是屏幕上已经成型的那条曲线，不会因这一点偏差重解
+	const auto pt = poly.penUpdatePreview(x, y, straight, win->dpi);
+	x = pt.x;
+	y = pt.y;
+	const auto last = poly.pts.back();
+	if (std::hypot(x - last.x, y - last.y) < 0.5f) return;
+	poly.pts.push_back(D2D1::Point2F(x, y));
+	poly.penStraight.push_back(straight);
+	poly.penPreview = false;
+}
+
+void ShapeLine::penPreviewPoint(float x, float y, bool straight)
+{
+	if (!poly.pen || poly.pts.empty()) return;
+	poly.penUpdatePreview(x, y, straight, win->dpi);
+}
+
+void ShapeLine::penClearPreview()
+{
+	poly.penPreview = false;
+}
+
 // 二次选中后修改样式时，仅应用线宽 / 虚线 / 圆头（荧光笔的宽度与透明度不属于箭头属性栏，跳过）。
 void ShapeLine::applyStyle()
 {
@@ -112,13 +153,13 @@ void ShapeLine::syncLinks() { ShapeLink::sync(win, poly); }
 // 折线长度中点（图像坐标）：文本工具悬停在线段中间时在那儿显示"可以打字"的空白
 bool ShapeLine::shaftMidPoint(float& mx, float& my) const
 {
-	const auto& pts = poly.pts;
-	if (kind_ == Angle && pts.size() >= 3) {
+	const auto& anchors = poly.pts;
+	if (kind_ == Angle && anchors.size() >= 3) {
 		// 角度的数字放在角的**内侧**（角平分线上、弧的外侧）——放到外侧会看不出是谁的角度。
 		// 为了不压到两条边线：按文字框在"垂直于角平分线"方向的半投影 ÷ sin(半角) 算最小距离，
 		// 夹角越窄离顶点越远（窄角时宁可放到线段尽头之外，也不横跨到边线上）。
 		// 角度的文字本身不挖洞（见 AnnotHost::ensureShaftText），所以即使极端情况贴边也不会剪线。
-		const auto v = pts[1], a = pts[0], c = pts[2];
+		const auto v = anchors[1], a = anchors[0], c = anchors[2];
 		const float la = std::hypot(a.x - v.x, a.y - v.y);
 		const float lc = std::hypot(c.x - v.x, c.y - v.y);
 		if (la < 1.f || lc < 1.f) return false;
@@ -146,6 +187,9 @@ bool ShapeLine::shaftMidPoint(float& mx, float& my) const
 		my = v.y + std::sin(am) * offset;
 		return true;
 	}
+	// 钢笔曲线按实际绘制路径取中点；普通线段用锚点折线
+	const std::vector<D2D1_POINT_2F> drawn = poly.pen ? poly.renderPoints() : anchors;
+	const auto& pts = drawn;
 	if (pts.size() < 2) return false;
 	float total = 0.f;
 	for (size_t i = 1; i < pts.size(); i++)
@@ -278,7 +322,10 @@ void ShapeLine::paint(ID2D1DeviceContext* ctx)
 		if (wave) ctx->DrawGeometry(wave.Get(), brush.Get(), strokeWidth, strokeStyle.Get());
 		return;
 	}
-	auto path = ArrowParts::shaftPath(factory, poly.pts);
+	// 钢笔形状按锚点生成平滑曲线；普通直线段原样使用折线
+	auto path = poly.pen
+		? ArrowParts::penPath(factory, poly)
+		: ArrowParts::shaftPath(factory, poly.renderPoints());
 	if (path) ctx->DrawGeometry(path.Get(), brush.Get(), strokeWidth, strokeStyle.Get());
 	if (kind_ == Angle) paintAngleArc(ctx);
 }
@@ -365,10 +412,11 @@ void ShapeLine::paintAngleArc(ID2D1DeviceContext* ctx)
 void ShapeLine::paintDragger(ID2D1DeviceContext* ctx)
 {
 	const bool dragging = poly.drag != ArrowPolyState::DragKind::None;
-	// 角度固定三个点、波浪线固定首尾两点：都不绘制“可加折点”的虚线中点
+	// 角度固定三个点、波浪线固定首尾两点：都不绘制“可加折点”的虚线中点。
+	// 钢笔式曲线同样不暴露加折点（曲线靠锚点自动平滑）
 	paintArrowPolyHandles(ctx, poly, win->dpi,
 		brushHandleFill.Get(), brushHandleBorder.Get(), brushHandleShadow.Get(), dragging,
-		kind_ == Straight);
+		kind_ == Straight && !poly.pen);
 }
 
 int ShapeLine::hoverFromHit(const ArrowHitInfo& h) const
@@ -414,8 +462,10 @@ bool ShapeLine::translateBy(float dx, float dy)
 D2D1_RECT_F ShapeLine::bounds() const
 {
 	if (poly.pts.empty()) return D2D1::RectF(0.f, 0.f, -1.f, -1.f);
-	float l = poly.pts[0].x, t = poly.pts[0].y, r = l, b = t;
-	for (const auto& p : poly.pts) {
+	const std::vector<D2D1_POINT_2F> drawn = poly.pen ? poly.renderPoints() : poly.pts;
+	if (drawn.empty()) return D2D1::RectF(0.f, 0.f, -1.f, -1.f);
+	float l = drawn[0].x, t = drawn[0].y, r = l, b = t;
+	for (const auto& p : drawn) {
 		l = (std::min)(l, p.x); t = (std::min)(t, p.y);
 		r = (std::max)(r, p.x); b = (std::max)(b, p.y);
 	}
@@ -572,6 +622,15 @@ void ShapeLine::mouseUp(const float x, const float y)
 
 bool ShapeLine::hitBody(float x, float y)
 {
+	if (poly.pen) {
+		// 曲线偏离锚点连线，命中按实际绘制路径判
+		const auto pts = poly.renderPoints();
+		const float tol = strokeWidth * 0.5f + 6.f * win->dpi;
+		for (size_t i = 1; i < pts.size(); i++) {
+			if (ArrowPolyState::pointToSegDist(x, y, pts[i - 1], pts[i]) <= tol) return true;
+		}
+		return false;
+	}
 	return poly.hit(x, y, win->dpi, false, false).kind != ArrowHitInfo::None;
 }
 
@@ -580,8 +639,10 @@ void ShapeLine::mouseMove(const float x, const float y)
 	ShapeLink::sync(win, poly);   // 命中/悬停都按"贴回边缘之后"的端点算
 	const bool dragging = poly.drag != ArrowPolyState::DragKind::None;
 	// 角度只有三个点、波浪线只有首尾两点：不提供“线段中点加折点”的虚拟控点
-	const bool allowVirtual = isSelected() && kind_ == Straight;
+	const bool allowVirtual = isSelected() && kind_ == Straight && !poly.pen;
 	lastHit = poly.hit(x, y, win->dpi, dragging, allowVirtual);
+	if (poly.pen && lastHit.kind == ArrowHitInfo::None && hitBody(x, y))
+		lastHit.kind = ArrowHitInfo::Move;
 	if (lastHit.kind == ArrowHitInfo::Break && lastHit.insertAfter >= 0)
 		poly.breakHoverKey = lastHit.insertAfter + 1000;
 	else if (lastHit.kind == ArrowHitInfo::Break)

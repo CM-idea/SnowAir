@@ -1,5 +1,6 @@
 #include "pch.h"
 #include <cmath>
+#include <vector>
 #include "../Lang.h"
 #include "../Tip.h"
 #include "ToolColorPanel.h"
@@ -19,7 +20,7 @@ namespace {
 			(rgb & 0xFF) / 255.f);
 	}
 
-	D2D1_COLOR_F sampleQtConic(float t)
+	D2D1_COLOR_F sampleConic(float t)
 	{
 		struct Stop { float p; uint32_t rgb; };
 		static constexpr Stop stops[]{
@@ -105,7 +106,8 @@ void ToolColorPanel::onMinMaxInfo(MINMAXINFO* mmi)
 
 void ToolColorPanel::paintChrome(ID2D1DeviceContext* ctx)
 {
-	ToolbarChrome::paintPropBubble(ctx, w, h, dpi, brushBg.Get(), arrowX, tipDown_);
+	ToolbarChrome::paintPropBubble(ctx, w, h, dpi, brushBg.Get(), arrowX, tipDown_,
+		borderless_ ? 0.f : ToolbarTheme::borderWidth);
 }
 
 void ToolColorPanel::applyTipDirection(bool tipDown)
@@ -128,6 +130,7 @@ void ToolColorPanel::applyActiveStyle(size_t index, bool on)
 
 void PaintCustomColorSwatch(Ling::Canvas* canvas, float dpi)
 {
+	(void)dpi;   // 尺寸/圆角都由 Canvas 自身与像素尺寸决定，这里不再需要 dpi
 	if (!canvas) return;
 	auto ctx = canvas->startPaint();
 	if (!ctx) return;
@@ -138,43 +141,34 @@ void PaintCustomColorSwatch(Ling::Canvas* canvas, float dpi)
 		canvas->finishPaint();
 		return;
 	}
-	auto d2d = Ling::D2D::get();
-	const float radius = ToolbarTheme::swatchRadius * dpi;
-	ComPtr<ID2D1RoundedRectangleGeometry> clipGeo;
-	d2d->d2dFactory->CreateRoundedRectangleGeometry(
-		D2D1::RoundedRect(D2D1::RectF(0, 0, wPx, hPx), radius, radius),
-		clipGeo.GetAddressOf());
-	ComPtr<ID2D1Layer> layer;
-	ctx->CreateLayer(D2D1::SizeF(wPx, hPx), layer.GetAddressOf());
-	if (clipGeo && layer) {
-		D2D1_LAYER_PARAMETERS1 lp = D2D1::LayerParameters1(
-			D2D1::InfiniteRect(), clipGeo.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-		ctx->PushLayer(&lp, layer.Get());
+	// 逐像素按角度取锥形渐变的饱和色，不再画几十个抗锯齿扇形：
+	// 扇形的抗锯齿边缘互相叠加会混出深色接缝，18px 的小色块看起来又灰又有噪点。
+	// 圆角由 Canvas 自身的 Composition 圆角裁剪负责，这里只需铺满整块位图。
+	const UINT W = (UINT)std::lround(wPx);
+	const UINT H = (UINT)std::lround(hPx);
+	constexpr float pi = 3.14159265358979f;
+	const float cx = W * 0.5f;
+	const float cy = H * 0.5f;
+	std::vector<uint32_t> pixels(size_t(W) * H);
+	for (UINT y = 0; y < H; ++y) {
+		const float dy = (float)y + 0.5f - cy;
+		for (UINT x = 0; x < W; ++x) {
+			const float dx = (float)x + 0.5f - cx;
+			const float t = (std::atan2(dy, dx) + pi) / (2.f * pi);
+			const auto c = sampleConic(t);
+			const uint32_t r = (uint32_t)std::lround((std::clamp)(c.r, 0.f, 1.f) * 255.f);
+			const uint32_t g = (uint32_t)std::lround((std::clamp)(c.g, 0.f, 1.f) * 255.f);
+			const uint32_t b = (uint32_t)std::lround((std::clamp)(c.b, 0.f, 1.f) * 255.f);
+			pixels[size_t(y) * W + x] = 0xFF000000u | (r << 16) | (g << 8) | b;   // BGRA
+		}
 	}
-	constexpr int segs = 48;
-	constexpr float pi2 = 6.28318530718f;
-	const float cx = wPx * 0.5f;
-	const float cy = hPx * 0.5f;
-	const float R = std::sqrt(cx * cx + cy * cy) + 1.f;
-	for (int i = 0; i < segs; i++) {
-		const float t0 = float(i) / float(segs);
-		const float t1 = float(i + 1) / float(segs);
-		const float a0 = (t0 + 0.5f) * pi2;
-		const float a1 = (t1 + 0.5f) * pi2;
-		ComPtr<ID2D1PathGeometry> wedge;
-		d2d->d2dFactory->CreatePathGeometry(wedge.GetAddressOf());
-		ComPtr<ID2D1GeometrySink> sink;
-		wedge->Open(sink.GetAddressOf());
-		sink->BeginFigure({ cx, cy }, D2D1_FIGURE_BEGIN_FILLED);
-		sink->AddLine({ cx + R * std::cos(a0), cy + R * std::sin(a0) });
-		sink->AddLine({ cx + R * std::cos(a1), cy + R * std::sin(a1) });
-		sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-		sink->Close();
-		ComPtr<ID2D1SolidColorBrush> brush;
-		ctx->CreateSolidColorBrush(sampleQtConic((t0 + t1) * 0.5f), brush.GetAddressOf());
-		if (brush) ctx->FillGeometry(wedge.Get(), brush.Get());
-	}
-	if (clipGeo && layer) ctx->PopLayer();
+	ComPtr<ID2D1Bitmap> bmp;
+	ctx->CreateBitmap(D2D1::SizeU(W, H), pixels.data(), W * sizeof(uint32_t),
+		D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+			D2D1_ALPHA_MODE_IGNORE)), bmp.GetAddressOf());
+	if (bmp)
+		ctx->DrawBitmap(bmp.Get(), D2D1::RectF(0.f, 0.f, wPx, hPx), 1.f,
+			D2D1_INTERPOLATION_MODE_LINEAR);
 	canvas->finishPaint();
 }
 

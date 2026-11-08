@@ -7,6 +7,7 @@
 #include "Lang.h"
 #include "Win/WinCap.h"
 #include "Win/WinSetting.h"
+#include "Win/WinImageEdit.h"
 #include "Setting.h"
 #include "Win/SettingTheme.h"
 #include "Win/MenuTheme.h"
@@ -22,14 +23,10 @@ namespace {
 	// 配色/字体全部取自菜单主题（GetThemeColor），行高按系统菜单（30）。不抢前台，鼠标钩子点外关闭。
 	enum MenuCmd : UINT {
 		kCmdCapture = 1, kCmdCaptureFullscreen, kCmdRecord, kCmdDemoCanvas,
-		kCmdQuickTranslate, kCmdHistory, kCmdOpenDir, kCmdSettings, kCmdExit,
+		kCmdMakeCollage, kCmdHistory, kCmdOpenDir, kCmdSettings, kCmdExit,
 	};
 
 	struct MenuRow { UINT id; const wchar_t* langKey; const wchar_t* shortcutId; };
-
-	// 功能尚未实装的托盘项：置灰且不可点，与「全局热键」页的"功能开发中"一致。
-	// 快捷翻译实装后删除本函数的判断即可，行与命令派发都不必改
-	bool trayRowDisabled(UINT cmd) { return cmd == kCmdQuickTranslate; }
 
 	const MenuRow kMenuRows[] = {
 		{ kCmdCapture,           L"tray.capture",           L"capture" },
@@ -37,7 +34,7 @@ namespace {
 		{ kCmdRecord,            L"tray.record",            L"record" },
 		{ kCmdDemoCanvas,        L"tray.demoCanvas",        L"fullscreen_canvas" },
 		{ 0,                     nullptr,                   nullptr },
-		{ kCmdQuickTranslate,    L"tray.quickTranslate",    nullptr },
+		{ kCmdMakeCollage,       L"tray.makeCollage",       L"make_collage" },
 		{ 0,                     nullptr,                   nullptr },
 		{ kCmdHistory,           L"tray.history",           L"open_history" },
 		{ kCmdOpenDir,           L"tray.openDir",           L"open_screenshot_dir" },
@@ -125,8 +122,6 @@ namespace {
 			shell->setBorder(1.f, p.border);
 			shell->setBorderRadius((float)kMenuRadius);
 
-			// 置灰项的"灰"：同前景色、只把 alpha 压到 0x66（配色跟着主题走，别写死颜色）
-			const uint32_t fgDisabled = (p.fg & 0xFFFFFF00u) | 0x66u;
 			for (const auto& row : kMenuRows) {
 				if (row.id != 0 && !trayRowVisible(row.id)) continue;
 				if (row.id == 0) {
@@ -147,14 +142,12 @@ namespace {
 				btn->setMargin((float)kItemMarginX, 0.f, (float)kItemMarginX, 0.f);
 				btn->setBorderRadius((float)kItemRadius);
 				btn->setBg(0);
-				const bool disabled = trayRowDisabled(row.id);
-				// 置灰行悬停也不高亮（悬停底色取 0 = 与常态同色），点也不派发（不进 rows）
-				btn->setHoverBg(disabled ? 0u : p.hover);
+				btn->setHoverBg(p.hover);
 
 				auto* title = btn->makeChild<Ling::Label>();
 				title->setText(Lang::get(row.langKey));
 				title->setFontSize(12.f);
-				title->setColor(disabled ? fgDisabled : p.fg);
+				title->setColor(p.fg);
 				title->setFlexShrink(0.f);
 
 				auto* grow = btn->makeChild<Ling::Node>();
@@ -172,8 +165,7 @@ namespace {
 				}
 
 				// 行 → 命令记下来；按下/抬起由窗口级处理（见下面 onMouseDown/onMouseUp）
-				// ⚠ 置灰行不入表：它连"按下"都不记，自然也不会派发
-				if (!disabled) rows.push_back({ btn, row.id });
+				rows.push_back({ btn, row.id });
 			}
 
 		// 菜单「抬起才派发」：Ling 的按钮是在**按下**时就派发 onClick 的，那样命令一执行菜单
@@ -257,7 +249,7 @@ private:
 		case kCmdCaptureFullscreen:  if (auto* app = App::get()) app->captureFullScreenSilent(); break;
 		case kCmdRecord:             WinCap::beginRecordPick(); break;
 		case kCmdDemoCanvas:         WinCap::beginDemoCanvas(); break;
-		case kCmdQuickTranslate:     WinSetting::init(1); break;
+		case kCmdMakeCollage:        WinImageEdit::init(); break;
 		case kCmdHistory:            if (trayRowVisible(kCmdHistory)) WinSetting::init(5); break;
 		case kCmdOpenDir:            openOutputDir(); break;
 		case kCmdSettings:           WinSetting::init(0); break;

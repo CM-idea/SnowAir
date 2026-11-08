@@ -31,6 +31,8 @@ public:
 	bool tipDown() const { return tipDown_; }
 	void updatePosition(const RECT& workArea);
 	void hideHoverTip() { if (tip) tip->hide(); }
+	// 图片编辑器等嵌入场景：气泡去掉外描边（与二级属性栏保持一致）
+	void setBorderless(bool on) { borderless_ = on; if (open_) refresh(); }
 private:
 	void onCreated() override;
 	void layout() override;
@@ -58,6 +60,7 @@ private:
 	bool tipDown_{ false };
 	bool open_{ false };
 	bool needPaint_{ false };
+	bool borderless_{ false };
 	bool sidesStar_{ false };   // ShapeSides 当前调的是星形（否则多边形）
 	// 当前内容的滑条（悬停时在滑条上方显示说明；多边形/星形还会在画布上预览形状）
 	Ling::Slider* activeSlider_{ nullptr };

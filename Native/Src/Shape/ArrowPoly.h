@@ -29,6 +29,29 @@ struct ArrowPolyState {
 	bool freeStart{ false };
 	bool freeEnd{ false };
 	int breakHoverKey{ -1 };
+	// 钢笔式点按：pts 是锚点；penStraight 与相邻段一一对应（pts.size()-1）。
+	// penPreview 是鼠标当前的预览落点，只在绘制/命中时临时并入锚点。
+	bool pen{ false };
+	std::vector<bool> penStraight;
+	bool penPreview{ false };
+	D2D1_POINT_2F penPreviewPt{ 0.f, 0.f };
+	bool penPreviewStraight{ false };
+	// 钢笔曲线段：一段三次贝塞尔；line 为真时 c1/c2 无意义
+	struct PenSeg {
+		D2D1_POINT_2F p0{}, c1{}, c2{}, p1{};
+		bool line{ false };
+	};
+	std::vector<PenSeg> penSegments() const;
+	// 曲线结果缓存：锚点与预览点未变时直接复用上一帧结果。
+	// 内容只由锚点几何决定，锚点一变就按当前锚点重算，不会和真实几何脱节。
+	mutable std::vector<PenSeg> penCache;
+	mutable unsigned long long penCacheKey{ 0 };
+	mutable bool penCacheValid{ false };
+	// 预览/落点共用的坐标过滤：相对当前预览点位移小于死区时视为手抖、保持上一帧预览；
+	// 超过死区才把预览点对齐到指针。返回值即实际用于求解的落点坐标。
+	D2D1_POINT_2F penUpdatePreview(float x, float y, bool straight, float dpi);
+	// 实际绘制/命中用的点：普通形状原样返回 pts，钢笔形状按锚点生成平滑曲线
+	std::vector<D2D1_POINT_2F> renderPoints() const;
 	// 连线：两端各自可以绑一个形状（见 ShapeLink）
 	ArrowLink linkStart, linkEnd;
 
@@ -79,6 +102,9 @@ namespace ArrowParts
 	// 轴线（杆身）折线路径：虚线只挂这条
 	Microsoft::WRL::ComPtr<ID2D1PathGeometry> shaftPath(
 		ID2D1Factory* factory, const std::vector<D2D1_POINT_2F>& pts);
+	// 钢笔形状的轴线：按锚点解出的三次贝塞尔，渲染结果与命中采样一致
+	Microsoft::WRL::ComPtr<ID2D1PathGeometry> penPath(
+		ID2D1Factory* factory, const ArrowPolyState& poly);
 	// 趣味箭头轴线：整条杆身（含起笔侧的圈）按起笔段方向/长度整体映射，
 	// 圈始终落在杆身下方；loopScale/loopRot 给每条箭头一点手绘差异；
 	// tipFrom 回传头部方向参考点（沿杆身往回 headBack 距离）

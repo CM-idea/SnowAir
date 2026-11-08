@@ -73,13 +73,9 @@ namespace ToolbarTheme
 	inline constexpr uint32_t infoText{ 0xFFFFFFE6u };
 	inline constexpr uint32_t infoIconMuted{ 0xFFFFFFB3u }; // ~70% 白，深底上的默认图标
 
-	// 把 ToolbarStore::current() 的色板刷进上面的运行时变量。
-	// 调用时机：工具栏窗口创建时（各 Tool*.cpp 的 onCreated 首行）与设置页切换主题时。
-	// 工具栏里大量直接引用 Icon::ColorNormal / Icon::ColorDisabled 的调用点也一并跟随主题，
-	// 免去逐个改调用点（这两个常量仅被工具栏/属性栏使用）。
-	inline void refresh()
+	// 把指定色板刷进运行时变量（图片编辑器等需要指定主题的场景用）
+	inline void applyColors(const ToolbarStore::Colors& c)
 	{
-		const auto c = ToolbarStore::current();
 		auto withAlpha = [](uint32_t rgba, uint32_t a) { return (rgba & 0xFFFFFF00u) | a; };
 		// 背景 / 停悬底
 		background = c.primary;
@@ -100,5 +96,24 @@ namespace ToolbarTheme
 		// 工具栏按钮大量直接用 Icon::ColorNormal / ColorDisabled → 同步过去
 		Icon::ColorNormal = c.icon;
 		Icon::ColorDisabled = withAlpha(c.icon, 0x66u);
+	}
+
+	// 覆盖色板：图片编辑器等场景要求属性栏跟随软件主题而不是工具栏外观设置。
+	// 设置后 refresh() 也使用覆盖色板（ToolbarWindow::initChrome 创建窗口时会调 refresh）。
+	inline bool overrideActive{ false };
+	inline ToolbarStore::Colors overridePalette{};
+	inline void setOverride(const ToolbarStore::Colors& c)
+	{
+		overrideActive = true;
+		overridePalette = c;
+		applyColors(c);
+	}
+	inline void clearOverride() { overrideActive = false; }
+
+	// 把 ToolbarStore::current() 的色板刷进上面的运行时变量。
+	// 调用时机：工具栏窗口创建时（各 Tool*.cpp 的 onCreated 首行）与设置页切换主题时。
+	inline void refresh()
+	{
+		applyColors(overrideActive ? overridePalette : ToolbarStore::current());
 	}
 }

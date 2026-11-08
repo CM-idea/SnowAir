@@ -1374,7 +1374,15 @@ float ToolSub::setShapeSliderVal(const std::wstring& tool, float px)
 
 void ToolSub::drawChrome(ID2D1DeviceContext* ctx)
 {
-	ToolbarChrome::paintPropBubble(ctx, w, h, dpi, brushBg.Get(), arrowX, tipDown_);
+	if (flatPopup_) {
+		// 平底板：只画圆角底，不带边框/尖角
+		ToolbarChrome::paintRoundBar(ctx,
+			D2D1::RectF(0.f, 0.f, std::floor(w), std::floor(h)),
+			ToolbarTheme::borderRadius * dpi, brushBg.Get(), 0.f);
+		return;
+	}
+	ToolbarChrome::paintPropBubble(ctx, w, h, dpi, brushBg.Get(), arrowX, tipDown_,
+		bubbleBorderless_ ? 0.f : ToolbarTheme::borderWidth);
 }
 
 void ToolSub::layout()
@@ -1386,6 +1394,16 @@ void ToolSub::layout()
 
 void ToolSub::applyTipDirection(bool tipDown)
 {
+	if (flatPopup_) {
+		// 固定平底板：没有尖角，上下内边距对称
+		tipDown_ = true;
+		if (contentNode) {
+			const float pad = ToolbarTheme::shadowPad * dpi;
+			contentNode->setPosition(Ling::Edge::Top, pad);
+			contentNode->setPosition(Ling::Edge::Bottom, pad);
+		}
+		return;
+	}
 	tipDown_ = tipDown;
 	ToolbarChrome::applyPropBubbleContentPad(contentNode, tipDown_);
 }
@@ -2795,7 +2813,30 @@ float ToolSub::toPx(float logical) const
 
 float ToolSub::getDesiredHeight()
 {
+	if (flatPopup_)
+		return toPx(btnSize) + toPx(ToolbarTheme::shadowPad) * 2.f;
 	return toPx(btnSize) + toPx(marginTop) + toPx(ToolbarTheme::shadowPad);
+}
+
+void ToolSub::setFlatPopup(bool on)
+{
+	if (flatPopup_ == on) return;
+	flatPopup_ = on;
+	if (contentNode) {
+		const float pad = ToolbarTheme::shadowPad * dpi;
+		contentNode->setPosition(Ling::Edge::Top, pad);
+		contentNode->setPosition(Ling::Edge::Bottom, pad);
+	}
+	if (hasTools) refreshSize();
+	refresh();
+}
+
+void ToolSub::setBubbleBorderless(bool on)
+{
+	bubbleBorderless_ = on;
+	// 三级弹层（颜色面板 / 嵌套属性气泡）同属图片编辑器的弹出层，也要去掉描边
+	if (colorPanel) colorPanel->setBorderless(on);
+	if (nestedPanel) nestedPanel->setBorderless(on);
 }
 
 void ToolSub::initSize(int btnCount, bool withColors, bool centerOnBtn, float extraLogicW)
@@ -2950,6 +2991,28 @@ void ToolSub::bindOwner(HWND ownerHwnd)
 	SetWindowLongPtr(hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(ownerHwnd));
 }
 
+void ToolSub::showNoActivate()
+{
+	if (!hwnd) return;
+	// 确保 NOACTIVATE 始终在（防被外部改掉），并用不激活的显示命令：
+	// 否则 SW_SHOW 可能把激活抢到气泡上，宿主窗口标题栏随即变灰、画布失焦。
+	LONG_PTR ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+	if ((ex & WS_EX_NOACTIVATE) == 0)
+		SetWindowLongPtr(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE);
+	ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+}
+
+void ToolSub::setTopmost(bool on)
+{
+	if (!hwnd) return;
+	LONG_PTR ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+	if (on) ex |= WS_EX_TOPMOST;
+	else ex &= ~WS_EX_TOPMOST;
+	SetWindowLongPtr(hwnd, GWL_EXSTYLE, ex);
+	SetWindowPos(hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+		SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
 WinCap* ToolSub::maskHost() const
 {
 	// 属性栏的宿主可能是 WinCap（截图/长图）或 WinPin（钉图）
@@ -2974,6 +3037,31 @@ void ToolSub::updatePosition(const RECT& workArea)
 		static_cast<LONG>(bar.x + bar.w), static_cast<LONG>(bar.y + bar.h) };
 	const RECT wa = (bar.w > 0.f && bar.h > 0.f)
 		? ToolbarChrome::workAreaNear(barRect) : workArea;
+
+	if (flatPopup_) {
+		// 固定弹窗：水平居中于底部工具栏、紧贴其上方（不跟随当前按钮、无尖角）
+		float px = bar.x + (bar.w - w) * 0.5f;
+		if (px < (float)wa.left) px = (float)wa.left;
+		if (px + w > (float)wa.right) px = (float)wa.right - w;
+		float py = bar.y - ToolbarTheme::propBubbleGap * bar.dpi - h;
+		if (py < (float)wa.top) py = (float)wa.top;
+		applyTipDirection(true);
+		arrowX = bar.x + bar.w * 0.5f;
+		const int nx = (int)std::lround(px);
+		const int ny = (int)std::lround(py);
+		if (nx != x || ny != y) setPosition(nx, ny);
+		if (!isVisible) {
+			showNoActivate();
+			isVisible = true;
+		}
+		else {
+			refresh();
+		}
+		if (colorPanel && colorPanel->isOpen()) colorPanel->updatePosition(wa);
+		if (nestedPanel && nestedPanel->isOpen()) nestedPanel->updatePosition(wa);
+		return;
+	}
+
 	auto btnCenterX = bar.btnCenterX;
 	auto mainX = bar.x;
 	const float mainW = bar.w;
@@ -2993,8 +3081,8 @@ void ToolSub::updatePosition(const RECT& workArea)
 	const float arrowAnchor = mainX + btnCenterX;
 	auto place = ToolbarChrome::placeBubble(
 		wa, refTop, refBottom, w, h, ToolbarTheme::propBubbleGap,
-		// 属性栏优先在主栏下方；下方不够再上弹
-		px, arrowAnchor, true, tipDown_, arrowX, x, y);
+		// 属性栏优先在主栏下方；图片编辑器里强制优先上方（下方是桌面）
+		px, arrowAnchor, !bubbleAbove_, tipDown_, arrowX, x, y);
 
 	// 属性栏不能压在框选上：主栏在选区上方时，属性栏默认落在主栏下方正好会盖住选区。
 	// 这里再算一次"翻到主栏上方"的落点，两个落点里挑与选区重叠面积更小的那个。
@@ -3031,7 +3119,7 @@ void ToolSub::updatePosition(const RECT& workArea)
 	arrowX = place.arrowX;
 	if (place.moved) setPosition(place.x, place.y);
 	if (!isVisible) {
-		show();
+		showNoActivate();
 		isVisible = true;
 	}
 	else if (place.needPaint) {

@@ -658,9 +658,11 @@ void WinCap::demoRecSaveAs()
 		st->getVideoRecordFormat(), Setting::defaultVideoRecordFormat(), L"");
 	if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos) defName = defName.substr(slash + 1);
 	// 画布是置顶全屏窗：用 hwnd 做 owner，保存框才会压在画布之上且模态
-	auto tarPath = Util::getSaveFilePath(hwnd, ext, defName, st->getRecordDir());
-	if (!tarPath.empty() && CopyFileW(srcPath.c_str(), tarPath.c_str(), FALSE))
+	auto tarPath = Util::getSaveFilePath(hwnd, ext, defName, Util::lastSaveDir(true));
+	if (!tarPath.empty() && CopyFileW(srcPath.c_str(), tarPath.c_str(), FALSE)) {
+		Util::rememberSaveDir(true, tarPath);
 		addRecordHistory(tarPath, dur);
+	}
 	DeleteFileW(srcPath.c_str());
 	refresh();
 }
@@ -1703,6 +1705,7 @@ bool WinCap::beginMaskResize(POINT pos)
 	// 演示画布没有"选区"这个概念（铺满整屏、不描边不压暗）：不许拖/调边，
 	// 否则一拖就把看不见的选区挪走、还会 setToolChromeHidden 把工具条藏掉
 	if (demoMode) return false;
+	if (!getCurToolId().empty()) return false;
 	// 缩放只能由一次新的按下发起：拖动（拖选区/拖标注）过程中经过边缘不触发
 	if (isPress || maskDragging || annotMouseDown) return false;
 	const auto hit = cutMask->hitTest(pos);
@@ -1894,7 +1897,7 @@ BOOL WinCap::setCursor()
 		const bool longEdit = stage == CapStage::Long && capLong && capLong->isEditMode();
 		// 画幅锁定后不再给缩放光标（避免可拖动的误导）；区内可整体挪动时给四向光标。
 		// 这两项须与 beginMaskResize 的两道闸门一一对应，否则光标与实际可操作性不符。
-		const bool selResizable = !maskSizeLocked();
+		const bool selResizable = !maskSizeLocked() && getCurToolId().empty();
 		const bool selMovable = !maskMoveLocked() && !panelLocked && getCurToolId().empty() && !isMouseTransparent
 			&& (maskSizeLocked() || !hasAnnotShapes());
 		if (!demoMode && cutMask && cutMask->hasRect() && !longEdit) {
@@ -2706,6 +2709,11 @@ void WinCap::onDown(POINT pos, bool isRight)
         return;
     }
     if (isRight) {
+        // 钢笔式笔画还没收笔：右键先以当前位置收尾，不进入"逐层退出"
+        if (finishPenStroke(pos)) {
+            refresh();
+            return;
+        }
         if (handleLayerCancel(false))
             requestExitAfterRightUp();
         return;
@@ -4933,12 +4941,13 @@ void WinCap::saveToFile(bool keepOpen)
     const std::wstring defFallback = Setting::defaultManualSaveFormat();
     std::wstring defName = Util::previewFileName(defFmt, defFallback, focusAppName_);
     if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos) defName = defName.substr(slash + 1);
-    auto path = Util::getSaveFilePath(hwnd, saveExt, defName, Util::desktopDir().wstring());
+    auto path = Util::getSaveFilePath(hwnd, saveExt, defName, Util::lastSaveDir(false));
     if (path.empty()) {
         setToolTopmost(true);
         return;
     }
     if (Util::saveToFile(path, cw, ch, pixels.data())) {
+        Util::rememberSaveDir(false, path);
         Setting::get()->addHistoryFile(path, cw, ch, L"capture");
         if (!keepOpen) close();
     }

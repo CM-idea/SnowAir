@@ -685,9 +685,11 @@ void ToolVideo::saveFile()
 	std::wstring defName = Util::previewFileName(
 		st->getVideoRecordFormat(), Setting::defaultVideoRecordFormat(), L"");
 	if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos) defName = defName.substr(slash + 1);
-	auto tarPath = Util::getSaveFilePath(nullptr, ext, defName, st->getRecordDir());
-	if (!tarPath.empty() && CopyFile(srcPath.data(), tarPath.data(), false))
+	auto tarPath = Util::getSaveFilePath(nullptr, ext, defName, Util::lastSaveDir(true));
+	if (!tarPath.empty() && CopyFile(srcPath.data(), tarPath.data(), false)) {
+		Util::rememberSaveDir(true, tarPath);
 		addRecordHistory(tarPath, totalSeconds);
+	}
 	DeleteFile(srcPath.data());
 	win->close();
 }

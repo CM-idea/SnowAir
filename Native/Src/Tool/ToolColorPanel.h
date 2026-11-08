@@ -18,6 +18,8 @@ public:
 	void refreshSelection();
 	void updatePosition(const RECT& workArea);
 	void hideHoverTip() { if (tip) tip->hide(); }
+	// 图片编辑器等嵌入场景：气泡去掉外描边（与二级属性栏保持一致）
+	void setBorderless(bool on) { borderless_ = on; if (open_) refresh(); }
 private:
 	void onCreated() override;
 	void layout() override;
@@ -39,6 +41,7 @@ private:
 	float arrowX{ 0.f };
 	bool tipDown_{ false };
 	bool open_{ false };
+	bool borderless_{ false };
 	static constexpr float btnSize{ ToolbarTheme::propBtnSize };
 	static constexpr float hoverInset{ 4.f };
 	static constexpr float iconInner{ ToolbarTheme::propIconInner };

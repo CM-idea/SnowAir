@@ -94,10 +94,12 @@ namespace {
             || id == L"open_clipboard";
     }
 
-    // 每一项的「?」说明（目前只有快速贴屏需要；其余行不给问号）
+    // 每一项的「?」说明（目前快速贴屏、图片编辑 Beta 需要；其余行不给问号）
     std::wstring hotkeyHelpTipOf(const std::wstring& id)
     {
-        return id == L"quick_pin" ? Lang::get(L"shortcut.quickPinTip") : std::wstring{};
+        if (id == L"quick_pin") return Lang::get(L"shortcut.quickPinTip");
+        if (id == L"make_collage") return Lang::get(L"shortcut.imageEditBetaTip");
+        return std::wstring{};
     }
 
     // 快捷键按钮文字与颜色：未绑定时显示「点击设置」占位（muted 色），已绑定显示组合键。
@@ -164,9 +166,9 @@ WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
             { L"capture_repeat",        Lang::get(L"shortcut.capture_repeat") },
             { L"capture_focused_window",Lang::get(L"shortcut.capture_focused_window") },
         }},
-        // 1 剪切板组 2 项（紧跟在截图下面）：快速贴屏已实现（Beta），「打开剪切板」暂缓
+        // 1 剪切板组 2 项（紧跟在截图下面）：「快速贴屏」已转正，「打开剪切板」暂缓
         {Lang::get(L"setting.hotkeyGrpClipboard"),{
-            { L"quick_pin",             Lang::get(L"shortcut.quick_pin") + L" Beta" },
+            { L"quick_pin",             Lang::get(L"shortcut.quick_pin") },
             { L"open_clipboard",        Lang::get(L"shortcut.open_clipboard") },
         }},
         // 2 翻译组 2 项
@@ -174,9 +176,10 @@ WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
             { L"quick_translate",       Lang::get(L"shortcut.quick_translate") },
             { L"translate_selection",   Lang::get(L"shortcut.translate_selection") },
         }},
-        // 3 其他组 4 项
+        // 3 其他组 5 项
         {Lang::get(L"setting.hotkeyGrpOther"),{
             { L"show_main",             Lang::get(L"shortcut.show_main") },
+            { L"make_collage",          Lang::get(L"shortcut.make_collage") + L" Beta" },
             { L"open_screenshot_dir",   Lang::get(L"shortcut.open_screenshot_dir") },
             { L"open_history",          Lang::get(L"shortcut.open_history") },
             { L"toggle_pins",           Lang::get(L"shortcut.toggle_pins") },

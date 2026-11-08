@@ -26,6 +26,10 @@ public:
 	// defaultDir 非空时作为对话框的初始目录（每次都强制从这里开始，不留用"上次保存过的目录"）
 	static std::wstring getSaveFilePath(HWND hwnd, const std::wstring& ext = L"png",
 		const std::wstring& defaultName = L"", const std::wstring& defaultDir = L"");
+	// 保存对话框的初始目录：首次用桌面，之后用这一类文件上次选过的目录（截图与录屏分开记）
+	static std::wstring lastSaveDir(bool video);
+	// 记住本次选定的目录，供下一次保存对话框使用
+	static void rememberSaveDir(bool video, const std::wstring& filePath);
 	// 以当前时间生成默认文件名，精确到毫秒，避免连续保存时重名
 	static std::wstring createFileName(const std::wstring& ext);
 	// GDI 抓屏。返回 BGRA、top-down、行紧凑（步长 = w*4），与本类其他函数的入参格式一致

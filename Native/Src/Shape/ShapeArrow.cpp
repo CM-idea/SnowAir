@@ -32,6 +32,47 @@ ShapeArrow::~ShapeArrow()
 {
 }
 
+bool ShapeArrow::penBegin(float x, float y)
+{
+	// 只有普通箭头参与钢笔式点按；大/双/标注/趣味箭头仍按原来的拖拽方式
+	if (isDimension_ || headStyle != ToolSub::ArrowDefault) return false;
+	poly.endDrag();
+	poly.linkStart = ArrowLink{};
+	poly.linkEnd = ArrowLink{};
+	poly.pen = true;
+	poly.penStraight.clear();
+	poly.penPreview = false;
+	poly.pts.assign(1, D2D1::Point2F(x, y));
+	creating = false;
+	return true;
+}
+
+void ShapeArrow::penAddPoint(float x, float y, bool straight)
+{
+	if (!poly.pen || poly.pts.empty()) return;
+	// 落点与预览共用同一套死区：按下瞬间指针与最后一帧预览的微小偏差被吸收，
+	// 落下的坐标就是屏幕上已经成型的那条曲线，不会因这一点偏差重解
+	const auto pt = poly.penUpdatePreview(x, y, straight, win->dpi);
+	x = pt.x;
+	y = pt.y;
+	const auto last = poly.pts.back();
+	if (std::hypot(x - last.x, y - last.y) < 0.5f) return;
+	poly.pts.push_back(D2D1::Point2F(x, y));
+	poly.penStraight.push_back(straight);
+	poly.penPreview = false;
+}
+
+void ShapeArrow::penPreviewPoint(float x, float y, bool straight)
+{
+	if (!poly.pen || poly.pts.empty()) return;
+	poly.penUpdatePreview(x, y, straight, win->dpi);
+}
+
+void ShapeArrow::penClearPreview()
+{
+	poly.penPreview = false;
+}
+
 // 二次选中后修改样式时，仅应用属性（线宽 / 虚线 / 圆头）。
 // 箭头形态（常规 / 大 / 趣味 / 双箭头 / 标注箭头）属于工具形态，不回写到已绘制的箭头。
 void ShapeArrow::applyStyle()
@@ -113,7 +154,8 @@ bool ShapeArrow::bigHead() const
 // 折线长度中点（图像坐标）：文本工具悬停在线段中间时在那儿显示"可以打字"的空白
 bool ShapeArrow::shaftMidPoint(float& mx, float& my) const
 {
-	const auto& pts = poly.pts;
+	const std::vector<D2D1_POINT_2F> drawn = poly.pen ? poly.renderPoints() : poly.pts;
+	const auto& pts = drawn;
 	if (pts.size() < 2) return false;
 	float total = 0.f;
 	for (size_t i = 1; i < pts.size(); i++)
@@ -138,7 +180,8 @@ bool ShapeArrow::shaftMidPoint(float& mx, float& my) const
 
 float ShapeArrow::shaftLength() const
 {
-	const auto& pts = poly.pts;
+	const std::vector<D2D1_POINT_2F> drawn = poly.pen ? poly.renderPoints() : poly.pts;
+	const auto& pts = drawn;
 	if (pts.size() < 2) return 0.f;
 	float total = 0.f;
 	for (size_t i = 1; i < pts.size(); i++)
@@ -220,19 +263,20 @@ void ShapeArrow::rebuild()
 	else bigPath.Reset();
 }
 
-void ShapeArrow::drawPolyline(ID2D1DeviceContext* ctx, D2D1_POINT_2F* tipFrom, float headBack)
+void ShapeArrow::drawPolyline(ID2D1DeviceContext* ctx, const std::vector<D2D1_POINT_2F>& pts,
+	D2D1_POINT_2F* tipFrom, float headBack)
 {
 	// 轴线（杆身）：虚线只作用于这条路径
 	auto factory = Ling::D2D::get()->d2dFactory.Get();
 	auto path = isFun()
-		? ArrowParts::funShaftPath(factory, poly.pts, funLoopScale, funLoopRot, tipFrom, headBack)
-		: ArrowParts::shaftPath(factory, poly.pts);
+		? ArrowParts::funShaftPath(factory, pts, funLoopScale, funLoopRot, tipFrom, headBack)
+		: ArrowParts::shaftPath(factory, pts);
 	if (path) ctx->DrawGeometry(path.Get(), brush.Get(), strokeWidth, strokeStyle.Get());
 }
 
 void ShapeArrow::paint(ID2D1DeviceContext* ctx)
 {
-	if (poly.pts.size() < 2) return;
+	if (poly.pts.empty()) return;
 	// 连线端点先贴回形状边缘（形状可能刚被拖动/缩放，甚至已经被删掉）
 	ShapeLink::sync(win, poly);
 	if (isBig()) {
@@ -240,11 +284,14 @@ void ShapeArrow::paint(ID2D1DeviceContext* ctx)
 		if (bigPath) ctx->FillGeometry(bigPath.Get(), brush.Get());
 		return;
 	}
+	// 钢笔形状按锚点生成平滑曲线；普通形状原样使用折线
+	const auto pts = poly.renderPoints();
+	if (pts.size() < 2) return;
 	auto factory = Ling::D2D::get()->d2dFactory.Get();
-	const auto start = poly.front();
-	const auto startNext = poly.pts[1];
-	const auto end = poly.back();
-	const auto endPrev = poly.pts[poly.pts.size() - 2];
+	const auto start = pts.front();
+	const auto startNext = pts[1];
+	const auto end = pts.back();
+	const auto endPrev = pts[pts.size() - 2];
 	// 趣味箭头的头部要跟着杆身走，不能按起终点连线
 	D2D1_POINT_2F funTipFrom = endPrev;
 	// 头部长度以线宽为基准，且不超过箭头的 16%：箭头越短，头部同步收缩，
@@ -254,7 +301,14 @@ void ShapeArrow::paint(ID2D1DeviceContext* ctx)
 	const float funHeadLen = std::min(baseHeadLen * 1.3f,
 		std::max(chordLen * 0.16f, 14.f + strokeWidth));
 	const float funHeadScale = funHeadLen / std::max(baseHeadLen, 1.f);
-	drawPolyline(ctx, isFun() ? &funTipFrom : nullptr, funHeadLen);
+	if (poly.pen) {
+		// 钢笔曲线直接按贝塞尔渲染，与命中/包围盒的采样几何一致
+		auto path = ArrowParts::penPath(factory, poly);
+		if (path) ctx->DrawGeometry(path.Get(), brush.Get(), strokeWidth, strokeStyle.Get());
+	}
+	else {
+		drawPolyline(ctx, pts, isFun() ? &funTipFrom : nullptr, funHeadLen);
+	}
 	const auto headFrom = isFun() ? funTipFrom : endPrev;
 	// 箭头头部：圆头同样作用到它，且永远实线
 	if (headStyle == ToolSub::ArrowAnnot) {
@@ -278,10 +332,10 @@ void ShapeArrow::paintDragger(ID2D1DeviceContext* ctx)
 {
 	const bool dragging = poly.drag != ArrowPolyState::DragKind::None;
 	// 大箭头与普通箭头同一套控点（端点/断点/虚中点）；
-	// 趣味箭头、尺寸只给两个端点，不显示中间那个"加断点"的虚点
+	// 趣味箭头、尺寸只给两个端点；钢笔式曲线也不再暴露"加折点"的虚点
 	paintArrowPolyHandles(ctx, poly, win->dpi,
 		brushHandleFill.Get(), brushHandleBorder.Get(), brushHandleShadow.Get(),
-		dragging, !isFun() && !isDimension_);
+		dragging, !isFun() && !isDimension_ && !poly.pen);
 }
 
 int ShapeArrow::hoverFromHit(const ArrowHitInfo& h) const
@@ -329,8 +383,10 @@ bool ShapeArrow::translateBy(float dx, float dy)
 D2D1_RECT_F ShapeArrow::bounds() const
 {
 	if (poly.pts.empty()) return D2D1::RectF(0.f, 0.f, -1.f, -1.f);
-	float l = poly.pts[0].x, t = poly.pts[0].y, r = l, b = t;
-	for (const auto& p : poly.pts) {
+	const std::vector<D2D1_POINT_2F> drawn = poly.pen ? poly.renderPoints() : poly.pts;
+	if (drawn.empty()) return D2D1::RectF(0.f, 0.f, -1.f, -1.f);
+	float l = drawn[0].x, t = drawn[0].y, r = l, b = t;
+	for (const auto& p : drawn) {
 		l = (std::min)(l, p.x); t = (std::min)(t, p.y);
 		r = (std::max)(r, p.x); b = (std::max)(b, p.y);
 	}
@@ -453,6 +509,15 @@ bool ShapeArrow::hitFunBody(float x, float y) const
 
 bool ShapeArrow::hitBody(float x, float y)
 {
+	if (poly.pen) {
+		// 曲线偏离锚点连线，命中按实际绘制路径判
+		const auto pts = poly.renderPoints();
+		const float tol = strokeWidth * 0.5f + 6.f * win->dpi;
+		for (size_t i = 1; i < pts.size(); i++) {
+			if (ArrowPolyState::pointToSegDist(x, y, pts[i - 1], pts[i]) <= tol) return true;
+		}
+		return false;
+	}
 	if (poly.hit(x, y, win->dpi, false, false).kind != ArrowHitInfo::None) return true;
 	return hitFunBody(x, y);
 }
@@ -462,11 +527,13 @@ void ShapeArrow::mouseMove(const float x, const float y)
 	ShapeLink::sync(win, poly);   // 命中/悬停都按"贴回边缘之后"的端点算
 	const bool dragging = poly.drag != ArrowPolyState::DragKind::None;
 	// 大箭头与普通箭头同一套命中/断点逻辑；趣味箭头、尺寸保持两点式，不响应"加点"
-	const bool allowVirtual = isSelected() && !isFun() && !isDimension_;
+	const bool allowVirtual = isSelected() && !isFun() && !isDimension_ && !poly.pen;
 	lastHit = poly.hit(x, y, win->dpi, dragging, allowVirtual);
 	// 趣味箭头画出来的杆身/圈比折线粗得多：中心线 ±8px 之外也要能命中，
 	// 否则点着看得见的笔画却选不中/拖不动。
 	if (isFun() && lastHit.kind == ArrowHitInfo::None && hitFunBody(x, y))
+		lastHit.kind = ArrowHitInfo::Move;
+	if (poly.pen && lastHit.kind == ArrowHitInfo::None && hitBody(x, y))
 		lastHit.kind = ArrowHitInfo::Move;
 	if (lastHit.kind == ArrowHitInfo::Break && lastHit.insertAfter >= 0)
 		poly.breakHoverKey = lastHit.insertAfter + 1000;

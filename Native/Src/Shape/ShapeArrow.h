@@ -21,6 +21,12 @@ public:
 	void mouseMove(const float x, const float y) override;
 	void mouseWheel(const float x, const float y, const short delta) override;
 	void setCursor() override;
+	// 普通箭头：点按落锚点、自动平滑成曲线（Shift 走直线），右键收笔
+	bool penBegin(float x, float y) override;
+	void penAddPoint(float x, float y, bool straight) override;
+	void penPreviewPoint(float x, float y, bool straight) override;
+	void penClearPreview() override;
+	int penPointCount() const override { return (int)poly.pts.size(); }
 	bool hitErase(const float x, const float y) override;
 	bool toggleFreeEndpoint(float x, float y);
 	void resetFree();
@@ -55,7 +61,8 @@ private:
 	void ensureMinLength();
 	float arrowSize() const;
 	void ensureStrokeStyle();
-	void drawPolyline(ID2D1DeviceContext* ctx, D2D1_POINT_2F* tipFrom = nullptr, float headBack = 0.f);
+	void drawPolyline(ID2D1DeviceContext* ctx, const std::vector<D2D1_POINT_2F>& pts,
+		D2D1_POINT_2F* tipFrom = nullptr, float headBack = 0.f);
 	void constrainToEightDirections(const float anchorX, const float anchorY, const float mouseX, const float mouseY, float& targetX, float& targetY);
 	bool isBig() const;
 	bool isFun() const;

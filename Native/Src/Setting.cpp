@@ -20,6 +20,7 @@
 #include "Win/ClipPin.h"
 #include "Win/HotkeyHook.h"
 #include "Win/WinSetting.h"
+#include "Win/WinImageEdit.h"
 #include "App.h"
 #include <algorithm>
 #include <set>
@@ -46,6 +47,7 @@ namespace {
         { L"quick_pin",              110 },
         { L"rack_quick_hang",        111 },
         { L"rack_toggle",            112 },
+        { L"make_collage",           113 },
     };
     bool isGlobalHotkeyId(const std::wstring& id)
     {
@@ -272,6 +274,12 @@ namespace {
     // 下次启动解析失败 —— 用户看到的「配置文件读取错误」就是这么来的。
     bool writeConfigAtomic(const std::filesystem::path& dst, const std::wstring& text)
     {
+        // 数据目录是「用到才建」的（见 initDataPath）：配置落到 %AppData%\SnowAir 时这里补建，
+        // 免得便携模式之外的用户第一次保存因为目录不存在而写不进去。
+        if (!dst.parent_path().empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(dst.parent_path(), ec);
+        }
         const std::wstring tmp = dst.wstring() + L".tmp";
         HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
             FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -909,11 +917,9 @@ std::filesystem::path Setting::initDataPath()
     auto dataPath = std::filesystem::path{ pathTmp };
     CoTaskMemFree(pathTmp);
     dataPath.append("SnowAir");
-    if (!std::filesystem::exists(dataPath)) {
-        if (!std::filesystem::create_directories(dataPath)) {
-            _ASSERT_EXPR(FALSE, L"create data path，error");
-        }
-    }
+    // 这里**只算路径、不建目录**：配置可以放在 exe 旁（便携模式），插件目录也可能被指到
+    // 别处，此时用户根本没用到 %AppData%\SnowAir 里的东西，启动就凭空建一个空文件夹只是
+    // 留下垃圾。谁真要往里写（配置、剪贴板历史、缩略图缓存、插件），谁自己按需创建。
     return dataPath;
 }
 
@@ -1851,6 +1857,7 @@ void Setting::runHotkeyAction(const std::wstring& id)
     if (id == L"fullscreen_canvas") { WinCap::beginDemoCanvas(); return; }
     if (id == L"record") { WinCap::beginRecordPick(); return; }
     if (id == L"show_main") { WinSetting::toggle(); return; }
+    if (id == L"make_collage") { WinImageEdit::init(); return; }
     if (id == L"quick_pin") { quickPinFromContext(); return; }
     if (id == L"rack_quick_hang") { PluginHost::instance().quickHang(); return; }
     if (id == L"rack_toggle") { PluginHost::instance().toggleRack(); return; }

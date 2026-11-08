@@ -167,4 +167,18 @@ namespace Icon
 	inline constexpr const wchar_t* ClipLink = L"\ue67e";           // 链接（剪切板类别）
 	inline constexpr const wchar_t* ClipMusic = L"\ue67f";          // 音乐（剪切板类别）
 	inline constexpr const wchar_t* ClipVideo = L"\ue686";          // 视频（剪切板类别）
+	// —— 新字库 5228143 布局图标（e68c-e68e）——
+	inline constexpr const wchar_t* LayoutFree = L"\ue68c";         // 自由布局
+	inline constexpr const wchar_t* LayoutLR = L"\ue68d";           // 左右布局
+	inline constexpr const wchar_t* LayoutTB = L"\ue68e";           // 上下布局
+
+	// —— 图片编辑（新字库 5228143 增补 e68a、e68b）——
+	inline constexpr const wchar_t* Layout = L"\ue689";             // 布局
+	inline constexpr const wchar_t* Dimension01 = L"\ue68a";        // 尺寸01
+	inline constexpr const wchar_t* Split = L"\ue68b";              // 分割
+	// —— 新字库 5228143 快捷变换（e68f-e692）——
+	inline constexpr const wchar_t* RotateLeft = L"\ue68f";         // 向左旋转
+	inline constexpr const wchar_t* MirrorVertical = L"\ue690";     // 垂直镜像
+	inline constexpr const wchar_t* MirrorHorizontal = L"\ue691";   // 水平镜像
+	inline constexpr const wchar_t* RotateRight = L"\ue692";        // 向右旋转
 }

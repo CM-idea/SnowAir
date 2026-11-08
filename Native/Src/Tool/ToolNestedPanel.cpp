@@ -83,7 +83,8 @@ void ToolNestedPanel::onMinMaxInfo(MINMAXINFO* mmi)
 
 void ToolNestedPanel::paintChrome(ID2D1DeviceContext* ctx)
 {
-	ToolbarChrome::paintPropBubble(ctx, w, h, dpi, brushBg.Get(), arrowX, tipDown_);
+	ToolbarChrome::paintPropBubble(ctx, w, h, dpi, brushBg.Get(), arrowX, tipDown_,
+		borderless_ ? 0.f : ToolbarTheme::borderWidth);
 }
 
 void ToolNestedPanel::applyTipDirection(bool tipDown)

@@ -240,6 +240,9 @@ ShapeBase* History::createShape(const std::wstring& state, const int& x, const i
 
 D2D1_RECT_F annotImageRect(AnnotHost* win)
 {
+	// 嵌入到别的窗口的宿主（图片编辑器画板）自己给出底图范围
+	const auto custom = win->annotContentRect();
+	if (custom.right > custom.left && custom.bottom > custom.top) return custom;
 	if (auto* cap = dynamic_cast<WinCap*>(win)) {
 		if (cap->cutMask && cap->cutMask->hasRect())
 			return cap->cutMask->maskRect;

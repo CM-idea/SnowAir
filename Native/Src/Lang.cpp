@@ -58,21 +58,38 @@ std::wstring Lang::get(const std::wstring& keyPath)
 {
 	// 全程使用带默认值的重载：第三方语言文件缺键属正常情况（程序新增文案后，其文件仍是旧版），
 	// 而带默认值的 GetNamedObject/GetNamedString 不会抛异常。缺失时先回退内置 en-US，
-	// 仍无则直接显示键名 —— 界面观感较差，但优于异常，且可直接看出缺哪个键
+	// 仍无则直接显示键名 —— 界面观感较差，但优于异常，且可直接看出缺哪个键。
+	// 支持任意层级的点路径（如 imageEdit.tool.split）：中间段必须是对象，叶子必须是字符串，
+	// 类型不符按缺键处理——否则 GetNamedString 拿到对象会抛 hresult_error，异常穿透
+	// DispatcherQueue 回调直接杀进程。
 	auto arr = Ling::Util::splitStr(keyPath, L'.');
 	if (arr.size() < 2) return keyPath;
+
+	auto readPath = [](JsonObject const& root, const std::vector<std::wstring>& path) -> std::wstring {
+		try {
+			JsonObject obj = root;
+			if (!obj) return {};
+			for (size_t i = 0; i + 1 < path.size(); ++i) {
+				obj = obj.GetNamedObject(path[i], nullptr);
+				if (!obj) return {};
+			}
+			auto value = obj.GetNamedValue(path.back(), nullptr);
+			if (!value || value.ValueType() != JsonValueType::String) return {};
+			return std::wstring{ value.GetString() };
+		}
+		catch (...) {
+			// 手改坏的语言文件：类型不符等一律按缺键处理，绝不让异常穿透出去
+			return {};
+		}
+	};
+
 	auto& self = *lang;
-	auto obj = self.langObj.GetNamedObject(arr[0], nullptr);
-	if (obj) {
-		auto text = obj.GetNamedString(arr[1], L"");
-		if (!text.empty()) return std::wstring{ text };
-	}
+	auto text = readPath(self.langObj, arr);
+	if (!text.empty()) return text;
 	if (!self.fallbackObj) return keyPath;
-	auto def = self.fallbackObj.GetNamedObject(arr[0], nullptr);
-	if (!def) return keyPath;
-	auto text = def.GetNamedString(arr[1], L"");
+	text = readPath(self.fallbackObj, arr);
 	if (text.empty()) return keyPath;
-	return std::wstring{ text };
+	return text;
 }
 
 void Lang::initLang(const std::wstring& langCode)

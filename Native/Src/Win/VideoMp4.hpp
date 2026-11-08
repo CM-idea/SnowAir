@@ -43,15 +43,9 @@
 
 
 namespace VideoMp4{
-// {1884E6DC-2AE3-4499-A3D7-1A27E3B2AC39}
-inline static const GUID MyFakeFmt = { 0x1884e6dc, 0x2ae3, 0x4499, { 0xa3, 0xd7, 0x1a, 0x27, 0xe3, 0xb2, 0xac, 0x39 } };
-
-// {7F478D2D-9EBF-4B9A-B2F3-83800263BB86}
-inline static const GUID MFVideoFormat_RGB10 = { 0x7f478d2d, 0x9ebf, 0x4b9a, { 0xb2, 0xf3, 0x83, 0x80, 0x2, 0x63, 0xbb, 0x86 } };
-
 // —— HDR(scRGB) → SDR sRGB 的统一转换 ——
-// 截图/录屏共用同一套口径：scRGB 1.0 = 80 尼特，按当前显示器的 SDR 白点缩放后
-// 再做 linear→sRGB。录屏不再走 RGB10/HEVC 那条没有色调映射的旧路。
+// 截图与录屏共用同一套口径：scRGB 1.0 = 80 尼特，按当前显示器的 SDR 白点缩放后
+// 再做 linear→sRGB。录屏出口固定为 8 位 sRGB，不再保留 10 位浮点通路。
 inline float halfToFloat(unsigned short h)
 {
     const unsigned int sign = (unsigned int)(h & 0x8000u) << 16;
@@ -85,6 +79,19 @@ inline unsigned char linearToSrgbByte(float v)
     const float s = (v <= 0.0031308f) ? v * 12.92f : 1.055f * std::pow(v, 1.f / 2.4f) - 0.055f;
     const int n = (int)std::lround(s * 255.f);
     return (unsigned char)(n < 0 ? 0 : (n > 255 ? 255 : n));
+}
+
+// 高光滚降：拐点以下按原值输出，SDR 内容（含接近白点的界面）保持原样；
+// 超过拐点的部分用双曲曲线压进剩余码值，避免 HDR 高光在 8 位输出里被整片裁成纯白。
+// 曲线在拐点处值与斜率都连续（斜率 1），所以过渡不会出现台阶或色带；
+// 拐点取 0.9 后，SDR 白落到约 249，余下的 6 个码值留给高光层次；两者都在
+// 肉眼不易察觉的范围内。输入已按「SDR 白点归一化」，1.0 即屏幕上的 SDR 白。
+inline float softHighlightKnee(float v)
+{
+    constexpr float knee = 0.9f;
+    if (!(v > knee)) return v;
+    const float t = (v - knee) / (1.f - knee);
+    return knee + (1.f - knee) * (t / (1.f + t));
 }
 
 // 当前显示器的"SDR 内容亮度"（尼特）。非高级颜色 / 查询失败按 80 尼特。
@@ -234,7 +241,7 @@ public:
         if (!samples)
             return;
 
-        // If null, do nothing
+        // 空指针或空长度都直接忽略
         if (ForceIfEmpty == false && data)
         {
             bool Silence = true;
@@ -340,96 +347,6 @@ struct REBUFFER
         d.clear();
     }
 };
-template <typename T = float>
-class READYBUFF
-{
-public:
-
-    std::vector<T> g;
-
-    void Add(T* d, size_t sz)
-    {
-        auto t = g.size();
-        g.resize(t + sz);
-        memcpy(g.data() + t, d, sz * sizeof(T));
-    }
-
-    bool Next(T* d, size_t sz)
-    {
-        if (g.empty())
-            return false;
-        if (!sz)
-            return false;
-        memcpy(d, g.data(), sz * sizeof(T));
-
-        if (g.size() < sz)
-            g.clear();
-        else
-            g.erase(g.begin(), g.begin() + sz);
-        return true;
-    }
-
-};
-inline HRESULT MFTrs(DWORD, DWORD iid, DWORD ood, CComPtr<IMFTransform> trs, CComPtr<IMFSample> s, IMFSample** sx)
-{
-    if (!trs)
-        return E_FAIL;
-    auto hr = s ? trs->ProcessInput(iid, s, 0) : S_OK;
-    if (SUCCEEDED(hr) || hr == 0xC00D36B5)
-    {
-        bool FX = false;
-        if (hr == 0xC00D36B5)
-            FX = true;
-
-        MFT_INPUT_STREAM_INFO six = {};
-        trs->GetInputStreamInfo(iid, &six);
-
-        MFT_OUTPUT_STREAM_INFO si = {};
-        CComPtr<IMFMediaBuffer> bb;
-        if (si.cbSize == 0)
-            trs->GetOutputStreamInfo(ood, &si);
-        CComPtr<IMFSample> pSample2;
-        if ((si.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) == 0)
-        {
-            if (si.cbSize == 0)
-            {
-                return E_FAIL;
-            }
-            MFCreateSample(&pSample2);
-            MFCreateMemoryBuffer(si.cbSize, &bb);
-            pSample2->AddBuffer(bb);
-        }
-
-        MFT_OUTPUT_DATA_BUFFER db = { 0 };
-        db.dwStreamID = ood;
-        db.pSample = pSample2;
-        if (si.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES)
-            db.pSample = 0;
-
-        DWORD st = 0;
-        hr = trs->ProcessOutput(0, 1, &db, &st);
-        if (hr == 0xC00D6D72 && FX)
-        {
-            hr = trs->ProcessInput(iid, s, 0);
-            hr = trs->ProcessOutput(0, 1, &db, &st);
-        }
-        if (FAILED(hr))
-            return hr;
-        if (db.pEvents)
-            db.pEvents->Release();
-        if (!db.pSample)
-            return E_FAIL;
-        if (sx)
-        {
-            *sx = db.pSample;
-            if ((si.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) == 0)
-                (*sx)->AddRef();
-
-        }
-        return S_OK;
-    }
-    return hr;
-}
 class CAPTURE
 {
 public:
@@ -505,7 +422,7 @@ public:
     }
 
     DXGI_FORMAT InHDR = DXGI_FORMAT_UNKNOWN;
-    // 是否成功要到了"系统帮我转成 8 位"的桌面复制，见 Prepare
+    // 是否退到了"只列 BGRA8、由系统转换"的桌面复制，见 Prepare
     bool SDRForced = false;
     // —— 统一 HDR→SDR：所有帧出口都是 BGRA8(sRGB) ——
     float sdrWhiteNits{ 80.f };
@@ -521,8 +438,10 @@ public:
         if (srgbLutValid && std::fabs(srgbLutWhite - white) < 0.5f) return;
         const float inv = 80.f / white;
         for (int bits = 0; bits < 65536; ++bits) {
+            // scRGB 线性 → 以 SDR 白点为单位 → 高光滚降 → sRGB 编码。
+            // 前两步固定，滚降只让超出 SDR 白点的部分让步，SDR 内容仍按原值出图。
             float v = halfToFloat((unsigned short)bits) * inv;
-            srgbLut[(size_t)bits] = linearToSrgbByte(v);
+            srgbLut[(size_t)bits] = linearToSrgbByte(softHighlightKnee(v));
         }
         srgbLutWhite = white;
         srgbLutValid = true;
@@ -539,42 +458,162 @@ public:
         }
     }
 
-    // FP16(scRGB) / RGBA32F → BGRA8(sRGB)。输入 buf 是自下而上的行序，输出保持一致，
-    // 直接满足 MFVideoFormat_RGB32 的输入口径。
+    // FP16(scRGB) → BGRA8(sRGB)。输入 buf 是自下而上的行序，输出保持一致，
+    // 直接满足 MFVideoFormat_RGB32 的输入口径。只有 HDR 屏才会拿到 FP16 复制表面，
+    // SDR 屏不会进这个函数。
     bool toneMapHdrToBgra(int w, int h)
     {
         if (w <= 0 || h <= 0 || buf.empty()) return false;
         const size_t need = (size_t)w * (size_t)h * 4;
         if (sdrBuf.size() != need) sdrBuf.resize(need);
         ensureSrgbLut();
-        if (InHDR == DXGI_FORMAT_R16G16B16A16_FLOAT) {
-            const unsigned short* src = reinterpret_cast<const unsigned short*>(buf.data());
-            if ((size_t)w * h * 4 > buf.size() / 2) return false;
-            for (size_t i = 0, n = (size_t)w * h; i < n; ++i) {
-                const unsigned short* p = src + i * 4;
-                BYTE* d = sdrBuf.data() + i * 4;
-                d[0] = srgbLut[p[2]];   // B
-                d[1] = srgbLut[p[1]];   // G
-                d[2] = srgbLut[p[0]];   // R
+        if (InHDR != DXGI_FORMAT_R16G16B16A16_FLOAT) return false;
+        const unsigned short* src = reinterpret_cast<const unsigned short*>(buf.data());
+        if ((size_t)w * h * 4 > buf.size() / 2) return false;
+        for (size_t i = 0, n = (size_t)w * h; i < n; ++i) {
+            const unsigned short* p = src + i * 4;
+            BYTE* d = sdrBuf.data() + i * 4;
+            d[0] = srgbLut[p[2]];   // B
+            d[1] = srgbLut[p[1]];   // G
+            d[2] = srgbLut[p[0]];   // R
+            d[3] = 255;
+        }
+        return true;
+    }
+
+    // —— HDR 光标叠加 ——
+    // FP16 复制表面没有 GDI 兼容位，光标不能像 SDR 那样用 DrawIconEx 直接画进 GPU 纹理。
+    // 这里把光标图形渲染成一张 32 位位图（老式光标按掩码补 alpha），再按 alpha 混到
+    // 色调映射后的 BGRA8 画面上；混合放在 CPU 侧，是因为这时的画面已经是普通内存里的
+    // 紧凑 BGRA 缓冲，不需要再为光标建一张 GPU 纹理。
+    struct CURSORSHOT
+    {
+        HCURSOR cur = nullptr;
+        int w = 0, h = 0, hotX = 0, hotY = 0;
+        std::vector<BYTE> pix;   // top-down BGRA
+    };
+    CURSORSHOT cursorShot;
+
+    bool ensureCursorShot(HCURSOR cur)
+    {
+        if (cursorShot.cur == cur && !cursorShot.pix.empty()) return true;
+        ICONINFO ii{};
+        if (!cur || !GetIconInfo(cur, &ii)) return false;
+        auto cleanup = [&] {
+            if (ii.hbmColor) DeleteObject(ii.hbmColor);
+            if (ii.hbmMask) DeleteObject(ii.hbmMask);
+        };
+
+        int width = 32, height = 32;
+        if (ii.hbmColor) {
+            BITMAP bm{};
+            if (GetObject(ii.hbmColor, sizeof(bm), &bm)) { width = bm.bmWidth; height = bm.bmHeight; }
+        }
+        else if (ii.hbmMask) {
+            BITMAP bm{};
+            if (GetObject(ii.hbmMask, sizeof(bm), &bm)) { width = bm.bmWidth; height = bm.bmHeight / 2; }
+        }
+        width = width < 1 ? 1 : (width > 256 ? 256 : width);
+        height = height < 1 ? 1 : (height > 256 ? 256 : height);
+
+        HDC screen = GetDC(nullptr);
+        HDC mem = screen ? CreateCompatibleDC(screen) : nullptr;
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height;   // top-down：与热点坐标一致
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        HBITMAP dib = mem ? CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
+        bool ok = false;
+        if (dib && bits)
+        {
+            HGDIOBJ old = SelectObject(mem, dib);
+            memset(bits, 0, (size_t)width * (size_t)height * 4);
+            DrawIconEx(mem, 0, 0, cur, width, height, 0, nullptr, DI_NORMAL);
+
+            cursorShot.pix.assign((size_t)width * (size_t)height * 4, 0);
+            memcpy(cursorShot.pix.data(), bits, cursorShot.pix.size());
+
+            // 老式光标只有 AND/XOR 掩码、没有 alpha：DrawIconEx 之后 alpha 仍全 0，按掩码补
+            bool anyAlpha = false;
+            for (size_t i = 3; i < cursorShot.pix.size(); i += 4) {
+                if (cursorShot.pix[i]) { anyAlpha = true; break; }
+            }
+            BITMAP bmMask{};
+            if (!anyAlpha && ii.hbmMask && GetObject(ii.hbmMask, sizeof(bmMask), &bmMask)
+                && bmMask.bmWidth >= width && bmMask.bmHeight >= height)
+            {
+                BITMAPINFO mi{};
+                mi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+                mi.bmiHeader.biWidth = bmMask.bmWidth;
+                mi.bmiHeader.biHeight = -bmMask.bmHeight;   // top-down
+                mi.bmiHeader.biPlanes = 1;
+                mi.bmiHeader.biBitCount = 1;
+                mi.bmiHeader.biCompression = BI_RGB;
+                const int stride = ((bmMask.bmWidth + 31) / 32) * 4;
+                std::vector<BYTE> maskBits((size_t)stride * bmMask.bmHeight, 0);
+                if (GetDIBits(mem, ii.hbmMask, 0, bmMask.bmHeight, maskBits.data(), &mi, DIB_RGB_COLORS) != 0)
+                {
+                    for (int y = 0; y < height; ++y) {
+                        const BYTE* row = maskBits.data() + (size_t)y * stride;
+                        BYTE* line = cursorShot.pix.data() + (size_t)y * width * 4;
+                        for (int x = 0; x < width; ++x) {
+                            const bool transparent = (row[x >> 3] >> (7 - (x & 7))) & 1;
+                            line[x * 4 + 3] = transparent ? 0 : 255;
+                        }
+                    }
+                }
+            }
+            SelectObject(mem, old);
+            cursorShot.cur = cur;
+            cursorShot.w = width;
+            cursorShot.h = height;
+            cursorShot.hotX = (int)ii.xHotspot;
+            cursorShot.hotY = (int)ii.yHotspot;
+            ok = true;
+        }
+        if (dib) DeleteObject(dib);
+        if (mem) DeleteDC(mem);
+        if (screen) ReleaseDC(nullptr, screen);
+        cleanup();
+        return ok;
+    }
+
+    // dst 是自下而上的 BGRA8；originX/originY 是裁剪区左上角在虚拟桌面中的坐标
+    void blendCursor(std::vector<BYTE>& dst, int w, int h, int originX, int originY)
+    {
+        if (w <= 0 || h <= 0 || dst.empty()) return;
+        CURSORINFO ci{ sizeof(ci) };
+        if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING) || !ci.hCursor) return;
+        if (!ensureCursorShot(ci.hCursor)) return;
+        const int cx = (int)ci.ptScreenPos.x - originX - cursorShot.hotX;
+        const int cy = (int)ci.ptScreenPos.y - originY - cursorShot.hotY;
+        const BYTE* src = cursorShot.pix.data();
+        for (int y = 0; y < cursorShot.h; ++y) {
+            const int dy = cy + y;
+            if (dy < 0 || dy >= h) continue;
+            BYTE* drow = dst.data() + (size_t)(h - 1 - dy) * (size_t)w * 4;
+            for (int x = 0; x < cursorShot.w; ++x) {
+                const int dx = cx + x;
+                if (dx < 0 || dx >= w) continue;
+                const BYTE* s = src + ((size_t)y * (size_t)cursorShot.w + (size_t)x) * 4;
+                const unsigned a = s[3];
+                if (!a) continue;
+                BYTE* d = drow + (size_t)dx * 4;
+                if (a == 255) {
+                    d[0] = s[0]; d[1] = s[1]; d[2] = s[2];
+                }
+                else {
+                    d[0] = (BYTE)((s[0] * a + d[0] * (255 - a)) / 255);
+                    d[1] = (BYTE)((s[1] * a + d[1] * (255 - a)) / 255);
+                    d[2] = (BYTE)((s[2] * a + d[2] * (255 - a)) / 255);
+                }
                 d[3] = 255;
             }
-            return true;
         }
-        if (InHDR == DXGI_FORMAT_R32G32B32A32_FLOAT) {
-            const float* src = reinterpret_cast<const float*>(buf.data());
-            if ((size_t)w * h * 4 > buf.size() / 4) return false;
-            const float inv = 80.f / ((sdrWhiteNits > 1.f) ? sdrWhiteNits : 80.f);
-            for (size_t i = 0, n = (size_t)w * h; i < n; ++i) {
-                const float* p = src + i * 4;
-                BYTE* d = sdrBuf.data() + i * 4;
-                d[0] = linearToSrgbByte(p[2] * inv);
-                d[1] = linearToSrgbByte(p[1] * inv);
-                d[2] = linearToSrgbByte(p[0] * inv);
-                d[3] = 255;
-            }
-            return true;
-        }
-        return false;
     }
     // —— GDI 兜底（见 DESKTOPCAPTUREPARAMS::GdiFallback）——
     bool gdiMode = false;
@@ -589,7 +628,7 @@ public:
     {
         HRESULT hr = S_OK;
 
-        // Driver types supported
+        // 没有指定适配器时，按「硬件 → WARP → 软件参考驱动」的顺序试
         D3D_DRIVER_TYPE DriverTypes[] =
         {
             D3D_DRIVER_TYPE_HARDWARE,
@@ -598,7 +637,7 @@ public:
         };
         UINT NumDriverTypes = ARRAYSIZE(DriverTypes);
 
-        // Feature levels supported
+        // 桌面复制只要求 D3D11，低版本作为老机器的退路
         D3D_FEATURE_LEVEL FeatureLevels[] =
         {
             D3D_FEATURE_LEVEL_11_0,
@@ -623,16 +662,13 @@ public:
             g = nullptr; //指定的那块建不起来就退回默认适配器，别整个录制卡死在这
         }
 
-        // Create device
+        // 逐个驱动类型尝试，第一个成功的就留着
         for (UINT DriverTypeIndex = 0; DriverTypeIndex < NumDriverTypes; ++DriverTypeIndex)
         {
             hr = D3D11CreateDevice(g, DriverTypes[DriverTypeIndex], nullptr, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, FeatureLevels, NumFeatureLevels,
                 D3D11_SDK_VERSION, &device, &FeatureLevel, &context);
             if (SUCCEEDED(hr))
-            {
-                // Device creation success, no need to loop anymore
                 break;
-            }
         }
         if (FAILED(hr))
             return hr;
@@ -699,7 +735,7 @@ public:
 
     bool Get(IDXGIResource* lDesktopResource,bool Curs,RECT* rcx = 0)
     {
-        // QI for ID3D11Texture2D
+        // 取到的帧资源只有当它是 2D 纹理时才能拷进本设备的纹理
         CComPtr<ID3D11Texture2D> lAcquiredDesktopImage;
         if (!lDesktopResource)
             return 0;
@@ -711,15 +747,16 @@ public:
 
         if (InHDR != DXGI_FORMAT_UNKNOWN || Curs == 0)
         {
-            // No Cursor support
+            // HDR 帧没有 GDI 兼容位，光标改在色调映射后由 blendCursor 叠加；
+            // 不录光标时更省一步，直接拷进暂存纹理
             context->CopyResource(lDestImage, lAcquiredDesktopImage);
         }
         else
         {
-            // Copy image into GDI drawing texture
+            // SDR 且要录光标：先拷到 GDI 兼容纹理，GDI 才能把光标画上去
             context->CopyResource(lGDIImage, lAcquiredDesktopImage);
 
-            // Draw cursor image into GDI drawing texture
+            // 把光标画进这张 GDI 兼容纹理
             CComPtr<IDXGISurface1> lIDXGISurface1;
 
             lIDXGISurface1 = lGDIImage;
@@ -743,11 +780,14 @@ public:
                     HDC  lHDC = nullptr;
                     if (lGotIcon && SUCCEEDED(lIDXGISurface1->GetDC(FALSE, &lHDC)) && lHDC)
                     {
-                        auto lCursorPosition = lCursorInfo.ptScreenPos;
+                        // 纹理只覆盖单块显示器，光标坐标却是虚拟桌面坐标：
+                        // 必须减去本屏原点，否则副屏（非 0,0）上光标会被画到纹理外
+                        const int cx = (int)lCursorInfo.ptScreenPos.x - monRect.left - (int)iconInfo.xHotspot;
+                        const int cy = (int)lCursorInfo.ptScreenPos.y - monRect.top - (int)iconInfo.yHotspot;
                         DrawIconEx(
                             lHDC,
-                            lCursorPosition.x- iconInfo.xHotspot,
-                            lCursorPosition.y- iconInfo.yHotspot,
+                            cx,
+                            cy,
                             lCursorInfo.hCursor,
                             0,
                             0,
@@ -760,12 +800,12 @@ public:
                 }
             }
 
-            // Copy image into CPU access texture
+            // 画好光标后再拷到 CPU 可读的暂存纹理
             context->CopyResource(lDestImage, lGDIImage);
         }
 
 
-        // Copy from CPU access texture to bitmap buffer
+        // 从暂存纹理映射到内存，按裁剪区拷成紧凑位图
         D3D11_MAPPED_SUBRESOURCE resource;
         UINT subresource = D3D11CalcSubresource(0, 0, 0);
         hr = context->Map(lDestImage, subresource, D3D11_MAP_READ_WRITE, 0, &resource);
@@ -774,19 +814,15 @@ public:
 
         int multi = 4;
         if (InHDR == DXGI_FORMAT_R16G16B16A16_FLOAT)
-            multi = 8; // 64-bit
+            multi = 8; // FP16 每像素 8 字节
 
         auto sz = lOutputDuplDesc.ModeDesc.Width
             * lOutputDuplDesc.ModeDesc.Height * multi;
-        auto sz2 = sz;
         if (rcx)
-        {
-            sz2 = (rcx->right - rcx->left) * (rcx->bottom - rcx->top) * multi;
-            sz = sz2;
-        }
-        // ★ 先算好目标尺寸再 resize 一次：以前先按整屏 resize、再缩到选区尺寸，
-        //   vector 的 capacity 会一直停在整屏大小 —— 录一小块区域也要占一整屏内存。
-        if (buf.size() != (size_t)sz2) buf.resize(sz2);
+            sz = (rcx->right - rcx->left) * (rcx->bottom - rcx->top) * multi;
+        // 直接按目标尺寸 resize：先按整屏再缩到选区的话，capacity 会一直停在整屏大小，
+        // 录一小块区域也要占一整屏内存。
+        if (buf.size() != (size_t)sz) buf.resize(sz);
 
         UINT lBmpRowPitch = lOutputDuplDesc.ModeDesc.Width * multi;
         if (rcx)
@@ -816,13 +852,12 @@ public:
 
     bool Prepare(UINT Output = 0)
     {
-    // Get DXGI device
+        // 从已建好的 D3D 设备反查它所属的 DXGI 设备与适配器
         CComPtr<IDXGIDevice> lDxgiDevice;
         lDxgiDevice = device;
         if (!lDxgiDevice)
             return 0;
 
-        // Get DXGI adapter
         HRESULT hr = 0;
 
         CComPtr<IDXGIAdapter> lDxgiAdapter;
@@ -835,7 +870,7 @@ public:
 
         lDxgiDevice = 0;
 
-        // Get output
+        // 按输出索引取要录的那块显示器
         CComPtr<IDXGIOutput> lDxgiOutput;
         hr = lDxgiAdapter->EnumOutputs(Output, &lDxgiOutput);
         if (FAILED(hr))
@@ -851,7 +886,7 @@ public:
         srgbLutValid = false;
         lastWhiteRefresh = GetTickCount64();
 
-        // QI for Output 1
+        // 创建桌面复制至少需要 Output1
         CComPtr<IDXGIOutput1> lDxgiOutput1;
         lDxgiOutput1 = lDxgiOutput;
         if (!lDxgiOutput1)
@@ -859,23 +894,30 @@ public:
 
         lDxgiOutput = 0;
 
-        // Create desktop duplication
-        // 开着 HDR 的屏，桌面复制默认给的是 FP16(scRGB)，编码器一个都吃不下，得自己转：
-        // 转 10 位只有 HEVC 能收（编码器不是每台机器都有），自己降到 8 位则一片黑（FP16 表面
-        // 的 alpha 是未定义的，WIC 从 float 转 8 位时那一遍预乘 alpha 会把画面乘成 0）。
-        // DuplicateOutput1 可以直接指定"我只要 BGRA8"，转换和色调映射都交给系统做，于是
-        // HDR 屏走的就是和普通屏一样那条验证过的路，连光标叠加都能用上。
-        // Win10 1703 才有，且要求进程 per-monitor DPI aware；要不到就退回老接口
+        // 按桌面原生格式取帧：把 FP16(scRGB) 和 BGRA8 一起交给 DuplicateOutput1，HDR 屏拿到
+        // FP16、SDR 屏拿到 BGRA8，两者都命中桌面当前格式，系统不做任何转换。
+        // 只列 BGRA8 时系统会替我们把 FP16 转成 8 位，这个换算没有线性→sRGB 编码，
+        // 中间调会被压暗，且高光截断位置不受本程序控制 —— 色调映射必须自己做，
+        // 所以这里只在驱动不认双格式列表时才退回系统转换。
+        // DuplicateOutput1 要求 Win10 1703 以上且进程 per-monitor DPI aware；拿不到就退回旧接口
         CComPtr<IDXGIOutput5> lDxgiOutput5;
         lDxgiOutput5 = lDxgiOutput1;
         SDRForced = false;
+        bool nativeFormats = false;
         if (lDxgiOutput5)
         {
-            const DXGI_FORMAT want[] = { DXGI_FORMAT_B8G8R8A8_UNORM };
-            hr = lDxgiOutput5->DuplicateOutput1(device, 0, 1, want, &lDeskDupl);
-            SDRForced = SUCCEEDED(hr);
+            const DXGI_FORMAT want[] = { DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM };
+            hr = lDxgiOutput5->DuplicateOutput1(device, 0, 2, want, &lDeskDupl);
+            nativeFormats = SUCCEEDED(hr);
+            if (!nativeFormats)
+            {
+                // 个别驱动不认双格式列表：只能退到只列 BGRA8，系统转换画质差但还能录
+                const DXGI_FORMAT wantSdr[] = { DXGI_FORMAT_B8G8R8A8_UNORM };
+                hr = lDxgiOutput5->DuplicateOutput1(device, 0, 1, wantSdr, &lDeskDupl);
+                SDRForced = SUCCEEDED(hr);
+            }
         }
-        if (!SDRForced)
+        if (!nativeFormats && !SDRForced)
             hr = lDxgiOutput1->DuplicateOutput(
                 device,
                 &lDeskDupl);
@@ -886,7 +928,7 @@ public:
         lDxgiOutput5 = 0;
         lDxgiOutput1 = 0;
 
-        // Create GUI drawing texture
+        // 建 GPU 侧纹理：SDR 屏要靠它获得 GDI 兼容表面来画光标，HDR 屏只做拷贝中转
         lDeskDupl->GetDesc(&lOutputDuplDesc);
         // 只列了 BGRA8 一个，拿到的帧就只可能是它 —— 别听 GetDesc 报的显示模式格式，
         // 那个在 HDR 屏上仍是 FP16，照它建纹理会让下面的 CopyResource 拿不到画面
@@ -899,8 +941,9 @@ public:
         desc.ArraySize = 1;
         desc.BindFlags = D3D11_BIND_FLAG::D3D11_BIND_RENDER_TARGET;
         InHDR = DXGI_FORMAT_UNKNOWN;
-        if (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) // HDR, no GDI compatible
+        if (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT)
         {
+            // FP16 表面没有 GDI 兼容位，光标只能另走 CPU 混合（见 blendCursor）
             InHDR = desc.Format;
         }
         else
@@ -913,17 +956,9 @@ public:
         lGDIImage = 0;
         hr = device->CreateTexture2D(&desc, NULL, &lGDIImage);
         if (FAILED(hr))
-        {
-//            desc.MiscFlags = 0;
-  //          hr = device->CreateTexture2D(&desc, NULL, &lGDIImage);
-        }
-        if (FAILED(hr))
             return 0;
 
-        if (lGDIImage == nullptr)
-            return 0;
-
-        // Create CPU access texture
+        // 再建一张 CPU 可读的暂存纹理，映射后就是内存里的紧凑位图
         desc.Width = lOutputDuplDesc.ModeDesc.Width;
         desc.Height = lOutputDuplDesc.ModeDesc.Height;
         desc.Format = lOutputDuplDesc.ModeDesc.Format;
@@ -940,53 +975,7 @@ public:
         if (FAILED(hr))
             return 0;
 
-        if (lDestImage == nullptr)
-            return 0;
-
         return 1;
-    }
-
-
-    CComPtr<IWICImagingFactory2> wbfact;
-    HRESULT Convert(void* f, int wi, int he,std::vector<DWORD>& out,GUID from = GUID_WICPixelFormat128bppPRGBAFloat)
-    {
-        if (!wbfact)
-            CoCreateInstance(CLSID_WICImagingFactory2, 0, CLSCTX_INPROC_SERVER,
-                __uuidof(IWICImagingFactory2), (void**)&wbfact);
-        // 工厂建不起来就得就此收手，下面一路都是拿它当非空用的
-        if (!wbfact)
-            return E_FAIL;
-
-        int multi = 4;
-        if (from == GUID_WICPixelFormat128bppPRGBAFloat)
-            multi = 16;
-        if (from == GUID_WICPixelFormat64bppRGBAHalf)
-            multi = 8;
-        CComPtr<IWICBitmap> b;
-        wbfact->CreateBitmapFromMemory(wi, he, from, wi * multi, wi * he * multi, (BYTE*)f, &b);
-        if (!b)
-            return E_FAIL;
-
-
-        CComPtr<IWICFormatConverter> wf;
-        wbfact->CreateFormatConverter(&wf);
-
-        if (!wf)
-            return E_FAIL;
-        auto hr = wf->Initialize(b, GUID_WICPixelFormat32bppRGBA1010102, WICBitmapDitherTypeNone, 0, 0, WICBitmapPaletteTypeCustom);
-        if (FAILED(hr))
-            return E_FAIL;
-
-        CComPtr<IWICBitmap> wic;
-        wbfact->CreateBitmapFromSource(wf, WICBitmapCacheOnLoad, &wic);
-        if (!wic)
-            return E_FAIL;
-
-        WICRect wr = { 0,0,(INT)wi,(INT)he };
-        out.resize(wi * he);
-        hr = wic->CopyPixels(&wr, wi * 4, (UINT)out.size() * 4, (BYTE*)out.data());
-
-        return hr;
     }
 
 };
@@ -1391,10 +1380,8 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
 
         void PlaySilence(REFERENCE_TIME rt)
         {
-            // ns
+            // rt 是 100ns 单位，先折成毫秒再乘采样率，得到这一帧时长对应的采样数
             rt /= 10000;
-            // in SR , 1000 ms
-            //  ?    , rt ms
             auto ns = (wfx.nSamplesPerSec * rt);
             ns /= 1000;
             while (Capturing)
@@ -1407,7 +1394,7 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
                 if (!Capturing)
                     break;
 
-                // See how much buffer space is available.
+                // 先问渲染缓冲还空着多少，只补空位，避免一次塞满导致累计延迟
                 UINT32 numFramesPadding = 0;
                 auto hr = ac2->GetCurrentPadding(&numFramesPadding);
                 if (FAILED(hr))
@@ -1643,18 +1630,6 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
         if (dp.VIDEO_ENCODING_FORMAT == MFVideoFormat_VP80 || dp.VIDEO_ENCODING_FORMAT == MFVideoFormat_VP90)
             pMediaTypeOutVideo->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_Normal);
 
-/*
-    MF_MT_FRAME_SIZE	1920 x 1080
-    MF_MT_AVG_BITRATE	185984000
-    MF_MT_MAJOR_TYPE	MFMediaType_Video
-    MF_MT_VIDEO_NOMINAL_RANGE	1
-    MF_MT_FRAME_RATE	30 x 1
-    MF_MT_PIXEL_ASPECT_RATIO	1 x 1
-    MF_MT_INTERLACE_MODE	2
-    MF_MT_SUBTYPE	MFVideoFormat_HEVC
-
-
-*/
         hr = pSinkWriter->AddStream(pMediaTypeOutVideo, &OutVideoStreamIndex);
         if (FAILED(hr)) return -5;
     }
@@ -1756,19 +1731,7 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
         if (FAILED(hr)) return -7;
 
 
-        // pcm
-/*        if (AUDIO_ENCODING_FORMAT == MFAudioFormat_PCM)
-        {
-            pMediaTypeOutAudio->SetGUID(MF_MT_SUBTYPE, vp.AUDIO_TYPE);
-            pMediaTypeOutAudio->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, vp.AUDIO_CHANNELS);
-            pMediaTypeOutAudio->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, vp.AUDIO_SAMPLE_RATE);
-            pMediaTypeOutAudio->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, vp.AUDIO_BIT_RATE / 8);
-            int BA = (int)((vp.AUDIO_INPUT_BITS / 8) * vp.AUDIO_INPUT_CHANNELS);
-            pMediaTypeOutAudio->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, BA);
-            pMediaTypeOutAudio->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, vp.AUDIO_INPUT_BITS);
-        }
-*/
-        // mp3
+        // mp3（不指定编码器时的默认输出）
         if (dp.AUDIO_ENCODING_FORMAT == MFAudioFormat_MP3)
         {
             pMediaTypeOutAudio->SetGUID(MF_MT_SUBTYPE, dp.AUDIO_ENCODING_FORMAT);
@@ -1777,14 +1740,6 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
             pMediaTypeOutAudio->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, dp.ABR*1000 / 8);
         }
 
-/*        // wma
-        if (vp.AUDIO_TYPE == MFAudioFormat_WMAudioV9)
-        {
-            pMediaTypeOutAudio->SetGUID(MF_MT_SUBTYPE, vp.AUDIO_TYPE);
-            pMediaTypeOutAudio->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, vp.AUDIO_CHANNELS);
-            pMediaTypeOutAudio->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, vp.AUDIO_SAMPLE_RATE);
-        }
-*/
         // aac
         if (dp.AUDIO_ENCODING_FORMAT == MFAudioFormat_AAC || dp.AUDIO_ENCODING_FORMAT == MFAudioFormat_FLAC)
         {
@@ -1816,49 +1771,9 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
 
 
 
-    // NV12 converter
-    CComPtr<IMFTransform> VideoTransformMFT;
-    bool NV12 = 0;
-    if (false)
-    {
-        CComPtr<IMFTransform> trs;
-        trs.CoCreateInstance(CLSID_VideoProcessorMFT);
-        std::vector<DWORD> iids;
-        std::vector<DWORD> oods;
-        DWORD is = 0, os = 0;
-        hr = trs->GetStreamCount(&is, &os);
-        iids.resize(is);
-        oods.resize(os);
-        hr = trs->GetStreamIDs(is, iids.data(), os, oods.data());
-        CComPtr<IMFMediaType> ptype;
-        CComPtr<IMFMediaType> ptype2;
-        MFCreateMediaType(&ptype);
-        MFCreateMediaType(&ptype2);
-        pMediaTypeVideoIn->CopyAllItems(ptype);
-        pMediaTypeVideoIn->CopyAllItems(ptype2);
-
-        PROPVARIANT pv;
-        InitPropVariantFromCLSID(MFVideoFormat_RGB32, &pv);
-        ptype->SetItem(MF_MT_SUBTYPE, pv);
-
-        PROPVARIANT pv2;
-        InitPropVariantFromCLSID(MFVideoFormat_NV12, &pv2);
-        ptype2->SetItem(MF_MT_SUBTYPE, pv2);
-
-        hr = trs->SetInputType(iids[0], ptype, 0);
-        auto hr2 = trs->SetOutputType(oods[0], ptype2, 0);
-        if (SUCCEEDED(hr) && SUCCEEDED(hr2))
-        {
-            VideoTransformMFT = trs;
-            pMediaTypeVideoIn->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-            NV12 = true;
-        }
-    }
-
-    if (!NV12)
-        pMediaTypeVideoIn->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-
-    // 色彩统一在采集出口做完了：编码器永远收 BGRA8(sRGB)/RGB32，不再有 RGB10 分支
+    // 输入固定为 RGB32（BGRA8 全范围）：色调映射已在采集出口完成，
+    // RGB→YUV 与范围收缩交给 SinkWriter 自带的颜色转换。
+    pMediaTypeVideoIn->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
     if (dp.HasVideo && !dp.Framer)
     {
         hr = pSinkWriter->SetInputMediaType(OutVideoStreamIndex, pMediaTypeVideoIn, NULL);
@@ -1964,10 +1879,6 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
     std::vector<char> AudioData;
     std::vector<std::vector<float>> v(dp.NCH);
     std::vector<MIXBUFFER<float>> mixv(dp.NCH);
-   
-#ifdef _DEBUG
-    wchar_t ydebug[300] = { 0};
-#endif
     for (;;)
     {
         if (!dp.HasAudio && !dp.Framer)
@@ -1986,7 +1897,7 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
 
         if (dp.HasAudio)
         {
-            // Wait for all the events
+            // 等所有音频端点都至少有数据可抓
             if (!AudioEvents.empty())
                 WaitForMultipleObjects((DWORD)AudioEvents.size(), AudioEvents.data(), TRUE, INFINITE);
 
@@ -2069,7 +1980,7 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
                     mixv[ich].Fin(AvailableSamples);
             }
 
-            // v to shorts
+            // 混音结果是 ±1 的 float，这里转回 16bit 样本
             FinalAudioBytes = AvailableSamples * dp.NCH * 2;
             AudioData.resize(FinalAudioBytes);
             short* ad = (short*)AudioData.data();
@@ -2083,8 +1994,7 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
                 }
             }
 
-            // In SR , 1000 ms
-            // In ThisAudioSamples, ?
+            // 样本数 → 100ns：SR 个样本算 1 秒
             unsigned long long  ms = 1000 * AvailableSamples;
             ms *= 10000;
             ms /= dp.SR;
@@ -2104,7 +2014,7 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
         CComPtr<IDXGIResource> lDesktopResource;
         DXGI_OUTDUPL_FRAME_INFO lFrameInfo;
 
-        // Get new frame
+        // 取下一帧；超时不算失败，没有新画面就继续循环
         BYTE* pData = NULL;
         HRESULT hrf = S_FALSE;
         if (dp.HasVideo)
@@ -2224,8 +2134,7 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
 
 
 
-                // take a time stamp here
-                // Get the current time point
+                // 抓帧并拷进内存；有裁剪区时只拷选区那一块
                 if (lDesktopResource && !cap.Get(lDesktopResource, dp.Cursor, dp.rx.right && dp.rx.bottom ? &dp.rx : 0))
                     break;
             }
@@ -2238,8 +2147,7 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
             }
             else
             {
-                // Time stamp of current frame.
-                // Calculate the dt with last frame. and set to the frame property.
+                // 用与上一帧的实际间隔当帧时长：掉帧时累计时长也不会漂移
                 auto current_frameTimePoint = std::chrono::system_clock::now();
                 auto frameDuration = current_frameTimePoint - last_frame_time_point;
                 last_frame_time_point = current_frameTimePoint;
@@ -2265,10 +2173,17 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
             {
                 if (!cap.toneMapHdrToBgra(wi, he))
                     break;
+                // HDR 帧没有 GDI 兼容表面，光标改叠在色调映射后的画面上
+                if (dp.Cursor)
+                {
+                    const int ox = cap.monRect.left + ((dp.rx.right && dp.rx.bottom) ? dp.rx.left : 0);
+                    const int oy = cap.monRect.top + ((dp.rx.right && dp.rx.bottom) ? dp.rx.top : 0);
+                    cap.blendCursor(cap.sdrBuf, wi, he, ox, oy);
+                }
                 if (encW != wi || encH != he)
                     scaleBGRABox(cap.sdrBuf.data(), wi, he, (BYTE*)pData, encW, encH);
                 else
-                    memcpy(pData, cap.sdrBuf.data(), std::min(cap.sdrBuf.size(), (size_t)VideoBufferSize));
+                    memcpy(pData, cap.sdrBuf.data(), (size_t)VideoBufferSize);
             }
             else if (encW != wi || encH != he)
             {
@@ -2277,16 +2192,10 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
             }
             else
             {
-                memcpy(pData, cap.buf.data(), std::min(cap.buf.size(), (size_t)VideoBufferSize));
+                memcpy(pData, cap.buf.data(), (size_t)VideoBufferSize);
             }
-            if (dp.Framer) {
-                const DXGI_FORMAT fmt = (cap.InHDR != DXGI_FORMAT_UNKNOWN)
-                    ? DXGI_FORMAT_B8G8R8A8_UNORM : cap.InHDR;
-                const size_t sz = (cap.InHDR != DXGI_FORMAT_UNKNOWN)
-                    ? (size_t)VideoBufferSize
-                    : std::min(cap.buf.size(), (size_t)VideoBufferSize);
-                hrf = dp.Framer(fmt, wi, he, pData, sz, dp.cb);
-            }
+            if (dp.Framer)
+                hrf = dp.Framer(DXGI_FORMAT_B8G8R8A8_UNORM, wi, he, pData, (size_t)VideoBufferSize, dp.cb);
             hr = pVideoBuffer->Unlock();
             if (FAILED(hr)) break;
 
@@ -2313,22 +2222,6 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
 
 
 
-            hr = pVideoSample->SetSampleTime(rtV);
-            if (FAILED(hr)) break;
-
-            hr = pVideoSample->SetSampleDuration(ThisDurV);
-            if (FAILED(hr)) break;
-
-
-            // Video Transform MFT
-            if (VideoTransformMFT)
-            {
-                CComPtr<IMFSample> s2;
-                MFTrs(0, 0, 0, VideoTransformMFT, pVideoSample, &s2);
-                if (s2)
-                    pVideoSample = s2;
-            }
-
             if (pVideoSample && dp.HasVideo && !dp.Framer)
             {
                 hr = pVideoSample->SetSampleTime(rtV);
@@ -2343,7 +2236,7 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
             }
         }
 
-        // Audio 
+        // 音频：本帧有可写样本时才建缓冲
         CComPtr<IMFMediaBuffer> pAudioBuffer = NULL;
         if (dp.HasAudio && FinalAudioBytes)
         {
@@ -2382,21 +2275,14 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
             if (FAILED(hr))
                 break;
 
-#ifdef _DEBUG
-            swprintf_s(ydebug, 300, L"Writing audio at %llu - %llu...", rtA, ThisDurA);
-            OutputDebugString(ydebug);
-#endif
             hr = pSinkWriter->WriteSample(OutAudioStreamIndex, pAudioSample);
-#ifdef _DEBUG
-            OutputDebugString(L"OK\r\n");
-#endif
             if (FAILED(hr))
                 break;
 
             rtA += ThisDurA;
         }
 
-        // rtv to ms
+        // EndMS 是毫秒，rtV 是 100ns，换算后再比
         auto rvx = rtV / 10000;
         if (dp.EndMS > 0 && rvx >= dp.EndMS)
             break;
@@ -2405,7 +2291,7 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
             break;
     }
 
-    // Audio off
+    // 收工：停掉所有音频客户端，线程由 AINRELEASE 负责回收
     for (auto& a6 : ains)
     {
         if (a6->ac)

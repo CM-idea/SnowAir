@@ -26,7 +26,7 @@
 //   ③ 版本号 + Lite beta 胶囊（高 22 / 字号 11.5 / 间距 9）
 //   ④ 口号 13.5px 实色
 //   ⑤ 按钮组 margin-top:auto → 顶到卡片底部；按钮高 36 / 圆角 8 / 间距 10
-//   ⑥ 分隔线 + 配置目录（含打开目录按钮）+ © Liuyiran · 更新日志
+//   ⑥ 分隔线 + 配置目录（含打开目录按钮）+ © 城迷 · Liuyiran · 更新日志
 // 页面高度恒等于卡片高度（WinSetting::loadPage 里直接挂 cardNode），
 // 这样 ⑤ 的 auto 边距才有可分配空间，底部信息才会贴卡片底。
 // 配图压字的实现：图片行高只占 176-39，图本身 176 向下溢出；再 bringToFront 提到标题之上。
@@ -387,7 +387,7 @@ WinSettingAbout::WinSettingAbout(Ling::WinBase* parent) : Ling::Node(parent)
 	openDir->setHeight(22.f);
 	openDir->setBorderRadius(SettingTheme::radiusInner);      // 6：轻量圆角，贴合小字号
 	openDir->setPadding(6.f, 0.f, 6.f, 0.f);
-	openDir->setMarginLeft(-6.f);                             // 文字左缘与下面「© Liuyiran」对齐
+	openDir->setMarginLeft(-6.f);                             // 文字左缘与下面「© 城迷 · Liuyiran」对齐
 	openDir->setFlexDirection(Ling::FlexDirection::Row);
 	openDir->setJustifyContent(Ling::Justify::Center);
 	openDir->setAlignItems(Ling::Align::Center);
@@ -430,7 +430,7 @@ WinSettingAbout::WinSettingAbout(Ling::WinBase* parent) : Ling::Node(parent)
 	crRow->setMarginTop(10.f);
 
 	auto* author = crRow->makeChild<Ling::Label>();
-	author->setText(L"城迷 · © Liuyiran");
+	author->setText(L"© 城迷 · Liuyiran");
 	author->setFontSize(11.5f);
 	author->setColor(SettingTheme::textTertiary);
 

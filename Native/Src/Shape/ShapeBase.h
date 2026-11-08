@@ -35,6 +35,13 @@ public:
 	virtual void mouseWheel(const float x, const float y, const short delta) {};
 	virtual void setCursor() {};
 	virtual bool isValidWithoutDrag() { return false; };
+	// —— 钢笔式点按（箭头/线段）：落在锚点上，右键收笔 ——
+	// 返回 true 表示该形状支持这种交互，随后由宿主继续收集锚点
+	virtual bool penBegin(float x, float y) { (void)x; (void)y; return false; }
+	virtual void penAddPoint(float x, float y, bool straight) { (void)x; (void)y; (void)straight; }
+	virtual void penPreviewPoint(float x, float y, bool straight) { (void)x; (void)y; (void)straight; }
+	virtual void penClearPreview() {}
+	virtual int penPointCount() const { return 0; }
 	// 水印/包浆：视口滤镜，不可点选，选工具即生效
 	virtual bool isViewportFilter() { return false; };
 	// 渐隐画笔等：不可点选，淡出后自动移除

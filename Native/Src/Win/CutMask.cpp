@@ -1483,9 +1483,11 @@ ComPtr<IDWriteTextLayout> CutMask::makeIconLayout(const wchar_t* code, float slo
 
 void CutMask::makeLayout()
 {
-	// 追赶动画中：尺寸文案用逻辑目标，避免 W×H 每帧跳变把信息栏撑抖
-	const D2D1_RECT_F& labelR = (hoverTarget_.right > hoverTarget_.left)
-		? hoverTarget_ : maskRect;
+	// 追赶动画中：尺寸文案用逻辑目标，避免 W×H 每帧跳变把信息栏撑抖。
+	// 其余时候必须读 maskRect —— hoverTarget_ 只是"上一次命中的元素框"，点选确认后
+	// 它会被 snapHoverTarget() 固定下来不再跟随；若一直优先取它，进入调整阶段后拖边
+	// 只改 maskRect，左上角的 X/Y 和尺寸就会停在元素原位不动（曾经就是这个表现）。
+	const D2D1_RECT_F& labelR = hoverAnimating_ ? hoverTarget_ : maskRect;
 	const int ix = (int)std::lround(labelR.left);
 	const int iy = (int)std::lround(labelR.top);
 	const int iw = (int)std::lround(labelR.right - labelR.left);

@@ -41,6 +41,12 @@ public:
 	void mouseMove(const float x, const float y) override;
 	void mouseWheel(const float x, const float y, const short delta) override;
 	void setCursor() override;
+	// 直线段：点按落锚点、自动平滑成曲线（Shift 走直线），右键收笔
+	bool penBegin(float x, float y) override;
+	void penAddPoint(float x, float y, bool straight) override;
+	void penPreviewPoint(float x, float y, bool straight) override;
+	void penClearPreview() override;
+	int penPointCount() const override { return (int)poly.pts.size(); }
 	bool hitErase(const float x, const float y) override;
 	bool toggleFreeEndpoint(float x, float y);
 	void resetFree();

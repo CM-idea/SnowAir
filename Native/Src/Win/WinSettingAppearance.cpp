@@ -623,21 +623,27 @@ void WinSettingAppearance::buildRackTab(Ling::Node* host)
     // 收起行为与衣架尺寸：同一行左右两栏，继续沿用常规组的双栏卡片排布。
     auto* behaviorGrid = SettingUi::grid2(rackTab);
     behaviorGrid->setMarginTop(SettingTheme::optionGap);
-    // 点击时以 Setting 当前值为准，避免「恢复默认」程序化改写后仍按旧的
-    // 捕获状态取反（与「其他外观」页的 mkStateToggle 同一做法）。
-    auto autoRetractRow = SettingUi::optionRow(
-        behaviorGrid, Lang::get(L"setting.rackAutoRetract"), L"", true,
-        SettingUi::kToggleH, Lang::get(L"setting.rackAutoRetractTip"));
-    rackAutoRetractSw = autoRetractRow.ctrlBox->makeChild<Ling::Button>();
-    SettingUi::styleToggle(rackAutoRetractSw,
-        s->getRackFlag(L"rack.auto_retract", true));
-    rackAutoRetractSw->onClick.add([sw = rackAutoRetractSw](Ling::Button*) {
-        auto* st = Setting::get();
-        const bool on = !st->getRackFlag(L"rack.auto_retract", true);
-        st->setRackFlag(L"rack.auto_retract", on);
-        SettingUi::styleToggle(sw, on);
-        PluginHost::instance().onSettingChanged(L"rack.auto_retract");
-    });
+    int displayMode = s->getRackInt(L"rack.display_mode", -1);
+    if (displayMode < 0) {
+        // 老版本只有「自动收回」开关：true → 悬停展开，false → 常驻显示。
+        displayMode = s->getRackFlag(L"rack.auto_retract", true) ? 0 : 2;
+        s->setRackInt(L"rack.display_mode", displayMode);
+    }
+    displayMode = std::clamp(displayMode, 0, 2);
+    rackDisplayModeDdl = SettingUi::selectRow(
+        behaviorGrid, Lang::get(L"setting.rackDisplayMode"), L"",
+        { Lang::get(L"setting.rackDisplayModeHover"),
+          Lang::get(L"setting.rackDisplayModeHotkey"),
+          Lang::get(L"setting.rackDisplayModeAlways") },
+        displayMode,
+        [](int i, const std::wstring&) {
+            const int mode = std::clamp(i, 0, 2);
+            auto* st = Setting::get();
+            st->setRackInt(L"rack.display_mode", mode);
+            // 旧版插件只认这个布尔值，顺手同步，升级/回退都不至于失效。
+            st->setRackFlag(L"rack.auto_retract", mode == 0);
+            PluginHost::instance().onSettingChanged(L"rack.display_mode");
+        }, true);
     SettingUi::selectRow(behaviorGrid, Lang::get(L"setting.rackSize"),
         { Lang::get(L"setting.rackSizeSmall"), Lang::get(L"setting.rackSizeMedium"),
           Lang::get(L"setting.rackSizeLarge") },
@@ -1382,8 +1388,11 @@ bool WinSettingAppearance::appearanceAtDefaults() const
             && !s->getRememberToolStyle() && !s->getHoverPreview();
     }
     if (tabIndex == 0 && tbKind == 4) {
-        return s->getRackInt(L"rack.theme", 0) == 0 &&
-               s->getRackFlag(L"rack.auto_retract", true);
+        int displayMode = s->getRackInt(L"rack.display_mode", -1);
+        if (displayMode < 0) {
+            displayMode = s->getRackFlag(L"rack.auto_retract", true) ? 0 : 2;
+        }
+        return s->getRackInt(L"rack.theme", 0) == 0 && displayMode == 0;
     }
     // 「工具栏外观」页：布局与初始属性都为默认值
     auto def = ToolbarStore::defaultLayout(tbKind);
@@ -1405,9 +1414,12 @@ void WinSettingAppearance::tbRestoreDefaults()
     if (tabIndex == 0 && tbKind == 4) {
         setRackTheme(0);
         auto* s = Setting::get();
+        s->setRackInt(L"rack.display_mode", 0);
         s->setRackFlag(L"rack.auto_retract", true);
-        if (rackAutoRetractSw) SettingUi::styleToggle(rackAutoRetractSw, true);
-        PluginHost::instance().onSettingChanged(L"rack.auto_retract");
+        if (rackDisplayModeDdl) {
+            rackDisplayModeDdl->setText(Lang::get(L"setting.rackDisplayModeHover"));
+        }
+        PluginHost::instance().onSettingChanged(L"rack.display_mode");
         tbRefreshRestore();
         return;
     }

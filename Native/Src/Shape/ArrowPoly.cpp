@@ -13,6 +13,289 @@ void ArrowPolyState::setTwo(float x0, float y0, float x1, float y1)
 	pts = { D2D1::Point2F(x0, y0), D2D1::Point2F(x1, y1) };
 }
 
+namespace {
+
+	// —— 曲线求解 ——
+	// 各锚点的切线角作为未知量：初值按两侧弦长插值，随后逐轮比较锚点两侧曲率，
+	// 把曲率差按数值导数换算成切线修正量，加阻尼推进；两端每轮向曲率趋零的方向修正。
+	// 收敛后由每段两端相对弦的切线角直接给出三次贝塞尔控制点，长度随角度变化，
+	// 使各种夹角组合下曲线都平滑、段内不产生多余拐点。
+	// 相邻段共用同一锚点切线且曲率连续，接缝处不会出现折角或反弯。
+	constexpr float kTwoPi = 6.28318530717958647692f;
+
+	float modTwoPi(float th)
+	{
+		const float frac = th / kTwoPi;
+		return kTwoPi * (frac - std::round(frac));
+	}
+
+	void shapeCubic(float th0, float th1, float& x1, float& y1, float& x2, float& y2)
+	{
+		auto lenAt = [](float a0, float a1) {
+			const float off = 0.3f * std::sin(a1 * 2.f - 0.4f * std::sin(a1 * 2.f));
+			const float scale = 1.f / (3.f * 0.8f);
+			return scale * (std::cos(a0 - off) - 0.2f * std::cos(3.f * (a0 - off)));
+		};
+		const float l0 = lenAt(th0, th1);
+		const float l1 = lenAt(th1, th0);
+		x1 = std::cos(th0) * l0;
+		y1 = std::sin(th0) * l0;
+		x2 = 1.f - std::cos(th1) * l1;
+		y2 = std::sin(th1) * l1;
+	}
+
+	void endCurvatures(float th0, float th1, float& ak0, float& ak1)
+	{
+		float x1, y1, x2, y2;
+		shapeCubic(th0, th1, x1, y1, x2, y2);
+		auto curv = [](float th, float dx, float dy, float d2x, float d2y) {
+			const float c = std::cos(th), s = std::sin(th);
+			const float cross = d2y * c - d2x * s;
+			const float dot = dx * c + dy * s;
+			return std::atan2(cross, dot * std::fabs(dot));
+		};
+		const float dx0 = 3.f * x1, dy0 = 3.f * y1;
+		const float d2x0 = 6.f * (x2 - 2.f * x1), d2y0 = 6.f * (y2 - 2.f * y1);
+		ak0 = curv(th0, dx0, dy0, d2x0, d2y0);
+		const float dx1 = 3.f * (1.f - x2), dy1 = 3.f * (0.f - y2);
+		const float d2x1 = 6.f * (1.f - 2.f * x2 + x1), d2y1 = 6.f * (0.f - 2.f * y2 + y1);
+		ak1 = curv(-th1, dx1, dy1, d2x1, d2y1);
+	}
+
+	// 行程两端若紧邻直线段，把那条直线的方向锁为端部切线，
+	// 保证直线与曲线在连接点处切线一致
+	void solveRun(const std::vector<D2D1_POINT_2F>& run,
+		std::vector<D2D1_POINT_2F>& ctrl1, std::vector<D2D1_POINT_2F>& ctrl2,
+		bool hasStartDir, D2D1_POINT_2F startDir, bool hasEndDir, D2D1_POINT_2F endDir)
+	{
+		const int n = (int)run.size();
+		const int m = n - 1;
+		ctrl1.assign((size_t)(m > 0 ? m : 0), D2D1::Point2F(0.f, 0.f));
+		ctrl2 = ctrl1;
+		if (m < 1) return;
+		// 每段弦角、弦长与两端的相对切线角
+		std::vector<float> ths((size_t)n, 0.f);
+		for (int i = 1; i <= n - 2; i++) {
+			const float dx0 = run[i].x - run[i - 1].x, dy0 = run[i].y - run[i - 1].y;
+			const float dx1 = run[i + 1].x - run[i].x, dy1 = run[i + 1].y - run[i].y;
+			const float l0 = std::hypot(dx0, dy0), l1 = std::hypot(dx1, dy1);
+			const float a0 = std::atan2(dy0, dx0), a1 = std::atan2(dy1, dx1);
+			const float bend = modTwoPi(a1 - a0);
+			ths[(size_t)i] = modTwoPi(a0 + (l0 + l1 > 1e-9f ? bend * l0 / (l0 + l1) : 0.f));
+		}
+		const float headTh = std::atan2(run[1].y - run[0].y, run[1].x - run[0].x);
+		ths[0] = headTh;
+		ths[(size_t)(n - 1)] = (n == 2) ? headTh
+			: std::atan2(run[n - 1].y - run[n - 2].y, run[n - 1].x - run[n - 2].x);
+		if (hasStartDir) ths[0] = std::atan2(startDir.y, startDir.x);
+		if (hasEndDir) ths[(size_t)(n - 1)] = std::atan2(endDir.y, endDir.x);
+
+		auto getThs = [&](int i, float& th0, float& th1, float& chord) {
+			const float dx = run[i + 1].x - run[i].x, dy = run[i + 1].y - run[i].y;
+			const float a = std::atan2(dy, dx);
+			th0 = modTwoPi(ths[(size_t)i] - a);
+			th1 = modTwoPi(a - ths[(size_t)(i + 1)]);
+			chord = std::hypot(dx, dy);
+		};
+		auto endFix = [](float th) { return 0.5f * std::sin(2.f * th); };
+		auto errOf = [](float ch0, float kEnd, float ch1, float kStart) {
+			const float r0 = std::sqrt(ch0), r1 = std::sqrt(ch1);
+			const float a0 = std::atan2(std::sin(kEnd) * r1, std::cos(kEnd) * r0);
+			const float a1 = std::atan2(std::sin(kStart) * r0, std::cos(kStart) * r1);
+			return a0 - a1;
+		};
+
+		std::vector<float> step((size_t)(n > 2 ? n - 2 : 0), 0.f);
+		const float eps = 1e-3f;
+		for (int iter = 0; iter < 10; iter++) {
+			float th0 = 0.f, th1 = 0.f, ch = 0.f;
+			if (!hasStartDir) {
+				getThs(0, th0, th1, ch);
+				ths[0] += endFix(th1) - th0;
+			}
+			if (!hasEndDir) {
+				getThs(n - 2, th0, th1, ch);
+				ths[(size_t)(n - 1)] -= endFix(th0) - th1;
+			}
+			if (n < 3) continue;
+			float a0 = 0.f, b0 = 0.f, c0 = 0.f, k0a = 0.f, k0b = 0.f;
+			getThs(0, a0, b0, c0);
+			endCurvatures(a0, b0, k0a, k0b);
+			for (int i = 0; i < n - 2; i++) {
+				float a1 = 0.f, b1 = 0.f, c1 = 0.f, k1a = 0.f, k1b = 0.f;
+				getThs(i + 1, a1, b1, c1);
+				endCurvatures(a1, b1, k1a, k1b);
+				const float err = errOf(c0, k0b, c1, k1a);
+				float skip0 = 0.f, pb0 = 0.f, pa1 = 0.f, skip1 = 0.f;
+				endCurvatures(a0, b0 + eps, skip0, pb0);
+				endCurvatures(a1 - eps, b1, pa1, skip1);
+				const float errp = errOf(c0, pb0, c1, pa1);
+				const float derr = (errp - err) / eps;
+				step[(size_t)i] = (std::fabs(derr) > 1e-9f) ? err / derr : 0.f;
+				a0 = a1; b0 = b1; c0 = c1; k0b = k1b;
+			}
+			const float damp = std::tanh(0.25f * (float)(iter + 1));
+			for (int i = 0; i < n - 2; i++) {
+				const float s = damp * step[(size_t)i];
+				if (std::isfinite(s)) ths[(size_t)(i + 1)] += s;
+			}
+		}
+
+		for (int i = 0; i < m; i++) {
+			float th0 = 0.f, th1 = 0.f, ch = 0.f;
+			getThs(i, th0, th1, ch);
+			if (!(ch > 1e-6f) || !std::isfinite(th0) || !std::isfinite(th1)) {
+				ctrl1[i] = run[i]; ctrl2[i] = run[i + 1];
+				continue;
+			}
+			float x1 = 0.f, y1 = 0.f, x2 = 0.f, y2 = 0.f;
+			shapeCubic(th0, th1, x1, y1, x2, y2);
+			const float ca = (run[i + 1].x - run[i].x) / ch;
+			const float sa = (run[i + 1].y - run[i].y) / ch;
+			ctrl1[i] = D2D1::Point2F(
+				run[i].x + (ca * x1 - sa * y1) * ch, run[i].y + (sa * x1 + ca * y1) * ch);
+			ctrl2[i] = D2D1::Point2F(
+				run[i].x + (ca * x2 - sa * y2) * ch, run[i].y + (sa * x2 + ca * y2) * ch);
+		}
+	}
+}
+
+// 钢笔曲线：锚点精确过的曲率连续样条，不暴露控制柄。
+// 每个锚点只有一条切线，两侧控制点共用：接缝处切线与曲率都连续，不会出现折角。
+// 切线角由迭代求得，端点曲率随之自然收敛，段内不会冒出多余的极值或反弯。
+// 每段按两端相对弦的切线角直接生成三次贝塞尔，形状平滑、不依赖全局矩阵求解。
+// Shift 直线段视为折线角点：从角点切开分别求解，直线段原样，曲线段不被直线方向拖弯。
+// 预览点临时并入锚点一起求解，落点确认后几何不变。
+std::vector<ArrowPolyState::PenSeg> ArrowPolyState::penSegments() const
+{
+	std::vector<PenSeg> segs;
+	if (!pen) { penCacheValid = false; return segs; }
+	std::vector<D2D1_POINT_2F> anchors = pts;
+	std::vector<bool> straight = penStraight;
+	if (penPreview && !anchors.empty()) {
+		// 预览点几乎压在最后一个锚点上时不并入：近零长度的段会让相邻手柄退化，
+		// 落点后第一帧的曲率会跳一下
+		const float pdx = penPreviewPt.x - anchors.back().x;
+		const float pdy = penPreviewPt.y - anchors.back().y;
+		if (std::hypot(pdx, pdy) >= 3.f) {
+			anchors.push_back(penPreviewPt);
+			straight.push_back(penPreviewStraight);
+		}
+	}
+	if (anchors.size() < 2) { penCacheValid = false; return segs; }
+	const int segCount = (int)anchors.size() - 1;
+	straight.resize((size_t)segCount, false);
+
+	// 几何不变就复用上一帧解：绘制与命中在同一帧内会多次取曲线点
+	unsigned long long key = 1469598103934665603ULL;
+	auto mix = [&key](float v) {
+		unsigned int bits = 0;
+		std::memcpy(&bits, &v, sizeof(bits));
+		key ^= (unsigned long long)bits;
+		key *= 1099511628211ULL;
+	};
+	for (const auto& p : anchors) { mix(p.x); mix(p.y); }
+	for (bool s : straight) mix(s ? 1.f : 0.f);
+	if (penCacheValid && key == penCacheKey) return penCache;
+
+	std::vector<D2D1_POINT_2F> ctrl1((size_t)segCount, D2D1::Point2F(0.f, 0.f));
+	std::vector<D2D1_POINT_2F> ctrl2 = ctrl1;
+	std::vector<bool> solved((size_t)segCount, false);
+	for (int i = 0; i < segCount;) {
+		if (straight[i]) { i++; continue; }
+		int end = i;
+		while (end + 1 < segCount && !straight[end + 1]) end++;
+		std::vector<D2D1_POINT_2F> run(anchors.begin() + i, anchors.begin() + end + 2);
+		std::vector<D2D1_POINT_2F> runC1, runC2;
+		// 行程两端若紧邻直线段，把那条直线的方向作为端部切线，连接处不会折角
+		bool hasStartDir = i > 0 && straight[i - 1];
+		bool hasEndDir = end + 1 < segCount && straight[end + 1];
+		D2D1_POINT_2F startDir{ 0.f, 0.f }, endDir{ 0.f, 0.f };
+		if (hasStartDir) {
+			const float l = std::max(std::hypot(anchors[i].x - anchors[i - 1].x,
+				anchors[i].y - anchors[i - 1].y), 1e-6f);
+			startDir = D2D1::Point2F((anchors[i].x - anchors[i - 1].x) / l,
+				(anchors[i].y - anchors[i - 1].y) / l);
+		}
+		if (hasEndDir) {
+			const float l = std::max(std::hypot(anchors[end + 2].x - anchors[end + 1].x,
+				anchors[end + 2].y - anchors[end + 1].y), 1e-6f);
+			endDir = D2D1::Point2F((anchors[end + 2].x - anchors[end + 1].x) / l,
+				(anchors[end + 2].y - anchors[end + 1].y) / l);
+		}
+		solveRun(run, runC1, runC2, hasStartDir, startDir, hasEndDir, endDir);
+		for (int k = 0; k < (int)runC1.size(); k++) {
+			ctrl1[i + k] = runC1[k];
+			ctrl2[i + k] = runC2[k];
+			solved[i + k] = true;
+		}
+		i = end + 1;
+	}
+	segs.reserve((size_t)segCount);
+	for (int i = 0; i < segCount; i++) {
+		PenSeg sg;
+		sg.p0 = anchors[i];
+		sg.p1 = anchors[i + 1];
+		sg.line = straight[i] || !solved[i];
+		if (!sg.line) {
+			sg.c1 = ctrl1[i];
+			sg.c2 = ctrl2[i];
+		}
+		segs.push_back(sg);
+	}
+	penCache = segs;
+	penCacheKey = key;
+	penCacheValid = true;
+	return segs;
+}
+
+// 死区按 DPI 换算：手放稳时的微小抖动不进入求解，避免末端的亚像素位移被样条放大成整段变化。
+// 超过死区就一次性对齐到指针；对齐后距离归零，所以不会在阈值边界上反复触发。
+// 落点提交走同一函数，因此按下的位置与最后一帧预览完全一致。
+D2D1_POINT_2F ArrowPolyState::penUpdatePreview(float x, float y, bool straight, float dpi)
+{
+	penPreviewStraight = straight;
+	if (penPreview) {
+		const float dx = x - penPreviewPt.x;
+		const float dy = y - penPreviewPt.y;
+		// 1.5 个 DPI 像素：覆盖手停稳时的 1~2 像素级抖动，慢速移动也只需累积到这一距离就跟随
+		if (std::hypot(dx, dy) < 1.5f * dpi) return penPreviewPt;
+	}
+	penPreview = true;
+	penPreviewPt = D2D1::Point2F(x, y);
+	return penPreviewPt;
+}
+
+std::vector<D2D1_POINT_2F> ArrowPolyState::renderPoints() const
+{
+	if (!pen) return pts;
+	const auto segs = penSegments();
+	std::vector<D2D1_POINT_2F> out;
+	if (segs.empty()) return pts;
+	out.reserve(segs.size() * 16 + 1);
+	out.push_back(segs.front().p0);
+	for (const auto& sg : segs) {
+		if (sg.line) {
+			out.push_back(sg.p1);
+			continue;
+		}
+		const float len = std::hypot(sg.c1.x - sg.p0.x, sg.c1.y - sg.p0.y)
+			+ std::hypot(sg.c2.x - sg.c1.x, sg.c2.y - sg.c1.y)
+			+ std::hypot(sg.p1.x - sg.c2.x, sg.p1.y - sg.c2.y);
+		const int steps = std::clamp((int)(len / 4.f), 8, 64);
+		for (int s = 1; s <= steps; s++) {
+			const float t = (float)s / (float)steps;
+			const float u = 1.f - t;
+			const float a = u * u * u, b = 3.f * u * u * t;
+			const float c = 3.f * u * t * t, d = t * t * t;
+			out.push_back(D2D1::Point2F(
+				sg.p0.x * a + sg.c1.x * b + sg.c2.x * c + sg.p1.x * d,
+				sg.p0.y * a + sg.c1.y * b + sg.c2.y * c + sg.p1.y * d));
+		}
+	}
+	return out;
+}
+
 void ArrowPolyState::syncFromEnds(float sx, float sy, float ex, float ey)
 {
 	if (pts.size() < 2) {
@@ -412,6 +695,25 @@ ComPtr<ID2D1PathGeometry> shaftPath(ID2D1Factory* factory, const std::vector<D2D
 	sink->BeginFigure(pts[0], D2D1_FIGURE_BEGIN_HOLLOW);
 	for (size_t i = 1; i < pts.size(); i++)
 		sink->AddLine(pts[i]);
+	sink->EndFigure(D2D1_FIGURE_END_OPEN);
+	if (FAILED(sink->Close())) return {};
+	return path;
+}
+
+ComPtr<ID2D1PathGeometry> penPath(ID2D1Factory* factory, const ArrowPolyState& poly)
+{
+	ComPtr<ID2D1PathGeometry> path;
+	if (!factory) return path;
+	const auto segs = poly.penSegments();
+	if (segs.empty()) return path;
+	if (FAILED(factory->CreatePathGeometry(path.GetAddressOf())) || !path) return {};
+	ComPtr<ID2D1GeometrySink> sink;
+	if (FAILED(path->Open(sink.GetAddressOf())) || !sink) return {};
+	sink->BeginFigure(segs.front().p0, D2D1_FIGURE_BEGIN_HOLLOW);
+	for (const auto& sg : segs) {
+		if (sg.line) sink->AddLine(sg.p1);
+		else sink->AddBezier(D2D1::BezierSegment(sg.c1, sg.c2, sg.p1));
+	}
 	sink->EndFigure(D2D1_FIGURE_END_OPEN);
 	if (FAILED(sink->Close())) return {};
 	return path;
