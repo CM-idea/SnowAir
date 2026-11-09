@@ -26,11 +26,11 @@
   },
   "imageEdit": {
     "title": "SnowAir 图片编辑",
-    "modeCollage": "制作拼图",
+    "modeCollage": "创造拼图",
     "modeDoc": "合并文档",
     "cancel": "取消",
     "save": "保存",
-    "emptyCollage": "选择布局或把图片拖入画布开始制作",
+    "emptyCollage": "选择布局或把图片拖入画布开始创作",
     "emptyDoc": "把图片拖入工作区，或点击",
     "emptyCellHint": "拖拽或选择图片",
     "switchMode": "切换模式会清空当前内容，确定继续？",

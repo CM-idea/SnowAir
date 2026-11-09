@@ -280,6 +280,7 @@ void ToolNestedPanel::openShapeSides(const RECT& workArea, Ling::Button* anchor,
 			const int v = std::clamp((int)std::lround(nv), 3, 20);
 			if (star) owner->starPoints = v;
 			else owner->polygonSides = v;
+			owner->rememberShapeSides(star, v);     // 记忆工具样式：边数 / 角数
 			owner->applyShapeSidesLive(star, v);   // 选中的同形态形状实时变
 			owner->notifyStyleChanged();
 			owner->pulseShapePreview();            // 画布上的形状预览也跟着刷新

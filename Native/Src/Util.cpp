@@ -1185,7 +1185,18 @@ std::wstring Util::buildSavePath(const std::wstring& format, const std::wstring&
 		dir.append(sanitizeSegment(p));
 		if (!std::filesystem::exists(dir, ec)) std::filesystem::create_directories(dir, ec);
 	}
-	return (dir / fileName).wstring();
+	std::filesystem::path out = dir / fileName;
+	// 同名已存在就加 -2 / -3 后缀：文件名模板只精确到秒，连拍时不能互相覆盖
+	// （覆盖会让历史少一条、晾衣架把第二张判成"重复"）
+	if (std::filesystem::exists(out, ec)) {
+		const std::wstring stem = out.stem().wstring();
+		const std::wstring extension = out.extension().wstring();
+		for (int i = 2; i < 1000; ++i) {
+			std::filesystem::path candidate = dir / (stem + L"-" + std::to_wstring(i) + extension);
+			if (!std::filesystem::exists(candidate, ec)) { out = candidate; break; }
+		}
+	}
+	return out.wstring();
 }
 
 std::wstring Util::commitRecordedFile(const std::wstring& tempPath)

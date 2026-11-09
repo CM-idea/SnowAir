@@ -191,6 +191,17 @@ public:
 	void clearSelectedNumberValue();
 	// 鼠标进入画布前调用：让属性栏输入框失焦并释放它可能占着的鼠标捕获
 	void blurInputs();
+	// 序号输入框的「常态编辑」：点进输入框即持续编辑（鼠标移出不退出），
+	// 只有点画布（左键照常生效）、右键、点别的工具栏才结束；Esc 不参与。
+	bool numberEditActive() const;
+	void endNumberEdit();
+	// 鼠标滚轮停在序号输入框上（未处于编辑态）时加减序号，返回是否消费了这次滚轮
+	bool wheelNumberAt(int dir);
+	void stepNumber(int delta);
+	// 记忆工具样式：多边形边数 / 星形角数变化时保存
+	void rememberShapeSides(bool star, int v);
+	// 记忆工具样式：把当前工具的粗细 / 字号落盘（换工具、收栏时调；滑动过程中不写盘）
+	void flushRememberedSize();
 	RECT workAreaRect() const;
 	// 视窗内滚轮：按工具量程微调主滑条
 	bool adjustPrimarySize(int dir);

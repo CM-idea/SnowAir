@@ -2563,6 +2563,8 @@ void WinCap::onWheel(POINT pos, float space)
 {
 	if (space == 0.f) return;
 	const int dir = space > 0.f ? 1 : -1;
+	// 鼠标停在属性栏的序号输入框上（未在编辑）：滚轮直接加减序号
+	if (toolSub && toolSub->wheelNumberAt(dir)) return;
 	// 刚画完还没二次选中的标注：只让多边形、星形、气泡、爆裂跟随滚轮改属性
 	auto liveWheelShape = [](ShapeBase* s) {
 		if (auto* r = dynamic_cast<ShapeRect*>(s))
@@ -2682,6 +2684,11 @@ LRESULT WinCap::onHitTest(const POINT pos)
 
 void WinCap::onDown(POINT pos, bool isRight)
 {
+    // 序号输入框常态编辑中：点画布结束编辑。左键不吞（继续原操作），右键只收编辑
+    if (toolSub && toolSub->numberEditActive()) {
+        toolSub->endNumberEdit();
+        if (isRight) return;
+    }
     // 按下即结束"查找元素"：作废在途查询，免得悬停高亮的结果回来再改矩形、和下面的拖框打架。
     // 查询本身不碰遮罩样式与鼠标捕获，所以这里不需要为输入做任何补救。
     if (cutMask) cutMask->cancelHoverQuery();

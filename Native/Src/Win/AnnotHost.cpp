@@ -1492,10 +1492,16 @@ void AnnotHost::onToolStyleChanged()
 		refresh();
 		return;
 	}
-	// 二次选中或编辑中的标注：统一走虚函数，把工具条当前样式应用到该形状。
-	// 此前只有文字与滤镜在此处理，矩形 / 箭头 / 画笔修改虚线时对选中标注无效。
-	if (editingText) editingText->applyStyle();
-	else if (shapeHover && !shapeHover->isViewportFilter()) shapeHover->applyStyle();
+	// 二次选中或编辑中的标注：只有「选中的标注与当前工具同类」时才把属性栏样式下发。
+	// 否则会串台：例如选中序号时点矩形工具的虚线，矩形线宽会被当成序号字号写进去。
+	const auto curTool = getCurToolId();
+	if (editingText) {
+		if (toolIdOfShape(editingText) == curTool) editingText->applyStyle();
+	}
+	else if (shapeHover && !shapeHover->isViewportFilter() && !curTool.empty()
+		&& toolIdOfShape(shapeHover) == curTool) {
+		shapeHover->applyStyle();
+	}
 	// 视口滤镜（包浆/水印）没有选中态：样式一变就整体重刷
 	if (history) {
 		for (auto& s : history->shapes) {
@@ -1965,6 +1971,11 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 {
 	ensureHistory();
 	dropStaleEditingText();
+	// 序号输入框的常态编辑：点画布就退出。左键不吞（照常落笔/选中），右键只收编辑
+	if (toolSub && toolSub->numberEditActive()) {
+		toolSub->endNumberEdit();
+		if (isRight) return true;
+	}
 	if (toolSub) toolSub->blurInputs();
 	editStepTarget = nullptr;
 	editStepBefore.clear();

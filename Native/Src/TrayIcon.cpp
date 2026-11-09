@@ -53,10 +53,10 @@ HICON dibToIcon(HBITMAP color, int size)
 	return ic;
 }
 
-// 图标字库里的 Logo 字形，按 tint 上色 → HICON。
+// 图标字库里的字形，按 tint 上色 → HICON（默认是 Logo）。
 // 注意：图标字形的 em 盒比实际图形大一圈，直接按目标尺寸渲染会"小一圈"（四周留白）。
 // 做法：先在放大位图上渲染，取墨迹包围盒，再等比缩放填满目标尺寸。
-HICON buildGlyphIcon(uint32_t tint, int size)
+HICON buildGlyphIcon(uint32_t tint, int size, const wchar_t* glyph = Icon::Logo)
 {
 	auto d2d = Ling::D2D::getNoDevice();
 	if (!d2d || !d2d->dwriteFactory || !d2d->d2dFactory) return nullptr;
@@ -75,9 +75,9 @@ HICON buildGlyphIcon(uint32_t tint, int size)
 
 	IDWriteTextFormat* format = d2d->getTextFormat(L"font_family");
 	if (!format) return nullptr;
-	const wchar_t glyph[2]{ Icon::Logo[0], 0 };
+	const wchar_t glyphText[2]{ glyph ? glyph[0] : Icon::Logo[0], 0 };
 	ComPtr<IDWriteTextLayout> layout;
-	if (FAILED(d2d->dwriteFactory->CreateTextLayout(glyph, 1, format,
+	if (FAILED(d2d->dwriteFactory->CreateTextLayout(glyphText, 1, format,
 		(float)big, (float)big, layout.GetAddressOf())) || !layout) return nullptr;
 	layout->SetFontSize((float)big * 0.9f, { 0, 1 });
 	layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -226,6 +226,19 @@ HICON iconFor(int style, int size)
 	return ic;
 }
 
+// 「截图成功」的临时提醒图标：固定主题绿，不受托盘图标颜色设置影响（缓存 key 用 4*1024 段）
+constexpr uint32_t kSuccessTint{ 0x34C759FFu };
+HICON successIcon(int size)
+{
+	if (size <= 0) size = (std::max)(16, GetSystemMetrics(SM_CXSMICON));
+	const int key = 4 * 1024 + size;
+	auto it = g_cache.find(key);
+	if (it != g_cache.end()) return it->second;
+	HICON ic = buildGlyphIcon(kSuccessTint, size, Icon::SuccessTip);
+	if (ic) g_cache.emplace(key, ic);
+	return ic;
+}
+
 void apply()
 {
 	auto* s = Setting::get();
@@ -246,8 +259,70 @@ void apply()
 	if (HICON ic = iconFor(s->getTrayIconStyle())) app->setTrayIcon(ic);
 }
 
+// —— 截图成功的临时提醒：稍等片刻再换成成功勾（让反馈落在"截图完成"而不是"按下热键"），到点恢复 ——
+HWND g_flashWnd{ nullptr };
+constexpr UINT_PTR kFlashShowId{ 0x5A5A };
+constexpr UINT_PTR kFlashRestoreId{ 0x5A5B };
+constexpr UINT kFlashDelayMs{ 160 };   // 截图完成后到换图标的延迟
+UINT g_flashMs{ 1200 };                // 成功图标停留时长
+
+LRESULT CALLBACK flashWndProc(HWND h, UINT msg, WPARAM w, LPARAM l)
+{
+	if (msg == WM_TIMER && w == kFlashShowId) {
+		KillTimer(h, kFlashShowId);
+		if (auto* app = Ling::App::get()) {
+			if (HICON ic = successIcon(0)) app->setTrayIcon(ic);
+		}
+		SetTimer(h, kFlashRestoreId, g_flashMs, nullptr);
+		return 0;
+	}
+	if (msg == WM_TIMER && w == kFlashRestoreId) {
+		KillTimer(h, kFlashRestoreId);
+		apply();   // 恢复用户设置的托盘图标
+		return 0;
+	}
+	return DefWindowProcW(h, msg, w, l);
+}
+
+void ensureFlashWnd()
+{
+	if (g_flashWnd) return;
+	constexpr const wchar_t* kCls = L"SnowAirTrayFlash";
+	static bool registered = false;
+	if (!registered) {
+		WNDCLASSEXW wc{ sizeof(WNDCLASSEXW) };
+		wc.lpfnWndProc = flashWndProc;
+		wc.hInstance = GetModuleHandleW(nullptr);
+		wc.lpszClassName = kCls;
+		RegisterClassExW(&wc);
+		registered = true;
+	}
+	g_flashWnd = CreateWindowExW(WS_EX_TOOLWINDOW, kCls, L"", WS_POPUP,
+		0, 0, 0, 0, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+}
+
+void flashSuccess(int ms)
+{
+	auto* s = Setting::get();
+	auto* app = Ling::App::get();
+	if (!s || !app || !s->getTrayEnabled()) return;   // 托盘隐藏时不提醒
+	g_flashMs = (UINT)(std::max)(200, ms);
+	ensureFlashWnd();
+	if (!g_flashWnd) return;
+	// 连续触发时重置两个计时：延迟换图标 → 停留结束后恢复，只认最后一次
+	KillTimer(g_flashWnd, kFlashShowId);
+	KillTimer(g_flashWnd, kFlashRestoreId);
+	SetTimer(g_flashWnd, kFlashShowId, kFlashDelayMs, nullptr);
+}
+
 void dispose()
 {
+	if (g_flashWnd) {
+		KillTimer(g_flashWnd, kFlashShowId);
+		KillTimer(g_flashWnd, kFlashRestoreId);
+		DestroyWindow(g_flashWnd);
+		g_flashWnd = nullptr;
+	}
 	freeCache();
 }
 

@@ -52,6 +52,8 @@ namespace Icon
 	inline constexpr const wchar_t* Done = L"\ue616";           // 完成
 	inline constexpr const wchar_t* Copy = L"\ue647";           // 复制
 	inline constexpr const wchar_t* CopyOk = L"\ue648";         // 复制成功
+	inline constexpr const wchar_t* Success = L"\ue693";        // 成功
+	inline constexpr const wchar_t* SuccessTip = L"\ue694";     // 成功提醒
 	inline constexpr const wchar_t* Pin = L"\ue612";            // 贴图
 	inline constexpr const wchar_t* Fill = L"\ue629";           // 填充
 	inline constexpr const wchar_t* Bold = L"\ue62e";           // 加粗

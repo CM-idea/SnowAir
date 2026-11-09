@@ -478,6 +478,13 @@ namespace {
 		if (src == L"clipboard")  return Lang::get(L"setting.historyTabClipboard");
 		return Lang::get(L"setting.srcCapture");
 	}
+	// 目录扫描出来的「本软件保存的截图」：仍算截图（进全部/截图），不算用户文件
+	bool isUserHistoryFile(const Setting::HistoryItem& it)
+	{
+		if (it.id != it.filePath) return false;
+		auto* s = Setting::get();
+		return !(s && s->isOwnHistoryFile(it.filePath));
+	}
 	// 生成一个 26×26 的圆形浮层图标按钮（叠在缩略图右下角）
 	Ling::Button* mkIconBtn(Ling::Node* parent, const wchar_t* glyph,
 		float rightOffset, bool danger, std::function<void()> onClick)
@@ -993,7 +1000,7 @@ WinSettingHistory::~WinSettingHistory()
 // 才被带进「全部」（见 matchSourceTab）。
 bool WinSettingHistory::baseTabMatch(const Setting::HistoryItem& it) const
 {
-	const bool userFile = (it.id == it.filePath);
+	const bool userFile = isUserHistoryFile(it);
 	const bool clip = (it.source == L"clipboard");
 	if (sourceTab == 4) return clip;
 	if (clip) return sourceTab == 0;
@@ -1010,7 +1017,7 @@ bool WinSettingHistory::matchSourceTab(const Setting::HistoryItem& it) const
 	if (!baseTabMatch(it)) return false;
 	if (sourceTab != 0) return true;
 	// 「全部」：剪切板 / 其他 里的用户文件只在自定义标签筛选下出现
-	const bool extra = (it.source == L"clipboard") || (it.id == it.filePath);
+	const bool extra = (it.source == L"clipboard") || isUserHistoryFile(it);
 	return extra ? !filter.tag.empty() : true;
 }
 
@@ -1065,7 +1072,7 @@ bool WinSettingHistory::matchFilters(const Setting::HistoryItem& it) const
 				: Setting::get()->getHistoryTags(it.filePath);
 			if (!hit && clip) hit = searchHit(searchNormalize(clipTypeTag(it)), kw);
 			if (!hit && !clip && tags.empty()) {
-				const std::wstring chip = (it.id == it.filePath)
+				const std::wstring chip = isUserHistoryFile(it)
 					? Lang::get(it.source == L"record" ? L"setting.tagVideo" : L"setting.tagImage")
 					: sourceLabel(it.source);
 				hit = searchHit(searchNormalize(chip), kw);
@@ -2690,7 +2697,7 @@ void WinSettingHistory::refreshGrid()
 		if (clip && !noteItem) chips.push_back({ clipTypeTag(it), false });
 		for (auto& t : tags) chips.push_back({ t, true });
 		if (chips.empty()) {
-			chips.push_back({ it.id == it.filePath
+			chips.push_back({ isUserHistoryFile(it)
 				? Lang::get(isMedia ? L"setting.tagVideo" : L"setting.tagImage")
 				: sourceLabel(it.source), false });
 		}

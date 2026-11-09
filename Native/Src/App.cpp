@@ -3,12 +3,14 @@
 #include "App.h"
 #include "Setting.h"
 #include "Tray.h"
+#include "TrayIcon.h"
 #include "Lang.h"
 #include "Update.h"
 #include "Util.h"
 #include "./Win/WinCap.h"
 #include "./Win/WinPin.h"
 #include "./Win/WinSetting.h"
+#include "./Win/WinImageEdit.h"
 #include "./Win/ScreenCapture.h"
 #include "Plugin/PluginHost.h"
 
@@ -159,6 +161,8 @@ void App::captureFullScreenSilent()
 	else Util::saveToClipboard(sw, sh, pixels.data());
 	st->setLastCaptureRect(sx, sy, sw, sh);
 	if (saved) st->addHistoryFile(path, sw, sh, L"fullscreen");
+	// 静默截图没有窗口可反馈：托盘图标临时换成绿色的「成功」勾，1.2s 后自动恢复
+	TrayIcon::flashSuccess();
 }
 
 // 全局热键「截取焦点窗口」：静默抓当前前台窗口，全程不建窗口。
@@ -170,7 +174,22 @@ void App::captureFocusedWindowSilent()
 	if (!fg) return;
 	DWORD pid = 0;
 	GetWindowThreadProcessId(fg, &pid);
-	if (!pid || pid == GetCurrentProcessId()) return;   // 前台是我们自己的窗口：不做
+	if (!pid) return;
+	// 自己的窗口里只认「真正的窗口」：设置页 / 图片编辑页；
+	// 截图遮罩、托盘菜单、工具条这些不截（截出来是废图）
+	const bool ownWindow = (pid == GetCurrentProcessId());
+	if (ownWindow) {
+		bool allowed = false;
+		if (auto* lapp = Ling::App::get()) {
+			for (auto* w : lapp->windows) {
+				if (!w || w->hwnd != fg) continue;
+				allowed = dynamic_cast<WinSetting*>(w) != nullptr
+					|| dynamic_cast<WinImageEdit*>(w) != nullptr;
+				break;
+			}
+		}
+		if (!allowed) return;
+	}
 
 	// 扩展边框（DWM）比 GetWindowRect 更贴近用户看到的那一圈；取不到再退回 GetWindowRect
 	RECT rc{};
@@ -182,7 +201,9 @@ void App::captureFocusedWindowSilent()
 	if (w <= 0 || h <= 0) return;
 
 	// 应用名要在覆盖/任何窗口出现前取（此刻前台仍是目标窗口）
-	const std::wstring appName = Util::foregroundAppName();
+	std::wstring appName = Util::foregroundAppName();
+	// 截自己的窗口时 foregroundAppName 会返回空（同进程不取名字），文件名占位符补一个
+	if (appName.empty() && ownWindow) appName = L"SnowAir";
 	auto pixels = ScreenCapture::captureOrGdi(rc.left, rc.top, w, h);
 	if (pixels.empty()) return;
 
@@ -199,6 +220,8 @@ void App::captureFocusedWindowSilent()
 	else Util::saveToClipboard(w, h, pixels.data());
 	Setting::get()->setLastCaptureRect(rc.left, rc.top, w, h);
 	if (saved) Setting::get()->addHistoryFile(path, w, h, L"focused");
+	// 静默截图没有窗口可反馈：托盘图标临时换成绿色的「成功」勾，1.2s 后自动恢复
+	TrayIcon::flashSuccess();
 }
 
 // 全局热键「重复截图」：按上一次记住的选区（屏幕坐标）静默再抓一次，全程不建窗口。
@@ -226,6 +249,8 @@ void App::captureLastRegionSilent()
 	else if (!saved.empty() && action == 2) Util::addFileToClipboardCut(saved);
 	else Util::saveToClipboard(rw, rh, pixels.data());
 	if (!saved.empty()) Setting::get()->addHistoryFile(saved, rw, rh, L"capture");
+	// 静默截图没有窗口可反馈：托盘图标临时换成绿色的「成功」勾，1.2s 后自动恢复
+	TrayIcon::flashSuccess();
 }
 
 App::App()

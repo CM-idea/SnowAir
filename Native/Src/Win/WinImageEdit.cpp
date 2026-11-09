@@ -436,6 +436,8 @@ void WinImageEdit::onWheelAdjust(POINT pos, float space)
 {
     if (space == 0.f) return;
     const int dir = space > 0.f ? 1 : -1;
+    // 鼠标停在属性栏的序号输入框上（未在编辑）：滚轮直接加减序号
+    if (annot_ && annot_->toolSub && annot_->toolSub->wheelNumberAt(dir)) return;
     // 尺寸：高 / 宽
     if (editH_ && editH_->isPosIn(pos)) { bumpSizeBox(editH_, dir); return; }
     if (editW_ && editW_->isPosIn(pos)) { bumpSizeBox(editW_, dir); return; }

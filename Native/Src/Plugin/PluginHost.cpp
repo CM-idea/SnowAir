@@ -11,7 +11,9 @@
 #include "../Win/ClipPin.h"
 
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <map>
 
 namespace {
@@ -184,6 +186,28 @@ std::wstring fileNameOf(const std::wstring& path)
     return std::filesystem::path(path).filename().wstring();
 }
 
+// 截图完成时会顺手复制到剪贴板：同一张图在「截图历史」和「剪贴板历史」各有一条
+// （历史是真正的截图文件，剪贴板是缓存目录里的同名内容 PNG）。
+// 信封按内容把它们合并成一张卡，所以删除也要两条一起删；这里用字节比对确认是同一张图。
+bool sameFileBytes(const std::wstring& a, const std::wstring& b)
+{
+    if (a.empty() || b.empty()) return false;
+    std::ifstream fa(a, std::ios::binary);
+    std::ifstream fb(b, std::ios::binary);
+    if (!fa || !fb) return false;
+    constexpr std::streamsize kChunk = 64 * 1024;
+    std::vector<char> ba(kChunk), bb(kChunk);
+    while (fa && fb) {
+        fa.read(ba.data(), kChunk);
+        fb.read(bb.data(), kChunk);
+        const std::streamsize na = fa.gcount();
+        if (na != fb.gcount()) return false;
+        if (na == 0) break;
+        if (std::memcmp(ba.data(), bb.data(), static_cast<size_t>(na)) != 0) return false;
+    }
+    return true;
+}
+
 int entryKindOf(const Setting::HistoryItem& it)
 {
     if (it.source == L"clipboard") {
@@ -204,8 +228,16 @@ int entryKindOf(const Setting::HistoryItem& it)
 int entrySourceOf(const Setting::HistoryItem& it)
 {
     if (it.source == L"clipboard") return SNOWAIR_SOURCE_CLIPBOARD;
-    if (it.id == it.filePath) return SNOWAIR_SOURCE_OTHER;
     if (it.source == L"record") return SNOWAIR_SOURCE_RECORD;
+    // 目录扫描出来、文件名不是本软件保存模板的，才算「其他」用户文件
+    if (it.id == it.filePath) {
+        auto* s = Setting::get();
+        if (!s || !s->isOwnHistoryFile(it.filePath)) return SNOWAIR_SOURCE_OTHER;
+    }
+    if (it.source == L"focused") return SNOWAIR_SOURCE_FOCUSED;
+    if (it.source == L"fullscreen") return SNOWAIR_SOURCE_FULLSCREEN;
+    if (it.source == L"long") return SNOWAIR_SOURCE_LONG;
+    if (it.source == L"autosave") return SNOWAIR_SOURCE_AUTOSAVE;
     return SNOWAIR_SOURCE_CAPTURE;
 }
 
@@ -387,12 +419,31 @@ void entryDelete(void*, int index)
     const auto it = g_entries[static_cast<size_t>(index)];
     auto* s = Setting::get();
     if (!s) return;
+    std::error_code ec;
     if (it.source == L"clipboard") {
+        // 信封里这张卡可能是「剪贴板副本 + 截图历史」合并出来的：
+        // 先把内容相同的截图历史找出来，删完剪贴板记录再一起删（文件移入回收站）。
+        std::vector<Setting::HistoryItem> twins;
+        if (isImagePath(it.filePath)) {
+            for (const auto& h : s->getHistoryItemsForUi(true)) {
+                if (h.filePath.empty() || !isImagePath(h.filePath)) continue;
+                if (sameFileBytes(it.filePath, h.filePath)) twins.push_back(h);
+            }
+        }
         s->removeClipboardItem(it.id);
+        for (const auto& h : twins) s->removeHistoryItem(h.id, true);
     } else {
-        std::error_code ec;
         const bool exists = !it.filePath.empty() && std::filesystem::exists(it.filePath, ec);
+        // 反过来：删截图那条时，把剪贴板里同一张图的记录也删掉（不动截图文件之外的任何东西）
+        std::vector<std::wstring> twinClips;
+        if (exists && isImagePath(it.filePath)) {
+            for (const auto& c : s->getClipboardItems()) {
+                if (c.type != L"image" || c.filePath.empty()) continue;
+                if (sameFileBytes(it.filePath, c.filePath)) twinClips.push_back(c.id);
+            }
+        }
         s->removeHistoryItem(it.id, exists);   // recycle when the file still exists
+        for (const auto& id : twinClips) s->removeClipboardItem(id);
     }
     g_entriesDirty = true;
 }

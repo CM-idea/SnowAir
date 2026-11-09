@@ -69,6 +69,41 @@ namespace {
 		return true;
 	}
 
+	// —— 记忆工具样式（按工具记「上一次的形态 + 粗细」）——
+	// 开关开启时优先用上次实际用过的值；关闭时行为与以前一致（初始属性 > 会话记忆）
+	constexpr int kNoLast{ -999999 };
+	bool rememberToolStyle()
+	{
+		auto* s = Setting::get();
+		return s && s->getRememberToolStyle();
+	}
+	int rememberInt(const wchar_t* tool, const wchar_t* key, int def)
+	{
+		auto* s = Setting::get();
+		if (!s || !s->getRememberToolStyle()) return def;
+		return s->getToolLastInt(tool, key, def);
+	}
+	void saveLastInt(const wchar_t* tool, const wchar_t* key, int v)
+	{
+		auto* s = Setting::get();
+		if (s && s->getRememberToolStyle()) s->setToolLastInt(tool, key, v);
+	}
+	// 上次数值：开关开启且存过 → 用它；否则回落到初始属性。
+	// memKey 是记忆里用的键（滑条键名），designKey 是「初始属性」里用的键（两者通常相同）。
+	bool rememberedToolValue(const wchar_t* tool, const wchar_t* memKey, const wchar_t* designKey,
+		float mn, float mx, float& out)
+	{
+		auto* s = Setting::get();
+		if (s && s->getRememberToolStyle()) {
+			const int v = s->getToolLastInt(tool, memKey, kNoLast);
+			if (v != kNoLast) {
+				out = std::clamp((float)v, mn, mx);
+				return true;
+			}
+		}
+		return designSliderValue(tool, designKey, mn, mx, out);
+	}
+
 	// 属性栏要显示的形态：按「初始属性」里配置的顺序排，并去掉被设为工具栏默认的那一款
 	// （默认形态已经在工具栏按钮上，属性栏里不再重复）
 	std::vector<ToolInitial::InitialChoice> orderedFormsFor(const wchar_t* defId, int defaultForm)
@@ -124,10 +159,11 @@ ToolSub::ToolSub(AnnotHost* win) : ToolbarWindow(), win(win)
 	});
 	onKeyDown.add([this](UINT key) {
 		// 属性栏输入框编辑中：键盘只给输入框，不能再转发成删除标注/全局快捷键。
+		// Esc 例外：它是全局行为（退出截图等），小编辑框不为它让路。
 		const bool wmEditing = wmTextBox && wmTextBox->isFocused();
 		const bool numberEditing = numberInput && numberInput->isFocused();
 		if (wmEditing || numberEditing) {
-			if (key == VK_ESCAPE && wmEditing) this->win->forwardKey(key);
+			if (key == VK_ESCAPE) this->win->forwardKey(key);
 			return;
 		}
 		this->win->forwardKey(key);
@@ -139,6 +175,7 @@ ToolSub::ToolSub(AnnotHost* win) : ToolbarWindow(), win(win)
 
 ToolSub::~ToolSub()
 {
+	flushRememberedSize();   // 会话直接结束时也把当前工具的粗细/字号落盘
 	// WinBase 析构不销毁 HWND：正常路径由 WinCap::onClosed 先 close，
 	// 这里是兜底 —— 漏了就会留下"幽灵窗"，系统发 WM_DPICHANGED 时重入已释放对象
 	if (hwnd) { close(); hwnd = nullptr; }
@@ -166,10 +203,16 @@ void ToolSub::onCreated()
 			}
 		}
 	});
+	// 属性栏自己拿到滚轮时（它可能持有键盘焦点）：停在序号输入框上就加减序号
+	onMouseWheel.add([this](POINT, float space) {
+		if (space == 0.f) return;
+		wheelNumberAt(space > 0.f ? 1 : -1);
+	});
 }
 
 void ToolSub::beginTool(const std::wstring& id)
 {
+	flushRememberedSize();   // 换工具前把上一个工具的粗细/字号按「记忆工具样式」落盘
 	endMultiStyle();
 	closeColorPanel();
 	closeNestedPanel();
@@ -251,10 +294,10 @@ void ToolSub::beginTool(const std::wstring& id)
 	sliderMax = cfg->max;
 	// 会话内记忆；新截图会话 ToolSub 重建后回到默认
 	sliderVal = rememberedSlider(id, strokeDefaultWidth(id, cfg->def), cfg->min, cfg->max);
-	// 初始属性里的默认数值（粗细 / 字号 / 大小）优先于会话记忆。
+	// 开启「记忆工具样式」时用上次的粗细；否则沿用初始属性 > 会话记忆。
 	// 键名跟着滑条配置走（text/watermark 是 fontSize，number 是 radius），不能写死 width
 	float designVal = 0.f;
-	if (designSliderValue(id.c_str(), cfg->key, sliderMin, sliderMax, designVal))
+	if (rememberedToolValue(id.c_str(), cfg->key, cfg->key, sliderMin, sliderMax, designVal))
 		sliderVal = designVal;
 	auto cit = colorIndexMem.find(id);
 	selectColorIndex = (cit != colorIndexMem.end() && cit->second < colors.size()) ? cit->second : 0;
@@ -270,25 +313,39 @@ float ToolSub::rememberedSlider(const std::wstring& key, float def, float mn, fl
 
 void ToolSub::rememberSlider(const std::wstring& key, float val)
 {
-	sliderMem[key] = val;
+	sliderMem[key] = val;   // 会话内记忆；要落盘的「记忆工具样式」在换工具/收栏时统一写（见 flushRememberedSize）
+}
+
+void ToolSub::rememberShapeSides(bool star, int v)
+{
+	saveLastInt(ToolKey::Rect, star ? DesignKey::Points : DesignKey::Sides, v);
+}
+
+void ToolSub::flushRememberedSize()
+{
+	if (!hasTools || curToolId.empty() || curSliderKey.empty()) return;
+	auto* s = Setting::get();
+	if (!s || !s->getRememberToolStyle()) return;
+	s->setToolLastInt(curToolId, curSliderKey, (int)std::lround(sliderVal));
 }
 
 void ToolSub::showRectTools()
 {
 	if (curToolId == L"rect" && hasTools) return;
 	beginTool(L"rect");
-	// 初始属性：默认形态（0 矩形 / 1 椭圆 / 2 多边形 / 3 星形）+ 边数 / 角数
+	// 初始属性：默认形态（0 矩形 / 1 椭圆 / 2 多边形 / 3 星形）+ 边数 / 角数。
+	// 开启「记忆工具样式」时优先用上次的形态
 	int defaultForm = 0;
 	{
-		const int form = designInt(ToolKey::Rect, DesignKey::Form, -1);
+		const int form = rememberInt(ToolKey::Rect, DesignKey::Form, -1);
 		if (form >= 0) {
 			defaultForm = std::clamp(form, 0, 3);
 			isEllipse = (form == 1);
 			rectKind = (form == 2) ? PolygonShape : (form == 3) ? StarShape : RectShape;
 		}
-		const int sides = designInt(ToolKey::Rect, DesignKey::Sides, -1);
+		const int sides = rememberInt(ToolKey::Rect, DesignKey::Sides, -1);
 		if (sides >= 0) polygonSides = std::clamp(sides, 3, 20);
-		const int pts = designInt(ToolKey::Rect, DesignKey::Points, -1);
+		const int pts = rememberInt(ToolKey::Rect, DesignKey::Points, -1);
 		if (pts >= 0) starPoints = std::clamp(pts, 3, 20);
 	}
 	if (isRectFill && isRectDash) isRectDash = false;
@@ -308,6 +365,9 @@ void ToolSub::showRectTools()
 			isEllipse = false;
 			if (ellipseBtn) applyToggleStyle(ellipseBtn, false);
 			rectKind = same ? RectShape : kind;
+			// 记忆工具样式：记住这次的矩形形态（多边形 / 星形 / 回矩形）
+			saveLastInt(ToolKey::Rect, DesignKey::Form,
+				rectKind == PolygonShape ? 2 : rectKind == StarShape ? 3 : 0);
 			refreshRectKindBtns();
 			if (rectKind == kind) {
 				nestedPanel->openShapeSides(workAreaRect(), btn, kind == StarShape);
@@ -339,6 +399,9 @@ void ToolSub::showRectTools()
 						&& nestedPanel->kind() == ToolNestedPanel::Kind::ShapeSides)
 						closeNestedPanel();
 				}
+				// 记忆工具样式：记住当前形态（椭圆 = 1）
+				saveLastInt(ToolKey::Rect, DesignKey::Form,
+					isEllipse ? 1 : (rectKind == PolygonShape ? 2 : rectKind == StarShape ? 3 : 0));
 				refreshNestedTrigger();
 			});
 			registerStyleToggle([this] { return isEllipse; }, [this] {
@@ -365,6 +428,7 @@ void ToolSub::showRectTools()
 				closeColorPanel();
 				isEllipse = false;
 				rectKind = RectShape;
+				saveLastInt(ToolKey::Rect, DesignKey::Form, 0);   // 记忆工具样式：回矩形
 				refreshRectKindBtns();
 				refreshNestedTrigger();
 				if (nestedPanel && nestedPanel->isOpen()
@@ -440,16 +504,16 @@ void ToolSub::showArrowTools()
 	isArrowFill = true;
 	isLine = false;   // 默认画箭头；需要线段时点属性栏的「线段」临时开关
 	if (arrowHead < ArrowDefault || arrowHead > ArrowFun) arrowHead = ArrowDefault;
-	// 初始属性（外观 > 工具栏外观）：存过默认形态就优先用它
+	// 初始属性（外观 > 工具栏外观）：存过默认形态就优先用它；
+	// 开启「记忆工具样式」时，上次实际用过的箭头形态优先
+	arrowHead = std::clamp(rememberInt(ToolKey::Arrow, DesignKey::Head, arrowHead),
+		(int)ArrowDefault, (int)ArrowFun);
 	auto* designSetting = Setting::get();
 	const bool arrowDesign = designSetting && designSetting->hasToolDesign(L"arrow");
-	if (arrowDesign)
-		arrowHead = std::clamp(designSetting->getToolDesignInt(ToolKey::Arrow, DesignKey::Head, arrowHead),
-			(int)ArrowDefault, (int)ArrowFun);
 	// 各种箭头共用 arrow 滑条，不因切子样式改量程
 	loadStrokeSlider(L"arrow");
-	// 初始属性里的默认粗细（没存过就沿用滑条记忆 / 全局默认）
-	if (arrowDesign) {
+	// 初始属性里的默认粗细（没存过就沿用滑条记忆 / 全局默认）；开关开启时已由记忆接管
+	if (arrowDesign && !rememberToolStyle()) {
 		const int dw = designSetting->getToolDesignInt(ToolKey::Arrow, DesignKey::Width, -1);
 		if (dw > 0) sliderVal = std::clamp((float)dw, sliderMin, sliderMax);
 	}
@@ -546,14 +610,14 @@ void ToolSub::showLineTools()
 	int defaultLine = LineDimension;
 	lineKind = LineDimension;
 	{
-		const int form = designInt(ToolKey::Line, DesignKey::Form, -1);
+		const int form = rememberInt(ToolKey::Line, DesignKey::Form, -1);
 		if (form == LineBubble || form == LineBurst || form == LineAngle
 			|| form == LineWave || form == LineDimension) {
 			lineKind = form;
 			defaultLine = form;
 		}
 		const int lw = designInt(ToolKey::Line, DesignKey::Width, -1);
-		if (lw >= 0) sliderVal = std::clamp((float)lw, sliderMin, sliderMax);
+		if (lw >= 0 && !rememberToolStyle()) sliderVal = std::clamp((float)lw, sliderMin, sliderMax);
 	}
 	initSize(6, true);   // 4 个非默认形态 + 虚线 + 圆头，再加色块与滑条
 	lineKindBtns.clear();
@@ -571,6 +635,7 @@ void ToolSub::showLineTools()
 		tip->bind(b, Lang::get(tipKey));
 		b->onClick.add([this, kind](Ling::Button*) {
 			lineKind = kind;
+			saveLastInt(ToolKey::Line, DesignKey::Form, kind);   // 记忆工具样式：上次的线段形态
 			refreshLineKindBtns();
 			win->onToolStyleChanged();
 		});
@@ -754,10 +819,10 @@ void ToolSub::showNumberTools()
 	const bool fresh = (curToolId != L"number" || !hasTools);
 	beginTool(L"number");
 	isNumberFill = true;
-	// 初始属性：默认序号类型（0 数字 / 1 字母 / 2 Emoji）
+	// 初始属性：默认序号类型（0 数字 / 1 字母 / 2 Emoji）；记忆开关开启时用上次的类型
 	int defaultNum = NumberDigit;
 	{
-		const int form = designInt(ToolKey::Number, DesignKey::Form, -1);
+		const int form = rememberInt(ToolKey::Number, DesignKey::Form, -1);
 		if (form >= NumberDigit && form <= NumberEmoji) defaultNum = form;
 	}
 	if (fresh) numberStyle = defaultNum;
@@ -770,9 +835,9 @@ void ToolSub::showNumberTools()
 		sliderMin = 20.f;
 		sliderMax = 240.f;
 		sliderVal = rememberedSlider(L"numberEmoji", 40.f, sliderMin, sliderMax);
-		// Emoji 序号同样吃「初始属性」里的默认大小（量程 20–240，按此夹紧）
+		// Emoji 序号同样吃「初始属性」/ 记忆里的默认大小（量程 20–240，按此夹紧）
 		float designVal = 0.f;
-		if (designSliderValue(ToolKey::Number, L"radius", sliderMin, sliderMax, designVal))
+		if (rememberedToolValue(ToolKey::Number, L"emojiSize", L"radius", sliderMin, sliderMax, designVal))
 			sliderVal = designVal;
 		initSize(3, false); // 字母 / Emoji开关 / 当前表情
 	}
@@ -1551,8 +1616,9 @@ void ToolSub::notifyStyleChanged()
 
 void ToolSub::resetStyleToDefaults()
 {
-	// 关掉工具再打开 = 属性栏回到「初始属性」，不沿用上一次的选择
-	const int rf = designInt(ToolKey::Rect, DesignKey::Form, 0);
+	// 关掉工具再打开 = 属性栏回到「初始属性」，不沿用上一次的选择；
+	// 开启「记忆工具样式」时，形态仍取上次用过的（数值由 rememberedToolValue 负责）
+	const int rf = rememberInt(ToolKey::Rect, DesignKey::Form, 0);
 	isEllipse = (rf == 1);
 	rectKind = (rf == 2) ? PolygonShape : (rf == 3 ? StarShape : RectShape);
 	isRectFill = false;
@@ -1561,9 +1627,9 @@ void ToolSub::resetStyleToDefaults()
 	lastCornerRadius = 0.f;
 	isArrowDash = false;
 	isArrowRound = false;
-	arrowHead = designInt(ToolKey::Arrow, DesignKey::Head, ArrowDefault);
+	arrowHead = rememberInt(ToolKey::Arrow, DesignKey::Head, ArrowDefault);
 	isLine = false;
-	lineKind = designInt(ToolKey::Line, DesignKey::Form, LineDimension);
+	lineKind = rememberInt(ToolKey::Line, DesignKey::Form, LineDimension);
 	isPenDash = false;
 	isPenSoft = false;
 	isPenMarker = false;
@@ -1576,8 +1642,8 @@ void ToolSub::resetStyleToDefaults()
 	isHighlightBorder = designInt(ToolKey::Highlight, DesignKey::Border, 0) != 0;
 	isHighlightEllipse = designInt(ToolKey::Highlight, DesignKey::Form, 0) == 1;
 	isMosaicBlur = designInt(ToolKey::Mosaic, DesignKey::Form, 0) == 1;
-	numberStyle = designInt(ToolKey::Number, DesignKey::Form, NumberDigit);
-	// 颜色/粗细的会话记忆也清掉：重新打开按初始属性来
+	numberStyle = rememberInt(ToolKey::Number, DesignKey::Form, NumberDigit);
+	// 颜色/粗细的会话记忆也清掉：重新打开按初始属性来（记忆开关开启时改从 Setting 读）
 	selectColorIndex = 0;
 	sliderMem.clear();
 	colorIndexMem.clear();
@@ -2314,7 +2380,7 @@ void ToolSub::makeNumberStyleBtns()
 	numberInput = nullptr;
 	int defaultNum = NumberDigit;
 	{
-		const int form = designInt(ToolKey::Number, DesignKey::Form, -1);
+		const int form = rememberInt(ToolKey::Number, DesignKey::Form, -1);
 		if (form >= NumberDigit && form <= NumberEmoji) defaultNum = form;
 	}
 	// 再点同一项回到默认形态
@@ -2327,6 +2393,7 @@ void ToolSub::makeNumberStyleBtns()
 		tip->bind(btn, Lang::get(tipKey));
 		btn->onClick.add([this, style, defaultNum](Ling::Button*) {
 			numberStyle = (numberStyle == style) ? defaultNum : style;
+			saveLastInt(ToolKey::Number, DesignKey::Form, numberStyle);   // 记忆工具样式：序号类型
 			showNumberTools(); // 重建：Emoji 模式多出表情入口 / 滑条范围
 			win->onToolStyleChanged();
 		});
@@ -2425,11 +2492,52 @@ void ToolSub::clearSelectedNumberValue()
 
 void ToolSub::blurInputs()
 {
-	if (numberInput && numberInput->isFocused()) numberInput->blur();
+	// 序号输入框编辑中：整段跳过 —— 既不结束编辑，也不抢它正在用的鼠标捕获
+	// （拖选数字时鼠标划出属性栏，ReleaseCapture 会把选区打断）
+	if (numberInput && numberInput->isFocused()) return;
 	if (wmTextBox && wmTextBox->isFocused()) wmTextBox->blur();
 	// 输入框偶发残留鼠标捕获：鼠标已经回到画布，捕获还挂在属性栏上会导致画布点不动
 	HWND cap = GetCapture();
 	if (cap && hwnd && (cap == hwnd || IsChild(hwnd, cap))) ReleaseCapture();
+}
+
+bool ToolSub::numberEditActive() const
+{
+	return numberInput && numberInput->isFocused();
+}
+
+void ToolSub::endNumberEdit()
+{
+	if (!numberInput) return;
+	if (numberInput->isFocused()) numberInput->blur();
+	syncNumberInput();   // 空文本 / 非规范输入 → 回写成当前序号
+}
+
+bool ToolSub::wheelNumberAt(int dir)
+{
+	if (!numberInput || !hwnd || dir == 0) return false;
+	if (numberInput->isFocused()) return false;   // 编辑中不抢滚轮
+	if (!isVisible) return false;
+	POINT p{};
+	GetCursorPos(&p);
+	ScreenToClient(hwnd, &p);
+	if (!numberInput->isPosIn(p)) return false;
+	stepNumber(dir);
+	return true;
+}
+
+void ToolSub::stepNumber(int delta)
+{
+	if (!numberInput || delta == 0) return;
+	const std::wstring text = numberInput->getText();
+	// 只有内容是纯数字时才滚轮加减（字母 / Emoji / 自定义文字不动）
+	if (text.empty() || text.find_first_not_of(L"0123456789") != std::wstring::npos) return;
+	const int cur = _wtoi(text.c_str());
+	const int next = std::clamp(cur + delta, 1, 9999);
+	if (next == cur) return;
+	// 走 TextBox 的 setText → onTextChanged → applyNumberInputEdited，
+	// 与手动输入同一套规则（二次选中时改的是那个标注，否则改下一次落笔的序号）
+	numberInput->setText(std::to_wstring(next));
 }
 
 float ToolSub::measureNumberInputW(const std::wstring& text) const
@@ -2464,6 +2572,8 @@ void ToolSub::buildNumberInput()
 	numberInput->setAutoSize(true);
 	numberInput->setVerticalCenter(true);
 	numberInput->setTextAlignCenter(true);   // 序号在输入框里居中
+	// 常态编辑：属性栏是 NOACTIVATE 气泡，宿主窗口焦点变化不该结束这里的编辑
+	numberInput->setKeepFocusOnWindowBlur(true);
 	numberInputSyncing = true;
 	numberInput->setText(numberInputDisplay());
 	numberInputSyncing = false;
@@ -2477,9 +2587,8 @@ void ToolSub::buildNumberInput()
 	numberInput->onTextChanged.add([this](Ling::TextBox*, const std::wstring&) {
 		applyNumberInputEdited();
 	});
-	numberInput->onEnter.add([this](Ling::TextBox* tb) {
-		if (tb) tb->blur();
-	});
+	// 回车结束编辑由 TextBox 自身处理（singleLine）；这里不要再挂 onEnter ——
+	// 那是"鼠标进入控件"事件，会让鼠标一划进输入框就退出编辑。
 }
 
 void ToolSub::applyNumberInputEdited()
@@ -2669,9 +2778,11 @@ void ToolSub::makeArrowHeadBtn(const wchar_t* icon, int style, const wchar_t* ti
 	btn->onClick.add([this, style](Ling::Button*) {
 		arrowHead = (arrowHead == style) ? ArrowDefault : style;
 		isLine = false;   // 选任一箭头样式 = 退出「线段」模式
-		// 记忆工具样式：记住这次选的箭头样式
-		if (Setting::get()->getRememberToolStyle())
+		// 记忆工具样式：记住这次选的箭头形态（工具栏与「记忆工具样式」共用一份）
+		if (Setting::get()->getRememberToolStyle()) {
 			Setting::get()->setLastArrowHead(arrowHead);
+			saveLastInt(ToolKey::Arrow, DesignKey::Head, arrowHead);
+		}
 		refreshArrowHeadBtns();
 		win->onToolStyleChanged();
 	});
@@ -2711,7 +2822,7 @@ void ToolSub::loadStrokeSlider(const std::wstring& toolId)
 	// 重新载入滑条会覆盖 beginTool 已经套好的默认值，这里按各自键名再套一次：
 	// 序号是 radius、文字/水印是 fontSize，只有线迹类是 width。
 	float designVal = 0.f;
-	if (designSliderValue(toolId.c_str(), cfg->key, sliderMin, sliderMax, designVal))
+	if (rememberedToolValue(toolId.c_str(), cfg->key, cfg->key, sliderMin, sliderMax, designVal))
 		sliderVal = designVal;
 }
 
@@ -2904,6 +3015,7 @@ bool ToolSub::hasContent()
 
 void ToolSub::hideTools()
 {
+	flushRememberedSize();   // 收栏也把当前工具的粗细/字号落盘
 	// 收属性栏：先把"展示选中标注属性"期间的工具状态还原
 	endShapeStylePreview();
 	hasTools = false;

@@ -27,6 +27,10 @@ ToolCap::ToolCap(WinCap* capWin) : ToolbarWindow(), winCap(capWin)
 		if (winPin) winPin->forwardKey(key);
 		else if (winCap) winCap->forwardKey(key);
 	});
+	// 点工具栏（换工具/撤销/完成等）也结束序号输入框的常态编辑
+	onMouseDown.add([this](POINT, bool) {
+		if (auto* host = annotHost(); host && host->toolSub) host->toolSub->endNumberEdit();
+	});
 	onDpiChanged.add([this]() { dpiChanged = true; });
 	onSizeChanged.add([this]() {
 		if (!dpiChanged) return;
@@ -43,6 +47,10 @@ ToolCap::ToolCap(WinPin* pin) : ToolbarWindow(), winPin(pin)
 	applyStoredLayout(3);   // 套用「贴图工具栏外观」里保存的槽位顺序（没存过则为内置默认）
 	refreshSize();
 	onKeyDown.add([this](UINT key) { this->winPin->forwardKey(key); });
+	// 点工具栏（换工具/撤销/完成等）也结束序号输入框的常态编辑
+	onMouseDown.add([this](POINT, bool) {
+		if (auto* host = annotHost(); host && host->toolSub) host->toolSub->endNumberEdit();
+	});
 	onDpiChanged.add([this]() { dpiChanged = true; });
 	onSizeChanged.add([this]() {
 		if (!dpiChanged) return;

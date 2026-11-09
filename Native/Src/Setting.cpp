@@ -1264,6 +1264,39 @@ void Setting::clearToolDesign()
 }
 bool Setting::getRememberToolStyle() { return featBool(L"rememberToolStyle", false); }
 void Setting::setRememberToolStyle(bool on) { setFeatBool(L"rememberToolStyle", on); }
+namespace {
+	JsonObject toolLastRoot(JsonObject& features)
+	{
+		if (!features.HasKey(L"toolLast")
+			|| features.GetNamedValue(L"toolLast").ValueType() != JsonValueType::Object)
+			features.SetNamedValue(L"toolLast", JsonObject{});
+		return features.GetNamedObject(L"toolLast");
+	}
+}
+int Setting::getToolLastInt(const std::wstring& toolId, const std::wstring& key, int def)
+{
+	if (toolId.empty() || key.empty()) return def;
+	auto features = featuresObj();
+	if (!features.HasKey(L"toolLast")
+		|| features.GetNamedValue(L"toolLast").ValueType() != JsonValueType::Object)
+		return def;
+	auto last = features.GetNamedObject(L"toolLast");
+	if (!last.HasKey(toolId)) return def;
+	auto one = last.GetNamedObject(toolId, nullptr);
+	if (!one || !one.HasKey(key)) return def;
+	return (int)one.GetNamedNumber(key, (double)def);
+}
+void Setting::setToolLastInt(const std::wstring& toolId, const std::wstring& key, int value)
+{
+	if (toolId.empty() || key.empty()) return;
+	auto features = featuresObj();
+	auto last = toolLastRoot(features);
+	JsonObject one = last.HasKey(toolId) ? last.GetNamedObject(toolId, JsonObject{}) : JsonObject{};
+	one.SetNamedValue(key, JsonValue::CreateNumberValue((double)value));
+	last.SetNamedValue(toolId, one);
+	features.SetNamedValue(L"toolLast", last);
+	save();
+}
 // 悬停预览：历史记录 / 剪切板卡片停悬时弹出大图或文字卡（默认关闭）
 bool Setting::getHoverPreview() { return featBool(L"hoverPreview", false); }
 void Setting::setHoverPreview(bool on) { setFeatBool(L"hoverPreview", on); }
@@ -2114,6 +2147,30 @@ namespace {
 
 // 历史页用：索引 + 扫描「截图文件路径 / 录屏文件路径」里已有的媒体文件。
 // 这些文件没走过登记流程（如旧版本、手动拷进来的）也照样显示，保证“可见即所得”。
+bool Setting::isOwnHistoryFile(const std::wstring& filePath)
+{
+    if (filePath.empty()) return false;
+    std::wstring name = std::filesystem::path(filePath).filename().wstring();
+    for (auto& c : name) c = (wchar_t)towlower(c);
+    auto prefixOf = [](std::wstring fmt) {
+        if (fmt.empty()) return std::wstring{};
+        const auto brace = fmt.find(L"{{");
+        std::wstring p = brace == std::wstring::npos ? fmt : fmt.substr(0, brace);
+        if (const auto slash = p.find_last_of(L"/\\"); slash != std::wstring::npos)
+            p = p.substr(slash + 1);
+        for (auto& c : p) c = (wchar_t)towlower(c);
+        return p;
+    };
+    std::wstring manualFmt = getManualSaveFormat();
+    if (manualFmt.empty()) manualFmt = defaultManualSaveFormat();
+    std::wstring autoFmt = getAutoSaveFormat();
+    if (autoFmt.empty()) autoFmt = defaultAutoSaveFormat();
+    auto startsWith = [&](const std::wstring& p) {
+        return !p.empty() && name.size() >= p.size() && name.compare(0, p.size(), p) == 0;
+    };
+    return startsWith(prefixOf(manualFmt)) || startsWith(prefixOf(autoFmt));
+}
+
 std::vector<Setting::HistoryItem> Setting::getHistoryItemsForUi(bool forceRescan)
 {
     const auto nowTick = GetTickCount64();
@@ -2124,13 +2181,8 @@ std::vector<Setting::HistoryItem> Setting::getHistoryItemsForUi(bool forceRescan
     std::set<std::wstring> seen;
     for (const auto& it : list) seen.insert(historyPathKey(it.filePath));
 
-    // 「删除只记录」隐藏起来的文件：仍在磁盘上，但不再出现在历史里
-    std::set<std::wstring> hidden;
-    for (auto const& v : featArray(L"hiddenHistory")) {
-        if (v.ValueType() == JsonValueType::String)
-            hidden.insert(historyPathKey(v.GetString().c_str()));
-    }
-
+    // 历史页 = 索引 + 目录扫描（可见即所得）：删记录不等于删文件，
+    // 文件还在目录里就照常显示，不再用隐藏列表把它压掉。
     auto scanDir = [&](const std::filesystem::path& dir) {
         std::error_code ec;
         if (dir.empty() || !std::filesystem::is_directory(dir, ec)) return;
@@ -2143,7 +2195,6 @@ std::vector<Setting::HistoryItem> Setting::getHistoryItemsForUi(bool forceRescan
             const bool image = historyExtMatch(ws, { L"png", L"jpg", L"jpeg", L"webp", L"bmp", L"avif", L"jxl" });
             if (!video && !image) continue;
             const auto pathKey = historyPathKey(ws);
-            if (hidden.count(pathKey)) continue;
             if (!seen.insert(pathKey).second) continue;
             HistoryItem item;
             item.id = ws;              // 目录里已有的文件没有索引 id，直接用路径
@@ -2389,11 +2440,9 @@ void Setting::removeHistoryItem(const std::wstring& id, bool deleteFile)
     auto list = getHistoryItems();
     std::vector<HistoryItem> keep;
     bool found = false;
-    std::wstring targetPath = id;
     for (auto& it : list) {
         if (it.id == id) {
             found = true;
-            targetPath = it.filePath;
             // 历史即真实文件：deleteFile=true 时删条目就删文件（走回收站，避免误删）
             std::error_code ec;
             if (deleteFile && !it.filePath.empty()) Util::moveToRecycleBin(it.filePath);
@@ -2407,20 +2456,7 @@ void Setting::removeHistoryItem(const std::wstring& id, bool deleteFile)
         std::error_code ec;
         if (std::filesystem::exists(id, ec)) Util::moveToRecycleBin(id);
     }
-    // 只删记录：文件原地保留，但目录扫描会再次把它扫出来，所以路径要记进隐藏列表
-    if (!deleteFile && !targetPath.empty()) {
-        auto hiddenArr = featArray(L"hiddenHistory");
-        const auto key = historyPathKey(targetPath);
-        bool exists = false;
-        for (auto const& v : hiddenArr) {
-            if (v.ValueType() != JsonValueType::String) continue;
-            if (historyPathKey(v.GetString().c_str()) == key) { exists = true; break; }
-        }
-        if (!exists) {
-            hiddenArr.Append(JsonValue::CreateStringValue(targetPath));
-            setFeatArray(L"hiddenHistory", hiddenArr);
-        }
-    }
+    // 只删记录：文件原地保留，目录扫描会继续把它显示出来（删记录 != 删文件）
     JsonArray arr;
     for (auto& it : keep) arr.Append(historyItemToJson(it));
     auto features = featuresObj();

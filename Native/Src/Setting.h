@@ -125,6 +125,10 @@ public:
 	// 记忆工具样式：记住上次选中的标注工具样式（如箭头样式），不记忆滑动条
 	bool getRememberToolStyle();
 	void setRememberToolStyle(bool on);
+	// 记忆工具样式：上次实际用过的「形态 + 粗细」存在 features.toolLast/{工具 id}/{键}
+	// 只在 getRememberToolStyle() 开启时读写；没存过返回 def
+	int getToolLastInt(const std::wstring& toolId, const std::wstring& key, int def);
+	void setToolLastInt(const std::wstring& toolId, const std::wstring& key, int value);
 	// 悬停预览：历史记录 / 剪切板卡片停悬时弹出预览（默认关闭）
 	bool getHoverPreview();
 	void setHoverPreview(bool on);
@@ -275,6 +279,9 @@ public:
 	std::vector<HistoryItem> getHistoryItems();
 	// 历史页用：索引 + 扫描截图/录屏目录里已有的文件（可见即所得）
 	std::vector<HistoryItem> getHistoryItemsForUi(bool forceRescan = false);
+	// 文件名是否由本软件的保存模板生成（手动 / 自动保存前缀）：
+	// 这类磁盘扫描条目仍算「截图」，不归到「其他」
+	bool isOwnHistoryFile(const std::wstring& filePath);
 	// 登记一条已落盘的历史文件；文件不存在则不登记。返回条目 id
 	std::wstring addHistoryFile(const std::wstring& filePath, int width, int height,
 		const std::wstring& source);

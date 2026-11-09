@@ -92,7 +92,12 @@ enum SnowAirEntrySource {
     SNOWAIR_SOURCE_CLIPBOARD = 0,
     SNOWAIR_SOURCE_CAPTURE = 1,  /* produced by SnowAir's screenshot flow */
     SNOWAIR_SOURCE_RECORD = 2,   /* produced by SnowAir's recorder */
-    SNOWAIR_SOURCE_OTHER = 3     /* user files already in the history folders */
+    SNOWAIR_SOURCE_OTHER = 3,    /* user files already in the history folders */
+    /* 截图的细分来源（UI 标签用，都属于截图分类） */
+    SNOWAIR_SOURCE_FULLSCREEN = 4,  /* 截取全屏（静默） */
+    SNOWAIR_SOURCE_FOCUSED = 5,     /* 截取焦点窗口（静默） */
+    SNOWAIR_SOURCE_LONG = 6,        /* 长截图 */
+    SNOWAIR_SOURCE_AUTOSAVE = 7     /* 自动保存 */
 };
 
 #define SNOWAIR_ENTRY_LABEL_MAX 512
