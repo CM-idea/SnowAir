@@ -14,12 +14,16 @@ class AnnotHost : public Ling::WinBase
 public:
 	~AnnotHost();
 	std::wstring getCurToolId() const;
+	// 属性栏/选中样式使用的工具 id：尺寸是独立工具 id，但界面与属性仍归在 arrow 家族
+	std::wstring styleToolId() const;
 	virtual void forwardKey(UINT key);
 	// 嵌入到别的窗口时：鼠标捕获 / IME 用哪个 HWND（默认就是自己的窗口）。
 	// 图片编辑器的标注宿主是一个隐藏窗口，需要把捕获与输入法都交给宿主窗口。
 	virtual HWND annotInputHwnd() const { return hwnd; }
 	// 供嵌入画布把标注画到自己的 D2D 上下文里（坐标系由调用方先设好）
 	void paintAnnotPublic(ID2D1DeviceContext* ctx) { paintShapes(ctx); }
+	// 线上文字「开洞」时，用宿主自己的背景填这块区域（截图=捕获图；图片编辑=画板/画布底）
+	virtual void paintPunchBackground(ID2D1DeviceContext* ctx, const D2D1_RECT_F& r);
 	Ling::TextBox* getTextBox();
 	void setEditingText(ShapeText* shape);
 	// 属性滑条实时作用的形状：优先二次选中的；否则是刚画完、且仍属于当前工具的标注
@@ -141,6 +145,8 @@ public:
 	ShapeBase* styleLoadCandidate{ nullptr };
 	std::unique_ptr<History> history;
 	Microsoft::WRL::ComPtr<ID2D1Bitmap1> screenImg;
+	// 离屏合成时的「开洞底图」：保存/导出时当前目标就是这张底图，不能再用画布兜底色
+	ID2D1Bitmap1* punchSource_{ nullptr };
 protected:
 	AnnotHost();
 	void ensureHistory();

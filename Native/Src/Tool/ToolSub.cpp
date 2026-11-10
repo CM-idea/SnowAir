@@ -137,7 +137,14 @@ namespace {
 		return shown;
 	}
 
-	// 线迹标注类工具的默认宽度由「其他外观 → 标注默认值」决定（默认 4）
+	// 属性栏里一组形态按钮的公共交互：点未选中的形态 = 切换；再点当前形态 = 回到默认形态。
+	// 矩形 / 序号 / 标注三套形态共用这一条规则，避免某组漏做"再次点击取消"。
+	int toggledForm(int current, int clicked, int defaultForm)
+	{
+		return current == clicked ? defaultForm : clicked;
+	}
+
+	// 线迹标注类工具的默认宽度由设置项 toolDefaultWidth 决定（默认 4）
 	float strokeDefaultWidth(const std::wstring& tool, float fallback)
 	{
 		if (tool != L"rect" && tool != L"arrow" && tool != L"pen" && tool != L"highlight")
@@ -361,21 +368,27 @@ void ToolSub::showRectTools()
 		tip->bind(b, Lang::get(tipKey));
 		b->onClick.add([this, kind](Ling::Button* btn) {
 			closeColorPanel();
-			const bool same = (rectKind == kind && !isEllipse);
+			const bool star = (kind == StarShape);
+			// 再点同一个形态：收起它自己的二级栏，但形态保持选中；
+			// 点的是另一个已选形态（或当前开着别的二级栏）：切回该形态并打开它的二级栏。
+			if (nestedPanel && nestedPanel->shapeSidesFor(star)) {
+				// 再点同一个形态 = 收起它的二级栏，并回到矩形；圆角等其它选中态不受影响
+				closeNestedPanel();
+				isEllipse = false;
+				rectKind = RectShape;
+				saveLastInt(ToolKey::Rect, DesignKey::Form, 0);
+				refreshRectKindBtns();
+				win->onToolStyleChanged();
+				return;
+			}
 			isEllipse = false;
 			if (ellipseBtn) applyToggleStyle(ellipseBtn, false);
-			rectKind = same ? RectShape : kind;
-			// 记忆工具样式：记住这次的矩形形态（多边形 / 星形 / 回矩形）
+			rectKind = kind;
+			// 记忆工具样式：记住这次的矩形形态（多边形 / 星形）
 			saveLastInt(ToolKey::Rect, DesignKey::Form,
 				rectKind == PolygonShape ? 2 : rectKind == StarShape ? 3 : 0);
 			refreshRectKindBtns();
-			if (rectKind == kind) {
-				nestedPanel->openShapeSides(workAreaRect(), btn, kind == StarShape);
-			}
-			else if (nestedPanel && nestedPanel->isOpen()
-				&& nestedPanel->kind() == ToolNestedPanel::Kind::ShapeSides) {
-				closeNestedPanel();
-			}
+			nestedPanel->openShapeSides(workAreaRect(), btn, star);
 			win->onToolStyleChanged();
 		});
 		registerStyleToggle([this, kind] { return !isEllipse && rectKind == kind; }, [this] {
@@ -598,7 +611,7 @@ void ToolSub::applyPenMarkerState(bool on)
 	updateDashAvailability();
 }
 
-void ToolSub::showLineTools()
+void ToolSub::showLineTools(int forceKind)
 {
 	// 标注 = 只有轴线：形态（尺寸 / 气泡 / 角度 / 波浪线）+ 虚线 / 圆头 / 颜色 / 粗细。
 	// 直线（线段）不在这里：它是箭头属性栏的临时开关（见 showArrowTools）。
@@ -609,7 +622,12 @@ void ToolSub::showLineTools()
 	// 初始属性：标注默认形态是「尺寸」；旧配置里的 0（直线）按尺寸处理
 	int defaultLine = LineDimension;
 	lineKind = LineDimension;
-	{
+	if (forceKind >= 0) {
+		// 独立「尺寸」主按钮：形态固定为尺寸，不受上次记忆影响
+		lineKind = forceKind;
+		defaultLine = forceKind;
+	}
+	else {
 		const int form = rememberInt(ToolKey::Line, DesignKey::Form, -1);
 		if (form == LineBubble || form == LineBurst || form == LineAngle
 			|| form == LineWave || form == LineDimension) {
@@ -625,7 +643,7 @@ void ToolSub::showLineTools()
 	angleKindBtn = nullptr;
 	waveKindBtn = nullptr;
 	dimKindBtn = nullptr;
-	auto addKindBtn = [this](const wchar_t* icon, int kind, const wchar_t* tipKey) {
+	auto addKindBtn = [this, defaultLine](const wchar_t* icon, int kind, const wchar_t* tipKey) {
 		auto b = contentNode->makeChild<Ling::Button>();
 		b->setText(icon);
 		styleToolbarBtn(b);
@@ -633,9 +651,10 @@ void ToolSub::showLineTools()
 		b->setFontSize(Icon::Size);
 		applyToggleStyle(b, lineKind == kind);
 		tip->bind(b, Lang::get(tipKey));
-		b->onClick.add([this, kind](Ling::Button*) {
-			lineKind = kind;
-			saveLastInt(ToolKey::Line, DesignKey::Form, kind);   // 记忆工具样式：上次的线段形态
+		b->onClick.add([this, kind, defaultLine](Ling::Button*) {
+			// 再点同一个形态 = 回到初始属性里的默认形态（与矩形/序号形态同一套交互）
+			lineKind = toggledForm(lineKind, kind, defaultLine);
+			saveLastInt(ToolKey::Line, DesignKey::Form, lineKind);   // 记忆工具样式：上次的线段形态
 			refreshLineKindBtns();
 			win->onToolStyleChanged();
 		});
@@ -1535,17 +1554,29 @@ void ToolSub::openStrokeColorPanel(float screenCenterX, float screenBottom, cons
 	colorPanel->open(workAreaRect());
 }
 
-RECT ToolSub::colorPanelParentBodyRect() const
+RECT ToolSub::bodyRectForChildPopup(const RECT& parent, bool parentAbove) const
 {
-	RECT r = colorParentOverride_
-		? colorParentRect_
-		: RECT{ x, y, x + static_cast<int>(w), y + static_cast<int>(h) };
-	const bool parentAbove = colorParentOverride_ && nestedPanel
-		? nestedPanel->tipDown() : tipDown();
+	RECT r = parent;
 	const int caret = static_cast<int>(std::lround(ToolbarTheme::caretSize * dpi));
 	if (parentAbove) r.bottom -= caret;
 	else r.top += caret;
 	return r;
+}
+
+RECT ToolSub::popupParentBodyRect() const
+{
+	return bodyRectForChildPopup(
+		RECT{ x, y, x + static_cast<int>(w), y + static_cast<int>(h) }, tipDown());
+}
+
+RECT ToolSub::colorPanelParentBodyRect() const
+{
+	const RECT parent = colorParentOverride_
+		? colorParentRect_
+		: RECT{ x, y, x + static_cast<int>(w), y + static_cast<int>(h) };
+	const bool parentAbove = colorParentOverride_ && nestedPanel
+		? nestedPanel->tipDown() : tipDown();
+	return bodyRectForChildPopup(parent, parentAbove);
 }
 
 bool ToolSub::colorPanelPreferBelow() const
@@ -2392,7 +2423,7 @@ void ToolSub::makeNumberStyleBtns()
 		btn->setFontSize(Icon::Size);
 		tip->bind(btn, Lang::get(tipKey));
 		btn->onClick.add([this, style, defaultNum](Ling::Button*) {
-			numberStyle = (numberStyle == style) ? defaultNum : style;
+			numberStyle = toggledForm(numberStyle, style, defaultNum);
 			saveLastInt(ToolKey::Number, DesignKey::Form, numberStyle);   // 记忆工具样式：序号类型
 			showNumberTools(); // 重建：Emoji 模式多出表情入口 / 滑条范围
 			win->onToolStyleChanged();

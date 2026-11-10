@@ -1051,7 +1051,7 @@ WinCap* ToolCap::maskHost() const
 	return winCap;
 }
 
-// 停悬气泡：按「快捷键提示」(外观设置 > 其他外观) 决定是否把该按钮当前的键位拼进文字，
+// 停悬气泡：按「快捷键提示」(功能设置 > 其他功能) 决定是否把该按钮当前的键位拼进文字，
 // 如 "矩形" → "矩形（1）"。贴图布局不属于命令表（贴图/镜像组已取消），故不提示。
 void ToolCap::bindTip(Ling::Button* btn, const std::wstring& text, const std::wstring& lookup)
 {

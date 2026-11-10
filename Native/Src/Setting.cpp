@@ -506,7 +506,26 @@ namespace {
 
     DWORD g_lastClipSeq{ 0 };
     constexpr UINT_PTR kClipPollTimer{ 1 };
+    constexpr UINT_PTR kClipDebounceTimer{ 2 };
     constexpr UINT kClipPollMs{ 800 };
+    constexpr UINT kClipDebounceMs{ 80 };
+
+    // 剪贴板必须尽早关闭：写入方（Adobe 等）在我们读取后马上还要再 OpenClipboard 做粘贴，
+    // 读数据期间顺带保存历史/PNG 会让对方的复制粘贴抢不到剪贴板。
+    struct ClipboardGuard
+    {
+        bool opened{ false };
+        explicit ClipboardGuard(HWND owner)
+        {
+            // 剪贴板可能仍被写入方占用：短重试，避免"刚好这一下没读到"就永远漏掉
+            for (int attempt = 0; attempt < 10; ++attempt) {
+                if (OpenClipboard(owner)) { opened = true; break; }
+                Sleep(5);
+            }
+        }
+        ~ClipboardGuard() { if (opened) CloseClipboard(); }
+        void release() { if (opened) { CloseClipboard(); opened = false; } }
+    };
 
     void captureClipboardNow(bool force = false)
     {
@@ -515,75 +534,87 @@ namespace {
         // 事件与轮询可能撞在同一处：序列号没变就不再重复读一遍
         const DWORD seq = GetClipboardSequenceNumber();
         if (!force && seq == g_lastClipSeq) return;
-        // 剪贴板可能仍被写入方占用：短重试，避免"刚好这一下没读到"就永远漏掉
-        bool opened = false;
-        for (int attempt = 0; attempt < 10; ++attempt) {
-            if (OpenClipboard(g_clipWnd)) { opened = true; break; }
-            Sleep(5);
-        }
-        if (!opened) return;
-        g_lastClipSeq = seq;
-        if (HANDLE hf = GetClipboardData(CF_HDROP)) {
-            // 文件列表（资源管理器 / Word / PPT 等）：只记路径，不复制内容
-            HDROP drop = static_cast<HDROP>(hf);
-            const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
-            std::vector<std::wstring> files;
-            for (UINT i = 0; i < count; ++i) {
-                const UINT len = DragQueryFileW(drop, i, nullptr, 0);
-                if (len == 0) continue;
-                std::wstring path(len, L'\0');
-                if (DragQueryFileW(drop, i, path.data(), len + 1) == 0) continue;
-                files.push_back(std::move(path));
-            }
-            if (!files.empty()) {
-                s->addClipboardFiles(files);
-                CloseClipboard();
-                return;
-            }
-        }
-        if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
-            if (const auto* p = static_cast<const wchar_t*>(GlobalLock(h))) {
-                s->addClipboardText(p);
-                GlobalUnlock(h);
-            }
-        }
-        else if (HANDLE ha = GetClipboardData(CF_TEXT)) {
-            // 老程序只给 ANSI 文本：按本地代码页转一次
-            if (const auto* p = static_cast<const char*>(GlobalLock(ha))) {
-                const int len = MultiByteToWideChar(CP_ACP, 0, p, -1, nullptr, 0);
-                if (len > 1) {
-                    std::wstring w((size_t)len - 1, L'\0');
-                    MultiByteToWideChar(CP_ACP, 0, p, -1, w.data(), len);
-                    s->addClipboardText(w);
+
+        std::vector<std::wstring> files;
+        std::wstring text;
+        std::vector<BYTE> px;
+        int imgW = 0, imgH = 0;
+        bool hasFiles = false, hasText = false, hasImage = false;
+
+        {
+            // 剪贴板可能仍被写入方占用：短重试，避免"刚好这一下没读到"就永远漏掉
+            ClipboardGuard clip(g_clipWnd);
+            if (!clip.opened) return;
+            g_lastClipSeq = seq;
+
+            if (HANDLE hf = GetClipboardData(CF_HDROP)) {
+                // 文件列表（资源管理器 / Word / PPT 等）：只记路径，不复制内容
+                HDROP drop = static_cast<HDROP>(hf);
+                const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+                for (UINT i = 0; i < count; ++i) {
+                    const UINT len = DragQueryFileW(drop, i, nullptr, 0);
+                    if (len == 0) continue;
+                    std::wstring path(len, L'\0');
+                    if (DragQueryFileW(drop, i, path.data(), len + 1) == 0) continue;
+                    files.push_back(std::move(path));
                 }
-                GlobalUnlock(ha);
+                hasFiles = !files.empty();
             }
+            if (!hasFiles) {
+                if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
+                    if (const auto* p = static_cast<const wchar_t*>(GlobalLock(h))) {
+                        text = p;
+                        hasText = !text.empty();
+                        GlobalUnlock(h);
+                    }
+                }
+                else if (HANDLE ha = GetClipboardData(CF_TEXT)) {
+                    // 老程序只给 ANSI 文本：按本地代码页转一次
+                    if (const auto* p = static_cast<const char*>(GlobalLock(ha))) {
+                        const int len = MultiByteToWideChar(CP_ACP, 0, p, -1, nullptr, 0);
+                        if (len > 1) {
+                            text.resize((size_t)len - 1);
+                            MultiByteToWideChar(CP_ACP, 0, p, -1, text.data(), len);
+                            hasText = !text.empty();
+                        }
+                        GlobalUnlock(ha);
+                    }
+                }
+                else {
+                    // 优先级：PNG（浏览器/Electron，体积小且带 alpha）→ DIBV5/DIB → CF_BITMAP
+                    static const UINT pngFmt = RegisterClipboardFormatW(L"PNG");
+                    if (HANDLE hp = GetClipboardData(pngFmt)) hasImage = pngToBgra(hp, imgW, imgH, px);
+                    if (!hasImage) {
+                        HANDLE hb = GetClipboardData(CF_DIBV5);
+                        if (!hb) hb = GetClipboardData(CF_DIB);
+                        if (hb) hasImage = dibToBgra(hb, imgW, imgH, px);
+                    }
+                    if (!hasImage) {
+                        if (HBITMAP hbm = (HBITMAP)GetClipboardData(CF_BITMAP))
+                            hasImage = hbitmapToBgra(hbm, imgW, imgH, px);
+                    }
+                }
+            }
+            // 读到这里就结束，先关剪贴板；下面的历史落盘 / PNG 保存都不再占着它
+            clip.release();
         }
-        else {
-            int w = 0, hh = 0;
-            std::vector<BYTE> px;
-            bool ok = false;
-            // 优先级：PNG（浏览器/Electron，体积小且带 alpha）→ DIBV5/DIB → CF_BITMAP
-            static const UINT pngFmt = RegisterClipboardFormatW(L"PNG");
-            if (HANDLE hp = GetClipboardData(pngFmt)) ok = pngToBgra(hp, w, hh, px);
-            if (!ok) {
-                HANDLE hb = GetClipboardData(CF_DIBV5);
-                if (!hb) hb = GetClipboardData(CF_DIB);
-                if (hb) ok = dibToBgra(hb, w, hh, px);
-            }
-            if (!ok) {
-                if (HBITMAP hbm = (HBITMAP)GetClipboardData(CF_BITMAP))
-                    ok = hbitmapToBgra(hbm, w, hh, px);
-            }
-            if (ok) s->addClipboardImage(w, hh, px);
-        }
-        CloseClipboard();
+
+        if (hasFiles) s->addClipboardFiles(files);
+        else if (hasText) s->addClipboardText(text);
+        else if (hasImage) s->addClipboardImage(imgW, imgH, px);
     }
 
     LRESULT CALLBACK clipboardWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         if (msg == WM_CLIPBOARDUPDATE) {
-            // 直接读（内部带重试）；不依赖 DispatcherQueue，避免队列没跑起来时事件被吞
+            // 不要在这里同步 OpenClipboard：写入方（Adobe 等）复制后往往马上粘贴，
+            // 我们哪怕只开几十毫秒也会让对方的 OpenClipboard 失败。延后一拍再读，
+            // 先让写入方自己的粘贴走完。
+            SetTimer(hwnd, kClipDebounceTimer, kClipDebounceMs, nullptr);
+            return 0;
+        }
+        if (msg == WM_TIMER && wp == kClipDebounceTimer) {
+            KillTimer(hwnd, kClipDebounceTimer);
             captureClipboardNow();
             return 0;
         }
@@ -619,6 +650,7 @@ namespace {
     {
         if (!g_clipWnd) return;
         KillTimer(g_clipWnd, kClipPollTimer);
+        KillTimer(g_clipWnd, kClipDebounceTimer);
         RemoveClipboardFormatListener(g_clipWnd);
         DestroyWindow(g_clipWnd);
         g_clipWnd = nullptr;
@@ -634,6 +666,10 @@ void Setting::init()
     setting->purgeRemovedAiSettings();
     // 启动时清理旧程序（ScreenCapture）留下的历史键位
     setting->purgeLegacyShortcutKeys();
+    // 视频/录屏文件已经不在了：对应的封面缓存也不再保留
+    setting->pruneOrphanThumbCache();
+    // 旧数据里同内容的剪贴板条目收敛成一条
+    setting->dedupeClipboardItems();
     installClipboardWatch();
 }
 
@@ -1393,6 +1429,15 @@ void Setting::restoreFunctionTranslateDefaults()
 	setQuickTranslateNewSession(false);
 }
 
+// 其他功能：功能提示开、快捷键提示关、记忆工具样式关、悬停预览关
+void Setting::restoreFunctionOtherDefaults()
+{
+	setFeatureTips(true);
+	setHotkeyTip(false);
+	setRememberToolStyle(false);
+	setHoverPreview(false);
+}
+
 // —— 与上面的 restore* 成对：判断该子页是否**仍是出厂值**（供「恢复默认」按钮置灰）——
 // 判据统一取"restore* 会不会真的改动什么"：每项都与 restore 写回的值比一遍。改默认值时两处一起改。
 bool Setting::functionScreenshotAtDefaults()
@@ -1436,6 +1481,12 @@ bool Setting::functionTranslateAtDefaults()
 {
 	return getTranslateProvider() == L"microsoft" && !getTranslateDictMode()
 		&& getTranslateMsTone() == L"standard" && !getQuickTranslateNewSession();
+}
+
+bool Setting::functionOtherAtDefaults()
+{
+	return getFeatureTips() && !getHotkeyTip()
+		&& !getRememberToolStyle() && !getHoverPreview();
 }
 
 int Setting::getVideoQuality() { return featInt(L"videoQuality", 4); }
@@ -2402,6 +2453,38 @@ std::wstring Setting::addHistoryMedia(const std::wstring& mediaPath, int width, 
     return it.id;
 }
 
+namespace {
+bool isUnderDir(const std::wstring& file, const std::filesystem::path& dir)
+{
+    const std::wstring d = dir.lexically_normal().wstring();
+    if (file.size() <= d.size()) return false;
+    if (_wcsicmp(file.substr(0, d.size()).c_str(), d.c_str()) != 0) return false;
+    const wchar_t sep = file[d.size()];
+    return sep == L'\\' || sep == L'/';
+}
+
+// 只有明确的缓存目录才永久删除；截图/录屏等用户文件仍一律进回收站。
+bool isCachePath(const std::wstring& path)
+{
+    auto* s = Setting::get();
+    if (!s || path.empty()) return false;
+    const std::wstring file = std::filesystem::path(path).lexically_normal().wstring();
+    const auto data = s->getDataPath();
+    return isUnderDir(file, data / L"Clipboard") || isUnderDir(file, data / L"ThumbCache") ||
+           isUnderDir(file, data / L"RackQuick");
+}
+
+void deleteHistoryFile(const std::wstring& path)
+{
+    if (isCachePath(path)) {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    } else {
+        Util::moveToRecycleBin(path);
+    }
+}
+} // namespace
+
 void Setting::pruneExpiredHistory()
 {
     int days = getHistoryRetentionDays();
@@ -2421,7 +2504,7 @@ void Setting::pruneExpiredHistory()
             continue;
         }
         std::error_code ec;
-        if (!it.filePath.empty()) std::filesystem::remove(it.filePath, ec);
+        if (!it.filePath.empty()) deleteHistoryFile(it.filePath);
         std::filesystem::remove(getHistoryThumbDir() / (it.id + L".png"), ec);
     }
     // 写回
@@ -2434,6 +2517,38 @@ void Setting::pruneExpiredHistory()
     save();
 }
 
+void Setting::pruneOrphanThumbCache()
+{
+    auto dir = getHistoryThumbDir();
+    std::error_code ec;
+    if (!std::filesystem::is_directory(dir, ec)) return;
+
+    std::vector<std::wstring> keep;
+    for (const auto& it : getHistoryItems()) {
+        if (it.source != L"record" || it.filePath.empty()) continue;
+        std::error_code fileEc;
+        if (!std::filesystem::exists(it.filePath, fileEc)) continue;
+        keep.push_back(it.id + L".png");
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        if (ec || !entry.is_regular_file(ec)) continue;
+        if (_wcsicmp(entry.path().extension().c_str(), L".png") != 0) continue;
+        const std::wstring name = entry.path().filename().wstring();
+        bool referenced = false;
+        for (const auto& kept : keep) {
+            if (_wcsicmp(name.c_str(), kept.c_str()) == 0) {
+                referenced = true;
+                break;
+            }
+        }
+        if (!referenced) {
+            std::error_code removeEc;
+            std::filesystem::remove(entry.path(), removeEc);
+        }
+    }
+}
+
 void Setting::removeHistoryItem(const std::wstring& id, bool deleteFile)
 {
     historyUiCacheDirty_ = true;
@@ -2443,9 +2558,9 @@ void Setting::removeHistoryItem(const std::wstring& id, bool deleteFile)
     for (auto& it : list) {
         if (it.id == id) {
             found = true;
-            // 历史即真实文件：deleteFile=true 时删条目就删文件（走回收站，避免误删）
+            // 历史即真实文件：deleteFile=true 时删条目就删文件（缓存直接删，用户文件走回收站）
             std::error_code ec;
-            if (deleteFile && !it.filePath.empty()) Util::moveToRecycleBin(it.filePath);
+            if (deleteFile && !it.filePath.empty()) deleteHistoryFile(it.filePath);
             std::filesystem::remove(getHistoryThumbDir() / (it.id + L".png"), ec);
         } else {
             keep.push_back(it);
@@ -2454,7 +2569,7 @@ void Setting::removeHistoryItem(const std::wstring& id, bool deleteFile)
     // 目录扫描出来的条目没有索引 id（id 就是文件路径）：deleteFile=true 时直接删文件
     if (!found && deleteFile) {
         std::error_code ec;
-        if (std::filesystem::exists(id, ec)) Util::moveToRecycleBin(id);
+        if (std::filesystem::exists(id, ec)) deleteHistoryFile(id);
     }
     // 只删记录：文件原地保留，目录扫描会继续把它显示出来（删记录 != 删文件）
     JsonArray arr;
@@ -2478,7 +2593,7 @@ void Setting::clearAllHistory(int sourceTab)
         if (sourceTab == 1 && isRecord) continue;   // 只清截图
         if (sourceTab == 2 && !isRecord) continue;  // 只清录屏
         std::error_code ec;
-        if (!it.filePath.empty()) Util::moveToRecycleBin(it.filePath);
+        if (!it.filePath.empty()) deleteHistoryFile(it.filePath);
         std::filesystem::remove(getHistoryThumbDir() / (it.id + L".png"), ec);
     }
     // 索引里保留没被清掉的分类
@@ -2503,7 +2618,7 @@ void Setting::clearOtherFiles()
     auto list = getHistoryItemsForUi(true);
     for (auto& it : list) {
         if (it.id != it.filePath) continue;
-        Util::moveToRecycleBin(it.filePath);
+        deleteHistoryFile(it.filePath);
     }
     historyUiCacheDirty_ = true;
 }
@@ -2641,6 +2756,73 @@ void Setting::writeClipboardItems(std::vector<ClipboardItem>& items)
 }
 
 namespace {
+    std::wstring normalizedClipboardText(const std::wstring& text)
+    {
+        std::wstring out;
+        out.reserve(text.size());
+        for (size_t i = 0; i < text.size(); ++i) {
+            wchar_t c = text[i];
+            if (c == L'\r') {
+                if (i + 1 < text.size() && text[i + 1] == L'\n') ++i;
+                out.push_back(L'\n');
+            } else {
+                out.push_back(c);
+            }
+        }
+        while (!out.empty() &&
+               (out.back() == L' ' || out.back() == L'\t' || out.back() == L'\n')) {
+            out.pop_back();
+        }
+        return out;
+    }
+
+    std::wstring normalizedClipboardPath(const std::wstring& path)
+    {
+        std::wstring s = std::filesystem::path(path).lexically_normal().wstring();
+        for (auto& c : s) c = (wchar_t)towlower(c);
+        return s;
+    }
+
+    std::wstring clipboardFilesKey(const std::vector<std::wstring>& files)
+    {
+        std::vector<std::wstring> normalized;
+        normalized.reserve(files.size());
+        for (const auto& f : files) {
+            if (!f.empty()) normalized.push_back(normalizedClipboardPath(f));
+        }
+        std::sort(normalized.begin(), normalized.end());
+        std::wstring key;
+        for (const auto& f : normalized) {
+            key += f;
+            key.push_back(L'\n');
+        }
+        return key;
+    }
+
+    bool sameClipboardContent(const Setting::ClipboardItem& a, const Setting::ClipboardItem& b)
+    {
+        if (a.type == L"text" && b.type == L"text") {
+            return normalizedClipboardText(a.text) == normalizedClipboardText(b.text);
+        }
+        if (a.type == L"image" && b.type == L"image") {
+            return a.hash == b.hash && a.width == b.width && a.height == b.height;
+        }
+        if (a.type == L"files" && b.type == L"files") {
+            return clipboardFilesKey(a.files) == clipboardFilesKey(b.files);
+        }
+        // 同一个图片文件既可能以 image 记一条，也可能被外部程序当文件复制成 files；
+        // 两条指向同一路径时视为同一内容。
+        if (a.type == L"image" && b.type == L"files" && b.files.size() == 1) {
+            return !a.filePath.empty() &&
+                   normalizedClipboardPath(a.filePath) == normalizedClipboardPath(b.files.front());
+        }
+        if (a.type == L"files" && b.type == L"image" && a.files.size() == 1) {
+            return !b.filePath.empty() &&
+                   normalizedClipboardPath(b.filePath) == normalizedClipboardPath(a.files.front());
+        }
+        return false;
+    }
+
     // 剪贴板内容去重：同一内容已经在历史里，就把它挪到最前并刷新时间（保留原 id 与标签），
     // 而不是再加一条。返回 -1 = 没有同内容；0 = 本来就在最前（不用动）；1 = 已挪到最前（需写回）
     template <typename Fn>
@@ -2670,8 +2852,9 @@ void Setting::addClipboardText(const std::wstring& text, bool dedup)
         std::chrono::system_clock::now().time_since_epoch()).count();
     // 同内容只把它移到最前（复制历史里的文字回来也会走到这里）
     if (dedup) {
+        const std::wstring key = normalizedClipboardText(s);
         const int dup = promoteClipboardItem(items, (long long)nowMs, [&](const ClipboardItem& it) {
-            return it.type == L"text" && it.text == s;
+            return it.type == L"text" && normalizedClipboardText(it.text) == key;
         });
         if (dup >= 0) {
             if (dup > 0) writeClipboardItems(items);
@@ -2745,23 +2928,21 @@ void Setting::addClipboardImage(int w, int h, const std::vector<BYTE>& bgra)
 void Setting::addClipboardFiles(const std::vector<std::wstring>& files)
 {
     if (files.empty()) return;
-    // 去重用的签名：路径按小写拼接 + FNV-1a
-    std::wstring sig;
-    for (const auto& f : files) {
-        for (wchar_t c : f) sig.push_back((wchar_t)towlower(c));
-        sig.push_back(L'\n');
-    }
+    const std::wstring filesKey = clipboardFilesKey(files);
     unsigned hash = 2166136261u;
-    for (wchar_t c : sig) {
+    for (wchar_t c : filesKey) {
         hash ^= (unsigned)c;
         hash *= 16777619u;
     }
     auto items = getClipboardItems();
     const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    // 同一组文件只挪到最前，不再加一条
+    // 同一组文件只挪到最前，不再加一条；如果是某个已存在的图片缓存文件，也并回图片条目。
+    ClipboardItem probe;
+    probe.type = L"files";
+    probe.files = files;
     const int dup = promoteClipboardItem(items, (long long)nowMs, [&](const ClipboardItem& it) {
-        return it.type == L"files" && it.hash == hash && it.files == files;
+        return sameClipboardContent(it, probe);
     });
     if (dup >= 0) {
         if (dup > 0) writeClipboardItems(items);
@@ -2779,15 +2960,66 @@ void Setting::addClipboardFiles(const std::vector<std::wstring>& files)
     writeClipboardItems(items);
 }
 
+void Setting::dedupeClipboardItems()
+{
+    auto items = getClipboardItems();
+    std::vector<ClipboardItem> out;
+    bool changed = false;
+    for (auto& it : items) {
+        size_t duplicate = static_cast<size_t>(-1);
+        for (size_t i = 0; i < out.size(); ++i) {
+            if (sameClipboardContent(out[i], it)) {
+                duplicate = i;
+                break;
+            }
+        }
+        if (duplicate == static_cast<size_t>(-1)) {
+            out.push_back(std::move(it));
+            continue;
+        }
+
+        changed = true;
+        ClipboardItem& kept = out[duplicate];
+        for (const auto& tag : it.tags) {
+            if (std::find(kept.tags.begin(), kept.tags.end(), tag) == kept.tags.end()) {
+                kept.tags.push_back(tag);
+            }
+        }
+        if (it.type == L"image" && !it.filePath.empty()) {
+            // 只有确认没有别的条目还引用这个 PNG 时才删缓存。
+            bool referenced = false;
+            if (kept.type == L"image" && !kept.filePath.empty() &&
+                normalizedClipboardPath(kept.filePath) == normalizedClipboardPath(it.filePath)) {
+                referenced = true;
+            }
+            for (const auto& f : kept.files) {
+                if (normalizedClipboardPath(f) == normalizedClipboardPath(it.filePath)) {
+                    referenced = true;
+                    break;
+                }
+            }
+            if (!referenced) {
+                std::error_code ec;
+                std::filesystem::remove(it.filePath, ec);
+            }
+        }
+    }
+    if (changed) writeClipboardItems(out);
+}
+
 void Setting::removeClipboardItem(const std::wstring& id)
 {
     auto items = getClipboardItems();
     std::vector<ClipboardItem> keep;
     for (auto& it : items) {
         if (it.id == id) {
-            if (it.type == L"image") {
-                std::error_code ec;
+            std::error_code ec;
+            if (it.type == L"image" && !it.filePath.empty()) {
                 std::filesystem::remove(it.filePath, ec);
+            } else if (it.type == L"files") {
+                for (const auto& f : it.files) {
+                    if (isCachePath(f)) std::filesystem::remove(f, ec);
+                }
             }
             continue;
         }
@@ -2817,9 +3049,14 @@ void Setting::clearClipboardHistory()
 {
     auto items = getClipboardItems();
     for (auto& it : items) {
-        if (it.type != L"image") continue;
         std::error_code ec;
-        std::filesystem::remove(it.filePath, ec);
+        if (it.type == L"image" && !it.filePath.empty()) {
+            std::filesystem::remove(it.filePath, ec);
+        } else if (it.type == L"files") {
+            for (const auto& f : it.files) {
+                if (isCachePath(f)) std::filesystem::remove(f, ec);
+            }
+        }
     }
     std::vector<ClipboardItem> empty;
     writeClipboardItems(empty);

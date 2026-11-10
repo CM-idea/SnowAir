@@ -157,6 +157,12 @@ ShapeBase* History::createShape(const std::wstring& state, const int& x, const i
             shapes.push_back(std::move(shape));
         }
     }
+    else if (curId == L"dimension") {
+        // 独立「尺寸」工具（图片编辑器主按钮）：不依赖 toolSub 的线型状态，落笔必为尺寸
+        auto shape = std::make_unique<ShapeArrow>(win, ToolSub::ArrowAnnot, true);
+        result = shape.get();
+        shapes.push_back(std::move(shape));
+    }
     else if (curId == L"arrow") {
         if (win->toolSub->isLine) {
             // 标注的形态：气泡 = 带默认文字的对话气泡；

@@ -23,7 +23,7 @@ public:
 	~WinSettingHistory();
 private:
 	struct CellSlot;   // 下面才定义；showPreview 的形参先用到它
-	void refreshGrid();
+	void refreshGrid(bool forceRescan = true);
 	// 当前分类的完整条目列表：文件历史 + （全部/剪切板页）剪切板条目，按时间倒序
 	std::vector<Setting::HistoryItem> collectItems(bool forceRescan);
 	// 已渲染内容盖不住「当前滚动位置 + 一屏 + 一行余量」时续补一批

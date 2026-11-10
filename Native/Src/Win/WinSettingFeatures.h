@@ -16,6 +16,8 @@ private:
 	void buildOutput(Ling::Node* p);
 	void buildOcr(Ling::Node* p);
 	void buildTranslate(Ling::Node* p);
+	void buildRecognize(Ling::Node* p);   // 识别模型：文字识别 + 翻译模型两组
+	void buildOther(Ling::Node* p);       // 其他功能：功能提示 / 快捷键提示 / 悬停预览 / 记忆工具样式
 	void rebuildTab(int index);
 	// 延迟到调度队列再重建：调用点若位于卡片内按钮/下拉自身的回调中，同步 removeAllChildren
 	// 会在事件派发中途销毁正在执行回调的控件（同 WinSettingHistory 筛选下拉的处理）。

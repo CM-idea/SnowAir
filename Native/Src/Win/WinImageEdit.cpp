@@ -370,7 +370,14 @@ void WinImageEdit::buildToolbar()
         btn->onClick.add([this, index](Ling::Button*) { setActiveTool(index); });
 
         if (hoverTip_ && std::wstring(slot.id) != L"undo" && std::wstring(slot.id) != L"reset") {
-            const std::wstring key = L"imageEdit.tool." + std::wstring(slot.id);
+            // 一级工具停悬显示工具种类，不显示形态名：
+            // 尺寸 → 标注，数字序号 → 序号
+            const std::wstring id = slot.id;
+            const wchar_t* kindKey = (id == L"dimension") ? L"tool.line"
+                : (id == L"number") ? L"tool.number"
+                : nullptr;
+            const std::wstring key = kindKey ? std::wstring(kindKey)
+                : L"imageEdit.tool." + id;
             hoverTip_->bind(btn, Lang::get(key.c_str()));
         }
     }

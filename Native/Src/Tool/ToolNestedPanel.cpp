@@ -169,8 +169,11 @@ void ToolNestedPanel::place(const RECT& workArea, Ling::Button* anchor)
 	}
 	const float subPad = ToolbarTheme::shadowPad * owner->dpi;
 	const float gap = ToolbarTheme::propBubbleGap;
-	const float refTop = (float)owner->y + subPad;
-	const float refBottom = (float)owner->y + owner->h - subPad;
+	// 与颜色面板同一口径：先去掉父气泡的箭头本体，再按 shadowPad 收进内容区，
+	// 否则二级栏相对属性栏会多/少一个 caret 的间距（翻到上方时尤其明显）。
+	const RECT parent = owner->popupParentBodyRect();
+	const float refTop = (float)parent.top + subPad;
+	const float refBottom = (float)parent.bottom - subPad;
 	const bool preferBelow = !owner->tipDown();
 	// 荧光笔透明度 / 多边形边数气泡：与属性栏左对齐（尖仍指向触发按钮）
 	float desiredX = (kind_ == Kind::PenOpacity || kind_ == Kind::ShapeSides)

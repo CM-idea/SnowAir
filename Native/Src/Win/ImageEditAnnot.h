@@ -48,6 +48,8 @@ public:
 
     // 画到画布上：调用前已把「画板像素 → 屏幕」的变换设好
     void paintOnScreen(ID2D1DeviceContext* ctx);
+    // 线上文字开洞：画板/画布底色 + 画板内容（画板透明时也能把线断开）
+    void paintPunchBackground(ID2D1DeviceContext* ctx, const D2D1_RECT_F& r) override;
 
     // —— AnnotHost ——
     HWND annotInputHwnd() const override;
@@ -67,4 +69,5 @@ private:
 
     WinImageEdit* editor_{ nullptr };
     winrt::event_token tokTimer_{};
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> punchBgBrush_;
 };

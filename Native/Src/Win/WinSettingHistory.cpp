@@ -2216,10 +2216,13 @@ std::vector<Setting::HistoryItem> WinSettingHistory::collectItems(bool forceResc
 	return list;
 }
 
-void WinSettingHistory::refreshGrid()
+void WinSettingHistory::refreshGrid(bool forceRescan)
 {
-	Setting::get()->pruneExpiredHistory();
-	auto all = collectItems(true);
+	if (forceRescan) {
+		Setting::get()->pruneExpiredHistory();
+		Setting::get()->pruneOrphanThumbCache();
+	}
+	auto all = collectItems(forceRescan);
 
 	// 按当前筛选过滤（导航 + 时间 + 标签 + 关键词）
 	std::vector<Setting::HistoryItem> items;
@@ -2459,31 +2462,42 @@ void WinSettingHistory::refreshGrid()
 			img->loadImg(svgPreview, 800.f * win->dpi, 3200.f * win->dpi);
 		}
 		else if (clipText) {
-			// 换行 / 制表都压成空格，交给 TextBox 按卡片实际高度裁剪并加省略号
+			// 换行 / 制表都压成空格；只画四行，剩下的用同色块挡住
 			std::wstring preview = it.text;
 			for (auto& ch : preview)
 				if (ch == L'\r' || ch == L'\n' || ch == L'\t') ch = L' ';
-			auto* tb = thumbHost->makeChild<Ling::TextBox>();
+			auto* clip = thumbHost->makeChild<Ling::ScrollerBox>();
+			clip->setWidthPercent(100.f);
+			clip->setHeight(72.f);
+			clip->setScrollBarVisible(false);
+			clip->setWheelEnabled(false);
+			clip->content->setFlexDirection(Ling::FlexDirection::Column);
+			clip->content->setWidthPercent(100.f);
+			auto* tb = clip->makeChild<Ling::Label>();
 			tb->setWidthPercent(100.f);
-			tb->setHeightPercent(100.f);
-			tb->setPadding(8.f, 6.f, 8.f, 6.f);
+			tb->setPadding(8.f, 4.f, 8.f, 4.f);
 			tb->setBg(0);
-			tb->setBorder(0.f, 0);
+			tb->setJustifyContent(Ling::Justify::Start);
+			tb->setAlignItems(Ling::Align::FlexStart);
 			tb->setText(preview);
 			tb->setColor(SettingTheme::textPrimary);
 			tb->setFontSize(SettingTheme::fontSm);
-			tb->setReadOnly(true);
-			tb->setMouseSelectionEnabled(false);
-			tb->setTextHoverCursor(false);     // 卡片上停悬保持普通箭头（不是可编辑的暗示）
-			tb->setTextEllipsis(true);         // 装不下就截断加省略号，卡片内不再滚动
-			tb->setScrollBarVisible(false);   // 预览区不出现内部滑动条
+			uint32_t maskColor = SettingTheme::isDark() ? 0x111111FFu : SettingTheme::secondary;
 			// 色值条目：缩略图区直接铺这个颜色，并按亮度换文字色
 			uint32_t rgb{};
 			if (clipTextKind(it.text, &rgb) == ClipTextKind::Color) {
 				tb->setBg((rgb << 8) | 0xFFu);
+				maskColor = (rgb << 8) | 0xFFu;
 				const int lum = (((rgb >> 16) & 0xFF) * 299 + ((rgb >> 8) & 0xFF) * 587 + (rgb & 0xFF) * 114) / 1000;
 				tb->setColor(lum > 150 ? 0x14181CFFu : 0xFFFFFFFFu);
 			}
+			auto* mask = thumbHost->makeChild<Ling::Node>();
+			mask->setPositionType(Ling::Position::Absolute);
+			mask->setPosition(Ling::Edge::Left, 0.f);
+			mask->setWidthPercent(100.f);
+			mask->setPosition(Ling::Edge::Bottom, 0.f);
+			mask->setHeight(6.f);
+			mask->setBg(maskColor);
 		}
 		else if (!thumbPath.empty()) {
 			if (clip) {
@@ -2512,20 +2526,16 @@ void WinSettingHistory::refreshGrid()
 			}
 			// 文件/文件夹只显示名字，不再叠一个大图标（类型已由左上角图标说明）。
 			// 文字按卡片实际高度省略（末尾加省略号），不做卡片内滚动
-			auto* nameBox = thumbHost->makeChild<Ling::TextBox>();
+			auto* nameBox = thumbHost->makeChild<Ling::Label>();
 			nameBox->setWidthPercent(100.f);
 			nameBox->setHeightPercent(100.f);
 			nameBox->setPadding(8.f, 6.f, 8.f, 6.f);
 			nameBox->setBg(0);
-			nameBox->setBorder(0.f, 0);
+			nameBox->setJustifyContent(Ling::Justify::Start);
+			nameBox->setAlignItems(Ling::Align::FlexStart);
 			nameBox->setText(name);
 			nameBox->setColor(SettingTheme::textPrimary);
 			nameBox->setFontSize(SettingTheme::fontSm);
-			nameBox->setReadOnly(true);
-			nameBox->setMouseSelectionEnabled(false);
-			nameBox->setTextHoverCursor(false);   // 卡片上停悬保持普通箭头
-			nameBox->setTextEllipsis(true);
-			nameBox->setScrollBarVisible(false);
 		}
 		else {
 			// 目录里扫出来的录屏没有封面：用视频图标占位
@@ -2812,7 +2822,7 @@ void WinSettingHistory::fillCheck()
 	if (contentH >= need) return;
 
 	shownCount = (std::min)(total, shownCount + kBatch);
-	refreshGrid();
+	refreshGrid(false);
 }
 
 void WinSettingHistory::maybeScrollGrew()

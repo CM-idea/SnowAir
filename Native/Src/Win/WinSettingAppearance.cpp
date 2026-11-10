@@ -77,7 +77,9 @@ WinSettingAppearance::WinSettingAppearance(Ling::WinBase* parent) :Ling::Node(pa
     // 悬停文字（系统 tooltip，需要 hwnd）。必须在构建各 Tab 之前建好：
     // tbBuildTheme 在构建期就会给自定义色块 bind，若此刻 tbTip_ 还是空，bind 被跳过 → 色块永远没有提示。
     tbTip_ = std::make_unique<Tip>(win);
-    // 3 个子 Tab：工具栏外观 / 软件外观 / 其他外观（分段胶囊滑动 + 右侧横排「恢复默认/预览效果」）
+    // 子 Tab：工具栏外观 / 软件外观；安装「轻雪晾衣架」组件后追加轻雪晾衣架
+    //（分段胶囊滑动 + 右侧横排「恢复默认/预览效果」）
+    rackAvailable = PluginHost::instance().rackInstalled();
     auto tabRow = makeChild<Ling::Node>();
     tabRow->setFlexDirection(Ling::FlexDirection::Row);
     tabRow->setWidthPercent(100.f);
@@ -98,17 +100,18 @@ WinSettingAppearance::WinSettingAppearance(Ling::WinBase* parent) :Ling::Node(pa
     tabs[0]->setFlexGrow(1.f); tabs[0]->setWidthPercent(100.f);
     tabs[1] = tabHost->makeChild<Ling::Node>();
     tabs[1]->setFlexGrow(1.f); tabs[1]->setWidthPercent(100.f);
-    tabs[2] = tabHost->makeChild<Ling::Node>();
-    tabs[2]->setFlexGrow(1.f); tabs[2]->setWidthPercent(100.f);
+    if (rackAvailable) {
+        tabs[2] = tabHost->makeChild<Ling::Node>();
+        tabs[2]->setFlexGrow(1.f); tabs[2]->setWidthPercent(100.f);
+    }
     buildToolbarTab(tabs[0]);
-    buildRackTab(tabs[0]);
     buildAppTab(tabs[1]);
-    buildOtherTab(tabs[2]);
+    if (rackAvailable && tabs[2]) buildRackTab(tabs[2]);
     showTab(0);
     // 内容区只有外层 content 提供底部留白：清掉各 tab 末尾元素的 marginBottom，使底部与左右一致。
     SettingUi::trimTrailingGap(tabs[0]);
     SettingUi::trimTrailingGap(tabs[1]);
-    SettingUi::trimTrailingGap(tabs[2]);
+    if (tabs[2]) SettingUi::trimTrailingGap(tabs[2]);
 
     // 拖拽幽灵：绝对定位浮块（不占布局），跟手显示被拖的图标；随本页一起销毁
     tbGhost = makeChild<Ling::Node>();
@@ -252,20 +255,18 @@ void WinSettingAppearance::tbRefreshActionState()
 void WinSettingAppearance::showTab(int index)
 {
     if (index < 0 || index > 2) return;
-    if (index != 0 || tbKind != 4) {
-        PluginHost::instance().setRackPreview(false);
-    } else {
-        PluginHost::instance().setRackPreview(true);
-    }
+    // 未安装晾衣架组件时不存在 Tab2，兜底回到工具栏外观
+    if (index == 2 && (!rackAvailable || !tabs[2])) index = 0;
+    PluginHost::instance().setRackPreview(index == 2);
     tabIndex = index;
     // 同步胶囊选中态（不触发 onChange，避免点击后递归）
     segHighlight(index);
-    // 「预览效果」只属于工具栏外观页：切到软件/其他外观或晾衣架时隐藏
+    // 「预览效果」只属于工具栏外观页：切到软件外观或晾衣架时隐藏
     if (tbPreviewBtn) {
-        if (index == 0 && tbKind != 4) tbPreviewBtn->show(); else tbPreviewBtn->hide();
+        if (index == 0) tbPreviewBtn->show(); else tbPreviewBtn->hide();
     }
     if (tbInitialBtn) {
-        if (index == 0 && tbKind != 4) tbInitialBtn->show();
+        if (index == 0) tbInitialBtn->show();
         else {
             tbInitialBtn->hide();
             // 离开工具栏页时收起编辑器，回来保持收起状态
@@ -286,8 +287,8 @@ void WinSettingAppearance::showTab(int index)
     tbRefreshActionState();
 }
 
-// 顶部 3 个分段胶囊：保留现有「选中 primary 黑底白字 / 未选中透明黑字 + hover 高亮」样式，
-// 但 Tab0 改为「标题 + ▾下拉」组合以承接工具栏类型切换（点击标题切 Tab，点击 ▾ 弹类型菜单）。
+// 顶部分段胶囊：保留现有「选中 primary 黑底白字 / 未选中透明黑字 + hover 高亮」样式，
+// Tab0 为「标题 + ▾下拉」组合，用于切换工具栏类型；安装晾衣架组件后追加独立胶囊。
 void WinSettingAppearance::buildSegTabs(Ling::Node* row)
 {
     auto* track = row->makeChild<Ling::Node>();
@@ -327,7 +328,7 @@ void WinSettingAppearance::buildSegTabs(Ling::Node* row)
     seg0Arrow->setMarginLeft(8.f);
     seg0Arrow->setFlexShrink(0.f);
 
-    // Tab1 / Tab2：普通胶囊按钮（样式与现有 segmentedPills 一致）
+    // Tab1：软件外观；Tab2：轻雪晾衣架（仅安装组件时创建）
     auto makeSeg = [&](const std::wstring& text) -> Ling::Button* {
         auto* b = track->makeChild<Ling::Button>();
         b->setText(text);
@@ -342,8 +343,10 @@ void WinSettingAppearance::buildSegTabs(Ling::Node* row)
     };
     segBtn1 = makeSeg(Lang::get(L"setting.appTab"));
     segBtn1->onClick.add([this](Ling::Button*) { this->showTab(1); });
-    segBtn2 = makeSeg(Lang::get(L"setting.otherTab"));
-    segBtn2->onClick.add([this](Ling::Button*) { this->showTab(2); });
+    if (rackAvailable) {
+        segRackBtn = makeSeg(Lang::get(L"setting.rackNav"));
+        segRackBtn->onClick.add([this](Ling::Button*) { this->showTab(2); });
+    }
 
     tbUpdateKindTitle();
     segHighlight(0);
@@ -385,18 +388,13 @@ void WinSettingAppearance::segHighlight(int index)
         }
     };
     styleBtn(segBtn1, index == 1);
-    styleBtn(segBtn2, index == 2);
+    styleBtn(segRackBtn, index == 2);
 }
 
 // 刷新 Tab0 标题：××工具栏外观（× = 当前工具栏类型）
 void WinSettingAppearance::tbUpdateKindTitle()
 {
     if (!seg0TitleBtn) return;
-    if (tbKind == 4) {
-        seg0TitleBtn->setText(Lang::get(L"setting.tbKind4") +
-                              Lang::get(L"setting.tbKindAppend"));
-        return;
-    }
     std::wstring key = L"setting.tbKind" + std::to_wstring(tbKind);
     seg0TitleBtn->setText(Lang::get(key) + Lang::get(L"setting.tbKindAppend"));
 }
@@ -408,8 +406,7 @@ void WinSettingAppearance::tbShowKindMenu()
     SettingUi::closePopup(win);
     std::vector<std::wstring> options = {
         Lang::get(L"setting.tbKind0"), Lang::get(L"setting.tbKind1"),
-        Lang::get(L"setting.tbKind2"), Lang::get(L"setting.tbKind3"),
-        Lang::get(L"setting.tbKind4")
+        Lang::get(L"setting.tbKind2"), Lang::get(L"setting.tbKind3")
     };
     const float itemH = 32.f;
     const float itemGap = 4.f;   // 选项之间 4px 间距
@@ -527,18 +524,14 @@ void WinSettingAppearance::buildToolbarTab(Ling::Node* host)
 
 void WinSettingAppearance::buildRackTab(Ling::Node* host)
 {
-    rackTab = host->makeChild<Ling::Node>();
-    rackTab->setWidthPercent(100.f);
-    rackTab->setFlexGrow(1.f);
-    rackTab->setFlexDirection(Ling::FlexDirection::Column);
-    rackTab->hide();
+    host->setFlexDirection(Ling::FlexDirection::Column);
 
-    SettingUi::groupLabel(rackTab, Lang::get(L"setting.rackThemeGroup"));
+    SettingUi::groupLabel(host, Lang::get(L"setting.rackThemeGroup"));
     static const wchar_t* kNames[4] = {
         L"setting.rackTheme0", L"setting.rackTheme1",
         L"setting.rackTheme2", L"setting.rackTheme3"
     };
-    auto* themeGrid = SettingUi::grid2(rackTab);
+    auto* themeGrid = SettingUi::grid2(host);
     std::array<Ling::Node*, 4> themeCells{};
     for (int idx = 0; idx < 4; ++idx) {
         auto* cell = themeGrid->makeChild<Ling::Button>();
@@ -604,8 +597,8 @@ void WinSettingAppearance::buildRackTab(Ling::Node* host)
     }
     styleRackThemeButtons();
 
-    SettingUi::groupLabel(rackTab, Lang::get(L"setting.rackCollectGroup"));
-    auto* collectGrid = SettingUi::grid2(rackTab);
+    SettingUi::groupLabel(host, Lang::get(L"setting.rackCollectGroup"));
+    auto* collectGrid = SettingUi::grid2(host);
     auto* s = Setting::get();
     SettingUi::toggleRow(collectGrid, Lang::get(L"setting.rackAutoCapture"),
         s->getRackFlag(L"rack.auto_capture", true),
@@ -621,7 +614,7 @@ void WinSettingAppearance::buildRackTab(Ling::Node* host)
     SettingUi::grid2Cells(collectGrid);
 
     // 收起行为与衣架尺寸：同一行左右两栏，继续沿用常规组的双栏卡片排布。
-    auto* behaviorGrid = SettingUi::grid2(rackTab);
+    auto* behaviorGrid = SettingUi::grid2(host);
     behaviorGrid->setMarginTop(SettingTheme::optionGap);
     int displayMode = s->getRackInt(L"rack.display_mode", -1);
     if (displayMode < 0) {
@@ -699,56 +692,6 @@ void WinSettingAppearance::buildAppTab(Ling::Node* host)
     }
     initPinBorderCtrls(sc);
     initTrayCtrls(sc);
-}
-
-void WinSettingAppearance::buildOtherTab(Ling::Node* host)
-{
-    // 双栏：与「软件外观」等页的开关排布一致
-    auto* grid = SettingUi::grid2(host);
-    // 开关的点击状态以 Setting 当前值为准（而非构建该行时捕获的值），
-    // 避免「恢复默认」程序化改写设置后，下一次点击仍按过期状态取反而失效
-    auto mkStateToggle = [&](const std::wstring& labelKey,
-                             std::function<bool()> get,
-                             std::function<void(bool)> set,
-                             std::function<void(bool)> after,
-                             const std::wstring& helpKey = L"") -> Ling::Button* {
-        auto r = SettingUi::optionRow(grid, Lang::get(labelKey), L"", true, SettingUi::kToggleH,
-            helpKey.empty() ? L"" : Lang::get(helpKey));
-        auto* sw = r.ctrlBox->makeChild<Ling::Button>();
-        SettingUi::styleToggle(sw, get());
-        sw->onClick.add([this, sw, get, set, after](Ling::Button*) {
-            const bool next = !get();
-            set(next);
-            SettingUi::styleToggle(sw, next);
-            if (after) after(next);
-            this->tbRefreshRestore();
-        });
-        return sw;
-    };
-    otherFeatureTipsBtn = mkStateToggle(L"setting.featureTips",
-        [] { return Setting::get()->getFeatureTips(); },
-        [](bool on) { Setting::get()->setFeatureTips(on); },
-        [](bool) {
-            // 立刻把已经创建出来的「?」一起显示/隐藏，不用退出设置页才生效
-            SettingUi::applyFeatureTipsVisibility();
-        });
-    // 「快捷键提示」：开关只影响之后弹出的停悬气泡（已显示的提示仍带旧文字，属预期）
-    otherHotkeyTipBtn = mkStateToggle(L"setting.hotkeyTip",
-        [] { return Setting::get()->getHotkeyTip(); },
-        [](bool on) { Setting::get()->setHotkeyTip(on); }, {});
-    // 悬停预览：历史记录 / 剪切板卡片停悬时弹出大图或文字卡（默认关闭，避免误触打扰）
-    otherHoverPreviewBtn = mkStateToggle(L"setting.hoverPreview",
-        [] { return Setting::get()->getHoverPreview(); },
-        [](bool on) {
-            Setting::get()->setHoverPreview(on);
-            PluginHost::instance().onSettingChanged(L"hoverPreview");
-        }, {},
-        L"setting.hoverPreviewTip");
-    // 记忆工具样式：记住上次标注工具样式（如大箭头），下次截图自动复用；默认关闭
-    otherRememberStyleBtn = mkStateToggle(L"setting.rememberToolStyle",
-        [] { return Setting::get()->getRememberToolStyle(); },
-        [](bool on) { Setting::get()->setRememberToolStyle(on); }, {});
-    SettingUi::grid2Cells(grid);
 }
 
 // ---- 软件语言下拉：与其他下拉选项样式一致（标准 selectRow） ----
@@ -1332,22 +1275,7 @@ void WinSettingAppearance::showSelectBox(Ling::Button* btn)
 
 void WinSettingAppearance::tbSetKind(int kind)
 {
-    if (kind < 0 || kind > ToolbarStore::kindCount) return;
-    if (kind == 4) {
-        tbKind = 4;
-        if (tbScroller) tbScroller->hide();
-        if (rackTab) rackTab->show();
-        if (tbPreviewBtn) tbPreviewBtn->hide();
-        if (tbInitialBtn) tbInitialBtn->hide();
-        PluginHost::instance().setRackPreview(true);
-        return;
-    }
-    if (tbKind == 4) {
-        if (tbScroller) tbScroller->show();
-        if (rackTab) rackTab->hide();
-        if (tabIndex == 0 && tbPreviewBtn) tbPreviewBtn->show();
-        PluginHost::instance().setRackPreview(false);
-    }
+    if (kind < 0 || kind >= ToolbarStore::kindCount) return;
     if (kind == tbKind) return;
     tbKind = kind;
     auto st = ToolbarStore::loadLayout(kind);
@@ -1372,7 +1300,7 @@ void WinSettingAppearance::tbPersist()
     tbRefreshRestore();   // 布局改动后同步「恢复默认」的可用态
 }
 
-// 当前子页是否全部为默认值：三个子页共用同一判据，决定「恢复默认」是否置灰
+// 当前子页是否全部为默认值：各子页共用同一判据，决定「恢复默认」是否置灰
 bool WinSettingAppearance::appearanceAtDefaults() const
 {
     auto* s = Setting::get();
@@ -1384,10 +1312,7 @@ bool WinSettingAppearance::appearanceAtDefaults() const
             && s->getTrayIconStyle() == (int)TrayIcon::Style::Theme;
     }
     if (tabIndex == 2) {
-        return s->getFeatureTips() && !s->getHotkeyTip()
-            && !s->getRememberToolStyle() && !s->getHoverPreview();
-    }
-    if (tabIndex == 0 && tbKind == 4) {
+        // 「轻雪晾衣架」页
         int displayMode = s->getRackInt(L"rack.display_mode", -1);
         if (displayMode < 0) {
             displayMode = s->getRackFlag(L"rack.auto_retract", true) ? 0 : 2;
@@ -1409,9 +1334,10 @@ void WinSettingAppearance::tbRefreshRestore()
 
 void WinSettingAppearance::tbRestoreDefaults()
 {
-    // 已是默认值：按钮置灰，点击不产生任何改动（三个子页规则一致）
+    // 已是默认值：按钮置灰，点击不产生任何改动（各子页规则一致）
     if (appearanceAtDefaults()) return;
-    if (tabIndex == 0 && tbKind == 4) {
+    // 「轻雪晾衣架」页
+    if (tabIndex == 2) {
         setRackTheme(0);
         auto* s = Setting::get();
         s->setRackInt(L"rack.display_mode", 0);
@@ -1451,23 +1377,6 @@ void WinSettingAppearance::tbRestoreDefaults()
         TrayIcon::apply();
         refreshTrayRadios();
         refreshTrayPreviews();
-        tbRefreshRestore();
-        win->refresh();
-        return;
-    }
-    // 「其他外观」页：恢复本页开关到默认值（功能提示开、快捷键提示关、
-    // 记忆工具样式关、悬停预览关），直接回写控件显示，不重建整页
-    if (tabIndex == 2) {
-        auto* s = Setting::get();
-        s->setFeatureTips(true);
-        SettingUi::applyFeatureTipsVisibility();
-        s->setHotkeyTip(false);
-        s->setRememberToolStyle(false);
-        s->setHoverPreview(false);
-        if (otherFeatureTipsBtn) SettingUi::styleToggle(otherFeatureTipsBtn, true);
-        if (otherHotkeyTipBtn) SettingUi::styleToggle(otherHotkeyTipBtn, false);
-        if (otherRememberStyleBtn) SettingUi::styleToggle(otherRememberStyleBtn, false);
-        if (otherHoverPreviewBtn) SettingUi::styleToggle(otherHoverPreviewBtn, false);
         tbRefreshRestore();
         win->refresh();
         return;

@@ -6,7 +6,8 @@
 #include "SettingWidgets.h"
 #include "../Tool/ToolbarStore.h"
 /**
- * 外观设置页（3 Tab：工具栏外观 / 软件外观 / 其他外观）。
+ * 外观设置页（2 个固定 Tab：工具栏外观 / 软件外观）。
+ * 安装「轻雪晾衣架」组件后，导航条额外显示「轻雪晾衣架」Tab。
  * Tab 0 工具栏外观：工具栏类型切换 / 显隐 / 拖拽排序 /
  * 恢复默认 / 预览效果 / 主题色板（4 模式 + 6 色槽自定义）。
  * 数据层（布局+色板）走 ToolbarStore，纯 C++ 与 UI 解耦，运行时工具栏后续直接消费。
@@ -20,17 +21,16 @@ public:
 private:
 	void showTab(int index);
 	void buildTabActions(Ling::Node* row);
-	void buildSegTabs(Ling::Node* row);        // 顶部 3 个分段胶囊（Tab0 为「标题+▾下拉」组合）
+	void buildSegTabs(Ling::Node* row);        // 顶部分段胶囊（Tab0 为「标题+▾下拉」组合）
 	void segHighlight(int index);              // 程序化高亮选中段（不触发 onChange）
 	void tbShowKindMenu();                     // Tab0 ▾ 下拉：工具栏类型菜单
 	void tbUpdateKindTitle();                  // 刷新 Tab0 标题（××工具栏外观）
 
 	void buildToolbarTab(Ling::Node* host);    // Tab 0
-	void buildRackTab(Ling::Node* host);       // Tab 0 下拉里的「轻雪晾衣架」
+	void buildRackTab(Ling::Node* host);       // Tab 2（仅安装晾衣架组件时存在）
 	void setRackTheme(int theme);
 	void styleRackThemeButtons();
 	void buildAppTab(Ling::Node* host);        // Tab 1：自启+语言+主题+贴图边框
-	void buildOtherTab(Ling::Node* host);      // Tab 2：功能提示
 
 	// Tab 1 内部子组件
 	void initAutoStartCtrls(Ling::Node* p);
@@ -100,20 +100,20 @@ private:
 private:
 	Ling::Node* tabHost{ nullptr };
 	Ling::Node* tabs[3]{ nullptr };
-	Ling::Node* rackTab{ nullptr };
+	bool rackAvailable{ false };   // 晾衣架组件已安装 → 才创建 Tab2 与对应胶囊
 	std::array<Ling::Button*, 4> rackThemeRadios{};
 	std::array<Ling::Node*, 4> rackThemeDots{};
 	Ling::Button* rackDisplayModeDdl{ nullptr };
 	int tabIndex{ 0 };
 
-	// 顶部 3 个分段胶囊（Tab0 为「标题 + ▾下拉」组合，保留现有胶囊样式）
+	// 顶部分段胶囊（Tab0 为「标题 + ▾下拉」组合，保留现有胶囊样式）
 	Ling::Node* seg0Box{ nullptr };       // Tab0 胶囊容器
 	// Tab0：整条既是"切到工具栏外观页"又是"工具栏类型下拉"：
 	// 已是当前页 → 点击弹出类型菜单；否则先切到该页。▾ 是按钮内的一个 Label。
 	Ling::Button* seg0TitleBtn{ nullptr };
 	Ling::Label* seg0Arrow{ nullptr };    // 按钮内的 ▾ 图标（左右各留 8px）
 	Ling::Button* segBtn1{ nullptr };     // Tab1 胶囊
-	Ling::Button* segBtn2{ nullptr };     // Tab2 胶囊
+	Ling::Button* segRackBtn{ nullptr };  // Tab2 胶囊（仅安装晾衣架组件时创建）
 	// 工具栏类型下拉浮层（挂在 Tab0 ▾ 上）
 	std::unique_ptr<SettingUi::Popup> tbKindPopup;
 
@@ -176,11 +176,6 @@ private:
 	std::wstring tbChipCloseId;
 	winrt::event_token tbDownTok;
 	winrt::event_token tbMoveTok, tbUpTok;
-	// 「其他外观」页的行控件（恢复默认时直接回写显示，不重建整页）
-	Ling::Button* otherFeatureTipsBtn{ nullptr };
-	Ling::Button* otherHotkeyTipBtn{ nullptr };
-	Ling::Button* otherRememberStyleBtn{ nullptr };
-	Ling::Button* otherHoverPreviewBtn{ nullptr };
 	int tbKind{ 0 };
 	std::vector<std::wstring> tbActive;     // 显示区布局（预览条镜像同一份数据）
 	// chip 悬停文字（系统 tooltip，同截图工具栏）

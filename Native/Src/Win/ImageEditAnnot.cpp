@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "ImageEditAnnot.h"
 #include "WinImageEdit.h"
+#include "ImageEditTheme.h"
 #include "SettingTheme.h"
 #include "../App.h"
 #include "../History.h"
@@ -102,8 +103,11 @@ void ImageEditAnnotHost::activateTool(const std::wstring& id)
     // 图片编辑器是普通窗口：属性栏不能置顶压到别的应用上
     if (toolSub) toolSub->setTopmost(false);
     // 打开工具时属性栏回到初始属性（与截图工具栏一致）
+    if (toolSub) toolSub->endShapeStylePreview();
     if (toolSub) toolSub->resetStyleToDefaults();
-    setForcedToolId(id == L"dimension" ? L"arrow" : id);
+    // 「尺寸」在图片编辑器里是独立工具 id：落笔由 History 按 id 直接创建尺寸，
+    // 不再借 arrow + isLine/lineKind 的样式状态来推断形状类型。
+    setForcedToolId(id);
 
     // 每次重建属性栏内容前再刷一次：图标色在创建按钮时读取
     applyEditorToolbarPalette();
@@ -114,9 +118,7 @@ void ImageEditAnnotHost::activateTool(const std::wstring& id)
             toolSub->showArrowTools();
         }
         else if (id == L"dimension") {
-            toolSub->isLine = true;
-            toolSub->lineKind = ToolSub::LineDimension;
-            toolSub->showLineTools();
+            toolSub->showLineTools(ToolSub::LineDimension);
         }
         else if (id == L"pen") toolSub->showPenTools();
         else if (id == L"text") toolSub->showTextTools();
@@ -312,6 +314,30 @@ void ImageEditAnnotHost::paintOnScreen(ID2D1DeviceContext* ctx)
     if (!ctx || !history) return;
     if (editor_ && editor_->dpi > 0.f) dpi = editor_->dpi;
     paintAnnotPublic(ctx);
+}
+
+void ImageEditAnnotHost::paintPunchBackground(ID2D1DeviceContext* ctx, const D2D1_RECT_F& r)
+{
+    if (!ctx) return;
+    // 屏幕预览：画板允许透明（空画布 / 无背景色），screenImg 也可能是透明图；
+    // 先铺一层画布底色，再把画板内容盖上去，文字区域才能稳定把线断开。
+    // 离屏合成时 punchSource_ 就是最终底图，直接用它开洞，不能铺画布色（会破坏透明导出）。
+    if (!punchSource_) {
+        const uint32_t c = ImageEditTheme::canvasBg;
+        const D2D1_COLOR_F col = D2D1::ColorF(
+            ((c >> 24) & 0xFF) / 255.f,
+            ((c >> 16) & 0xFF) / 255.f,
+            ((c >> 8) & 0xFF) / 255.f,
+            (c & 0xFF) / 255.f);
+        if (!punchBgBrush_) {
+            ctx->CreateSolidColorBrush(col, punchBgBrush_.GetAddressOf());
+        }
+        else {
+            punchBgBrush_->SetColor(col);
+        }
+        if (punchBgBrush_) ctx->FillRectangle(r, punchBgBrush_.Get());
+    }
+    AnnotHost::paintPunchBackground(ctx, r);
 }
 
 void ImageEditAnnotHost::onToolChanged()

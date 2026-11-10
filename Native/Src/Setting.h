@@ -154,12 +154,14 @@ public:
 	void restoreFunctionOutputDefaults();     // 文件输出
 	void restoreFunctionOcrDefaults();        // 文本识别
 	void restoreFunctionTranslateDefaults(); // 翻译
-	// 与上面 5 个 restore 成对：该子页是否仍是出厂值（供「恢复默认」按钮置灰）
+	void restoreFunctionOtherDefaults();      // 其他功能（原「其他外观」的开关）
+	// 与上面 6 个 restore 成对：该子页是否仍是出厂值（供「恢复默认」按钮置灰）
 	bool functionScreenshotAtDefaults();
 	bool functionRecordAtDefaults();
 	bool functionOutputAtDefaults();
 	bool functionOcrAtDefaults();
 	bool functionTranslateAtDefaults();
+	bool functionOtherAtDefaults();
 
 	int getVideoQuality();
 	void setVideoQuality(int v);
@@ -295,6 +297,8 @@ public:
 	// 所有可用标签（去重 + 字典序，只保留文件仍存在的条目）
 	std::vector<std::wstring> getAllHistoryTags();
 	void pruneExpiredHistory();
+	// 视频/录屏文件已删除（或历史条目已删）时，清掉 ThumbCache 里对应的封面缓存。
+	void pruneOrphanThumbCache();
 	// deleteFile=false：只删历史记录/索引，不动磁盘上的文件（设置页单条删除用）；
 	// 目录扫描出来的用户文件没有索引，改为记入隐藏列表（同样不删文件）。
 	void removeHistoryItem(const std::wstring& id, bool deleteFile = true);
@@ -327,6 +331,8 @@ public:
 	void addClipboardImage(int w, int h, const std::vector<BYTE>& bgra);
 	// 文件列表（资源管理器 / Word / PPT 等复制的文件）：只记路径，可以一次多个
 	void addClipboardFiles(const std::vector<std::wstring>& files);
+	// 启动时收敛旧数据里同内容的重复条目（文本 / 图片 / 文件组）
+	void dedupeClipboardItems();
 	void removeClipboardItem(const std::wstring& id);
 	// 复制历史里的剪切板条目：把该条挪到最前面（更新时间），不生成重复条目。返回是否真的挪动了
 	bool touchClipboardItem(const std::wstring& id);

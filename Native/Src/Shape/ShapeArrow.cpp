@@ -92,10 +92,18 @@ void ShapeArrow::syncToolFromShape() const
 {
 	auto* ts = win->toolSub.get();
 	if (!ts) return;
-	ts->isLine = false;
+	const bool dimensionTool = (win->getCurToolId() == L"dimension");
+	if (isDimension_ || dimensionTool) {
+		// 尺寸是两点式标注箭头：属性栏保持线型/尺寸形态，不能被普通箭头的同步改成 isLine=false
+		ts->isLine = true;
+		ts->lineKind = ToolSub::LineDimension;
+	}
+	else {
+		ts->isLine = false;
+		ts->arrowHead = headStyle;
+	}
 	ts->isArrowDash = isDash;
 	ts->isArrowRound = isRound;
-	if (!isDimension_) ts->arrowHead = headStyle;
 	ts->setShapeSliderVal(L"arrow", strokeWidth);
 }
 

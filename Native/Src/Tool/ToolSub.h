@@ -18,7 +18,8 @@ public:
 	void showRectTools();
 	void showArrowTools();
 	// 「标注」（原线段）：从箭头属性栏独立出来，只有虚线/圆头/颜色/粗细
-	void showLineTools();
+	// forceKind >= 0 时强制使用该形态（图片编辑器的独立「尺寸」主按钮用），否则沿用记忆/初始属性
+	void showLineTools(int forceKind = -1);
 	// 标注的形态：直线 / 波浪线 / 气泡 / 角度 / 尺寸 / 爆裂
 	enum LineKind : int { LineStraight = 0, LineWave = 1, LineBubble = 2, LineAngle = 3, LineDimension = 4, LineBurst = 5 };
 	int lineKind{ LineStraight };
@@ -93,6 +94,8 @@ public:
 	void openStrokeColorPanel(float screenCenterX, float screenBottom, const RECT& parentRect);
 	// 三级颜色面板的参考矩形：去掉父气泡的箭头本体，保证换向后间距仍一致
 	RECT colorPanelParentBodyRect() const;
+	// 二级气泡的参考矩形：同样去掉属性栏箭头本体，与颜色面板共用一套间距口径
+	RECT popupParentBodyRect() const;
 	bool colorPanelPreferBelow() const;
 	bool colorPanelAnchoredToNested() const { return colorParentOverride_; }
 	// 二级栏互斥：新二级栏打开前，先收起颜色面板
@@ -203,6 +206,8 @@ public:
 	// 记忆工具样式：把当前工具的粗细 / 字号落盘（换工具、收栏时调；滑动过程中不写盘）
 	void flushRememberedSize();
 	RECT workAreaRect() const;
+	// 去掉父气泡箭头本体后的内容区矩形（二级栏/颜色面板共用）
+	RECT bodyRectForChildPopup(const RECT& parent, bool parentAbove) const;
 	// 视窗内滚轮：按工具量程微调主滑条
 	bool adjustPrimarySize(int dir);
 	// 属性栏是否在主栏上方（箭头朝下）；二级弹窗据此决定默认开向

@@ -28,6 +28,7 @@ public:
 	void closePanel();
 	bool isOpen() const { return open_; }
 	Kind kind() const { return kind_; }
+	bool shapeSidesFor(bool star) const { return open_ && kind_ == Kind::ShapeSides && sidesStar_ == star; }
 	bool tipDown() const { return tipDown_; }
 	void updatePosition(const RECT& workArea);
 	void hideHoverTip() { if (tip) tip->hide(); }

@@ -3866,6 +3866,10 @@ void ImageEditCollage::onCursor(bool* handled)
     GetCursorPos(&pos);
     ScreenToClient(win->hwnd, &pos);
     if (!isPosIn(pos)) return;
+    // 工具栏 / 顶部胶囊上的按钮优先：Button 自己的 onCursor 已经给了手型，
+    // 画布不要再拿工具光标（十字等）盖掉它 —— 截图栏里工具条是独立窗口，本来就不会互相覆盖。
+    if (handled && *handled) return;
+    if (uiHitTest && uiHitTest(pos)) return;
 
     // 快捷变换按钮：悬停手型
     if (!panning_ && !spaceHeld_ && !dragging_ && quickActionHit(pos) >= 0) {
@@ -4415,7 +4419,8 @@ void ImageEditCollage::paintScreen(ID2D1DeviceContext* rt)
     // 标注：坐标是画板内像素，按同一套「画板 → 屏幕」变换画在图片之上。
     // 画板像素 (0,0) 对应画板左上角 (art.left)，所以这里只需要 Scale(s) + Translation(ox, oy)，
     // 不能再多减一次 art.left（否则标注会整体偏离鼠标，表现为「不跟手」）。
-    if (annot_ && annot_->hasAnyShapes()) {
+    // 空画板也要画：序号工具的跟手圆、框选框等是「工具预览」，不属于已提交的形状。
+    if (annot_ && (annot_->hasAnyShapes() || annot_->annotating())) {
         rt->SetTransform(D2D1::Matrix3x2F::Scale(s, s)
             * D2D1::Matrix3x2F::Translation(ox, oy));
         annot_->paintOnScreen(rt);

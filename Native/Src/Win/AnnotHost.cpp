@@ -129,6 +129,31 @@ std::wstring AnnotHost::getCurToolId() const
 	return eff == L"line" ? L"arrow" : eff;
 }
 
+std::wstring AnnotHost::styleToolId() const
+{
+	const auto id = getCurToolId();
+	// 图片编辑器的「尺寸」是独立工具 id（保证落笔一定是尺寸），
+	// 但属性栏/选中样式仍归 arrow 家族，这样线型、颜色、粗细的交互保持一致。
+	return id == L"dimension" ? L"arrow" : id;
+}
+
+// 线上文字开洞：默认用屏幕捕获图把文字区域原样盖回去。
+// 宿主可以重写（图片编辑器的画板可能是透明的，需要先铺画布底色）。
+void AnnotHost::paintPunchBackground(ID2D1DeviceContext* ctx, const D2D1_RECT_F&)
+{
+	ID2D1Bitmap1* src = punchSource_ ? punchSource_ : screenImg.Get();
+	if (!ctx || !src) return;
+	// 底图按自身像素尺寸铺（贴图缩放时客户区尺寸 ≠ 图像尺寸，用 w/h 会抠错位置）；
+	// 尺寸对不上时仍按窗口尺寸铺，保持白板/演示的原行为
+	const D2D1_SIZE_U srcPx = src->GetPixelSize();
+	const float sc = scale > 0.001f ? scale : 1.f;
+	const bool sameSpace = std::fabs((float)srcPx.width - (float)w / sc) <= 2.f
+		&& std::fabs((float)srcPx.height - (float)h / sc) <= 2.f;
+	ctx->DrawBitmap(src, sameSpace
+		? D2D1::RectF(0.f, 0.f, (float)srcPx.width, (float)srcPx.height)
+		: D2D1::RectF(0.f, 0.f, (float)w, (float)h));
+}
+
 // 按住 Alt = 强制落笔：跳过"按下先命中已有标注"，让当前工具直接压在旧标注上作画。
 // 只在"手里有工具"时生效 —— 空工具（选择态）下 Alt 不改变"点谁选谁"。
 bool AnnotHost::altForceDraw() const
@@ -827,7 +852,7 @@ ShapeBase* AnnotHost::liveStyleShape()
 		if (s.get() == lastCreatedShape_) { alive = true; break; }
 	}
 	if (!alive || lastCreatedShape_->isUndo
-		|| toolIdOfShape(lastCreatedShape_) != getCurToolId()) {
+		|| toolIdOfShape(lastCreatedShape_) != styleToolId()) {
 		lastCreatedShape_ = nullptr;
 		return nullptr;
 	}
@@ -861,7 +886,7 @@ void AnnotHost::presentSelectedAnnotStyle()
 		toolSub->endShapeStylePreview();
 		return;
 	}
-	const auto cur = getCurToolId();
+	const auto cur = styleToolId();
 	const auto sid = toolIdOfShape(shapeHover);
 	// 多选：属性栏按"当前工具 + 形态"筛出目标集合，逐项比较后统一展示/置灰。
 	if (hasMultiSelection()) {
@@ -1354,7 +1379,12 @@ void AnnotHost::paintSerialCursor(ID2D1DeviceContext* ctx)
 	GetCursorPos(&screen);
 	POINT client = screen;
 	ScreenToClient(annotInputHwnd(), &client);
-	if (client.x < 0 || client.y < 0 || client.x >= (int)w || client.y >= (int)h) return;
+	// 用宿主窗口的客户区判断，不能用 w/h：
+	// 图片编辑器的 w/h 是画板像素、客户区还包含左右栏和缩放偏移；空画板时 w/h 甚至为 0，
+	// 会把跟手预览整个裁掉，而系统光标已经被隐藏 → 看起来就是"鼠标不见了"。
+	RECT clientRect{};
+	if (!GetClientRect(annotInputHwnd(), &clientRect)) return;
+	if (client.x < 0 || client.y < 0 || client.x >= clientRect.right || client.y >= clientRect.bottom) return;
 
 	const auto img = toImgPos(client);
 	const float mx = (float)img.x;
@@ -1377,7 +1407,7 @@ void AnnotHost::paintSerialCursor(ID2D1DeviceContext* ctx)
 		layout->SetFontFamilyName(L"Segoe UI Emoji", { 0, (UINT32)emoji.size() });
 		layout->SetFontSize(draw, { 0, (UINT32)emoji.size() });
 		ComPtr<ID2D1SolidColorBrush> brush;
-		d2d->deviceContext->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 0.9f), brush.GetAddressOf());
+		ctx->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 0.9f), brush.GetAddressOf());
 		ctx->DrawTextLayout({ mx - box, my - box }, layout.Get(), brush.Get(),
 			D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
 		return;
@@ -1389,9 +1419,8 @@ void AnnotHost::paintSerialCursor(ID2D1DeviceContext* ctx)
 	ComPtr<ID2D1SolidColorBrush> border;
 	auto fillC = color; fillC.a = 0.28f;
 	auto borderC = color; borderC.a = 0.55f;
-	auto d2d = Ling::D2D::get();
-	d2d->deviceContext->CreateSolidColorBrush(fillC, fill.GetAddressOf());
-	d2d->deviceContext->CreateSolidColorBrush(borderC, border.GetAddressOf());
+	ctx->CreateSolidColorBrush(fillC, fill.GetAddressOf());
+	ctx->CreateSolidColorBrush(borderC, border.GetAddressOf());
 	const float rad = size;
 	const D2D1_ELLIPSE el{ { mx, my }, rad, rad };
 	ctx->FillEllipse(el, fill.Get());
@@ -1684,7 +1713,7 @@ bool AnnotHost::sizePreviewSuppressed() const
 {
 	// 气泡/爆裂正在编辑文字时，滚轮/滑条改的是它自己的描边，直接看本体即可
 	if (editingText && editingText->isFrame()) return true;
-	return hasSelectedAnnot() && toolIdOfShape(shapeHover) == getCurToolId();
+	return hasSelectedAnnot() && toolIdOfShape(shapeHover) == styleToolId();
 }
 
 void AnnotHost::pulseSizePreview(bool shapePreview)
@@ -1924,7 +1953,10 @@ void AnnotHost::paintSizePreview(ID2D1DeviceContext* ctx)
 
 bool AnnotHost::dimensionToolActive() const
 {
-	if (!toolSub || getCurToolId() != L"arrow") return false;
+	if (!toolSub) return false;
+	// 图片编辑器：独立「尺寸」工具 id；截图/标注栏：arrow + 当前线型是尺寸
+	if (getCurToolId() == L"dimension") return true;
+	if (getCurToolId() != L"arrow") return false;
 	return toolSub->isLine && toolSub->lineKind == ToolSub::LineDimension;
 }
 
@@ -2729,7 +2761,10 @@ bool AnnotHost::composeAnnotOnImage(const BYTE* bgra, int imgW, int imgH, std::v
 	d2d->deviceContext->Clear(D2D1::ColorF(0, 0.f));
 	d2d->deviceContext->SetTransform(D2D1::Matrix3x2F::Identity());
 	d2d->deviceContext->DrawBitmap(srcBmp.Get(), D2D1::RectF(0, 0, (float)imgW, (float)imgH));
+	// 离屏合成：开洞就从这张底图上抠，不能用画布兜底色（透明导出会被垫成实色）
+	punchSource_ = srcBmp.Get();
 	paintShapes(d2d->deviceContext.Get(), false, true);
+	punchSource_ = nullptr;
 	if (FAILED(d2d->deviceContext->EndDraw())) {
 		d2d->deviceContext->SetTarget(nullptr);
 		return false;

@@ -12,13 +12,14 @@
 #include "../Ocr/OcrPackVariant.h"
 #include "../Ocr/LwPpOcrEngine.h"
 #include "../Translate/TranslateTypes.h"
+#include "../Plugin/PluginHost.h"
 #include "WinSetting.h"
 #include "CapVideo.h"
 #include <shobjidl.h>
 #include <commdlg.h>
 
 namespace {
-	// 某个子 Tab 是否仍是出厂值：0 基本功能 / 1 视频录制 / 2 文件输出 / 3 文本识别 / 4 翻译
+	// 某个子 Tab 是否仍是出厂值：0 基本功能 / 1 视频录制 / 2 文件输出 / 3 识别模型 / 4 其他功能
 	//（与 build() 里给 segmentedPills 的标签顺序一致，也与 restoreBtn 的动作分派一致）
 	bool functionAtDefaults(int tab)
 	{
@@ -26,8 +27,8 @@ namespace {
 		switch (tab) {
 		case 1:  return s->functionRecordAtDefaults();
 		case 2:  return s->functionOutputAtDefaults();
-		case 3:  return s->functionOcrAtDefaults();
-		case 4:  return s->functionTranslateAtDefaults();
+		case 3:  return s->functionOcrAtDefaults() && s->functionTranslateAtDefaults();
+		case 4:  return s->functionOtherAtDefaults();
 		default: return s->functionScreenshotAtDefaults();
 		}
 	}
@@ -347,8 +348,8 @@ void WinSettingFeatures::rebuildTab(int index)
 	if (index == 0) buildBasic(tabs[index]);
 	else if (index == 1) buildRecord(tabs[index]);
 	else if (index == 2) buildOutput(tabs[index]);
-	else if (index == 3) buildOcr(tabs[index]);
-	else buildTranslate(tabs[index]);
+	else if (index == 3) buildRecognize(tabs[index]);
+	else buildOther(tabs[index]);
 	// 内容区只有外层 content 提供底部留白：清掉该 tab 末尾元素的 marginBottom。
 	SettingUi::trimTrailingGap(tabs[index]);
 }
@@ -365,8 +366,8 @@ void WinSettingFeatures::build()
 {
 	const std::vector<std::wstring> labels = {
 		Lang::get(L"setting.fnTabBasic"), Lang::get(L"setting.fnTabVideo"),
-		Lang::get(L"setting.fnTabOutput"), Lang::get(L"setting.fnTabOcr"),
-		Lang::get(L"setting.fnTabTrans")
+		Lang::get(L"setting.fnTabOutput"), Lang::get(L"setting.fnTabRecognize"),
+		Lang::get(L"setting.fnTabOther")
 	};
 	// 分段胶囊 Tab（点击滑块滑动）＋ 右侧「恢复默认」
 	auto tabRow = makeChild<Ling::Node>();
@@ -390,8 +391,14 @@ void WinSettingFeatures::build()
 		case 0:  s->restoreFunctionScreenshotDefaults(); break;
 		case 1:  s->restoreFunctionRecordDefaults();     break;
 		case 2:  s->restoreFunctionOutputDefaults();     break;
-		case 3:  s->restoreFunctionOcrDefaults();        break;
-		default: s->restoreFunctionTranslateDefaults();  break;
+		case 3:
+			s->restoreFunctionOcrDefaults();
+			s->restoreFunctionTranslateDefaults();
+			break;
+		default:
+			s->restoreFunctionOtherDefaults();
+			SettingUi::applyFeatureTipsVisibility();
+			break;
 		}
 		rebuildTab(tabIndex);
 		syncRestoreState();
@@ -407,8 +414,8 @@ void WinSettingFeatures::build()
 	buildBasic(tabs[0]);    SettingUi::trimTrailingGap(tabs[0]);
 	buildRecord(tabs[1]);   SettingUi::trimTrailingGap(tabs[1]);
 	buildOutput(tabs[2]);   SettingUi::trimTrailingGap(tabs[2]);
-	buildOcr(tabs[3]);      SettingUi::trimTrailingGap(tabs[3]);
-	buildTranslate(tabs[4]); SettingUi::trimTrailingGap(tabs[4]);
+	buildRecognize(tabs[3]); SettingUi::trimTrailingGap(tabs[3]);
+	buildOther(tabs[4]);    SettingUi::trimTrailingGap(tabs[4]);
 	showTab(0);
 }
 
@@ -753,6 +760,15 @@ void WinSettingFeatures::buildOutput(Ling::Node* p)
 		[](const std::wstring& v) { Setting::get()->setRecordDir(v); });
 }
 
+// 识别模型：一页两组 —— 文字识别 / 翻译模型（沿用各自原有的控件与回调）
+void WinSettingFeatures::buildRecognize(Ling::Node* p)
+{
+	SettingUi::groupLabel(p, Lang::get(L"setting.fnTabOcr"));
+	buildOcr(p);
+	SettingUi::groupLabel(p, Lang::get(L"setting.fnTabTrans"));
+	buildTranslate(p);
+}
+
 void WinSettingFeatures::buildOcr(Ling::Node* p)
 {
 	auto* s = Setting::get();
@@ -898,4 +914,54 @@ void WinSettingFeatures::buildTranslate(Ling::Node* p)
 	auto* row2 = makeRow();
 	SettingUi::toggleRow(makeCol(row2, false), Lang::get(L"setting.quickNewSession"), s->getQuickTranslateNewSession(),
 		[](bool on) { Setting::get()->setQuickTranslateNewSession(on); }, true);
+}
+
+// 其他功能：原「外观设置 > 其他外观」的四项开关搬到这里（2×2 双栏，保持原排版）
+void WinSettingFeatures::buildOther(Ling::Node* p)
+{
+	auto* grid = SettingUi::grid2(p);
+	// 开关的点击状态以 Setting 当前值为准（而非构建该行时捕获的值），
+	// 避免「恢复默认」程序化改写设置后，下一次点击仍按过期状态取反而失效
+	auto mkStateToggle = [&](const std::wstring& labelKey,
+		std::function<bool()> get,
+		std::function<void(bool)> set,
+		std::function<void(bool)> after,
+		const std::wstring& helpKey = L"") -> Ling::Button* {
+			auto r = SettingUi::optionRow(grid, Lang::get(labelKey), L"", true, SettingUi::kToggleH,
+				helpKey.empty() ? L"" : Lang::get(helpKey));
+			auto* sw = r.ctrlBox->makeChild<Ling::Button>();
+			SettingUi::styleToggle(sw, get());
+			sw->onClick.add([this, sw, get, set, after](Ling::Button*) {
+				const bool next = !get();
+				set(next);
+				SettingUi::styleToggle(sw, next);
+				if (after) after(next);
+				this->syncRestoreState();
+				});
+			return sw;
+		};
+	mkStateToggle(L"setting.featureTips",
+		[] { return Setting::get()->getFeatureTips(); },
+		[](bool on) { Setting::get()->setFeatureTips(on); },
+		[](bool) {
+			// 立刻把已经创建出来的「?」一起显示/隐藏，不用退出设置页才生效
+			SettingUi::applyFeatureTipsVisibility();
+		});
+	// 「快捷键提示」：开关只影响之后弹出的停悬气泡（已显示的提示仍带旧文字，属预期）
+	mkStateToggle(L"setting.hotkeyTip",
+		[] { return Setting::get()->getHotkeyTip(); },
+		[](bool on) { Setting::get()->setHotkeyTip(on); }, {});
+	// 悬停预览：历史记录 / 剪切板卡片停悬时弹出大图或文字卡（默认关闭，避免误触打扰）
+	mkStateToggle(L"setting.hoverPreview",
+		[] { return Setting::get()->getHoverPreview(); },
+		[](bool on) {
+			Setting::get()->setHoverPreview(on);
+			PluginHost::instance().onSettingChanged(L"hoverPreview");
+		}, {},
+		L"setting.hoverPreviewTip");
+	// 记忆工具样式：记住上次标注工具样式（如大箭头），下次截图自动复用；默认关闭
+	mkStateToggle(L"setting.rememberToolStyle",
+		[] { return Setting::get()->getRememberToolStyle(); },
+		[](bool on) { Setting::get()->setRememberToolStyle(on); }, {});
+	SettingUi::grid2Cells(grid);
 }
