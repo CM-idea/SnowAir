@@ -18,7 +18,6 @@ std::unordered_map<int, HICON> g_cache;   // key = style*1024 + size
 std::wstring g_customPath;                // 上次用于生成自定义图标的路径
 uint32_t g_customColor = 0;               // 上次用于生成"自定义颜色"图标的时间色
 bool g_customColorValid = false;
-bool g_shown = true;                      // 托盘图标当前是否挂着（initTray 时已 NIM_ADD）
 
 // 系统是否为浅色：AppsUseLightTheme != 0
 bool sysIsLight()
@@ -252,10 +251,12 @@ void apply()
 	if (!g_customColorValid || cc != g_customColor) { g_customColorValid = true; g_customColor = cc; freeCache(); }
 
 	if (!s->getTrayEnabled()) {
-		if (g_shown) { app->setTrayVisible(false); g_shown = false; }
+		app->setTrayVisible(false);
 		return;
 	}
-	if (!g_shown) { app->setTrayVisible(true); g_shown = true; }
+	// initTray 的 NIM_ADD 可能失败（开机自启早于任务栏就绪）或被 Explorer 重启清除。
+	// 每次 apply 都向 Ling 确认状态（幂等）；未注册时由 Ling 重新注册并重试。
+	app->setTrayVisible(true);
 	if (HICON ic = iconFor(s->getTrayIconStyle())) app->setTrayIcon(ic);
 }
 

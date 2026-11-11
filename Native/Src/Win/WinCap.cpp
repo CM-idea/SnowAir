@@ -2,6 +2,8 @@
 #include <include/Ling.h>
 #include "../Tool/DesignKeys.h"
 #include "WinCap.h"
+#include "PixLens.h"
+#include "CursorImage.h"
 #include "WinPin.h"
 #include "CutMask.h"
 #include "../App.h"
@@ -154,22 +156,64 @@ namespace
 	}
 
 	// 「显示光标」：会话开始那一刻鼠标下面那个**真实窗口**正在用的光标。
-	// 不能只靠 GetCursorInfo —— 上一次截图退出时我们的框选十字光标（IDC_CROSS）可能还残留在
-	// 全局光标状态里（鼠标不动就不会被刷新），于是这次会抓到"我们自己的截图框选光标"。
-	// 趁还没有任何本程序窗口遮挡鼠标，先给鼠标下的窗口补发一次 WM_SETCURSOR 让它把光标设回来，
-	// 再读 GetCursor()，交 captureCursorSnapshot 取用。
+	// 这里有三个坑（都在真机上踩过）：
+	//   1) GetCursor() 返回的是**本线程**的光标，不是屏幕上那个。上一次截图里我们给覆盖窗设过
+	//      IDC_CROSS / IDC_SIZEALL，鼠标不动就不会被刷掉，于是这次抓到的还是"我们自己的
+	//      框选 / 移动光标" —— 用户报的「工字型变成了十字移动光标」就是它；
+	//   2) 目标窗口要是不处理 WM_SETCURSOR（有些自绘控件只在 WM_MOUSEMOVE 里设），
+	//      补发之后也未必能拿到真实光标；
+	//   3) 少数程序会把光标藏起来（CURSOR_SHOWING 清零）。
+	// 做法：**先信屏幕上那个全局光标**（GetCursorInfo 拿到的就是当前真正显示的光标，
+	// 网页的 CSS 自定义光标也在这一层）；只有它明显还是我们本线程留下的那个（上一次会话的
+	// 框选/移动光标）时才补发 WM_SETCURSOR 去刷新 —— 补发对网页自定义光标只能拿到类光标
+	// （普通系统光标），所以能不问就不问。
 	HCURSOR g_cursorForCapture{ nullptr };
+	bool g_cursorForCaptureShown{ false };
+	POINT g_cursorPosForCapture{};
 
 	void primeCursorForCapture()
 	{
+		g_cursorForCapture = nullptr;
+		g_cursorForCaptureShown = false;
+		g_cursorPosForCapture = POINT{};
+
 		POINT p{};
 		if (!GetCursorPos(&p)) return;
-		if (HWND under = WindowFromPoint(p)) {
-			DWORD_PTR res = 0;
-			SendMessageTimeoutW(under, WM_SETCURSOR, (WPARAM)under,
-				MAKELPARAM(HTCLIENT, WM_MOUSEMOVE), SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &res);
+		g_cursorPosForCapture = p;
+
+		CURSORINFO ci{ sizeof(CURSORINFO) };
+		if (!GetCursorInfo(&ci)) return;
+		g_cursorForCapture = ci.hCursor;
+		g_cursorForCaptureShown = (ci.flags & CURSOR_SHOWING) != 0;
+		g_cursorPosForCapture = ci.ptScreenPos;
+
+		HWND under = WindowFromPoint(p);
+		DWORD pid = 0;
+		if (under) GetWindowThreadProcessId(under, &pid);
+		const bool foreign = under && pid && pid != GetCurrentProcessId();
+		if (!foreign) return;
+
+		// 屏幕上的光标还是本线程最后一次设的那个 → 上一次会话没刷新掉，才需要补发
+		const HCURSOR ours = GetCursor();
+		const bool stale = !g_cursorForCapture || (ours && g_cursorForCapture == ours);
+		if (!stale) return;
+
+		DWORD_PTR res = 0;
+		SendMessageTimeoutW(under, WM_SETCURSOR, (WPARAM)under,
+			MAKELPARAM(HTCLIENT, WM_MOUSEMOVE), SMTO_ABORTIFHUNG | SMTO_BLOCK, 80, &res);
+		if (!GetCursorInfo(&ci)) return;
+		if (ci.hCursor) {
+			g_cursorForCapture = ci.hCursor;
+			g_cursorForCaptureShown = (ci.flags & CURSOR_SHOWING) != 0;
+			g_cursorPosForCapture = ci.ptScreenPos;
 		}
-		g_cursorForCapture = GetCursor();
+
+		// 补发也没生效：读回来的仍是我们的光标 → 退回该窗口的类光标。
+		// 类光标是那个窗口的"默认光标"，对文本框/编辑器通常就是工字型，比画我们自己的准。
+		if (g_cursorForCapture == ours) {
+			if (HCURSOR cls = (HCURSOR)GetClassLongPtrW(under, GCLP_HCURSOR))
+				g_cursorForCapture = cls;
+		}
 	}
 
 	bool sameOcrRect(const D2D1_RECT_F& a, const D2D1_RECT_F& b)
@@ -269,6 +313,12 @@ namespace
 
 std::unique_ptr<WinCap> winCap;
 
+namespace {
+	// 静默截图关闭时的一次性预置选区（屏幕坐标），由 initNow 消费。
+	bool g_pendingRectValid = false;
+	RECT g_pendingRect{};
+}
+
 WinCap::WinCap() : AnnotHost()
 {
 	setTitle(L"SnowAir 轻雪");
@@ -357,7 +407,10 @@ WinCap::~WinCap()
 void WinCap::init(StartMode mode)
 {
     // 双击托盘图标会连着来两下，已经开着就不再建第二个
-    if (winCap) return;
+    if (winCap) {
+        g_pendingRectValid = false;
+        return;
+    }
 
     // 命令行入口 --enter=... 是**一次性**的：在这里取走并从 args 删掉，只带进本次会话。
     // 不删的话参数会随进程一直留着，之后每次 F1 / 托盘截图框完都再走一遍录屏/长截图/识别，
@@ -406,6 +459,22 @@ void WinCap::initNow(StartMode mode, std::shared_ptr<std::vector<BYTE>> grab,
     // 选区挪动 → 通知录制侧把裁剪框一起平移（拖拽/鼠标跟随/方向键/滚轮全走 CutMask 这一处）
     ptr->cutMask->onRectMoved = [p = ptr]() { p->onMaskRectChanged(); };
     ptr->pendingGrab_ = std::move(grab);
+    // 预置选区：跳过框选，直接进入 Adjust 并显示工具栏
+    bool hasPreset = false;
+    if (mode == StartMode::Normal && g_pendingRectValid) {
+        g_pendingRectValid = false;
+        const auto clampf = [](float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); };
+        const D2D1_RECT_F rect = D2D1::RectF(
+            clampf((float)(g_pendingRect.left - ptr->x), 0.f, ptr->w),
+            clampf((float)(g_pendingRect.top - ptr->y), 0.f, ptr->h),
+            clampf((float)(g_pendingRect.right - ptr->x), 0.f, ptr->w),
+            clampf((float)(g_pendingRect.bottom - ptr->y), 0.f, ptr->h));
+        if (rect.right > rect.left && rect.bottom > rect.top) {
+            ptr->stage = CapStage::Adjust;
+            ptr->cutMask->maskRect = rect;
+            hasPreset = true;
+        }
+    }
     if (mode == StartMode::Demo) {
         // 演示画布：不画静帧（实时桌面）、不压暗/不描边/不画控点
         ptr->demoMode = true;
@@ -435,6 +504,13 @@ void WinCap::initNow(StartMode mode, std::shared_ptr<std::vector<BYTE>> grab,
         // 从托盘「屏幕录制」进来的：框选阶段起就按单块屏约束（框完直接开录，不能跨屏）
         if (ptr->cutMask) ptr->cutMask->setSingleMonitorMode(true);
     }
+    else if (hasPreset) {
+        ptr->cutMask->refreshLabel();
+        ptr->onMaskRectChanged();
+        ptr->refresh();
+        ptr->makeToolCap();
+        ptr->scheduleCodeScan(true);
+    }
 }
 
 WinCap* WinCap::get()
@@ -456,6 +532,14 @@ void WinCap::beginDemoCanvas()
 {
     init(StartMode::Demo);
     // 临时全局键的镜像在 initNow() 的演示分支里做：会话没真正建起来时不能去改钩子上的绑定
+}
+
+void WinCap::beginWithRect(const RECT& screenRect)
+{
+    if (winCap) return;
+    g_pendingRect = screenRect;
+    g_pendingRectValid = true;
+    init(StartMode::Normal);
 }
 
 namespace {
@@ -1755,7 +1839,7 @@ bool WinCap::beginMaskResize(POINT pos)
 	SetCapture(hwnd);
 	if (moveFromBorder) cutMask->startDragMove(pos);   // 锁定画幅：拖边 = 整体挪动
 	else cutMask->startAdjust(pos);
-	setPixPos(pos);
+	setPixForMask(pos);
 	setToolChromeHidden(true);
 	refresh();
 	return true;
@@ -2017,14 +2101,55 @@ void WinCap::applyEmptyToolCursor()
 
 void WinCap::setPixPos(POINT pos)
 {
-	// 外壳贴在鼠标**右下角**，与光标留 12 逻辑像素间距
-	//（不紧贴十字准星），越界时夹回窗口内。pixFocus 仍是取样点（= 光标处）。
+	setPixPosAt(pos, pos);
+}
+
+// 选区上的统一入口：贴边/拖角时把放大镜的取样中心挪到边线上（光标此时可能离边十几像素）
+void WinCap::setPixForMask(POINT cur)
+{
+	setPixPosAt(cur, (cutMask && cutMask->isResizingEdge()) ? cutMask->edgePointNear(cur) : cur);
+}
+
+// pos：外壳朝哪边避让的依据（= 光标）；focus：放大镜的取样中心。
+// 拖边时 focus 传"边上的点"（见 CutMask::edgePointNear）—— 光标可以在命中带里离边十几像素，
+// 以光标为中心的话边线会落在放大镜视野边上，根本没法做 1 像素精修。
+void WinCap::setPixPosAt(POINT pos, POINT focus)
+{
+	// 外壳默认贴在光标**右下角**，与准星留 12 逻辑像素间距（不紧贴十字准星）。
+	// 贴边时不能再用「夹回窗口」：截图覆盖窗是整个虚拟桌面（多屏时比一块屏宽得多），
+	// 夹的边界可能是另一块屏 —— 表现就是「放大镜跑出屏幕了」。
+	// 现在改成：右下放不下就在 左下 / 右上 / 左上 里挑第一个放得下的，能放下就立刻回右下
+	//（只避让、不记忆）；四个都放不下（显示器比外壳还小）才退回右下并夹进该显示器。
 	const float gap = kCursorGap * dpi;
 	const float shellW = kShellW * dpi;
 	const float shellH = kShellH * dpi;
-	pixPos.x = (LONG)std::clamp((float)pos.x + gap, 0.f, std::max(0.f, w - shellW));
-	pixPos.y = (LONG)std::clamp((float)pos.y + gap, 0.f, std::max(0.f, h - shellH));
-	pixFocus = pos;
+
+	// 光标所在显示器（屏幕坐标）→ 客户区坐标；再夹一层窗口范围，防止窗口本身比显示器小
+	POINT sp{ pos.x, pos.y };
+	ClientToScreen(hwnd, &sp);
+	MONITORINFO mi{ sizeof(MONITORINFO) };
+	float areaL = 0.f, areaT = 0.f, areaR = w, areaB = h;
+	if (GetMonitorInfoW(MonitorFromPoint(sp, MONITOR_DEFAULTTONEAREST), &mi)) {
+		POINT tl{ mi.rcMonitor.left, mi.rcMonitor.top };
+		POINT br{ mi.rcMonitor.right, mi.rcMonitor.bottom };
+		ScreenToClient(hwnd, &tl);
+		ScreenToClient(hwnd, &br);
+		areaL = (float)tl.x;
+		areaT = (float)tl.y;
+		areaR = (float)(std::min)(br.x, (LONG)std::lround(w));
+		areaB = (float)(std::min)(br.y, (LONG)std::lround(h));
+		// 显示器与窗口几乎不重叠（或窄到放不下外壳）：退回整窗范围，别算出负尺寸
+		if (areaR - areaL < shellW || areaB - areaT < shellH) {
+			areaL = 0.f; areaT = 0.f; areaR = w; areaB = h;
+		}
+	}
+
+	PixLensBox box{};
+	pixLensQuadrant((float)pos.x, (float)pos.y, shellW, shellH, gap,
+		areaL, areaT, areaR, areaB, &box);
+	pixPos.x = (LONG)std::lround(box.x);
+	pixPos.y = (LONG)std::lround(box.y);
+	pixFocus = focus;
 }
 
 void WinCap::samplePixColor()
@@ -2102,8 +2227,45 @@ void WinCap::paintPix(ID2D1DeviceContext* ctx)
 	ctx->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x0, y0, x0 + shellW, y0 + shellH), radius, radius), brushBg.Get());
 
 	const D2D1_RECT_F canvasRect{ x0 + pad, y0 + pad, x0 + pad + canvas, y0 + pad + canvas };
-	// 轴对齐裁剪代替每帧建圆角 Geometry，拖边更跟手
-	ctx->PushAxisAlignedClip(canvasRect, D2D1_ANTIALIAS_MODE_ALIASED);
+	// 画面区四角给一点点圆角（与外壳同心：外壳半径 6、内缩 pad=4 → 内圆角 2）。
+	// 几何/图层缓存复用：只有设备上下文或 dpi 变了才重建，拖动时每帧只是 Push/Pop。
+	const float innerRadius = (std::max)(1.f, radius - pad);
+	if (!pixClipGeom_ || pixClipCtx_ != ctx || pixClipRadius_ != innerRadius) {
+		pixClipGeom_.Reset();
+		pixClipLayer_.Reset();
+		pixClipCtx_ = nullptr;
+		pixClipRadius_ = 0.f;
+		auto* d2d = Ling::D2D::get();
+		if (d2d && d2d->d2dFactory) {
+			const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(
+				D2D1::RectF(0.f, 0.f, canvas, canvas), innerRadius, innerRadius);
+			ComPtr<ID2D1RoundedRectangleGeometry> geom;
+			ComPtr<ID2D1Layer> layer;
+			if (SUCCEEDED(d2d->d2dFactory->CreateRoundedRectangleGeometry(rr, geom.GetAddressOf()))
+				&& SUCCEEDED(ctx->CreateLayer(nullptr, layer.GetAddressOf()))) {
+				pixClipGeom_ = geom;
+				pixClipLayer_ = layer;
+				pixClipCtx_ = ctx;
+				pixClipRadius_ = innerRadius;
+			}
+		}
+	}
+	bool rounded = false;
+	if (pixClipGeom_ && pixClipLayer_ && pixClipCtx_ == ctx && pixClipRadius_ == innerRadius) {
+		D2D1_LAYER_PARAMETERS1 lp{};
+		lp.contentBounds = D2D1::InfiniteRect();
+		lp.geometricMask = pixClipGeom_.Get();
+		lp.maskAntialiasMode = D2D1_ANTIALIAS_MODE_PER_PRIMITIVE;
+		lp.maskTransform = D2D1::Matrix3x2F::Translation(canvasRect.left, canvasRect.top);
+		lp.opacity = 1.f;
+		lp.layerOptions = D2D1_LAYER_OPTIONS1_NONE;
+		ctx->PushLayer(lp, pixClipLayer_.Get());
+		rounded = true;
+	}
+	if (!rounded) {
+		// 兜底：几何/图层建不出来时退回旧的直角裁剪（至少能画）
+		ctx->PushAxisAlignedClip(canvasRect, D2D1_ANTIALIAS_MODE_ALIASED);
+	}
 	ctx->FillRectangle(canvasRect, brushBg.Get());
 
 	const float picker = canvas / kScale;
@@ -2119,7 +2281,8 @@ void WinCap::paintPix(ID2D1DeviceContext* ctx)
 	const float stroke = 1.5f * dpi;
 	ctx->DrawLine(D2D1::Point2F(cx, canvasRect.top), D2D1::Point2F(cx, canvasRect.bottom), crossBrush.Get(), stroke);
 	ctx->DrawLine(D2D1::Point2F(canvasRect.left, cy), D2D1::Point2F(canvasRect.right, cy), crossBrush.Get(), stroke);
-	ctx->PopAxisAlignedClip();
+	if (rounded) ctx->PopLayer();
+	else ctx->PopAxisAlignedClip();
 
 	// 色值从底图取样（避免 GetPixel 同步读屏拖垮帧率）
 	samplePixColor();
@@ -2563,6 +2726,11 @@ void WinCap::onWheel(POINT pos, float space)
 {
 	if (space == 0.f) return;
 	const int dir = space > 0.f ? 1 : -1;
+	// 查找元素阶段：滚轮向上放大到父元素，向下缩小到子元素
+	if (stage == CapStage::Select && !demoMode && cutMask && cutMask->wheelHover(dir)) {
+		refresh();
+		return;
+	}
 	// 鼠标停在属性栏的序号输入框上（未在编辑）：滚轮直接加减序号
 	if (toolSub && toolSub->wheelNumberAt(dir)) return;
 	// 刚画完还没二次选中的标注：只让多边形、星形、气泡、爆裂跟随滚轮改属性
@@ -2835,7 +3003,7 @@ void WinCap::onDown(POINT pos, bool isRight)
         if (toolOcr && cutMask->hitTest(pos) == MaskHit::Inside) return;
         isPress = true;
         cutMask->startAdjust(pos);
-        setPixPos(pos);
+        setPixForMask(pos);
         if (cutMask->adjustingHit() != MaskHit::None) {
             SetCapture(hwnd); // 拖边时结果窗盖在选区上，无 Capture 则抬起被抢走、isPress 卡死
             setToolChromeHidden(true);
@@ -2845,7 +3013,7 @@ void WinCap::onDown(POINT pos, bool isRight)
     else if (videoCanAdjust()) {
         isPress = true;
         cutMask->startAdjust(pos);
-        setPixPos(pos);
+        setPixForMask(pos);
         if (cutMask->adjustingHit() != MaskHit::None) {
             SetCapture(hwnd);
             setToolChromeHidden(true);
@@ -2944,7 +3112,7 @@ void WinCap::onMove(POINT pos)
         GetCursorPos(&cur);
         ScreenToClient(hwnd, &cur);
         cutMask->adjust(cur);
-        if (cutMask->isResizingEdge()) setPixPos(cur);
+        if (cutMask->isResizingEdge()) setPixForMask(cur);
         syncQrcodePanel();
         refresh();
         return;
@@ -2991,7 +3159,7 @@ void WinCap::onMove(POINT pos)
             GetCursorPos(&cur);
             ScreenToClient(hwnd, &cur);
             cutMask->adjust(cur);
-            if (cutMask->isResizingEdge()) setPixPos(cur);
+            if (cutMask->isResizingEdge()) setPixForMask(cur);
             syncQrcodePanel();
             refresh();
         }
@@ -3003,7 +3171,7 @@ void WinCap::onMove(POINT pos)
             GetCursorPos(&cur);
             ScreenToClient(hwnd, &cur);
             cutMask->adjust(cur);
-            if (cutMask->isResizingEdge()) setPixPos(cur);
+            if (cutMask->isResizingEdge()) setPixForMask(cur);
             syncQrcodePanel();
             refresh();
         }
@@ -3282,8 +3450,18 @@ void WinCap::layoutTool(Ling::WinBase* tool)
     const bool fitBelow = (maskBottomScr + gap + visualH) <= mi.rcWork.bottom;
     const bool fitAbove = (maskTopScr - gap - visualH) >= mi.rcWork.top;
 
-    // 可视栏左缘对齐选区左缘（与左上角信息栏同侧）
+    // 可视栏横向对齐：按「功能设置 → 其他功能 → 工具栏对齐」贴选区左缘 / 右缘 / 中线
+    //（默认左对齐，与左上角信息栏同侧）
+    const int align = Setting::get() ? Setting::get()->getCaptureToolbarAlign() : 0;
     int toolX = maskLeftScr - pad;
+    if (align == 1) {
+        // 右对齐：可视栏右缘贴选区右缘
+        toolX = maskRightScr - visualW - pad;
+    }
+    else if (align == 2) {
+        // 居中：可视栏中线与选区中线重合
+        toolX = maskLeftScr + (maskRightScr - maskLeftScr - visualW) / 2 - pad;
+    }
     int toolY = 0;
     if (fitBelow) {
         toolY = maskBottomScr + gap - pad;
@@ -5085,125 +5263,144 @@ bool WinCap::exportSelection(std::vector<BYTE>& pixels, int& cw, int& ch, bool i
     return cutMask->applyExportEffects(pixels, cw, ch);
 }
 
-// 「显示光标」：会话开始抓一次真实系统光标。老式光标只有 AND 掩码没 alpha，
-// DrawIconEx 画进 32bpp DIB 时 alpha 全 0 —— 得自己按掩码补。
+// 「显示光标」：会话开始抓一次真实系统光标（见 primeCursorForCapture）。
+// 取像素走 CursorImage::Extract（直接读 ICONINFO 位图，单色/彩色/带 alpha 都能解），
+// 不再依赖 DrawIconEx 往 32bpp DIB 上画 —— 那条路对单色光标会得到 alpha 全 0，
+// 于是"看起来没显示光标"。
 void WinCap::captureCursorSnapshot()
 {
     cursorValid = false;
     cursorBmp.Reset();
     cursorPix.clear();
     cursorW = cursorH = 0;
+
     CURSORINFO ci{ sizeof(CURSORINFO) };
-    if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING) || !ci.hCursor) return;
-    // 优先用会话开始前抓到的真实光标（见 primeCursorForCapture）；拿不到再退回当前光标
+    const bool haveInfo = GetCursorInfo(&ci) != FALSE;
+
+    // 会话开始前抓到的真实光标优先；没有再退回"当前全局光标"
     HCURSOR useCur = g_cursorForCapture;
     g_cursorForCapture = nullptr;
+    if (!useCur) useCur = haveInfo ? ci.hCursor : nullptr;
+    if (!useCur) return;
+
     ICONINFO ii{};
-    if (!useCur || !GetIconInfo(useCur, &ii)) {
+    if (!GetIconInfo(useCur, &ii)) {
+        // 主句柄画不出来（跨进程销毁 / 自定义光标已释放）：用全局光标再试一次
+        if (!haveInfo || !ci.hCursor || ci.hCursor == useCur || !GetIconInfo(ci.hCursor, &ii)) return;
         useCur = ci.hCursor;
-        if (!GetIconInfo(useCur, &ii)) return;
     }
     auto cleanup = [&] {
         if (ii.hbmColor) DeleteObject(ii.hbmColor);
         if (ii.hbmMask) DeleteObject(ii.hbmMask);
+        ii.hbmColor = ii.hbmMask = nullptr;
     };
 
-    int width = 32, height = 32;
-    if (ii.hbmColor) {
-        BITMAP bm{};
-        if (GetObject(ii.hbmColor, sizeof(bm), &bm)) { width = bm.bmWidth; height = bm.bmHeight; }
-    }
-    else if (ii.hbmMask) {
-        BITMAP bm{};
-        if (GetObject(ii.hbmMask, sizeof(bm), &bm)) { width = bm.bmWidth; height = bm.bmHeight / 2; }
-    }
-    width = std::clamp(width, 1, 256);
-    height = std::clamp(height, 1, 256);
-
-    HDC screenDc = GetDC(nullptr);
-    HDC memDc = CreateCompatibleDC(screenDc);
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height;   // top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    void* bits = nullptr;
-    HBITMAP dib = CreateDIBSection(memDc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (!dib || !bits) {
-        if (dib) DeleteObject(dib);
-        DeleteDC(memDc);
-        ReleaseDC(nullptr, screenDc);
+    int width = 0, height = 0;
+    if (!CursorImage::ChooseSize(ii, &width, &height)) {
         cleanup();
         return;
     }
-    HGDIOBJ old = SelectObject(memDc, dib);
-    memset(bits, 0, (size_t)width * (size_t)height * 4);
-    DrawIconEx(memDc, 0, 0, useCur, width, height, 0, nullptr, DI_NORMAL);
-    cursorPix.assign((size_t)width * (size_t)height * 4, 0);
-    memcpy(cursorPix.data(), bits, cursorPix.size());
+    cursorScreenPos = haveInfo ? ci.ptScreenPos : g_cursorPosForCapture;
 
-    // 补 alpha：掩码位 = 1 ⇒ 该点透明；掩码两种布局都试，用"本体必须不透明"挑对的
-    bool anyAlpha = false;
-    for (size_t i = 3; i < cursorPix.size(); i += 4) { if (cursorPix[i]) { anyAlpha = true; break; } }
-    BITMAP bmMask{};
-    const bool haveMask = ii.hbmMask && GetObject(ii.hbmMask, sizeof(bmMask), &bmMask)
-        && bmMask.bmWidth >= width && bmMask.bmHeight >= height;
-    if (!anyAlpha && haveMask) {
-        BITMAPINFO mi{};
-        mi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        mi.bmiHeader.biWidth = bmMask.bmWidth;
-        mi.bmiHeader.biHeight = bmMask.bmHeight;   // bottom-up
-        mi.bmiHeader.biPlanes = 1;
-        mi.bmiHeader.biBitCount = 1;
-        mi.bmiHeader.biCompression = BI_RGB;
-        const int stride = ((bmMask.bmWidth + 31) / 32) * 4;
-        std::vector<BYTE> maskBits((size_t)stride * bmMask.bmHeight, 0);
-        if (GetDIBits(memDc, ii.hbmMask, 0, bmMask.bmHeight, maskBits.data(), &mi, DIB_RGB_COLORS) != 0) {
-            const std::vector<BYTE> original = cursorPix;
-            const int total = width * height;
-            for (int cand = 0; cand < 2; ++cand) {
-                const int firstRow = (cand == 0) ? 0 : (bmMask.bmHeight - height);
-                cursorPix = original;
-                int opaque = 0, mismatch = 0;
-                for (int y = 0; y < height; ++y) {
-                    const int br = firstRow + (height - 1 - y);
-                    if (br < 0 || br >= bmMask.bmHeight) continue;
-                    const BYTE* row = maskBits.data() + (size_t)br * stride;
-                    BYTE* line = cursorPix.data() + (size_t)y * width * 4;
-                    for (int x = 0; x < width; ++x) {
-                        const bool transparent = (row[x >> 3] >> (7 - (x & 7))) & 1;
-                        const bool hasRgb = (line[x * 4] | line[x * 4 + 1] | line[x * 4 + 2]) != 0;
-                        if (transparent) {
-                            line[x * 4] = line[x * 4 + 1] = line[x * 4 + 2] = line[x * 4 + 3] = 0;
-                            if (hasRgb) ++mismatch;
-                        }
-                        else {
-                            line[x * 4 + 3] = 255;
-                            ++opaque;
-                        }
-                    }
-                }
-                if (mismatch == 0 && opaque > 0 && opaque <= total * 3 / 4) break;
-                cursorPix = original;
-            }
+    HDC screenDc = GetDC(nullptr);
+    HDC memDc = screenDc ? CreateCompatibleDC(screenDc) : nullptr;
+    if (memDc) {
+        std::vector<BYTE> px, xorMask;
+        if (CursorImage::Extract(memDc, ii, width, height, px, &xorMask)
+            && px.size() == (size_t)width * height * 4) {
+            cursorPix.swap(px);
+            cursorValid = true;
+            // 单色光标的"反色"像素（工字光标就是这种）用底图里的真实背景取反：
+            // 白底编辑器里画成黑线、黑底里画成白线，才不会出现"白线白底 = 看不见光标"。
+            if (!xorMask.empty()) invertCursorXorPixels(xorMask, width, height);
         }
     }
 
-    SelectObject(memDc, old);
-    DeleteObject(dib);
-    DeleteDC(memDc);
-    ReleaseDC(nullptr, screenDc);
+    // 兜底：Extract 解不出来时仍按老办法画一次，只是改成就"有 RGB 的地方就不透明"，
+    // 保证至少能看见光标，而不是整块消失
+    if (!cursorValid && memDc) {
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height;   // top-down
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        HBITMAP dib = CreateDIBSection(memDc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (dib && bits) {
+            HGDIOBJ old = SelectObject(memDc, dib);
+            const size_t bytes = (size_t)width * height * 4;
+            memset(bits, 0, bytes);
+            DrawIconEx(memDc, 0, 0, useCur, width, height, 0, nullptr, DI_NORMAL);
+            cursorPix.assign((const BYTE*)bits, (const BYTE*)bits + bytes);
+            for (size_t i = 0; i < cursorPix.size(); i += 4) {
+                const bool ink = (cursorPix[i] | cursorPix[i + 1] | cursorPix[i + 2]) != 0;
+                cursorPix[i + 3] = ink ? 255 : 0;
+                if (ink) cursorValid = true;
+            }
+            SelectObject(memDc, old);
+        }
+        if (dib) DeleteObject(dib);
+    }
+    if (memDc) DeleteDC(memDc);
+    if (screenDc) ReleaseDC(nullptr, screenDc);
     cleanup();
+    if (!cursorValid) return;
 
     cursorW = width;
     cursorH = height;
     cursorHotspot = POINT{ (LONG)ii.xHotspot, (LONG)ii.yHotspot };
-    cursorScreenPos = ci.ptScreenPos;
-    for (size_t i = 3; i < cursorPix.size(); i += 4) {
-        if (cursorPix[i]) { cursorValid = true; break; }
+}
+
+// 单色光标里 AND=1、XOR=1 的像素是"把屏幕反色"画出来的（工字光标整条都在这一类）。
+// 用截图底图里光标位置的真实背景取反，结果就和屏幕上看到的一致。
+void WinCap::invertCursorXorPixels(const std::vector<BYTE>& xorMask, int cw, int ch)
+{
+    if (!screenImg || cw <= 0 || ch <= 0 || xorMask.size() != (size_t)cw * ch) return;
+
+    POINT tl = cursorScreenPos;
+    ScreenToClient(hwnd, &tl);            // 光标位图左上角（客户区坐标）
+    tl.x -= cursorHotspot.x;
+    tl.y -= cursorHotspot.y;
+
+    const LONG left = (std::max)(0L, tl.x);
+    const LONG top = (std::max)(0L, tl.y);
+    const LONG right = (std::min)((LONG)std::lround(w), tl.x + cw);
+    const LONG bottom = (std::min)((LONG)std::lround(h), tl.y + ch);
+    if (right <= left || bottom <= top) return;
+
+    auto d2d = Ling::D2D::get();
+    if (!d2d || !d2d->deviceContext) return;
+    D2D1_BITMAP_PROPERTIES1 prop{};
+    prop.pixelFormat = screenImg->GetPixelFormat();
+    prop.bitmapOptions = D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+    screenImg->GetDpi(&prop.dpiX, &prop.dpiY);
+    ComPtr<ID2D1Bitmap1> cpu;
+    if (FAILED(d2d->deviceContext->CreateBitmap(
+        D2D1::SizeU((UINT32)(right - left), (UINT32)(bottom - top)), nullptr, 0, &prop, cpu.GetAddressOf())))
+        return;
+    const D2D1_POINT_2U dest{ 0, 0 };
+    const D2D1_RECT_U src{ (UINT32)left, (UINT32)top, (UINT32)right, (UINT32)bottom };
+    if (FAILED(cpu->CopyFromBitmap(&dest, screenImg.Get(), &src))) return;
+    D2D1_MAPPED_RECT mapped{};
+    if (FAILED(cpu->Map(D2D1_MAP_OPTIONS_READ, &mapped))) return;
+    for (int y = 0; y < ch; ++y) {
+        const LONG py = tl.y + y;
+        if (py < top || py >= bottom) continue;
+        for (int x = 0; x < cw; ++x) {
+            if (!xorMask[(size_t)y * cw + x]) continue;
+            const LONG px = tl.x + x;
+            if (px < left || px >= right) continue;
+            const BYTE* bg = mapped.bits + (size_t)(py - top) * mapped.pitch + (size_t)(px - left) * 4;
+            BYTE* p = cursorPix.data() + ((size_t)y * cw + x) * 4;
+            p[0] = (BYTE)(255 - bg[0]);
+            p[1] = (BYTE)(255 - bg[1]);
+            p[2] = (BYTE)(255 - bg[2]);
+            p[3] = 255;
+        }
     }
+    cpu->Unmap();
 }
 
 void WinCap::toggleShowCursor()

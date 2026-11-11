@@ -1,9 +1,12 @@
 #include "pch.h"
 #include "SelfTest.h"
+#include "ConfigMerge.h"
 #include "Shape/RoundBox.h"
 #include "Shape/LinkGeom.h"
 #include "Shape/ShapeBase.h"
 #include "Shape/ArrowPoly.h"
+#include "Win/PixLens.h"
+#include "Win/CursorImage.h"
 #include <cstdio>
 
 namespace
@@ -171,6 +174,106 @@ int RunSelfTest()
 		check(drift < 1.0f, buf);
 	}
 
+	// —— 放大镜落位：只避让、不记忆（默认右下，放不下才换边，放得下立刻回右下） ——
+	{
+		const float W = 128.f, H = 190.f, G = 12.f;
+		const float AL = 0.f, AT = 0.f, AR = 2560.f, AB = 1080.f;
+		auto inside = [&](const PixLensBox& b) {
+			return b.x >= AL - 0.5f && b.y >= AT - 0.5f
+				&& b.x + W <= AR + 0.5f && b.y + H <= AB + 0.5f;
+		};
+		// 外壳是「取样点旁边的取色窗」，压住光标就等于挡住了要看的那一格
+		auto coversCursor = [&](const PixLensBox& b, float cx, float cy) {
+			return cx > b.x && cx < b.x + W && cy > b.y && cy < b.y + H;
+		};
+		auto run = [&](float cx, float cy, int wantQuad, const wchar_t* name) {
+			PixLensBox b{};
+			const int q = pixLensQuadrant(cx, cy, W, H, G, AL, AT, AR, AB, &b);
+			wchar_t buf[256]{};
+			swprintf_s(buf, L"放大镜落位 %s 象限=%d 盒=(%.0f,%.0f)", name, q, b.x, b.y);
+			check(q == wantQuad && inside(b) && !coversCursor(b, cx, cy), buf);
+		};
+
+		run(1280.f, 540.f, 0, L"屏幕中央→右下");
+		run(2540.f, 540.f, 1, L"右边→左下");
+		run(1280.f, 1060.f, 2, L"下边→右上");
+		run(2540.f, 1060.f, 3, L"右下角→左上");
+		run(5.f, 5.f, 0, L"左上角→右下");
+		run(1280.f, 5.f, 0, L"上边→右下");
+		run(5.f, 540.f, 0, L"左边→右下");
+		// 只避让不记忆：从右下角挪回屏幕中央必须立刻回右下
+		run(2540.f, 1060.f, 3, L"右下角（避让）");
+		run(1280.f, 540.f, 0, L"离开边缘立刻回右下");
+
+		// 全屏扫描：任何位置外壳都要整块留在显示器内，且不压住取样点
+		bool sweepOk = true;
+		for (float cx = 1.f; cx < 2560.f; cx += 37.f)
+			for (float cy = 1.f; cy < 1080.f; cy += 41.f) {
+				PixLensBox b{};
+				pixLensQuadrant(cx, cy, W, H, G, AL, AT, AR, AB, &b);
+				if (!inside(b) || coversCursor(b, cx, cy)) sweepOk = false;
+			}
+		check(sweepOk, L"放大镜落位 全屏扫描均不出界、不压光标");
+
+		// 显示器比外壳还小：没有完整解，返回 -1，但仍要夹在区域内
+		PixLensBox tiny{};
+		const int tq = pixLensQuadrant(50.f, 50.f, W, H, G, 0.f, 0.f, 100.f, 100.f, &tiny);
+		check(tq == -1 && tiny.x >= 0.f && tiny.y >= 0.f && tiny.x <= 100.f && tiny.y <= 100.f,
+			L"放大镜落位 区域过小时夹回区域内");
+	}
+
+	// —— 光标位图解析：单色（工字）与彩色光标都必须能解出可见像素 ——
+	{
+		HDC screenDc = GetDC(nullptr);
+		HDC memDc = screenDc ? CreateCompatibleDC(screenDc) : nullptr;
+		auto tryCursor = [&](LPCWSTR id, const wchar_t* name) {
+			HCURSOR cur = LoadCursorW(nullptr, id);
+			ICONINFO ii{};
+			int w = 0, h = 0;
+			std::vector<BYTE> px;
+			const bool ok = cur && GetIconInfo(cur, &ii)
+				&& CursorImage::ChooseSize(ii, &w, &h)
+				&& memDc && CursorImage::Extract(memDc, ii, w, h, px)
+				&& px.size() == (size_t)w * h * 4;
+			if (ii.hbmColor) DeleteObject(ii.hbmColor);
+			if (ii.hbmMask) DeleteObject(ii.hbmMask);
+			wchar_t buf[192]{};
+			swprintf_s(buf, L"光标位图 %s 解析 %dx%d 且有不透明像素", name, w, h);
+			check(ok, buf);
+		};
+		tryCursor(IDC_IBEAM, L"工字");
+		tryCursor(IDC_ARROW, L"箭头");
+		tryCursor(IDC_HAND, L"手型");
+		tryCursor(IDC_SIZEALL, L"移动");
+		if (memDc) DeleteDC(memDc);
+		if (screenDc) ReleaseDC(nullptr, screenDc);
+	}
+
+	// —— 配置三路合并：不同键的修改共存、同键最后写入者赢、删除生效 ——
+	{
+		using namespace winrt::Windows::Data::Json;
+		const auto parse = [](const wchar_t* s) { return JsonObject::Parse(s); };
+		auto latest = parse(LR"({"common":{"lang":"zh","autoStart":true},"features":{"tray":1},"other":"keep"})");
+		auto base = parse(LR"({"common":{"lang":"zh","autoStart":true},"features":{"tray":1}})");
+		auto mine = parse(LR"({"common":{"lang":"en","autoStart":true},"features":{"tray":2},"toolPin":{"x":1}})");
+		ConfigMerge::MergeObjects(latest, base, mine);
+		check(std::wstring{ latest.GetNamedObject(L"common").GetNamedString(L"lang", L"") } == L"en",
+			L"配置合并 自己改的键生效");
+		check(latest.GetNamedObject(L"features").GetNamedNumber(L"tray") == 2,
+			L"配置合并 同键最后写入者赢");
+		check(std::wstring{ latest.GetNamedString(L"other", L"") } == L"keep",
+			L"配置合并 保留对方/其它键");
+		check(latest.GetNamedObject(L"toolPin").GetNamedNumber(L"x") == 1,
+			L"配置合并 新增对象键");
+
+		auto latest2 = parse(LR"({"features":{"a":1},"keep":true})");
+		auto base2 = parse(LR"({"features":{"a":1}})");
+		auto mine2 = parse(LR"({"keep":true})");
+		ConfigMerge::MergeObjects(latest2, base2, mine2);
+		check(!latest2.HasKey(L"features") && latest2.GetNamedBoolean(L"keep"),
+			L"配置合并 删除的键生效");
+	}
+
 	if (g_log)
 	{
 		fwprintf(g_log, L"\n失败项：%d\n", g_fail);
@@ -178,4 +281,3 @@ int RunSelfTest()
 	}
 	return g_fail;
 }
-

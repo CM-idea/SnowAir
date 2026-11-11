@@ -1248,8 +1248,11 @@ CutMask::CutMask(Ling::WinBase* win) :win{ win }
 	// 查询线程的结果回到 UI 线程后在这里落地：序号比当前投递旧的结果直接丢（光标早已经移开）
 	HoverQuery::setSink([this](const PickPath& path, bool ok, uint64_t seq, bool coarse, bool progress) {
 		if (!this->win || seq != hoverSeq_) return;
+		// 锁定期内忽略旧查询结果，避免层级被改回去
+		if (hoverLock_) return;
 		// 细化过程中的中间链：只刷新高亮，不结束查询，也不改写细化状态
 		if (progress) {
+			if (hoverLevel_ > 0) return;   // 已滚轮放大时，细化结果不回落最细层级
 			if (!ok || path.empty()) return;
 			hoverPath_.clear();
 			hoverPath_.reserve(path.size());
@@ -1273,7 +1276,10 @@ CutMask::CutMask(Ling::WinBase* win) :win{ win }
 			for (const RECT& r : path)
 				hoverPath_.push_back(clientRectFromScreen(r, this->win));
 		}
-		const D2D1_RECT_F next = hoverPath_.empty() ? D2D1::RectF() : hoverPath_.front();
+		if (hoverLevel_ < 0) hoverLevel_ = 0;
+		if (!hoverPath_.empty() && hoverLevel_ >= (int)hoverPath_.size())
+			hoverLevel_ = (int)hoverPath_.size() - 1;
+		const D2D1_RECT_F next = hoverPath_.empty() ? D2D1::RectF() : hoverPath_[hoverLevel_];
 		// 只把亚像素差异当作"没变"。以前还容忍 1~2px，结果细化出来的更小元素被当成抖动丢掉，
 		// 光标下明明已经换成相邻的小元素，框却停在旧位置，单击确认时就差那 1~2px。
 		if (!rectEq(hoverTarget_, next)) setHoverTarget(next, true);
@@ -1324,6 +1330,7 @@ void CutMask::clearHoverAnim()
 void CutMask::snapHoverTarget()
 {
 	clearHoverAnim();
+	hoverLock_ = false;
 	if (hoverTarget_.right <= hoverTarget_.left || hoverTarget_.bottom <= hoverTarget_.top) return;
 	// 确认时把命中框对齐到整像素：命中框来自屏幕坐标换算，可能带小数；截图是按整像素裁的，
 	// 不先对齐就会出现"框的一边比实际截到的大/小半个像素"的观感偏差。
@@ -1363,6 +1370,24 @@ void CutMask::setHoverTarget(const D2D1_RECT_F& target, bool animate)
 	win->setTimer(hoverTickMs, hoverAnimTimerId);
 }
 
+bool CutMask::wheelHover(int dir)
+{
+	if (!hoverPicking_ || hoverPath_.size() < 2) return false;
+	int level = hoverLevel_;
+	if (level < 0) level = 0;
+	if (level >= (int)hoverPath_.size()) level = (int)hoverPath_.size() - 1;
+	const int next = std::max(0, std::min((int)hoverPath_.size() - 1, level + (dir > 0 ? 1 : -1)));
+	if (next == level) return false;
+	hoverLevel_ = next;
+	// 放大时锁定刚离开的较细元素，缩小时锁定新选中的较细元素
+	hoverLockRect_ = hoverPath_[dir > 0 ? level : next];
+	hoverLock_ = true;
+	stopHoverRefine();
+	// 沿用普通悬停的补间，避免切换时框跳变
+	setHoverTarget(hoverPath_[next], true);
+	return true;
+}
+
 void CutMask::onHoverAnimTick(UINT timerId)
 {
 	if (timerId != hoverAnimTimerId) return;
@@ -1388,6 +1413,12 @@ void CutMask::onHoverAnimTick(UINT timerId)
 bool CutMask::highlight(POINT pos, bool force)
 {
 	hoverPicking_ = true;
+	// 锁定元素内移动不重查，避免轻微抖动冲掉放大/缩小结果
+	if (hoverLock_) {
+		if (rectContains(hoverLockRect_, pos)) return false;
+		hoverLock_ = false;
+		stopHoverRefine();
+	}
 	const ULONGLONG now = GetTickCount64();
 	const int moved = std::abs(pos.x - lastHoverQueryPos_.x) + std::abs(pos.y - lastHoverQueryPos_.y);
 	// 查询已经全部交给工作线程，界面这边只控制投递节奏：
@@ -1411,6 +1442,7 @@ bool CutMask::highlight(POINT pos, bool force)
 	// 查询全程不碰遮罩的窗口样式与鼠标捕获 —— 再慢也不会影响按下/拖框。
 	lastHoverQueryMs_ = now;
 	lastHoverQueryPos_ = pos;
+	hoverLevel_ = 0;         // 新位置从最细元素重新开始
 	hoverRefineTries_ = 0;   // 用户再次移动鼠标：重置驻留细化预算
 	stopHoverRefine();       // 新的实时命中投出，原驻留细化定时器作废
 	hoverSeq_ = HoverQuery::request(POINT{ pos.x + win->x, pos.y + win->y }, win->hwnd, false);
@@ -1420,6 +1452,8 @@ bool CutMask::highlight(POINT pos, bool force)
 void CutMask::cancelHoverQuery()
 {
 	hoverPicking_ = false;
+	hoverLevel_ = 0;
+	hoverLock_ = false;
 	stopHoverRefine();
 	hoverCoarse_ = false;
 	hoverRefineTries_ = 0;
@@ -1431,6 +1465,7 @@ void CutMask::cancelHoverQuery()
 
 void CutMask::scheduleHoverRefine()
 {
+	if (hoverLock_) return;   // 锁定期内不做驻留细化
 	// 驻留细化预算：连续 5 次（每次 80ms + 一次细化查询）仍不够细就停，
 	// 避免"页面本就无更细节点"时持续空转；鼠标一动就重置预算。
 	if (hoverRefineTries_ >= 5 || hoverRefineTimerOn_) return;
@@ -1452,6 +1487,7 @@ void CutMask::onHoverDwellTimer(UINT timerId)
 {
 	if (timerId != hoverRefineTimerId) return;
 	stopHoverRefine();
+	if (hoverLock_) return;
 	if (!win || !win->hwnd || !hoverCoarse_) return;
 	if (!(hoverTarget_.right > hoverTarget_.left) || !rectContains(hoverTarget_, lastHoverQueryPos_))
 		return;
@@ -1782,6 +1818,8 @@ void CutMask::makeRect(POINT pos)
 	clearHoverAnim();
 	hoverTarget_ = {};
 	hoverPath_.clear();
+	hoverLevel_ = 0;
+	hoverLock_ = false;
 	hoverPicking_ = false;
 	auto [left, right] = std::minmax(pressPos.x, pos.x);
 	auto [top, bottom] = std::minmax(pressPos.y, pos.y);
@@ -1886,6 +1924,8 @@ void CutMask::clearRect()
 	clearHoverAnim();
 	hoverTarget_ = {};
 	hoverPath_.clear();
+	hoverLevel_ = 0;
+	hoverLock_ = false;
 	hoverPicking_ = false;
 	lastHoverQueryMs_ = 0;
 	lastHoverQueryPos_ = {};
@@ -1967,14 +2007,37 @@ MaskHit CutMask::hitTest(POINT pos) const
 	return MaskHit::None;
 }
 
+POINT CutMask::edgePointNear(POINT pos) const
+{
+	POINT p = pos;
+	const LONG l = (LONG)std::lround(maskRect.left);
+	const LONG t = (LONG)std::lround(maskRect.top);
+	const LONG r = (LONG)std::lround(maskRect.right);
+	const LONG b = (LONG)std::lround(maskRect.bottom);
+	switch (adjustHit) {
+	case MaskHit::Left: p.x = l; break;
+	case MaskHit::Right: p.x = r; break;
+	case MaskHit::Top: p.y = t; break;
+	case MaskHit::Bottom: p.y = b; break;
+	case MaskHit::TopLeft: p.x = l; p.y = t; break;
+	case MaskHit::TopRight: p.x = r; p.y = t; break;
+	case MaskHit::BottomRight: p.x = r; p.y = b; break;
+	case MaskHit::BottomLeft: p.x = l; p.y = b; break;
+	default: break;
+	}
+	return p;
+}
+
 void CutMask::startAdjust(POINT pos)
 {
 	adjustHit = hitTest(pos);
 	adjustPressPos = pos;
 	adjustStartRect = maskRect;
-	if (adjustHit != MaskHit::None && adjustHit != MaskHit::Inside) {
-		adjust(pos);
-	}
+	// 按下只"选中"这条边/角（光标变 ↔），矩形一个像素都不动；
+	// 真正拖出阈值之后才在 adjust() 里按位移改尺寸。
+	// 以前这里会立刻 adjust(pos) 一次，把边直接吸到光标处 —— 只要按下点没正好压在
+	// 边线的正中间（命中带 ±14 逻辑像素），刚调好的边就会被按歪。
+	adjustDragging = false;
 }
 
 // 画幅锁定（录屏开录）时拖边框：没有"改大小"这件事，按整体平移起拖。
@@ -1989,8 +2052,17 @@ void CutMask::startDragMove(POINT pos)
 void CutMask::adjust(POINT pos)
 {
 	if (adjustHit == MaskHit::None) return;
-	D2D1_RECT_F r = adjustStartRect;
 	const float px = (float)pos.x, py = (float)pos.y;
+	const float dx = px - (float)adjustPressPos.x;
+	const float dy = py - (float)adjustPressPos.y;
+	// 「按下不移动」：命中边/角后先要拖出一点距离才真的开始改（阈值和框选抖动同一口径）。
+	// 阈值内返回 → 点按、以及按下时的手抖都不会碰到边。
+	if (adjustHit != MaskHit::Inside && !adjustDragging) {
+		if (std::fabs(dx) + std::fabs(dy) <= adjustDragThreshold) return;
+		adjustDragging = true;
+	}
+
+	D2D1_RECT_F r = adjustStartRect;
 	if (adjustHit == MaskHit::Inside) {
 		const float rw = r.right - r.left;
 		const float rh = r.bottom - r.top;
@@ -1999,19 +2071,23 @@ void CutMask::adjust(POINT pos)
 		r = D2D1::RectF(left, top, left + rw, top + rh);
 	}
 	else {
-		const float cx = std::clamp(px, 0.f, win->w);
-		const float cy = std::clamp(py, 0.f, win->h);
+		// 边/角：按下时的边 + 指针位移（保留抓取偏移），不再"边 = 光标位置"。
 		switch (adjustHit) {
-		case MaskHit::Left: r.left = cx; break;
-		case MaskHit::Right: r.right = cx; break;
-		case MaskHit::Top: r.top = cy; break;
-		case MaskHit::Bottom: r.bottom = cy; break;
-		case MaskHit::TopLeft: r.left = cx; r.top = cy; break;
-		case MaskHit::TopRight: r.right = cx; r.top = cy; break;
-		case MaskHit::BottomRight: r.right = cx; r.bottom = cy; break;
-		case MaskHit::BottomLeft: r.left = cx; r.bottom = cy; break;
+		case MaskHit::Left: r.left += dx; break;
+		case MaskHit::Right: r.right += dx; break;
+		case MaskHit::Top: r.top += dy; break;
+		case MaskHit::Bottom: r.bottom += dy; break;
+		case MaskHit::TopLeft: r.left += dx; r.top += dy; break;
+		case MaskHit::TopRight: r.right += dx; r.top += dy; break;
+		case MaskHit::BottomRight: r.right += dx; r.bottom += dy; break;
+		case MaskHit::BottomLeft: r.left += dx; r.bottom += dy; break;
 		default: break;
 		}
+		// 夹进窗口：拖动中越界的那条边停在画布边缘（等价于原来"把光标夹进窗口"）
+		r.left = std::clamp(r.left, 0.f, win->w);
+		r.right = std::clamp(r.right, 0.f, win->w);
+		r.top = std::clamp(r.top, 0.f, win->h);
+		r.bottom = std::clamp(r.bottom, 0.f, win->h);
 		const float l = std::min(r.left, r.right), rr = std::max(r.left, r.right);
 		const float t = std::min(r.top, r.bottom), b = std::max(r.top, r.bottom);
 		r = D2D1::RectF(l, t, rr, b);

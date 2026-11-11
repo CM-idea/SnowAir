@@ -96,6 +96,12 @@ public:
 	void setTrayClickAction(int v);
 	bool getPinZoomAtCursor();
 	void setPinZoomAtCursor(bool on);
+	// 截图工具栏相对选区的横向对齐：0 左 / 1 右 / 2 居中（默认左）
+	int getCaptureToolbarAlign();
+	void setCaptureToolbarAlign(int v);
+	// 静默截图：开启时全屏/重复/焦点窗口截图直接完成；关闭后跳过框选、显示工具栏，需手动完成
+	bool getSilentCapture();
+	void setSilentCapture(bool on);
 	bool getPinAutoOcr();
 	void setPinAutoOcr(bool on);
 	bool getPinAutoFit();
@@ -345,6 +351,15 @@ private:
 	Setting();
 	// 剪切板索引写回（含上限裁剪）：新条目在前
 	void writeClipboardItems(std::vector<ClipboardItem>& items);
+	// 本机数据（剪贴板历史、截图历史、上次选区）统一保存在 dataPath\local.json。
+	// config.json 保存用户设置，可能位于同步盘；local.json 仅属于本机。
+	std::filesystem::path getLocalDataPath();
+	JsonObject loadLocalData();
+	bool saveLocalData(const JsonObject& data);
+	void migrateLocalDataToFile();
+	bool writeClipboardItemsToFile(const std::vector<ClipboardItem>& items);
+	JsonObject loadHistoryStore();
+	bool saveHistoryStore(const JsonObject& store);
 	// 历史页目录扫描缓存：鼠标移动/滚动会频繁取列表，不能每次都遍历目录
 	std::vector<HistoryItem> historyUiCache_;
 	unsigned long long historyUiCacheAt_{ 0 };
@@ -367,6 +382,9 @@ private:
 	void backupConfigFile();
 	bool restoreFromBackup();
 	void preserveBrokenConfig();
+	// 启动时若发现 OneDrive 等生成的冲突副本（config-电脑名.json / config (1).json）比主配置新，
+	// 采用较新版本（原 config.json 已由 backupConfigFile 保存为 .bak），避免设置回退。
+	void adoptNewerConflictCopy();
 	bool featBool(const wchar_t* key, bool def);
 	void setFeatBool(const wchar_t* key, bool v);
 	int featInt(const wchar_t* key, int def);
@@ -379,6 +397,10 @@ private:
 	const std::filesystem::path dataPath;
 	const std::filesystem::path configPath;
 	JsonObject configObj;
+	// 上次成功写入的配置文本；内容未变化时跳过写入
+	std::wstring lastSavedConfig;
+	// 写入失败仅提示一次，避免重复弹窗
+	bool configSaveWarned{ false };
 	// config.json 这一次没读出来：本次会话只读不写，别拿默认值把用户的文件覆盖掉
 	bool configReadOnly{ false };
 	UINT_PTR hotkeyRetryTimer{ 0 };

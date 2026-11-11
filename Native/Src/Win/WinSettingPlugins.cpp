@@ -289,15 +289,18 @@ namespace {
 	struct LangPack {
 		const wchar_t* id;
 		const wchar_t* labelKey;
+		// 下载体积提示（= 该语言包所有 .gz 的 Content-Length 之和，四舍五入到 MB）。
+		// 每行都显示；只有「当前选中项」因为显示在下拉首行（=触发框复刻）而看不到自己。
+		const wchar_t* sizeHint;
 	};
 	constexpr LangPack kLangPacks[] = {
-		{ L"zh-en",   L"setting.plugLangZhEn"   },
-		{ L"zh-Hant", L"setting.plugLangZhHant" },
-		{ L"ru",      L"setting.plugLangRu"     },
-		{ L"ko",      L"setting.plugLangKo"     },
-		{ L"ja",      L"setting.plugLangJa"     },
-		{ L"fr",      L"setting.plugLangFr"     },
-		{ L"de",      L"setting.plugLangDe"     },
+		{ L"zh-en",   L"setting.plugLangZhEn",   L"83m"   },
+		{ L"zh-Hant", L"setting.plugLangZhHant", L"71m"   },
+		{ L"ru",      L"setting.plugLangRu",     L"45m"   },
+		{ L"ko",      L"setting.plugLangKo",     L"94m"   },
+		{ L"ja",      L"setting.plugLangJa",     L"81m"   },
+		{ L"fr",      L"setting.plugLangFr",     L"50m"   },
+		{ L"de",      L"setting.plugLangDe",     L"49m"   },
 	};
 	constexpr int kLangPackCount = (int)(sizeof(kLangPacks) / sizeof(kLangPacks[0]));
 }
@@ -611,14 +614,18 @@ void WinSettingPlugins::build()
 	trBadgeRow = tr.badgeRow;
 	trProgress = tr.progress;
 	{
-		std::vector<std::wstring> labels;
+		std::vector<std::wstring> labels, sizes;
 		labels.reserve(kLangPackCount);
-		for (const auto& p : kLangPacks) labels.push_back(Lang::get(p.labelKey));
+		sizes.reserve(kLangPackCount);
+		for (const auto& p : kLangPacks) {
+			labels.push_back(Lang::get(p.labelKey));
+			sizes.push_back(p.sizeHint ? p.sizeHint : L"");
+		}
 		auto* sel = SettingUi::selectDdl(tr.titleRow, labels, trPackIdx,
 			[this](int i, const std::wstring&) {
 				this->trPackIdx = i;
 				this->refreshStatus();
-			});
+			}, false, sizes);
 		sel->setWidth(120.f);              // 宽度 120
 		sel->setMarginLeft(6.f);
 		sel->setFlexShrink(0.f);

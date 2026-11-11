@@ -138,11 +138,16 @@ void App::clearCaptureExclusion(HWND hwnd)
 	SetWindowDisplayAffinity(hwnd, WDA_NONE);
 }
 
-// 托盘「截取全屏」：静默整屏抓图 → 存文件 + 剪贴板 + 历史，全程不建窗口
+// 托盘「截取全屏」：静默模式下直接抓图；关闭「静默截图」时带整屏选区进入工具栏，由用户手动完成。
 void App::captureFullScreenSilent()
 {
 	auto [sx, sy, sw, sh] = getScreenArea();
 	if (sw <= 0 || sh <= 0) return;
+	// 「静默截图」关闭：跳过框选直接带选区进标注，显示工具栏，由用户手动完成
+	if (!Setting::get()->getSilentCapture()) {
+		WinCap::beginWithRect(RECT{ sx, sy, sx + sw, sy + sh });
+		return;
+	}
 	auto pixels = ScreenCapture::captureOrGdi(sx, sy, sw, sh);
 	if (pixels.empty()) return;
 
@@ -165,7 +170,7 @@ void App::captureFullScreenSilent()
 	TrayIcon::flashSuccess();
 }
 
-// 全局热键「截取焦点窗口」：静默抓当前前台窗口，全程不建窗口。
+// 全局热键「截取焦点窗口」：静默模式直接抓当前前台窗口；关闭「静默截图」时改为带窗口选区进入工具栏。
 // 与 captureFullScreenSilent 的差别只在"抓哪块"；文件名统一走「手动保存文件名格式」，
 // 其中 {{FOCUS_WINDOW_APP_NAME}} 会替换成前台应用名。
 void App::captureFocusedWindowSilent()
@@ -199,6 +204,11 @@ void App::captureFocusedWindowSilent()
 	const int w = rc.right - rc.left;
 	const int h = rc.bottom - rc.top;
 	if (w <= 0 || h <= 0) return;
+	// 「静默截图」关闭：跳过框选，直接把前台窗口区域带进标注工具栏
+	if (!Setting::get()->getSilentCapture()) {
+		WinCap::beginWithRect(rc);
+		return;
+	}
 
 	// 应用名要在覆盖/任何窗口出现前取（此刻前台仍是目标窗口）
 	std::wstring appName = Util::foregroundAppName();
@@ -224,7 +234,7 @@ void App::captureFocusedWindowSilent()
 	TrayIcon::flashSuccess();
 }
 
-// 全局热键「重复截图」：按上一次记住的选区（屏幕坐标）静默再抓一次，全程不建窗口。
+// 全局热键「重复截图」：静默模式按上次选区直接再抓一次；关闭「静默截图」时带该选区进入工具栏。
 void App::captureLastRegionSilent()
 {
 	int rx = 0, ry = 0, rw = 0, rh = 0;
@@ -238,6 +248,12 @@ void App::captureLastRegionSilent()
 	if (rx + rw > sx + sw) rw = sx + sw - rx;
 	if (ry + rh > sy + sh) rh = sy + sh - ry;
 	if (rw <= 0 || rh <= 0) return;
+
+	// 「静默截图」关闭：跳过框选，按上次选区直接进入标注工具栏
+	if (!Setting::get()->getSilentCapture()) {
+		WinCap::beginWithRect(RECT{ rx, ry, rx + rw, ry + rh });
+		return;
+	}
 
 	auto pixels = ScreenCapture::captureOrGdi(rx, ry, rw, rh);
 	if (pixels.empty()) return;
@@ -261,6 +277,24 @@ App::App()
     Ling::D2D::addFonts({ L"icon.ttf" });
     // 录制中直接退出会让编码线程和 D3D 设备一起卡住，退出前先把录制停掉
     app->onBeforeQuit.add([]() { WinCap::stopIfRecording(); });
+
+    // 提权重启时需等待上一实例退出，该步骤必须在单实例判定之前
+    if (auto it = app->args.find(L"--wait-pid"); it != app->args.end()) {
+        DWORD pid = static_cast<DWORD>(std::stoul(it->second));
+        if (HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid)) {
+            WaitForSingleObject(h, 15000);
+            CloseHandle(h);
+        }
+    }
+
+    // 单实例判定在读取配置之前进行：第二个实例仅通知已有实例打开设置中心，
+    // 不读写 config / local.json，避免多余的同步盘写入，以及仅应由主实例执行的迁移。
+    const auto autoQuitIt = app->args.find(L"--auto-quit");
+    const bool autoQuit = autoQuitIt != app->args.end() && autoQuitIt->second == L"true";
+    if (!autoQuit) {
+        if (app->refuseSecondInstance()) return;
+    }
+
     Setting::init();
     Lang::init();
     PluginHost::instance().init();
@@ -278,18 +312,8 @@ App::App()
             params += L" " + key;
             if (val != L"true") params += L"=" + val;
         }
-        params += L" --elevated";
+        params += L" --elevated --wait-pid=" + std::to_wstring(GetCurrentProcessId());
         if (Util::spawnElevated(params)) app->exit(0); // 提权进程已拉起，原进程退出
-    }
-
-    // 由「设置里打开以管理员身份运行」触发的重启：上一实例还在退出中，先等它退干净再去抢单实例，
-    // 否则会被上一实例的单实例标记窗口当成"重复启动"直接挡掉（见 App::restartAsAdmin）。
-    if (auto it = app->args.find(L"--wait-pid"); it != app->args.end()) {
-        DWORD pid = static_cast<DWORD>(std::stoul(it->second));
-        if (HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid)) {
-            WaitForSingleObject(h, 15000);
-            CloseHandle(h);
-        }
     }
 
     // 提权重启后，用提权身份把自启补登记一次：非提权进程建不出"最高权限"的计划任务，
@@ -301,13 +325,10 @@ App::App()
     // 还指着老 exe，这里按当前 exe 重登记一次把它接管过来（路径没变则什么都不做）。
     Setting::get()->takeOverAutoStart();
 
-    auto autoQuitIt = app->args.find(L"--auto-quit");
-    if (autoQuitIt != app->args.end() && autoQuitIt->second == L"true") {
+    if (autoQuit) {
         WinCap::init();
     }
     else {
-        bool flag = app->refuseSecondInstance();
-        if (flag) return;
         Tray::init();
         // 打开软件不再"随即进入截图模式"：一律先只挂托盘图标待命。
         // 截图的触发交给：托盘图标单击（按设置 → 截图 / 打开设置 / 无操作，见 Tray.cpp）、

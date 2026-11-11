@@ -69,7 +69,7 @@ The following covers how to obtain, run and extend the software; see [`Native/RE
 
 Go to [SnowAir Releases](https://github.com/CM-idea/SnowAir/releases), expand **Assets**, download `SnowAir.exe`, and double-click to run — no installation required.
 
-Configuration, language and plugins live in `%AppData%\SnowAir\` by default; to keep them next to the program instead (so you can move the whole folder to a USB drive and keep your settings), place an empty file named `config.json` next to `SnowAir.exe` — delete the file to restore the default.
+Configuration, language and plugins live in `%AppData%\SnowAir\` by default; to keep them next to the program instead (so you can move the whole folder to a USB drive and keep your settings), place an empty file named `config.json` next to `SnowAir.exe` — delete the file to restore the default. Clipboard history, capture history and the last selection are machine-local: they always stay in `%AppData%\SnowAir\local.json`, and are not carried by the portable config.
 
 </details>
 

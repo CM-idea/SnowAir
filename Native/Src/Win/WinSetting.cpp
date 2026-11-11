@@ -631,6 +631,15 @@ LRESULT WinSetting::onHitTest(const POINT pos)
 	//    拖动、双击最大化、最小/最大化/关闭按钮（含关闭按钮悬停红底）
 	// 这里仅保留 client 区的边缘 resize hit-test（非最大化时）
 	if (!isMaximized) {
+		// 原生标题栏下方是客户区上边界，不是窗口外边界：不能把它当成 HTTOP，
+		// 否则鼠标停在标题栏与内容的交界处会显示上下调整大小光标（红线段位置）。
+		// 上边交给原生 sizing border；交界处仅在左右边缘保留横向 resize。
+		const int border = static_cast<int>(4 * dpi);
+		if (pt.y >= 0 && pt.y < border) {
+			if (pt.x >= 0 && pt.x < border) return HTLEFT;
+			if (pt.x <= (int)w && pt.x >= (int)w - border) return HTRIGHT;
+			return HTCLIENT;
+		}
 		auto result = borderHitTest(pt);
 		if (result != HTCLIENT) return result;
 	}

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <fstream>
 #include <mutex>
+#include <atomic>
 // 快速贴屏要读「资源管理器当前选中项」（Shell COM）与「前台窗口里拖选的文字」（UIA）
 #include <servprov.h>
 #include <shlguid.h>
@@ -12,6 +13,7 @@
 #include <oleacc.h>
 #include <UIAutomationClient.h>
 #include "Setting.h"
+#include "ConfigMerge.h"
 #include "Plugin/PluginHost.h"
 #include "Util.h"
 #include "Lang.h"
@@ -269,6 +271,26 @@ namespace {
         return true;
     }
 
+    // 启动读取配置时重试若干次：OneDrive 下载或杀毒软件扫描可能导致首次打开失败。
+    // 若立即判定为读取失败，本次会话将进入只读状态，后续修改无法保存。
+    bool readConfigContentRetry(const std::filesystem::path& path, std::wstring& out)
+    {
+        for (int attempt = 0; attempt < 10; ++attempt) {
+            if (readConfigContent(path, out)) return true;
+            Sleep(80);
+        }
+        return false;
+    }
+
+    bool isOwnProcessForeground()
+    {
+        HWND fg = GetForegroundWindow();
+        if (!fg) return false;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(fg, &pid);
+        return pid == GetCurrentProcessId();
+    }
+
     // 原子写：先写同目录临时文件，成功后再整体替换目标。
     // 旧实现 CreateFile(CREATE_ALWAYS) 直接截断目标文件，写到一半崩溃 / 被杀就留下半截 JSON，
     // 下次启动解析失败 —— 用户看到的「配置文件读取错误」就是这么来的。
@@ -280,7 +302,11 @@ namespace {
             std::error_code ec;
             std::filesystem::create_directories(dst.parent_path(), ec);
         }
-        const std::wstring tmp = dst.wstring() + L".tmp";
+        // 临时文件名包含进程 ID 和序号，避免多实例或多线程写入时共用同一临时文件。
+        // 固定名称在同步盘上可能导致创建失败：上一次的临时文件仍被同步引擎占用。
+        static std::atomic<unsigned long long> tmpSeq{ 0 };
+        const std::wstring tmp = dst.wstring() + L"." + std::to_wstring(GetCurrentProcessId())
+            + L"." + std::to_wstring(++tmpSeq) + L".tmp";
         HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
             FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h == INVALID_HANDLE_VALUE) return false;
@@ -295,17 +321,26 @@ namespace {
             DeleteFileW(tmp.c_str());
             return false;
         }
-        if (!MoveFileExW(tmp.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-            DeleteFileW(tmp.c_str());
-            return false;
+        // 目标文件可能被 OneDrive、杀毒软件或另一实例短暂占用，替换失败时重试若干次
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            if (MoveFileExW(tmp.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING)) return true;
+            const DWORD err = GetLastError();
+            if (err != ERROR_ACCESS_DENIED && err != ERROR_SHARING_VIOLATION
+                && err != ERROR_LOCK_VIOLATION) break;
+            Sleep(20);
         }
-        return true;
+        DeleteFileW(tmp.c_str());
+        return false;
     }
 
     std::filesystem::path siblingOf(const std::filesystem::path& p, const wchar_t* suffix)
     {
         return std::filesystem::path{ p.wstring() + suffix };
     }
+
+    // 定义见本机数据（local.json）实现。剪贴板、历史与状态共用此递归锁，
+    // 保证读-改-写串行执行。
+    std::recursive_mutex& localDataMutex();
 }
 
 
@@ -313,7 +348,7 @@ Setting::Setting() :dataPath{ initDataPath() }, configPath{ initConfigPath() }
 {
     if (std::filesystem::exists(configPath)) {
         std::wstring content;
-        if (!readConfigContent(configPath, content)) {
+        if (!readConfigContentRetry(configPath, content)) {
             // 读不到 ≠ 空文件：原文件保持原样，本次先用内存里的默认值，绝不回写覆盖
             configReadOnly = true;
             configObj = JsonObject::Parse(defaultConfig);
@@ -333,8 +368,12 @@ Setting::Setting() :dataPath{ initDataPath() }, configPath{ initConfigPath() }
         JsonObject obj{ nullptr };
         if (JsonObject::TryParse(content, obj)) {
             configObj = obj;
+            // 记录已保存内容，供 save() 跳过无变化的写入（后续启动清理步骤也会调用 save()）
+            lastSavedConfig = content;
             // 留一份可用配置：下次真解析失败时用它恢复，而不是把设置清成默认值
             backupConfigFile();
+            // 若 OneDrive 冲突副本比主文件新，采用较新版本，避免设置回退
+            adoptNewerConflictCopy();
             return;
         }
         // 解析失败：先留存现场，再尝试上一份可用配置，都没有才回落默认值。
@@ -359,7 +398,53 @@ void Setting::backupConfigFile()
     if (configPath.empty()) return;
     std::wstring text;
     if (!readConfigContent(configPath, text)) return;
+    // 若 .bak 内容与当前配置相同则跳过写入，减少同步盘上的无效上传与冲突
+    std::wstring old;
+    if (readConfigContent(siblingOf(configPath, L".bak"), old) && old == text) return;
     writeConfigAtomic(siblingOf(configPath, L".bak"), text);
+}
+
+// 同步盘在检测到同一文件被多台电脑修改时，会保留两份并将其中一份命名为
+// config-电脑名.json 或 config (1).json。启动时若该副本比 config.json 新，则采用该副本
+// 原配置已由 backupConfigFile() 保存到 .bak。
+void Setting::adoptNewerConflictCopy()
+{
+    if (configPath.empty()) return;
+    std::error_code ec;
+    const auto mainTime = std::filesystem::last_write_time(configPath, ec);
+    if (ec) return;
+
+    std::filesystem::path best;
+    std::filesystem::file_time_type bestTime{};
+    for (const auto& entry : std::filesystem::directory_iterator(configPath.parent_path(), ec)) {
+        if (ec) break;
+        std::error_code fec;
+        if (!entry.is_regular_file(fec)) continue;
+        const auto path = entry.path();
+        if (_wcsicmp(path.extension().c_str(), L".json") != 0) continue;
+        const std::wstring name = path.filename().wstring();
+        // 仅匹配同步盘或资源管理器生成的冲突副本命名，避免误用用户自建的 config-xxx.json
+        const bool conflictName = name.rfind(L"config-", 0) == 0
+            || name.rfind(L"config (", 0) == 0
+            || name.rfind(L"config - ", 0) == 0;
+        if (!conflictName) continue;
+        const auto t = entry.last_write_time(fec);
+        if (fec || t <= mainTime) continue;
+        if (best.empty() || t > bestTime) { best = path; bestTime = t; }
+    }
+    if (best.empty()) return;
+
+    std::wstring text;
+    if (!readConfigContentRetry(best, text) || isBlankConfig(text)) return;
+    JsonObject obj{ nullptr };
+    if (!JsonObject::TryParse(text, obj)) return;
+    // 仅接受包含 common 节的文件，避免将同目录其他 JSON 或不完整文件当作配置，导致设置被清空
+    if (!obj.HasKey(L"common")) return;
+
+    OutputDebugStringW((L"[SnowAir] adopted newer config conflict copy: " + best.wstring() + L"\n").c_str());
+    configObj = obj;
+    lastSavedConfig.clear();   // 清除已保存记录，确保采用的配置写回 config.json
+    save();
 }
 
 // 解析失败后的兜底：用上一份可用配置重建主文件
@@ -507,22 +592,16 @@ namespace {
     DWORD g_lastClipSeq{ 0 };
     constexpr UINT_PTR kClipPollTimer{ 1 };
     constexpr UINT_PTR kClipDebounceTimer{ 2 };
-    constexpr UINT kClipPollMs{ 800 };
-    constexpr UINT kClipDebounceMs{ 80 };
+    constexpr UINT kClipPollMs{ 1000 };
+    // 剪贴板与输入法、设计软件共用：延迟读取，事件和轮询走同一条路径，
+    // 不在通知或轮询里直接 OpenClipboard。
+    constexpr UINT kClipDebounceMs{ 300 };
 
-    // 剪贴板必须尽早关闭：写入方（Adobe 等）在我们读取后马上还要再 OpenClipboard 做粘贴，
-    // 读数据期间顺带保存历史/PNG 会让对方的复制粘贴抢不到剪贴板。
+    // 读取只尝试一次；失败交给轮询下一轮，不原地重试抢锁。
     struct ClipboardGuard
     {
         bool opened{ false };
-        explicit ClipboardGuard(HWND owner)
-        {
-            // 剪贴板可能仍被写入方占用：短重试，避免"刚好这一下没读到"就永远漏掉
-            for (int attempt = 0; attempt < 10; ++attempt) {
-                if (OpenClipboard(owner)) { opened = true; break; }
-                Sleep(5);
-            }
-        }
+        explicit ClipboardGuard(HWND owner) : opened(OpenClipboard(owner) != FALSE) {}
         ~ClipboardGuard() { if (opened) CloseClipboard(); }
         void release() { if (opened) { CloseClipboard(); opened = false; } }
     };
@@ -542,7 +621,7 @@ namespace {
         bool hasFiles = false, hasText = false, hasImage = false;
 
         {
-            // 剪贴板可能仍被写入方占用：短重试，避免"刚好这一下没读到"就永远漏掉
+            // 仍被写入方占用：本次放弃，等待轮询重新排延迟读取。
             ClipboardGuard clip(g_clipWnd);
             if (!clip.opened) return;
             g_lastClipSeq = seq;
@@ -595,7 +674,7 @@ namespace {
                     }
                 }
             }
-            // 读到这里就结束，先关剪贴板；下面的历史落盘 / PNG 保存都不再占着它
+            // 读完先关剪贴板，后续落盘不再占用。
             clip.release();
         }
 
@@ -607,9 +686,7 @@ namespace {
     LRESULT CALLBACK clipboardWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         if (msg == WM_CLIPBOARDUPDATE) {
-            // 不要在这里同步 OpenClipboard：写入方（Adobe 等）复制后往往马上粘贴，
-            // 我们哪怕只开几十毫秒也会让对方的 OpenClipboard 失败。延后一拍再读，
-            // 先让写入方自己的粘贴走完。
+            // 延迟读取，先让写入方完成粘贴；此处不直接 OpenClipboard。
             SetTimer(hwnd, kClipDebounceTimer, kClipDebounceMs, nullptr);
             return 0;
         }
@@ -619,8 +696,9 @@ namespace {
             return 0;
         }
         if (msg == WM_TIMER && wp == kClipPollTimer) {
-            // 兜底轮询：个别环境下收不到 WM_CLIPBOARDUPDATE，用序列号变化补上
-            if (GetClipboardSequenceNumber() != g_lastClipSeq) captureClipboardNow();
+            // 轮询只发现变化，读取仍走延迟路径。
+            if (GetClipboardSequenceNumber() != g_lastClipSeq)
+                SetTimer(hwnd, kClipDebounceTimer, kClipDebounceMs, nullptr);
             return 0;
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
@@ -662,6 +740,9 @@ void Setting::init()
 {
     auto ptr = new Setting();
     setting.reset(ptr);
+    // 将旧版本分散在 config.json、clipboard.json、history.json、state.json 中的本机数据
+    // 迁移到 local.json。此后本机数据只写入 local.json，用户设置只写入 config.json。
+    setting->migrateLocalDataToFile();
     // 启动时清理旧版本遗留的 AI 配置（AI 对话 / AI 视觉 OCR / AI 翻译）
     setting->purgeRemovedAiSettings();
     // 启动时清理旧程序（ScreenCapture）留下的历史键位
@@ -765,10 +846,16 @@ bool Setting::shortcutKeyAtDefaults()
     return !obj || obj.Size() == 0;
 }
 
-// 全局热键「重复截图」：记住的上一块选区（屏幕坐标），存成 "x,y,w,h"。
+// 全局热键「重复截图」的上次选区（屏幕坐标）保存在 local.json 的 state.lastCaptureRect。
+// 该状态与具体电脑相关，不写入同步盘上的 config。
 bool Setting::getLastCaptureRect(int& x, int& y, int& w, int& h)
 {
-    const std::wstring v = featStr(L"lastCaptureRect", L"");
+    std::wstring v;
+    auto data = loadLocalData();
+    if (data.HasKey(L"state") && data.GetNamedValue(L"state").ValueType() == JsonValueType::Object) {
+        auto state = data.GetNamedObject(L"state");
+        v = state.GetNamedString(L"lastCaptureRect", L"").c_str();
+    }
     if (v.empty()) return false;
     int a[4]{ 0, 0, 0, 0 };
     size_t idx = 0, pos = 0;
@@ -788,7 +875,17 @@ bool Setting::getLastCaptureRect(int& x, int& y, int& w, int& h)
 void Setting::setLastCaptureRect(int x, int y, int w, int h)
 {
     if (w <= 0 || h <= 0) return;
-    setFeatStr(L"lastCaptureRect", wfmt(L"%d,%d,%d,%d", x, y, w, h));
+    std::lock_guard<std::recursive_mutex> lock(localDataMutex());
+    auto data = loadLocalData();
+    JsonObject state{ nullptr };
+    if (data.HasKey(L"state") && data.GetNamedValue(L"state").ValueType() == JsonValueType::Object)
+        state = data.GetNamedObject(L"state");
+    if (!state) {
+        state = JsonObject{};
+        data.SetNamedValue(L"state", state);
+    }
+    state.SetNamedValue(L"lastCaptureRect", JsonValue::CreateStringValue(wfmt(L"%d,%d,%d,%d", x, y, w, h)));
+    saveLocalData(data);
 }
 
 // 旧版本写入的 AI 相关配置：AI 对话（模型 / 新建会话 / 对话 API 配置）、AI 视觉 OCR
@@ -979,9 +1076,66 @@ void Setting::save()
     // 设置项会从多个线程改（下载回调、剪贴板监听、热键线程），串行化落盘，
     // 免得两处同时写临时文件/替换目标。原子性本身由 writeConfigAtomic 保证。
     static std::mutex saveMutex;
-    const std::wstring str{ configObj.Stringify() };
-    std::lock_guard<std::mutex> lock(saveMutex);
-    writeConfigAtomic(configPath, str);
+    std::wstring str{ configObj.Stringify() };
+    bool failed = false;
+    {
+        std::lock_guard<std::mutex> lock(saveMutex);
+        // 内容未变化时不重复写入。设置页与启动清理中存在大量值未变的保存调用，
+        // 在同步盘上会造成不必要的上传。
+        if (str == lastSavedConfig) return;
+
+        // config.json 可能已被其他电脑修改。写入前先读取磁盘内容，将本进程相对
+        // lastSavedConfig 的改动合并到最新配置，避免直接覆盖对方修改并触发 OneDrive 冲突副本。
+        std::error_code ec;
+        const bool exists = std::filesystem::exists(configPath, ec);
+        if (exists) {
+            std::wstring disk;
+            if (!readConfigContent(configPath, disk)) {
+                // 读取失败时暂不写入，避免覆盖未知内容；下次保存时重试
+                failed = true;
+            }
+            else if (disk != lastSavedConfig) {
+                JsonObject diskObj{ nullptr };
+                if (JsonObject::TryParse(disk, diskObj)) {
+                    JsonObject baseObj{ nullptr };
+                    if (!lastSavedConfig.empty()) JsonObject::TryParse(lastSavedConfig, baseObj);
+                    if (!baseObj) baseObj = JsonObject{};
+                    ConfigMerge::MergeObjects(diskObj, baseObj, configObj);
+                    configObj = diskObj;   // 合并结果同时更新内存中的配置
+                    str = std::wstring{ configObj.Stringify() };
+                    if (str == disk) {     // 合并结果与磁盘一致，无需重复写入
+                        lastSavedConfig = disk;
+                        return;
+                    }
+                }
+                else {
+                    // 磁盘文件损坏（例如同步中断导致内容不完整）：先备份到 .bad，再写入当前配置
+                    std::error_code cec;
+                    std::filesystem::copy_file(configPath, siblingOf(configPath, L".bad"),
+                        std::filesystem::copy_options::overwrite_existing, cec);
+                }
+            }
+        }
+
+        if (!failed) {
+            if (writeConfigAtomic(configPath, str)) {
+                lastSavedConfig = str;
+                return;
+            }
+            failed = true;
+        }
+    }
+    // 写入失败时需提示用户，避免误认为已保存。后台运行时不弹窗，
+    // 仅在前台操作时提示一次。
+    // 提示框必须在 saveMutex 之外：MessageBox 会处理消息，可能重入 save()。
+    if (failed && !configSaveWarned && isOwnProcessForeground()) {
+        configSaveWarned = true;
+        MessageBox(nullptr,
+            L"配置未能写入 config.json（可能被 OneDrive / 杀毒软件临时占用）。\n"
+            L"本次修改可能没有保存，稍后再改任意设置会重新尝试。\n\n"
+            L"Could not write config.json (it may be temporarily locked by OneDrive or antivirus).",
+            L"SnowAir", MB_OK | MB_ICONWARNING);
+    }
 }
 
 std::wstring Setting::getLang()
@@ -1192,8 +1346,12 @@ bool Setting::getFindWindowElements() { return featBool(L"findWindowElements", t
 void Setting::setFindWindowElements(bool on) { setFeatBool(L"findWindowElements", on); }
 int Setting::getTrayClickAction() { return featInt(L"trayClickAction", 0); }
 void Setting::setTrayClickAction(int v) { setFeatInt(L"trayClickAction", v); }
-bool Setting::getPinZoomAtCursor() { return featBool(L"pinZoomAtCursor", false); }
+bool Setting::getPinZoomAtCursor() { return featBool(L"pinZoomAtCursor", true); }
 void Setting::setPinZoomAtCursor(bool on) { setFeatBool(L"pinZoomAtCursor", on); }
+int Setting::getCaptureToolbarAlign() { return featInt(L"captureToolbarAlign", 0); }
+void Setting::setCaptureToolbarAlign(int v) { setFeatInt(L"captureToolbarAlign", v < 0 ? 0 : (v > 2 ? 2 : v)); }
+bool Setting::getSilentCapture() { return featBool(L"silentCapture", true); }
+void Setting::setSilentCapture(bool on) { setFeatBool(L"silentCapture", on); }
 bool Setting::getPinAutoOcr() { return featBool(L"pinAutoOcr", false); }
 void Setting::setPinAutoOcr(bool on) { setFeatBool(L"pinAutoOcr", on); }
 bool Setting::getPinAutoFit() { return featBool(L"pinAutoFit", true); }
@@ -1373,7 +1531,7 @@ void Setting::restoreFunctionScreenshotDefaults()
 	setTrayClickAction(0);
 	setDemoDefaultTool(0);
 	setDemoEdgeBehavior(0);
-	setPinZoomAtCursor(false);
+	setPinZoomAtCursor(true);
 	setPinAutoOcr(false);
 	setPinAutoFit(true);
 	setPinDoubleClickAction(0);
@@ -1429,13 +1587,15 @@ void Setting::restoreFunctionTranslateDefaults()
 	setQuickTranslateNewSession(false);
 }
 
-// 其他功能：功能提示开、快捷键提示关、记忆工具样式关、悬停预览关
+// 其他功能：功能提示开、快捷键提示关、记忆工具样式关、悬停预览关、静默截图开
 void Setting::restoreFunctionOtherDefaults()
 {
 	setFeatureTips(true);
 	setHotkeyTip(false);
 	setRememberToolStyle(false);
 	setHoverPreview(false);
+	setSilentCapture(true);
+	setCaptureToolbarAlign(0);
 }
 
 // —— 与上面的 restore* 成对：判断该子页是否**仍是出厂值**（供「恢复默认」按钮置灰）——
@@ -1451,7 +1611,7 @@ bool Setting::functionScreenshotAtDefaults()
 		&& getManualSaveFormat().empty() && getAutoSaveFormat().empty()
 		&& getVideoRecordFormat().empty() && getTrayClickAction() == 0
 		&& getDemoDefaultTool() == 0 && getDemoEdgeBehavior() == 0
-		&& !getPinZoomAtCursor() && !getPinAutoOcr() && getPinAutoFit()
+		&& getPinZoomAtCursor() && !getPinAutoOcr() && getPinAutoFit()
 		&& getPinDoubleClickAction() == 0 && getPinOpacity() == 100;
 }
 
@@ -1486,7 +1646,8 @@ bool Setting::functionTranslateAtDefaults()
 bool Setting::functionOtherAtDefaults()
 {
 	return getFeatureTips() && !getHotkeyTip()
-		&& !getRememberToolStyle() && !getHoverPreview();
+		&& !getRememberToolStyle() && !getHoverPreview()
+		&& getSilentCapture() && getCaptureToolbarAlign() == 0;
 }
 
 int Setting::getVideoQuality() { return featInt(L"videoQuality", 4); }
@@ -2103,12 +2264,155 @@ void Setting::setWindowBlacklist(const std::vector<std::wstring>& titles)
     setFeatArray(L"windowBlacklist", arr);
 }
 
-// ================ 新增：History 目录 / 条目 / 过期清理 ================
-static JsonObject historyStore(JsonObject& features)
+// ================ 本机数据：local.json ================
+// 程序使用两个数据文件：
+//   config.json = 用户设置（可能位于 OneDrive 或便携目录）
+//   local.json  = 本机数据（剪贴板历史、截图/录屏历史、上次选区）
+// 本机数据包含仅对本机有效的绝对路径和剪贴板内容，不随设置同步；
+// 写入仅发生在本地磁盘，不会在 OneDrive 上产生同步冲突。
+namespace {
+std::recursive_mutex& localDataMutex()
 {
-    if (!features.HasKey(L"history") || features.GetNamedValue(L"history").ValueType() != JsonValueType::Object)
-        features.SetNamedValue(L"history", JsonObject{});
-    return features.GetNamedObject(L"history");
+    static std::recursive_mutex m;
+    return m;
+}
+}
+
+std::filesystem::path Setting::getLocalDataPath()
+{
+    auto dir = dataPath;
+    std::error_code ec;
+    if (!std::filesystem::exists(dir, ec)) std::filesystem::create_directories(dir, ec);
+    dir.append(L"local.json");
+    return dir;
+}
+
+JsonObject Setting::loadLocalData()
+{
+    std::lock_guard<std::recursive_mutex> lock(localDataMutex());
+    const auto path = getLocalDataPath();
+    std::wstring text;
+    if (!readConfigContent(path, text) || isBlankConfig(text)) return JsonObject{};
+    JsonObject obj{ nullptr };
+    if (JsonObject::TryParse(text, obj)) return obj;
+    // 文件损坏：备份为 .bad，本次按空数据读取；后续写入会重建文件
+    std::error_code ec;
+    std::filesystem::copy_file(path, siblingOf(path, L".bad"),
+        std::filesystem::copy_options::overwrite_existing, ec);
+    return JsonObject{};
+}
+
+bool Setting::saveLocalData(const JsonObject& data)
+{
+    std::lock_guard<std::recursive_mutex> lock(localDataMutex());
+    return writeConfigAtomic(getLocalDataPath(), std::wstring{ data.Stringify() });
+}
+
+// 将旧版本分散的本机数据迁移到 local.json：
+//   - 旧版本拆分出的 clipboard.json / history.json / state.json
+//   - 更早版本直接写在 config.json 的 features.clipboard / features.history / features.lastCaptureRect
+// 迁移成功后再删除旧文件和 config 中的旧键；任一步骤失败则保留原数据，下次启动重试。
+void Setting::migrateLocalDataToFile()
+{
+    std::lock_guard<std::recursive_mutex> lock(localDataMutex());
+    const auto path = getLocalDataPath();
+
+    std::wstring existing;
+    JsonObject data{ nullptr };
+    bool localReady = false;
+    if (readConfigContent(path, existing) && !isBlankConfig(existing)) {
+        JsonObject parsed{ nullptr };
+        const bool parsedOk = JsonObject::TryParse(existing, parsed);
+        if (parsedOk && (parsed.HasKey(L"clipboard") || parsed.HasKey(L"history") || parsed.HasKey(L"state"))) {
+            data = parsed;
+            localReady = true;
+        }
+        else if (!parsedOk) {
+            // 文件损坏：备份为 .bad，避免迁移直接覆盖
+            std::error_code ec;
+            std::filesystem::copy_file(path, siblingOf(path, L".bad"),
+                std::filesystem::copy_options::overwrite_existing, ec);
+        }
+    }
+
+    bool tookClipboard = false, tookHistory = false, tookState = false;
+    if (!localReady) {
+        data = JsonObject{};
+
+        auto takeFile = [&](const wchar_t* name, const wchar_t* section) -> bool {
+            std::wstring text;
+            if (!readConfigContent(dataPath / name, text) || isBlankConfig(text)) return false;
+            JsonObject obj{ nullptr };
+            if (!JsonObject::TryParse(text, obj)) return false;   // 解析失败则保留原文件，不参与迁移
+            data.SetNamedValue(section, obj);
+            return true;
+        };
+        tookClipboard = takeFile(L"clipboard.json", L"clipboard");
+        tookHistory = takeFile(L"history.json", L"history");
+        tookState = takeFile(L"state.json", L"state");
+
+        auto features = configObj.GetNamedObject(L"features", nullptr);
+        if (features) {
+            if (!data.HasKey(L"clipboard") && features.HasKey(L"clipboard")
+                && features.GetNamedValue(L"clipboard").ValueType() == JsonValueType::Object) {
+                data.SetNamedValue(L"clipboard", features.GetNamedValue(L"clipboard").GetObject());
+            }
+            if (!data.HasKey(L"history") && features.HasKey(L"history")
+                && features.GetNamedValue(L"history").ValueType() == JsonValueType::Object) {
+                data.SetNamedValue(L"history", features.GetNamedValue(L"history").GetObject());
+            }
+            if (!data.HasKey(L"state") && features.HasKey(L"lastCaptureRect")) {
+                JsonObject state{ nullptr };
+                state.SetNamedValue(L"lastCaptureRect",
+                    JsonValue::CreateStringValue(features.GetNamedString(L"lastCaptureRect", L"")));
+                data.SetNamedValue(L"state", state);
+            }
+        }
+
+        bool hasAny = data.HasKey(L"clipboard") || data.HasKey(L"history") || data.HasKey(L"state");
+        if (hasAny && !saveLocalData(data)) return;
+    }
+
+    // 清理旧位置：仅删除已成功迁移的文件，损坏文件保留
+    auto removeLegacy = [&](const wchar_t* name, bool taken) {
+        if (!taken && !localReady) return;
+        std::error_code ec;
+        std::filesystem::remove(dataPath / name, ec);
+    };
+    removeLegacy(L"clipboard.json", tookClipboard);
+    removeLegacy(L"history.json", tookHistory);
+    removeLegacy(L"state.json", tookState);
+
+    auto features = configObj.GetNamedObject(L"features", nullptr);
+    bool configChanged = false;
+    if (features) {
+        for (const wchar_t* key : { L"clipboard", L"history", L"lastCaptureRect" }) {
+            if (features.HasKey(key)) {
+                features.Remove(key);
+                configChanged = true;
+            }
+        }
+    }
+    if (configChanged) {
+        save();
+        backupConfigFile();
+    }
+}
+
+JsonObject Setting::loadHistoryStore()
+{
+    auto data = loadLocalData();
+    if (data.HasKey(L"history") && data.GetNamedValue(L"history").ValueType() == JsonValueType::Object)
+        return data.GetNamedObject(L"history");
+    return JsonObject{};
+}
+
+bool Setting::saveHistoryStore(const JsonObject& store)
+{
+    std::lock_guard<std::recursive_mutex> lock(localDataMutex());
+    auto data = loadLocalData();
+    data.SetNamedValue(L"history", store);
+    return saveLocalData(data);
 }
 
 std::filesystem::path Setting::getHistoryThumbDir()
@@ -2148,8 +2452,7 @@ static Setting::HistoryItem historyItemFromJson(const JsonObject& o)
 
 std::vector<Setting::HistoryItem> Setting::getHistoryItems()
 {
-    auto features = featuresObj();
-    auto store = historyStore(features);
+    auto store = loadHistoryStore();
     JsonArray arr{};
     if (store.HasKey(L"items") && store.GetNamedValue(L"items").ValueType() == JsonValueType::Array)
         arr = store.GetNamedArray(L"items");
@@ -2299,8 +2602,7 @@ std::vector<std::wstring> Setting::getHistoryTags(const std::wstring& filePath)
 {
     std::vector<std::wstring> out;
     if (filePath.empty()) return out;
-    auto features = featuresObj();
-    auto store = historyStore(features);
+    auto store = loadHistoryStore();
     const auto key = historyPathKey(filePath);
     const auto all = historyTagsArr(store);
     if (!all) return out;
@@ -2323,8 +2625,7 @@ std::vector<std::wstring> Setting::getHistoryTags(const std::wstring& filePath)
 void Setting::setHistoryTags(const std::wstring& filePath, const std::vector<std::wstring>& tags)
 {
     if (filePath.empty()) return;
-    auto features = featuresObj();
-    auto store = historyStore(features);
+    auto store = loadHistoryStore();
     const auto key = historyPathKey(filePath);
 
     JsonArray arr;
@@ -2346,16 +2647,14 @@ void Setting::setHistoryTags(const std::wstring& filePath, const std::vector<std
         arr.Append(o);
     }
     store.SetNamedValue(L"tags", arr);
-    features.SetNamedValue(L"history", store);
-    save();
+    saveHistoryStore(store);
     historyUiCacheDirty_ = true;
 }
 
 std::vector<std::wstring> Setting::getAllHistoryTags()
 {
     std::set<std::wstring> uniq;
-    auto features = featuresObj();
-    auto store = historyStore(features);
+    auto store = loadHistoryStore();
     const auto all = historyTagsArr(store);
     if (!all) return {};
     for (auto const& v : all) {
@@ -2404,11 +2703,9 @@ std::wstring Setting::addHistoryFile(const std::wstring& filePath, int width, in
         arr.Append(historyItemToJson(old));
     }
 
-    auto features = featuresObj();
-    auto store = historyStore(features);
+    auto store = loadHistoryStore();
     store.SetNamedValue(L"items", arr);
-    features.SetNamedValue(L"history", store);
-    save();
+    saveHistoryStore(store);
     PluginHost::instance().onCapture(filePath);
     return it.id;
 }
@@ -2445,11 +2742,9 @@ std::wstring Setting::addHistoryMedia(const std::wstring& mediaPath, int width, 
         arr.Append(historyItemToJson(old));
     }
 
-    auto features = featuresObj();
-    auto store = historyStore(features);
+    auto store = loadHistoryStore();
     store.SetNamedValue(L"items", arr);
-    features.SetNamedValue(L"history", store);
-    save();
+    saveHistoryStore(store);
     return it.id;
 }
 
@@ -2510,11 +2805,9 @@ void Setting::pruneExpiredHistory()
     // 写回
     JsonArray arr;
     for (auto& it : keep) arr.Append(historyItemToJson(it));
-    auto features = featuresObj();
-    auto store = historyStore(features);
+    auto store = loadHistoryStore();
     store.SetNamedValue(L"items", arr);
-    features.SetNamedValue(L"history", store);
-    save();
+    saveHistoryStore(store);
 }
 
 void Setting::pruneOrphanThumbCache()
@@ -2574,11 +2867,9 @@ void Setting::removeHistoryItem(const std::wstring& id, bool deleteFile)
     // 只删记录：文件原地保留，目录扫描会继续把它显示出来（删记录 != 删文件）
     JsonArray arr;
     for (auto& it : keep) arr.Append(historyItemToJson(it));
-    auto features = featuresObj();
-    auto store = historyStore(features);
+    auto store = loadHistoryStore();
     store.SetNamedValue(L"items", arr);
-    features.SetNamedValue(L"history", store);
-    save();
+    saveHistoryStore(store);
 }
 
 void Setting::clearAllHistory(int sourceTab)
@@ -2603,11 +2894,9 @@ void Setting::clearAllHistory(int sourceTab)
         if ((sourceTab == 1 && isRecord) || (sourceTab == 2 && !isRecord))
             arr.Append(historyItemToJson(it));
     }
-    auto features = featuresObj();
-    auto store = historyStore(features);
+    auto store = loadHistoryStore();
     store.SetNamedValue(L"items", arr);
-    features.SetNamedValue(L"history", store);
-    save();
+    saveHistoryStore(store);
 }
 
 // 「其他」：目录扫描出来的条目（id 就是文件路径）是用户自己放进来的文件。
@@ -2624,26 +2913,72 @@ void Setting::clearOtherFiles()
 }
 
 // ================= 剪切板历史 =================
+// 剪贴板历史保存在 local.json 的 clipboard 节，不写入 config.json：
+//  - 每次复制都会重写配置，在同步盘上会持续产生冲突；
+//  - 剪贴板内容（可能包含密码、验证码）不应随配置上传云端；
+//  - 本机剪贴板历史对其他电脑没有意义。
 // 不限条数：文本直接进索引，图片落盘到 dataPath\Clipboard（历史页用缩略图展示）。
 namespace {
-    JsonObject clipboardStore(JsonObject& features)
-    {
-        if (!features.HasKey(L"clipboard") || features.GetNamedValue(L"clipboard").ValueType() != JsonValueType::Object)
-            features.SetNamedValue(L"clipboard", JsonObject{});
-        return features.GetNamedObject(L"clipboard");
-    }
-    JsonArray clipboardArr(JsonObject& store)
-    {
-        if (store.HasKey(L"items") && store.GetNamedValue(L"items").ValueType() == JsonValueType::Array)
-            return store.GetNamedArray(L"items");
-        return JsonArray{};
-    }
     unsigned clipboardHash(const std::vector<BYTE>& data)
     {
         unsigned h = 2166136261u;
         for (BYTE b : data) { h ^= b; h *= 16777619u; }
         return h;
     }
+
+    std::vector<Setting::ClipboardItem> clipboardItemsFromArray(const JsonArray& arr)
+    {
+        std::vector<Setting::ClipboardItem> out;
+        if (!arr) return out;
+        for (auto const& v : arr) {
+            if (v.ValueType() != JsonValueType::Object) continue;
+            auto o = v.GetObjectW();
+            Setting::ClipboardItem it;
+            it.id = o.GetNamedString(L"id", L"").c_str();
+            it.type = o.GetNamedString(L"type", L"text").c_str();
+            it.text = o.GetNamedString(L"text", L"").c_str();
+            it.filePath = o.GetNamedString(L"filePath", L"").c_str();
+            it.width = (int)o.GetNamedNumber(L"width", 0);
+            it.height = (int)o.GetNamedNumber(L"height", 0);
+            it.createdAt = (long long)o.GetNamedNumber(L"createdAt", 0);
+            it.hash = (unsigned)o.GetNamedNumber(L"hash", 0);
+            if (o.HasKey(L"tags") && o.GetNamedValue(L"tags").ValueType() == JsonValueType::Array) {
+                for (auto const& t : o.GetNamedArray(L"tags")) {
+                    if (t.ValueType() == JsonValueType::String) {
+                        std::wstring s = t.GetString().c_str();
+                        if (!s.empty()) it.tags.push_back(std::move(s));
+                    }
+                }
+            }
+            if (o.HasKey(L"files") && o.GetNamedValue(L"files").ValueType() == JsonValueType::Array) {
+                for (auto const& f : o.GetNamedArray(L"files")) {
+                    if (f.ValueType() == JsonValueType::String) {
+                        std::wstring s = f.GetString().c_str();
+                        if (!s.empty()) it.files.push_back(std::move(s));
+                    }
+                }
+            }
+            if (it.type == L"image") {
+                std::error_code ec;
+                if (it.filePath.empty() || !std::filesystem::exists(it.filePath, ec)) continue;
+            }
+            if (it.type == L"files") {
+                if (it.files.empty()) continue;
+                // 文件条目只保存路径，不复制内容：源文件全部不存在时（例如微信临时文件被清理），
+                // 与图片条目一致，不再显示这条失效记录；文件恢复后会自动重新出现。
+                bool anyExists = false;
+                for (const auto& f : it.files) {
+                    std::error_code ec;
+                    if (std::filesystem::exists(f, ec)) { anyExists = true; break; }
+                }
+                if (!anyExists) continue;
+            }
+            if (it.type == L"text" && it.text.empty()) continue;
+            out.push_back(std::move(it));
+        }
+        return out;
+    }
+
 }
 
 std::filesystem::path Setting::getClipboardDir()
@@ -2658,46 +2993,13 @@ std::filesystem::path Setting::getClipboardDir()
 std::vector<Setting::ClipboardItem> Setting::getClipboardItems()
 {
     std::vector<ClipboardItem> out;
-    auto features = featuresObj();
-    auto store = clipboardStore(features);
-    const auto arr = clipboardArr(store);
-    if (!arr) return out;
-    for (auto const& v : arr) {
-        if (v.ValueType() != JsonValueType::Object) continue;
-        auto o = v.GetObjectW();
-        ClipboardItem it;
-        it.id = o.GetNamedString(L"id", L"").c_str();
-        it.type = o.GetNamedString(L"type", L"text").c_str();
-        it.text = o.GetNamedString(L"text", L"").c_str();
-        it.filePath = o.GetNamedString(L"filePath", L"").c_str();
-        it.width = (int)o.GetNamedNumber(L"width", 0);
-        it.height = (int)o.GetNamedNumber(L"height", 0);
-        it.createdAt = (long long)o.GetNamedNumber(L"createdAt", 0);
-        it.hash = (unsigned)o.GetNamedNumber(L"hash", 0);
-        if (o.HasKey(L"tags") && o.GetNamedValue(L"tags").ValueType() == JsonValueType::Array) {
-            for (auto const& t : o.GetNamedArray(L"tags")) {
-                if (t.ValueType() == JsonValueType::String) {
-                    std::wstring s = t.GetString().c_str();
-                    if (!s.empty()) it.tags.push_back(std::move(s));
-                }
-            }
-        }
-        if (o.HasKey(L"files") && o.GetNamedValue(L"files").ValueType() == JsonValueType::Array) {
-            for (auto const& f : o.GetNamedArray(L"files")) {
-                if (f.ValueType() == JsonValueType::String) {
-                    std::wstring s = f.GetString().c_str();
-                    if (!s.empty()) it.files.push_back(std::move(s));
-                }
-            }
-        }
-        if (it.type == L"image") {
-            std::error_code ec;
-            if (it.filePath.empty() || !std::filesystem::exists(it.filePath, ec)) continue;
-        }
-        if (it.type == L"files" && it.files.empty()) continue;
-        if (it.type == L"text" && it.text.empty()) continue;
-        out.push_back(std::move(it));
-    }
+    auto data = loadLocalData();
+    if (!data.HasKey(L"clipboard") || data.GetNamedValue(L"clipboard").ValueType() != JsonValueType::Object)
+        return out;
+    auto store = data.GetNamedObject(L"clipboard");
+    if (!store.HasKey(L"items") || store.GetNamedValue(L"items").ValueType() != JsonValueType::Array)
+        return out;
+    out = clipboardItemsFromArray(store.GetNamedArray(L"items"));
     std::sort(out.begin(), out.end(), [](const ClipboardItem& a, const ClipboardItem& b) {
         return a.createdAt > b.createdAt;
     });
@@ -2726,7 +3028,7 @@ void Setting::setClipboardTags(const std::wstring& id, const std::vector<std::ws
 }
 
 // 写回索引：新条目在前（不做条数截断，历史由用户手动清理）
-void Setting::writeClipboardItems(std::vector<ClipboardItem>& items)
+bool Setting::writeClipboardItemsToFile(const std::vector<ClipboardItem>& items)
 {
     JsonArray arr;
     for (const auto& it : items) {
@@ -2747,11 +3049,23 @@ void Setting::writeClipboardItems(std::vector<ClipboardItem>& items)
         o.SetNamedValue(L"files", fs);
         arr.Append(o);
     }
-    auto features = featuresObj();
-    auto store = clipboardStore(features);
-    store.SetNamedValue(L"items", arr);
-    features.SetNamedValue(L"clipboard", store);
-    save();
+    JsonObject clipboard;
+    clipboard.SetNamedValue(L"items", arr);
+
+    // 本地数据集中在一个文件：剪贴板、历史与状态分别修改各自节点，读-改-写必须串行，
+    // 避免并发写入互相覆盖。
+    std::lock_guard<std::recursive_mutex> lock(localDataMutex());
+    auto data = loadLocalData();
+    data.SetNamedValue(L"clipboard", clipboard);
+    return saveLocalData(data);
+}
+
+void Setting::writeClipboardItems(std::vector<ClipboardItem>& items)
+{
+    if (!writeClipboardItemsToFile(items)) {
+        OutputDebugStringW(L"[SnowAir] failed to write local.json (clipboard)\n");
+        return;   // 写入失败时不通知界面刷新，避免显示未持久化的内容
+    }
     if (clipboardChanged) clipboardChanged();
 }
 

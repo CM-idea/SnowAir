@@ -56,6 +56,7 @@ namespace {
 
 	void runTrayCommand(UINT cmd);
 	void closeTrayMenu();
+	void trimIdleGraphics();
 
 	class TrayMenuWindow : public Ling::WinBase
 	{
@@ -187,6 +188,9 @@ namespace {
 			if (!row || isRight || !row->isPosIn(pos)) return;   // 按下与抬起不在同一行：不派发
 			Ling::App::get()->dq.TryEnqueue([cmd]() {
 				closeTrayMenu();
+				// 这里**不** trim：命令可能只是异步拉起一个窗口（比如截图会话先抓屏），
+				// 此刻 app->windows 还算空，提前放掉图形设备会把刚起的会话搞坏。
+				// 那个窗口自己关闭时会按同一套逻辑回收（见 WinSetting::onDestroy / WinCap::onClosed）。
 				runTrayCommand(cmd);
 				});
 			});
@@ -212,6 +216,18 @@ private:
 		g_swallowUp = false;
 	}
 
+	// 托盘菜单也是「用完即关」的窗口：它一展开就会把 D2D/D3D 设备带起来（二十几 MB 常驻），
+	// 关掉后如果已经没有别的窗口，就按设置页 / 截图会话收工那套处理 —— 放掉空闲的图形设备，
+	// 再把工作集里的闲页换出去。少了这一步，反复右键会把内存抬到高位就再也不回落
+	//（用户的直观感受就是"点菜单涨上去，只有打开设置页再关掉才降回来"）。
+	void trimIdleGraphics()
+	{
+		auto* app = Ling::App::get();
+		if (!app || !app->windows.empty()) return;
+		Ling::D2D::dispose();
+		SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
+	}
+
 	LRESULT CALLBACK menuMouseProc(int code, WPARAM wp, LPARAM lp)
 	{
 		if (code != HC_ACTION) return CallNextHookEx(nullptr, code, wp, lp);
@@ -230,7 +246,10 @@ private:
 		if (PtInRect(&rc, ms->pt)) return CallNextHookEx(nullptr, code, wp, lp);
 
 		// 菜单外：这一下只用来关菜单，吞掉不往下传（按下时连配对的抬起一起吞）
-		Ling::App::get()->dq.TryEnqueue([]() { closeTrayMenu(); });
+		Ling::App::get()->dq.TryEnqueue([]() {
+			closeTrayMenu();
+			trimIdleGraphics();
+			});
 		if (down) g_swallowUp = true;
 		return 1;
 	}

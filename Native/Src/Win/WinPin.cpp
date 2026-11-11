@@ -116,8 +116,9 @@ WinPin::WinPin(int x, int y, int w, int h, const std::vector<BYTE>* data, const 
 			return;
 		}
 		// 非编辑态：悬停滚轮直接缩放。
-		// 锚点默认取鼠标所在一侧（边/角），画面朝反向伸缩；开启「以鼠标为中心缩放」时
-		// 直接以光标点为锚（光标下的像素保持不动）。
+		// 开启「光标中心缩放」（默认）时锚点就是光标点：光标下的像素保持不动。
+		// 关闭时锚点取**离鼠标最近的那条边**上的点：那条边固定、对面那条边伸缩
+		// （鼠标靠左 ⇒ 像在拖右边；靠下 ⇒ 像在拖上边），适合"贴着某条边对齐"的用法。
 		const float steps = space / 60.f;   // space = 格数 * 60 * dpi
 		const float factor = std::pow(1.1f, steps);
 		if (zoomMode == ZoomMode::Crop) {
@@ -129,11 +130,16 @@ WinPin::WinPin(int x, int y, int w, int h, const std::vector<BYTE>* data, const 
 			applyScale(scale * factor, pos);
 			return;
 		}
-		// 九宫格取锚点：左/中/右 × 上/中/下 → 边中点或角点（中间带取窗口 1/3）。
-		const int zx = (pos.x < this->w / 3.f) ? 0 : (pos.x > this->w * 2.f / 3.f ? 2 : 1);
-		const int zy = (pos.y < this->h / 3.f) ? 0 : (pos.y > this->h * 2.f / 3.f ? 2 : 1);
-		POINT anchor{ zx == 0 ? 0 : (zx == 2 ? (LONG)std::lround(this->w) : (LONG)std::lround(this->w * 0.5f)),
-					  zy == 0 ? 0 : (zy == 2 ? (LONG)std::lround(this->h) : (LONG)std::lround(this->h * 0.5f)) };
+		const float dL = (float)pos.x;
+		const float dR = this->w - (float)pos.x;
+		const float dT = (float)pos.y;
+		const float dB = this->h - (float)pos.y;
+		const float nearest = (std::min)((std::min)(dL, dR), (std::min)(dT, dB));
+		POINT anchor{};
+		if (nearest == dL)      anchor = POINT{ 0, pos.y };
+		else if (nearest == dR) anchor = POINT{ (LONG)std::lround(this->w), pos.y };
+		else if (nearest == dT) anchor = POINT{ pos.x, 0 };
+		else                    anchor = POINT{ pos.x, (LONG)std::lround(this->h) };
 		applyScale(scale * factor, anchor);
 	});
 	onTimer.add([this](UINT id) { this->onTimerCB(id); });

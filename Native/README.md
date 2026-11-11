@@ -51,7 +51,9 @@ SnowAir.exe --enter=tray              # 仅托盘（等同于默认行为）
 
 ## 数据目录
 
-默认：`%AppData%\SnowAir\`（配置、语言、插件、历史）
+默认：`%AppData%\SnowAir\`（配置、语言、插件、本机数据）
+
+用户设置在 `config.json`；本机数据（剪贴板历史、截图/录屏历史、上次选区）在 `local.json`，图片缓存在 `Clipboard\`。本机数据即使配置放在便携目录 / 同步盘，也不会跟着同步。
 
 ## OCR 插件
 

@@ -339,11 +339,14 @@ inline Ling::Button* selectRow(Ling::Node* parent,
 }
 // 下拉按钮本体（不包含行容器/标签，用于自定义布局）
 // compact=true：更矮的选项行、居中文字，用于状态行里的小号下拉
+// hints（可选，与 options 等长）：选项行右侧的灰色附注（如下载包体积「≈45 MB」），
+//   空串表示该行不显示；compact 模式下不参与排版（居中文字优先）。
 Ling::Button* selectDdl(Ling::Node* parent,
     const std::vector<std::wstring>& options,
     int current,
     std::function<void(int, const std::wstring&)> onChange,
-    bool compact = false);
+    bool compact = false,
+    const std::vector<std::wstring>& hints = {});
 
 // 方形图标下拉：外观同 Outline 按钮，只显示一个图标；点击弹出选项列表
 Ling::Button* selectDdlIcon(Ling::Node* parent,

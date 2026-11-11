@@ -28,6 +28,8 @@ public:
 	static void beginRecordPick();
 	// 托盘「演示画布」：整屏实时画布 + 顶部居中工具栏（全屏画布/演示模式）
 	static void beginDemoCanvas();
+	// 静默截图关闭时：跳过框选，按给定屏幕矩形直接进入标注并显示截图工具栏，由用户手动完成
+	static void beginWithRect(const RECT& screenRect);
 	// 启动后的一次性预热：建一个隐藏小窗 + Tip，把 comctl32/tooltip 首次初始化提前付掉。
 	// tip（默认）只热 tooltip；tipd2d 还把 D3D/D2D 设备热掉；off 关闭。
 	// requestedMode 为空时读 SNOWAIR_WARMUP；再为空则默认 "tip"。
@@ -187,6 +189,10 @@ private:
 	void enterReselect();
 	void requestExitAfterRightUp();
 	void setPixPos(POINT pos);
+	// 外壳按 pos 避让、取样中心用 focus（拖边时传边上的点，见 CutMask::edgePointNear）
+	void setPixPosAt(POINT pos, POINT focus);
+	// 选区相关的调用统一走这里：拖边/拖角时自动把取样中心挪到边线上
+	void setPixForMask(POINT cur);
 	// 放大镜此刻是否可见（绘制与 Ctrl+C 取色共用同一判据，避免"看得到提示却复制不到色值"）
 	bool magnifierVisible() const;
 	void paintPix(ID2D1DeviceContext* ctx);
@@ -255,6 +261,8 @@ private:
 	bool maskMoveLocked() const;
 	// 「显示光标」：会话开始抓一次系统光标位图；屏幕上/导出图里按开关叠加
 	void captureCursorSnapshot();
+	// 单色光标里"背景反色"的那部分像素：用截图底图的真实背景取反（工字光标全靠它）
+	void invertCursorXorPixels(const std::vector<BYTE>& xorMask, int cw, int ch);
 	void paintCursor(ID2D1DeviceContext* ctx);
 	// 「录制中显示按键」：装/摘全局键盘钩子 + 画浮层
 	void startKeyOverlay();
@@ -272,6 +280,12 @@ private:
 	std::unique_ptr<SelectionChrome> chrome_;
 	Ling::Canvas* canvas{ nullptr };
 	POINT pixPos{}, pixFocus{};
+	// 放大镜画面区的圆角裁切缓存：几何/图层按「设备上下文 + dpi」复用，
+	// 拖动时每帧只 Push/Pop，不重建几何（不拖慢跟手感）。
+	Microsoft::WRL::ComPtr<ID2D1RoundedRectangleGeometry> pixClipGeom_;
+	Microsoft::WRL::ComPtr<ID2D1Layer> pixClipLayer_;
+	ID2D1DeviceContext* pixClipCtx_{ nullptr };
+	float pixClipRadius_{ 0.f };
 	bool isPress{ false }, isClosed{ false }, isMouseTransparent{ false };
 	// 「隐藏/显示工具栏」的当前状态（系统按键 F1，只有命令键能触发）。随会话重建，不落盘
 	bool toolHidden{ false };

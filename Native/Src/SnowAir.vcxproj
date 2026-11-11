@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -417,6 +417,8 @@
     <ClInclude Include="Win\ImageEditTheme.h" />
     <ClInclude Include="Win\SettingWidgets.h" />
     <ClInclude Include="Win\WinCap.h" />
+    <ClInclude Include="Win\PixLens.h" />
+    <ClInclude Include="Win\CursorImage.h" />
     <ClInclude Include="Win\ClipPin.h" />
     <ClInclude Include="Win\WinPin.h" />
     <ClInclude Include="Win\PinMenu.h" />

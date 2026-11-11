@@ -13,12 +13,31 @@
 #include "../Ocr/LwPpOcrEngine.h"
 #include "../Translate/TranslateTypes.h"
 #include "../Plugin/PluginHost.h"
+#include "WinCap.h"
 #include "WinSetting.h"
 #include "CapVideo.h"
 #include <shobjidl.h>
 #include <commdlg.h>
 
 namespace {
+	// 半栏布局：整行 100%，列固定 50% − 半个列距；落单时也保持半宽
+	//（grid2Cells 按 flex 分配，单项会被拉满整行）
+	Ling::Node* halfRow(Ling::Node* parent)
+	{
+		auto* row = parent->makeChild<Ling::Node>();
+		row->setFlexDirection(Ling::FlexDirection::Row);
+		row->setWidthPercent(100.f);
+		return row;
+	}
+	Ling::Node* halfCol(Ling::Node* row, bool right)
+	{
+		auto* col = row->makeChild<Ling::Node>();
+		col->setWidthPercent(50.f);
+		col->setFlexDirection(Ling::FlexDirection::Column);
+		if (right) col->setPaddingLeft(SettingTheme::optionGap * 0.5f);
+		else col->setPaddingRight(SettingTheme::optionGap * 0.5f);
+		return col;
+	}
 	// 某个子 Tab 是否仍是出厂值：0 基本功能 / 1 视频录制 / 2 文件输出 / 3 识别模型 / 4 其他功能
 	//（与 build() 里给 segmentedPills 的标签顺序一致，也与 restoreBtn 的动作分派一致）
 	bool functionAtDefaults(int tab)
@@ -794,20 +813,6 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 	{
 		// 固定 50% 列容器：每列 = 半栏 − 半个列距，落单时也保持半宽
 		// （grid2Cells 按 flex 分配，单项会被拉满整行）
-		auto makeRow = [p]() {
-			auto* row = p->makeChild<Ling::Node>();
-			row->setFlexDirection(Ling::FlexDirection::Row);
-			row->setWidthPercent(100.f);
-			return row;
-		};
-		auto makeCol = [](Ling::Node* row, bool right) {
-			auto* col = row->makeChild<Ling::Node>();
-			col->setWidthPercent(50.f);
-			col->setFlexDirection(Ling::FlexDirection::Column);
-			if (right) col->setPaddingLeft(SettingTheme::optionGap * 0.5f);
-			else col->setPaddingRight(SettingTheme::optionGap * 0.5f);
-			return col;
-		};
 		auto addResultRow = [s](Ling::Node* parent) {
 			SettingUi::selectRow(parent, Lang::get(L"setting.fnOcrResultMode"),
 				{ Lang::get(L"setting.fnOcrResultOverlay"), Lang::get(L"setting.fnOcrResultReflow") },
@@ -817,8 +822,8 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 
 		const bool tierShown = (s->getOcrEngine() == 0 && !installed.empty());
 
-		auto* row1 = makeRow();
-		SettingUi::selectRow(makeCol(row1, false), Lang::get(L"setting.fnOcrModel"), labels, cur,
+		auto* row1 = halfRow(p);
+		SettingUi::selectRow(halfCol(row1, false), Lang::get(L"setting.fnOcrModel"), labels, cur,
 			[this, engines](int i, const std::wstring&) {
 				if (i < 0 || i >= (int)engines.size()) return;
 				const bool changed = Setting::get()->getOcrEngine() != engines[i];
@@ -830,7 +835,7 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 		// 模型规格：只有选中 PP-OCRv6 且装了模型才出现；系统 OCR 不需要模型，不显示
 		if (tierShown) {
 			// 识别结果版式放第一行右列（与文本识别模型并排）
-			addResultRow(makeCol(row1, true));
+			addResultRow(halfCol(row1, true));
 
 			// 模型规格独占第二行左列（半栏）
 			std::vector<std::wstring> tiers;
@@ -843,7 +848,7 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 			for (int i = 0; i < (int)tierIds.size(); ++i)
 				if (tierIds[i] == s->getOcrPackVariant()) { curTier = i; break; }
 			// 「?」放在标题「模型规格」右侧（optionRow 的 helpText 就是干这个的）
-			auto tierRow = SettingUi::optionRow(makeCol(makeRow(), false), Lang::get(L"setting.fnOcrTier"), L"", true,
+			auto tierRow = SettingUi::optionRow(halfCol(halfRow(p), false), Lang::get(L"setting.fnOcrTier"), L"", true,
 				SettingTheme::ctrlH, Lang::get(L"setting.plugOcrTierTip"));
 			auto* ddl = SettingUi::selectDdl(tierRow.ctrlBox, tiers, curTier,
 				[tierIds](int i, const std::wstring&) {
@@ -856,7 +861,7 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 		}
 		else {
 			// 系统 OCR：没有模型规格，识别结果版式直接并到第一行右列
-			addResultRow(makeCol(row1, true));
+			addResultRow(halfCol(row1, true));
 		}
 	}
 }
@@ -885,34 +890,20 @@ void WinSettingFeatures::buildTranslate(Ling::Node* p)
 		if (_wcsicmp(svcIds[i].c_str(), curP.c_str()) == 0) si = i;
 
 	// 与文字识别「模型规格」同一套半栏布局：行 = 两个 50% 列，落单也保持半宽
-	auto makeRow = [p]() {
-		auto* row = p->makeChild<Ling::Node>();
-		row->setFlexDirection(Ling::FlexDirection::Row);
-		row->setWidthPercent(100.f);
-		return row;
-		};
-	auto makeCol = [](Ling::Node* row, bool right) {
-		auto* col = row->makeChild<Ling::Node>();
-		col->setWidthPercent(50.f);
-		col->setFlexDirection(Ling::FlexDirection::Column);
-		if (right) col->setPaddingLeft(SettingTheme::optionGap * 0.5f);
-		else col->setPaddingRight(SettingTheme::optionGap * 0.5f);
-		return col;
-		};
 
 	// 第一行：翻译服务 | 字典模式
-	auto* row1 = makeRow();
-	SettingUi::selectRow(makeCol(row1, false), Lang::get(L"setting.fnTransService"), svcLabs, si,
+	auto* row1 = halfRow(p);
+	SettingUi::selectRow(halfCol(row1, false), Lang::get(L"setting.fnTransService"), svcLabs, si,
 		[svcIds](int i, const std::wstring&) {
 			if (i >= 0 && i < (int)svcIds.size())
 				Setting::get()->setTranslateProvider(svcIds[i]);
 		}, true);
-	SettingUi::toggleRow(makeCol(row1, true), Lang::get(L"setting.fnDictMode"), s->getTranslateDictMode(),
+	SettingUi::toggleRow(halfCol(row1, true), Lang::get(L"setting.fnDictMode"), s->getTranslateDictMode(),
 		[](bool on) { Setting::get()->setTranslateDictMode(on); }, true);
 
 	// 第二行左列：每次打开新建会话（右列留空，保持半栏）
-	auto* row2 = makeRow();
-	SettingUi::toggleRow(makeCol(row2, false), Lang::get(L"setting.quickNewSession"), s->getQuickTranslateNewSession(),
+	auto* row2 = halfRow(p);
+	SettingUi::toggleRow(halfCol(row2, false), Lang::get(L"setting.quickNewSession"), s->getQuickTranslateNewSession(),
 		[](bool on) { Setting::get()->setQuickTranslateNewSession(on); }, true);
 }
 
@@ -922,13 +913,14 @@ void WinSettingFeatures::buildOther(Ling::Node* p)
 	auto* grid = SettingUi::grid2(p);
 	// 开关的点击状态以 Setting 当前值为准（而非构建该行时捕获的值），
 	// 避免「恢复默认」程序化改写设置后，下一次点击仍按过期状态取反而失效
-	auto mkStateToggle = [&](const std::wstring& labelKey,
+	auto mkStateToggle = [&](Ling::Node* parent, const std::wstring& labelKey,
 		std::function<bool()> get,
 		std::function<void(bool)> set,
 		std::function<void(bool)> after,
 		const std::wstring& helpKey = L"") -> Ling::Button* {
-			auto r = SettingUi::optionRow(grid, Lang::get(labelKey), L"", true, SettingUi::kToggleH,
+			auto r = SettingUi::optionRow(parent, Lang::get(labelKey), L"", true, SettingUi::kToggleH,
 				helpKey.empty() ? L"" : Lang::get(helpKey));
+			r.row->setMarginBottom(0.f);   // 行距交给外层，保持与 grid2Cells 卡片一致
 			auto* sw = r.ctrlBox->makeChild<Ling::Button>();
 			SettingUi::styleToggle(sw, get());
 			sw->onClick.add([this, sw, get, set, after](Ling::Button*) {
@@ -940,7 +932,7 @@ void WinSettingFeatures::buildOther(Ling::Node* p)
 				});
 			return sw;
 		};
-	mkStateToggle(L"setting.featureTips",
+	mkStateToggle(grid, L"setting.featureTips",
 		[] { return Setting::get()->getFeatureTips(); },
 		[](bool on) { Setting::get()->setFeatureTips(on); },
 		[](bool) {
@@ -948,11 +940,11 @@ void WinSettingFeatures::buildOther(Ling::Node* p)
 			SettingUi::applyFeatureTipsVisibility();
 		});
 	// 「快捷键提示」：开关只影响之后弹出的停悬气泡（已显示的提示仍带旧文字，属预期）
-	mkStateToggle(L"setting.hotkeyTip",
+	mkStateToggle(grid, L"setting.hotkeyTip",
 		[] { return Setting::get()->getHotkeyTip(); },
 		[](bool on) { Setting::get()->setHotkeyTip(on); }, {});
 	// 悬停预览：历史记录 / 剪切板卡片停悬时弹出大图或文字卡（默认关闭，避免误触打扰）
-	mkStateToggle(L"setting.hoverPreview",
+	mkStateToggle(grid, L"setting.hoverPreview",
 		[] { return Setting::get()->getHoverPreview(); },
 		[](bool on) {
 			Setting::get()->setHoverPreview(on);
@@ -960,8 +952,33 @@ void WinSettingFeatures::buildOther(Ling::Node* p)
 		}, {},
 		L"setting.hoverPreviewTip");
 	// 记忆工具样式：记住上次标注工具样式（如大箭头），下次截图自动复用；默认关闭
-	mkStateToggle(L"setting.rememberToolStyle",
+	mkStateToggle(grid, L"setting.rememberToolStyle",
 		[] { return Setting::get()->getRememberToolStyle(); },
 		[](bool on) { Setting::get()->setRememberToolStyle(on); }, {});
 	SettingUi::grid2Cells(grid);
+
+	// 第三行双栏：左「静默截图」开关，右「工具栏对齐」下拉
+	auto* row = halfRow(p);
+	row->setMarginTop(SettingTheme::optionGap);
+	mkStateToggle(halfCol(row, false), L"setting.silentCapture",
+		[] { return Setting::get()->getSilentCapture(); },
+		[](bool on) { Setting::get()->setSilentCapture(on); }, {},
+		L"setting.silentCaptureTip");
+	{
+		const std::vector<std::wstring> labels{
+			Lang::get(L"setting.alignLeft"), Lang::get(L"setting.alignRight"), Lang::get(L"setting.alignCenter") };
+		auto r = SettingUi::optionRow(halfCol(row, true), Lang::get(L"setting.toolbarAlign"), L"", true,
+			SettingTheme::ctrlH, Lang::get(L"setting.toolbarAlignTip"));
+		r.row->setMarginBottom(0.f);
+		auto* ddl = SettingUi::selectDdl(r.ctrlBox, labels,
+			Setting::get()->getCaptureToolbarAlign(),
+			[this](int i, const std::wstring&) {
+				Setting::get()->setCaptureToolbarAlign(i);
+				this->syncRestoreState();
+				// 截图会话正好开着：立刻按新对齐重排（用户手动拖过工具栏时不生效，属预期）
+				if (auto* cap = WinCap::get()) cap->layoutTools();
+			});
+		ddl->setWidth(SettingTheme::dropdownWidth);
+		ddl->setFlexShrink(0.f);
+	}
 }

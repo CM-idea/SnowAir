@@ -2435,7 +2435,17 @@ void WinSettingHistory::refreshGrid(bool forceRescan)
 			if (std::filesystem::exists(cached, ec)) thumbPath = cached;
 		}
 		else if (clipFiles) {
-			if (clipImageKind) thumbPath = it.files.front();
+			if (clipImageKind) {
+				// 只记录文件路径、不复制内容：源文件可能已被删除或移动（例如微信临时文件）。
+				// 选第一个仍存在的图片作为缩略图；都不存在时留空，回退到下面的文件名显示。
+				for (const auto& f : it.files) {
+					std::error_code ec;
+					if (std::filesystem::exists(f, ec)) {
+						thumbPath = f;
+						break;
+					}
+				}
+			}
 			else {
 				// 本软件自己产出的文件（录屏/动图）：复用媒体历史的封面，不再显示文件名
 				std::wstring key = it.files.front();
@@ -2446,6 +2456,12 @@ void WinSettingHistory::refreshGrid(bool forceRescan)
 		}
 		else if (!clipText) {
 			thumbPath = it.filePath;
+		}
+		// 缩略图路径可能已失效（外部文件被删除、缓存被清理）：不要交给 ImageBox，
+		// 否则卡片只剩一块空白；下面会回退到文件名或类型占位图标。
+		if (!thumbPath.empty()) {
+			std::error_code ec;
+			if (!std::filesystem::exists(thumbPath, ec)) thumbPath.clear();
 		}
 		Ling::ScrollerBox* imgScroll = nullptr;   // 剪切板图片的滚动容器（无滑条）
 		Ling::TextBox* textScroll = nullptr;      // 剪切板文字预览（省略显示，不滚动）
@@ -2538,11 +2554,11 @@ void WinSettingHistory::refreshGrid(bool forceRescan)
 			nameBox->setFontSize(SettingTheme::fontSm);
 		}
 		else {
-			// 目录里扫出来的录屏没有封面：用视频图标占位
+			// 没有可用缩略图：录屏用视频图标，剪切板图片用图片图标占位
 			auto* ph = thumbHost->makeChild<Ling::Label>();
 			ph->setWidthPercent(100.f);
 			ph->setHeightPercent(100.f);
-			ph->setText(Icon::Video);
+			ph->setText(clip ? Icon::ImageBackground : Icon::Video);
 			ph->setFontFamily(Icon::Family);
 			ph->setFontSize(34.f);
 			ph->setColor(0xFFFFFF66);

@@ -44,9 +44,12 @@ public:
 	bool isResizingEdge() const {
 		return adjustHit != MaskHit::None && adjustHit != MaskHit::Inside;
 	}
+	// 拖边/拖角时，光标对应的"边上的那个点"：横边取边的 y、纵边取边的 x，角取角点。
+	// 放大镜的取样点用它，才能对着边线做 1 像素精修（以光标为中心时边落在视野边上）。
+	POINT edgePointNear(POINT pos) const;
 	// 抬手后可强制重建尺寸标签
 	void refreshLabel();
-	// 开始调整：记下方向和起始矩形。按的是边或角时，这一下就把那条边吸到光标处
+	// 开始调整：记下方向和起始矩形。按的是边或角时按下只"选中"它，拖出阈值才移动
 	void startAdjust(POINT pos);
 	// 从任意位置起拖"整体平移"（画幅锁定时拖边框没有缩放语义，按挪动处理）
 	void startDragMove(POINT pos);
@@ -118,6 +121,8 @@ public:
 	// 查找元素高亮补间（指数追赶 + 查询节流，去掉重开顿挫）
 	void onHoverAnimTick(UINT timerId);
 	void snapHoverTarget();
+	// 查找元素阶段滚轮切换命中层级：dir>0 放大到父元素，dir<0 缩小到子元素
+	bool wheelHover(int dir);
 	// 查找元素的辅助定时器：光标停稳后对同一点用完整预算再钻一次，直到细化或预算耗尽
 	void onHoverDwellTimer(UINT timerId);
 	// 按下/退出时立刻撤销查询状态（驻留重查、在途结果作废）；查询本身从不改动遮罩样式或鼠标捕获
@@ -189,7 +194,12 @@ private:
 	MaskHit adjustHit{ MaskHit::None };
 	D2D1_RECT_F adjustStartRect{};
 	POINT adjustPressPos{};
+	// 按下后是否已经真的拖动过：命中带很宽（±hitBandLogical），点按边/角时若直接按"边=光标"
+	// 改矩形，用户刚调好的边一按就又变了。按下只"选中"，拖出 adjustDragThreshold 才开始改。
+	bool adjustDragging{ false };
 	static constexpr float minSize{ 4.f };
+	// 拖动阈值（物理像素，和框选的抖动阈值同一口径：|dx|+|dy| 超过它才算拖动）
+	static constexpr float adjustDragThreshold{ 5.f };
 	static constexpr float handleLogical{ 8.f };
 	static constexpr float hitBandLogical{ 14.f };
 	// 圆角滑条：轨 4 / 钮半径 7
@@ -209,6 +219,10 @@ private:
 	D2D1_RECT_F hoverTarget_{};
 	// 最近一次命中链（客户区坐标，[0]=最细节点，末尾=窗口）；高亮用 [0]，其余供后续层级细化
 	std::vector<D2D1_RECT_F> hoverPath_;
+	int hoverLevel_{ 0 };   // hoverPath_ 的当前层级：0=最细，向后为更大的父元素
+	// 滚轮切换后的锁定：光标在锁定元素内移动时不重查、不重置层级
+	bool hoverLock_{ false };
+	D2D1_RECT_F hoverLockRect_{};
 	bool hoverAnimating_{ false };
 	ULONGLONG lastHoverQueryMs_{ 0 };
 	POINT lastHoverQueryPos_{};

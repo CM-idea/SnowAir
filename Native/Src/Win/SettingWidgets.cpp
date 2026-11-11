@@ -63,15 +63,17 @@ protected:
 
 // 为下拉按钮绑定浮层（选项列表 + 回调），复用全局 gPopup 实现互斥显示
 // setValue：回写选中文本到触发按钮（按钮文本由子 Label 控制，不能用 setText 覆盖）
+// hints（可选，与 options 等长）：选项行右侧的灰色附注，空串则该行不画
 void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int current,
                std::function<void(int, const std::wstring&)> onChange,
                std::function<void(const std::wstring&)> setValue = nullptr,
-               bool headerFromOptions = false, bool compact = false)
+               bool headerFromOptions = false, bool compact = false,
+               const std::vector<std::wstring>& hints = {})
 {
     // 选中值放进共享状态：展开时按「最新选中」渲染首行/排除项，选项被选中后即时更新。
     // 否则 current 是绑定那一刻的值，再次展开看到的还是初始默认项（首行恒为默认选项的 BUG）。
     auto sel = std::make_shared<int>(current);
-    btn->onClick.add([btn, options, sel, onChange, setValue, headerFromOptions, compact](Ling::Button*) mutable {
+    btn->onClick.add([btn, options, sel, onChange, setValue, headerFromOptions, compact, hints](Ling::Button*) mutable {
         auto* w = btn->win;
         // 开关切换：若浮层已展开且正好锚定在该按钮上，再次点击仅关闭（toggle 关），不再重开。
         // 注意顺序：全局低级鼠标钩子在消息派发前已先于按钮 onClick 运行，若它在此处关闭了浮层，
@@ -216,6 +218,7 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
                 spacer->setFlexGrow(1.f);
                 spacer->setFlexShrink(1.f);
             }
+            // 首行不画附注：它复刻的是触发框（只有名字），体积提示只出现在下方的选项行里。
             auto* icon = head->makeChild<FlipVLabel>();   // 垂直镜像的箭头
             icon->setText(Icon::Dropdown);
             icon->setFontFamily(Icon::Family);
@@ -238,7 +241,7 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
         listWrap->setFlexShrink(1.f);
         listWrap->setPadding(pad, pad, pad, pad);
 
-        auto addRow = [&](const std::wstring& text, std::function<void()> onPick) {
+        auto addRow = [&](const std::wstring& text, const std::wstring& hint, std::function<void()> onPick) {
             auto* item = listWrap->makeChild<Ling::Button>();
             item->setText(text);
             item->setHeight(itemH);
@@ -255,6 +258,25 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
             item->setHoverColor(SettingTheme::popupFg);
             item->setBg(0);
             item->setHoverBg(SettingTheme::popupSelBg);
+            // 附注（右侧、灰色小字）：把 left-对齐的按钮文本换成「名字 + 弹性空白 + 附注」两段，
+            // 附注才会贴到行尾，且下拉宽度变化时名字先收缩、附注保持完整。
+            if (!compact && !hint.empty()) {
+                item->setText(L"");
+                item->setAlignItems(Ling::Align::Center);
+                auto* name = item->makeChild<Ling::Label>();
+                name->setText(text);
+                name->setFontSize(SettingTheme::fontBase);
+                name->setColor(SettingTheme::popupFg);
+                name->setFlexShrink(1.f);
+                auto* gap = item->makeChild<Ling::Node>();
+                gap->setFlexGrow(1.f);
+                gap->setFlexShrink(1.f);
+                auto* tail = item->makeChild<Ling::Label>();
+                tail->setText(hint);
+                tail->setFontSize(SettingTheme::fontXs);   // 比选项名小一号、浅一档：是提示不是选项名
+                tail->setColor(SettingTheme::textTertiary);
+                tail->setFlexShrink(0.f);
+            }
             item->onClick.add([onPick, btn](Ling::Button*) {
                 if (onPick) onPick();
                 btn->setBorderWidth(1.f);   // 恢复触发框描边
@@ -265,7 +287,8 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
 
         for (size_t r = 0; r < rows.size(); r++) {
             const int i = rows[r];
-            auto* item = addRow(options[i], [i, options, onChange, setValue, sel]() {
+            const std::wstring hint = (i >= 0 && i < (int)hints.size()) ? hints[i] : std::wstring{};
+            auto* item = addRow(options[i], hint, [i, options, onChange, setValue, sel]() {
                 *sel = i;   // 记住新选中项：下次展开首行/排除项才对
                 if (setValue) setValue(options[i]);
                 if (onChange) onChange(i, options[i]);
@@ -274,7 +297,7 @@ void bindPopup(Ling::Button* btn, const std::vector<std::wstring>& options, int 
         }
         if (rows.empty()) {
             // 唯一选项就是当前值 → 列表空，补一行「无」：点了只收起，不改值
-            addRow(Lang::get(L"setting.none"), nullptr);
+            addRow(Lang::get(L"setting.none"), L"", nullptr);
         }
         gPopup->setAnchor(btn);
         gPopup->onDismiss = [btn]() {
@@ -909,7 +932,7 @@ namespace {
             { L"查找窗口元素", L"截图时识别并框选窗口内的子元素" },
             { L"“取消”弹窗", L"已绘制标注时，截图里按取消会先确认，避免误触丢失内容" },
             { L"截图自动保存", L"按键取消或关闭截图时，自动把选区内容保存至截图目录" },
-            { L"光标中心缩放", L"滚轮缩放贴图时以鼠标位置为中心" },
+            { L"光标中心缩放", L"滚轮缩放贴图时以鼠标位置为中心；关闭后以离鼠标最近的一边为锚点，对面那条边伸缩" },
             { L"自动文本识别", L"贴图后自动进行文本识别" },
             { L"自动缩放窗口", L"贴图超出显示器时自动缩放窗口，完整显示内容" },
             { L"托盘图标", L"在系统托盘显示图标" },
@@ -1235,7 +1258,8 @@ Ling::Button* selectDdl(Ling::Node* parent,
                         const std::vector<std::wstring>& options,
                         int current,
                         std::function<void(int, const std::wstring&)> onChange,
-                        bool compact)
+                        bool compact,
+                        const std::vector<std::wstring>& hints)
 {
     if (current < 0 || current >= (int)options.size()) current = 0;
     auto* btn = parent->makeChild<Ling::Button>();
@@ -1246,6 +1270,7 @@ Ling::Button* selectDdl(Ling::Node* parent,
     btn->setColor(SettingTheme::popupFg);
     btn->setHoverBg(SettingTheme::popupSelBg);   // 底色只在停悬时出现（浅色 F5F4F4 / 深色 424242）
     btn->setHoverColor(SettingTheme::popupFg);
+    btn->setHoverBorderColor(0);                 // 停悬不画描边，避免圆角边缘出现毛边
     btn->setFlexDirection(Ling::FlexDirection::Row);
     btn->setJustifyContent(Ling::Justify::Start);
     btn->setAlignItems(Ling::Align::Center);
@@ -1300,7 +1325,7 @@ Ling::Button* selectDdl(Ling::Node* parent,
     }
 
     bindPopup(btn, options, current, onChange,
-        [valueLab](const std::wstring& t) { valueLab->setText(t); }, false, compact);
+        [valueLab](const std::wstring& t) { valueLab->setText(t); }, false, compact, hints);
     return btn;
 }
 
@@ -1321,6 +1346,7 @@ Ling::Button* selectDdlIcon(Ling::Node* parent,
     // 图标：常态为「恢复默认」那种灰；停悬只把图标转纯白，底色沿用 Outline 的停悬底色
     btn->setColor(SettingTheme::textMuted);
     btn->setHoverColor(0xFFFFFFFF);
+    btn->setHoverBorderColor(0);   // 同上：停悬不画描边
     // 图标按钮没有文字：弹层首行直接显示当前选项
     bindPopup(btn, options, current, onChange, nullptr, true);
     return btn;
