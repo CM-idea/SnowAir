@@ -191,7 +191,7 @@ namespace ToolbarStore {
 			if (g_loaded) return;
 			g_loaded = true;
 			auto* s = Setting::get();
-			g_mode = std::clamp(s->getToolUInt(L"toolbarPalette", L"mode", 1), 0u, 3u);
+			g_mode = std::clamp(s->getToolUInt(L"toolbarPalette", L"mode", 0), 0u, 3u);
 			auto& c = g_custom;
 			// 键名沿用 c0/c1/c3/c4/c5：旧的 c2＝"停悬图标"已并入图标色，不再读取（老配置不丢色）。
 			c.primary = s->getToolUInt(L"toolbarPalette", L"c0", darkPreset().primary);
