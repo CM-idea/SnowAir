@@ -73,6 +73,7 @@ void ToolCap::refreshSize()
 	btnSize = (sizeMode == 0) ? 48.f : (sizeMode == 2 ? 38.f : 42.f);
 	ToolbarTheme::iconSize = (sizeMode == 0) ? 24.f : (sizeMode == 2 ? 20.f : 22.f);
 	ToolbarTheme::propPad = (sizeMode == 0) ? 12.f : (sizeMode == 2 ? 8.f : 10.f);
+	ToolbarTheme::propGap = (sizeMode == 0) ? 16.f : (sizeMode == 2 ? 12.f : 14.f);
 	// 内容宽：左 pad + 拖拽 + 拖拽右距 + 工具格 + 右 pad（右距已扣掉末按钮 margin/字形边）
 	float logicW{ ToolbarTheme::paddingLeft + ToolbarTheme::dragIconSize + dragMarginRight() };
 	const auto vis = visibleSlots();

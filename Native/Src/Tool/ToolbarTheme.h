@@ -22,7 +22,7 @@ namespace ToolbarTheme
 
 	// 属性栏 / 色板：左右各 16，项间距 16
 	inline float propPad{ 12.f };
-	inline constexpr float propGap{ 16.f };
+	inline float propGap{ 16.f };
 	inline float propBtnSize{ 42.f };
 	inline float propIconInner{ 34.f };
 	// 主栏/属性栏图标字号（随「工具栏尺寸」大中小切换）
