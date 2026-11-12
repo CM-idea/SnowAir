@@ -21,7 +21,7 @@ namespace ToolbarTheme
 	inline constexpr float splitterGap{ 12.f };
 
 	// 属性栏 / 色板：左右各 16，项间距 16
-	inline constexpr float propPad{ 18.f };
+	inline constexpr float propPad{ 20.f };
 	inline constexpr float propGap{ 16.f };
 	inline float propBtnSize{ 42.f };
 	inline float propIconInner{ 34.f };
