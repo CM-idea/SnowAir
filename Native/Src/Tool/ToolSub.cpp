@@ -28,6 +28,7 @@
 using namespace Microsoft::WRL;
 
 namespace {
+	std::vector<ToolSub*> g_toolSubs;
 	struct SliderCfg {
 		const wchar_t* key;
 		float min, max, def;
@@ -163,6 +164,14 @@ ToolSub::ToolSub(AnnotHost* win) : ToolbarWindow(), win(win)
 	ToolbarTheme::propBtnSize = btnSize;
 	ToolbarTheme::propIconInner = iconInner;
 	ToolbarTheme::iconSize = (sizeMode == 0) ? 24.f : (sizeMode == 2 ? 20.f : 22.f);
+	g_toolSubs.push_back(this);
+	static bool sizeHookInstalled = false;
+	if (!sizeHookInstalled && Setting::get()) {
+		sizeHookInstalled = true;
+		Setting::get()->toolbarSizeChanged = [] {
+			for (auto* sub : g_toolSubs) sub->applyToolbarSize();
+		};
+	}
 	onDpiChanged.add([this]() { dpiChanged = true; });
 	onSizeChanged.add([this]() {
 		if (!dpiChanged) return;
@@ -189,6 +198,7 @@ ToolSub::ToolSub(AnnotHost* win) : ToolbarWindow(), win(win)
 ToolSub::~ToolSub()
 {
 	flushRememberedSize();   // 会话直接结束时也把当前工具的粗细/字号落盘
+	g_toolSubs.erase(std::remove(g_toolSubs.begin(), g_toolSubs.end(), this), g_toolSubs.end());
 	// WinBase 析构不销毁 HWND：正常路径由 WinCap::onClosed 先 close，
 	// 这里是兜底 —— 漏了就会留下"幽灵窗"，系统发 WM_DPICHANGED 时重入已释放对象
 	if (hwnd) { close(); hwnd = nullptr; }
@@ -3014,6 +3024,19 @@ void ToolSub::refreshSize()
 {
 	if (!hasTools) return;
 	initSize(sizeBtnCount, sizeWithColors, centerOnBtn, sizeExtraW);
+}
+
+void ToolSub::applyToolbarSize()
+{
+	const int mode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
+	btnSize = (mode == 0) ? 48.f : (mode == 2 ? 38.f : 42.f);
+	iconInner = btnSize - 8.f;
+	ToolbarTheme::propBtnSize = btnSize;
+	ToolbarTheme::propIconInner = iconInner;
+	ToolbarTheme::iconSize = (mode == 0) ? 24.f : (mode == 2 ? 20.f : 22.f);
+	if (hasTools) refreshSize();
+	layout();
+	refresh();
 }
 
 D2D1_COLOR_F ToolSub::getSelectedColor() const
