@@ -2502,6 +2502,7 @@ void WinSettingAppearance::tbBuildTheme(Ling::Node* host)
     }
 
     auto* card = SettingUi::card(host);
+    card->setBorderRadius(SettingTheme::radiusRow);
     auto* title = card->makeChild<Ling::Label>();
     title->setText(Lang::get(L"setting.tbTheme"));
     title->setFontSize(13.f);
