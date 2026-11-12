@@ -68,6 +68,10 @@ float ToolCap::splitterSlotW() const
 
 void ToolCap::refreshSize()
 {
+	// 0 小 / 1 中 / 2 大：主工具栏高度 38 / 42 / 48。
+	const int sizeMode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
+	btnSize = (sizeMode == 0) ? 48.f : (sizeMode == 2 ? 38.f : 42.f);
+	ToolbarTheme::iconSize = (sizeMode == 0) ? 28.f : (sizeMode == 2 ? 22.f : 24.f);
 	// 内容宽：左 pad + 拖拽 + 拖拽右距 + 工具格 + 右 pad（右距已扣掉末按钮 margin/字形边）
 	float logicW{ ToolbarTheme::paddingLeft + ToolbarTheme::dragIconSize + dragMarginRight() };
 	const auto vis = visibleSlots();
@@ -81,7 +85,7 @@ void ToolCap::refreshSize()
 
 float ToolCap::iconSideInset() const
 {
-	return (btnSize - hoverInset * 2.f - Icon::Size) * 0.5f;
+	return (btnSize - hoverInset * 2.f - ToolbarTheme::iconSize) * 0.5f;
 }
 
 float ToolCap::dragMarginRight() const
@@ -814,7 +818,7 @@ void ToolCap::onCreated()
 				ToolbarTheme::iconNormal);
 			styleToolbarBtn(btn);
 			btn->setFontFamily(Icon::Family);
-			btn->setFontSize(Icon::Size);
+			btn->setFontSize(ToolbarTheme::iconSize);
 			applyActionColors(btn);
 			btn->onClick.add([this](Ling::Button* btn) { onClick(btn); });
 			if (winPin && id == L"close") {
@@ -850,7 +854,7 @@ void ToolCap::initDragHandle()
 	dragHandle->setId(L"drag");
 	dragHandle->setText(Icon::DragHandle);
 	dragHandle->setFontFamily(Icon::Family);
-	dragHandle->setFontSize(Icon::Size);
+	dragHandle->setFontSize(ToolbarTheme::iconSize);
 	// 半透明手柄、无悬停灰底
 	dragHandle->setColor(ToolbarTheme::dragHandleColor);
 	dragHandle->setHoverColor(ToolbarTheme::dragHandleColor);
@@ -1081,7 +1085,7 @@ void ToolCap::setSlotIcon(Ling::Button* btn, const std::wstring& toolId,
 	const auto* form = def ? ToolInitial::currentForm(*def) : nullptr;
 	if (form && form->overlayGlyph) {
 		btn->setText(L"");
-		if (auto* stack = ToolIcon::overlayGlyph(btn, form->glyph, form->overlayGlyph, Icon::Size,
+		if (auto* stack = ToolIcon::overlayGlyph(btn, form->glyph, form->overlayGlyph, ToolbarTheme::iconSize,
 			color, ToolIcon::withAlpha(color, 0x40u)))
 			slotOverlays.push_back({ btn, stack });
 	}

@@ -99,6 +99,8 @@ public:
 	// 截图工具栏相对选区的横向对齐：0 左 / 1 右 / 2 居中（默认左）
 	int getCaptureToolbarAlign();
 	void setCaptureToolbarAlign(int v);
+	int getToolbarSize();
+	void setToolbarSize(int v);
 	// 静默截图：开启时全屏/重复/焦点窗口截图直接完成；关闭后跳过框选、显示工具栏，需手动完成
 	bool getSilentCapture();
 	void setSilentCapture(bool on);

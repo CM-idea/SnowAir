@@ -187,10 +187,16 @@ void paintBarWithCaret(ID2D1DeviceContext* ctx, const D2D1_RECT_F& bar, float ra
 	enableSmooth(ctx);
 	const auto drawBar = insetRect(bar, kAaPad);
 	const float r = clampRadius(drawBar, radiusPx);
-	// 位图盖住圆角条 + 箭头尖（尖端可在 bar 外）；tip/base 用绝对坐标转局部，上下箭头同一套
-	const float destTop = (std::min)(drawBar.top, (std::min)(tipY, baseY));
-	const float destBottom = (std::max)(drawBar.bottom, (std::max)(tipY, baseY));
-	const D2D1_RECT_F dest{ drawBar.left, destTop, drawBar.right, destBottom };
+	// 位图盖住圆角条 + 箭头尖（尖端可在 bar 外）；tip/base 用绝对坐标转局部，上下箭头同一套。
+	// 外扩量必须是整像素：dest 一旦带 0.5px，整块超采样位图会被半像素重采样 → 描边又粗又糊。
+	// 描边外半边已由 layer 遮罩裁进填充内，不需要再按线宽预留空间，够填充分支自己的 AA 就行。
+	const float pad = kAaPad;
+	const float destTop = (std::min)(drawBar.top, (std::min)(tipY, baseY)) - pad;
+	const float destBottom = (std::max)(drawBar.bottom, (std::max)(tipY, baseY)) + pad;
+	const D2D1_RECT_F dest{
+		std::floor(drawBar.left - pad), std::floor(destTop),
+		std::ceil(drawBar.right + pad), std::ceil(destBottom)
+	};
 	const float ox = dest.left;
 	const float oy = dest.top;
 	const D2D1_RECT_F localBar{
@@ -213,10 +219,19 @@ void paintBarWithCaret(ID2D1DeviceContext* ctx, const D2D1_RECT_F& bar, float ra
 			return;
 		}
 		c->FillGeometry(geo.Get(), bg);
-		if (borderWidthPx > 0.f) {
-			auto stroke = makeBrush(c, borderRgba ? borderRgba : ToolbarTheme::border);
-			if (stroke) c->DrawGeometry(geo.Get(), stroke.Get(), borderWidthPx * scale);
-		}
+		if (borderWidthPx <= 0.f) return;
+		auto stroke = makeBrush(c, borderRgba ? borderRgba : ToolbarTheme::border);
+		if (!stroke) return;
+		const float bw = borderWidthPx * scale;
+		// 内收描边：与 paintRoundDirect「描边外沿 = 填充轮廓」一致。
+		// DrawGeometry 是沿路径居中的，外半边压在透明底上没有白底衬托，看起来比主栏粗一圈；
+		// 这里把居中描边画成 2× 线宽，再用填充几何当遮罩裁掉外侧 → 只剩内侧一半（宽 = bw）。
+		const D2D1_LAYER_PARAMETERS1 layer = D2D1::LayerParameters1(
+			D2D1::InfiniteRect(), geo.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+			D2D1::IdentityMatrix(), 1.f, nullptr, D2D1_LAYER_OPTIONS1_NONE);
+		c->PushLayer(&layer, nullptr);
+		c->DrawGeometry(geo.Get(), stroke.Get(), bw * 2.f);
+		c->PopLayer();
 	});
 }
 

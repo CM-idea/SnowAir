@@ -345,10 +345,10 @@ private:
 	MultiStyleFlags multiMixed_;
 	int multiFormKey_{ 0 };
 	bool resettingMultiSlider_{ false };
-	static constexpr float btnSize{ ToolbarTheme::propBtnSize };
+	inline static float btnSize{ ToolbarTheme::propBtnSize };
 	static constexpr float hoverRadius{ ToolbarTheme::hoverRadius };
 	static constexpr float hoverInset{ 4.f };
-	static constexpr float iconInner{ ToolbarTheme::propIconInner };
+	inline static float iconInner{ ToolbarTheme::propIconInner };
 	static constexpr float marginTop{ ToolbarTheme::caretSize };
 	static constexpr float swatchSize{ ToolbarTheme::swatchSize };
 	static constexpr float swatchRing{ ToolbarTheme::swatchRing };

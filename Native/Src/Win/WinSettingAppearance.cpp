@@ -1925,6 +1925,8 @@ void WinSettingAppearance::tbRefreshPreview()
     tbPreviewWrap->removeAllChildren();
     if (!tbPreviewShown) return;
     ToolbarTheme::refresh();   // 预览条与实际工具栏共用同一套运行时色板
+    const int sizeMode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
+    const float previewBtn = (sizeMode == 0) ? 36.f : (sizeMode == 2 ? 26.f : 30.f);
     // 预览条**镜像实际工具栏**（同一套 ToolbarTheme 常量）——所见即所得：
     // 实际是白底就画白底，另加 1px 描边（白底叠在白色卡片上才看得出边界）。
     auto* bar = tbPreviewWrap->makeChild<Ling::Node>();
@@ -1945,7 +1947,7 @@ void WinSettingAppearance::tbRefreshPreview()
             continue;
         }
         auto* b = bar->makeChild<Ling::Button>();
-        b->setSize(30.f, 30.f);
+        b->setSize(previewBtn, previewBtn);
         b->setBorderRadius(SettingTheme::radius);
         b->setBg(0);
         b->setHoverBg(ToolbarTheme::hoverBg);
@@ -2480,6 +2482,22 @@ int WinSettingAppearance::tbHitZone(POINT p, int fallback) const
 
 void WinSettingAppearance::tbBuildTheme(Ling::Node* host)
 {
+    auto* sizeDdl = SettingUi::selectRow(host, Lang::get(L"setting.tbSize"),
+        { Lang::get(L"setting.tbSizeLarge"), Lang::get(L"setting.tbSizeMedium"),
+          Lang::get(L"setting.tbSizeSmall") },
+        Setting::get()->getToolbarSize(),
+        [this](int idx, const std::wstring&) {
+            Setting::get()->setToolbarSize(idx);
+            this->tbRefreshPreview();
+        }, true);
+    // 与「全局热键」设置行同高，不再套一层大卡片。
+    if (sizeDdl && sizeDdl->parent && sizeDdl->parent->parent) {
+        auto* row = sizeDdl->parent->parent;
+        row->setHeight(SettingTheme::hotkeyRowH);
+        row->setPadding(SettingTheme::sp4, 0,
+            (SettingTheme::hotkeyRowH - SettingTheme::ctrlH) * 0.5f, 0);
+    }
+
     auto* card = SettingUi::card(host);
     auto* title = card->makeChild<Ling::Label>();
     title->setText(Lang::get(L"setting.tbTheme"));

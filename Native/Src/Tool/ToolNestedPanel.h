@@ -72,7 +72,7 @@ private:
 	std::wstring sliderTip_;
 	bool sliderHover_{ false };
 	bool sidesHover_{ false };
-	static constexpr float btnSize{ ToolbarTheme::propBtnSize };
-	static constexpr float iconInner{ ToolbarTheme::propIconInner };
+	inline static float btnSize{ 42.f };
+	inline static float iconInner{ 34.f };
 	static constexpr float marginTop{ ToolbarTheme::caretSize };
 };
