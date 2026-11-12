@@ -68,6 +68,9 @@ float ToolCap::splitterSlotW() const
 
 void ToolCap::refreshSize()
 {
+	// 0 小 / 1 中 / 2 大：主工具栏高度 38 / 42 / 48。
+	const int sizeMode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
+	btnSize = (sizeMode == 0) ? 48.f : (sizeMode == 2 ? 38.f : 42.f);
 	// 内容宽：左 pad + 拖拽 + 拖拽右距 + 工具格 + 右 pad（右距已扣掉末按钮 margin/字形边）
 	float logicW{ ToolbarTheme::paddingLeft + ToolbarTheme::dragIconSize + dragMarginRight() };
 	const auto vis = visibleSlots();
