@@ -52,8 +52,8 @@ void ToolPicker::onCreated()
 	row->setFlexDirection(Ling::FlexDirection::Row);
 	row->setAlignItems(Ling::Align::Center);
 	const int sizeMode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
-	ToolbarTheme::propGap = 16.f;
-	const float edge = (sizeMode == 0) ? 12.f : (sizeMode == 2 ? 8.f : 10.f);
+	ToolbarTheme::propGap = (sizeMode == 0) ? 18.f : (sizeMode == 2 ? 14.f : 16.f);
+	const float edge = (sizeMode == 0) ? 12.f : (sizeMode == 2 ? 9.f : 10.f);
 	row->setPaddingLeft(edge);
 	row->setPaddingRight(edge);
 	applyRowInsets();
@@ -82,8 +82,8 @@ void ToolPicker::applyToolbarSize()
 	ToolbarTheme::propBtnSize = (mode == 0) ? 48.f : (mode == 2 ? 38.f : 42.f);
 	ToolbarTheme::propIconInner = ToolbarTheme::propBtnSize - 8.f;
 	ToolbarTheme::iconSize = (mode == 0) ? 24.f : (mode == 2 ? 20.f : 22.f);
-	ToolbarTheme::propGap = 16.f;
-	const float edge = (mode == 0) ? 12.f : (mode == 2 ? 8.f : 10.f);
+	ToolbarTheme::propGap = (mode == 0) ? 18.f : (mode == 2 ? 14.f : 16.f);
+	const float edge = (mode == 0) ? 12.f : (mode == 2 ? 9.f : 10.f);
 	const float n = static_cast<float>(items.size());
 	const float slot = ToolbarTheme::iconSize + ToolbarTheme::propGap;
 	row->setPaddingLeft(edge);

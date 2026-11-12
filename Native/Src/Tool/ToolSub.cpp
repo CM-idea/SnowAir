@@ -164,8 +164,8 @@ ToolSub::ToolSub(AnnotHost* win) : ToolbarWindow(), win(win)
 	ToolbarTheme::propBtnSize = btnSize;
 	ToolbarTheme::propIconInner = iconInner;
 	ToolbarTheme::iconSize = (sizeMode == 0) ? 24.f : (sizeMode == 2 ? 20.f : 22.f);
-	ToolbarTheme::propPad = (sizeMode == 0) ? 12.f : (sizeMode == 2 ? 8.f : 10.f);
-	ToolbarTheme::propGap = 16.f;
+	ToolbarTheme::propPad = (sizeMode == 0) ? 12.f : (sizeMode == 2 ? 9.f : 10.f);
+	ToolbarTheme::propGap = (sizeMode == 0) ? 18.f : (sizeMode == 2 ? 14.f : 16.f);
 	g_toolSubs.push_back(this);
 	static bool sizeHookInstalled = false;
 	if (!sizeHookInstalled && Setting::get()) {
@@ -3012,8 +3012,8 @@ void ToolSub::initSize(int btnCount, bool withColors, bool centerOnBtn, float ex
 	ToolbarTheme::propBtnSize = btnSize;
 	ToolbarTheme::propIconInner = iconInner;
 	ToolbarTheme::iconSize = (sizeMode == 0) ? 24.f : (sizeMode == 2 ? 20.f : 22.f);
-	ToolbarTheme::propPad = (sizeMode == 0) ? 12.f : (sizeMode == 2 ? 8.f : 10.f);
-	ToolbarTheme::propGap = 16.f;
+	ToolbarTheme::propPad = (sizeMode == 0) ? 12.f : (sizeMode == 2 ? 9.f : 10.f);
+	ToolbarTheme::propGap = (sizeMode == 0) ? 18.f : (sizeMode == 2 ? 14.f : 16.f);
 	const int nIcons = btnCount + (withColors ? 1 : 0);
 	const float iconSlot = ToolbarTheme::iconSize + ToolbarTheme::propGap;
 	auto pxW = toPx(ToolbarTheme::propPad) * 2.f
@@ -3038,8 +3038,8 @@ void ToolSub::applyToolbarSize()
 	ToolbarTheme::propBtnSize = btnSize;
 	ToolbarTheme::propIconInner = iconInner;
 	ToolbarTheme::iconSize = (mode == 0) ? 24.f : (mode == 2 ? 20.f : 22.f);
-	ToolbarTheme::propPad = (mode == 0) ? 12.f : (mode == 2 ? 8.f : 10.f);
-	ToolbarTheme::propGap = 16.f;
+	ToolbarTheme::propPad = (mode == 0) ? 12.f : (mode == 2 ? 9.f : 10.f);
+	ToolbarTheme::propGap = (mode == 0) ? 18.f : (mode == 2 ? 14.f : 16.f);
 	if (contentNode) {
 		contentNode->setPaddingLeft(ToolbarTheme::propPad);
 		contentNode->setPaddingRight(ToolbarTheme::propPad);
