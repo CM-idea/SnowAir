@@ -612,13 +612,48 @@ namespace {
         return obj && SUCCEEDED(obj->GetData(&fe, &stm));
     }
 
+    // 部分源只提供 IStream；转成 HGLOBAL 后复用现有解析逻辑。
+    bool streamToHGlobal(IStream* stream, HGLOBAL& out)
+    {
+        if (!stream) return false;
+        std::vector<BYTE> bytes;
+        BYTE buf[64 * 1024];
+        for (;;) {
+            ULONG read = 0;
+            const HRESULT hr = stream->Read(buf, sizeof(buf), &read);
+            if (read > 0) bytes.insert(bytes.end(), buf, buf + read);
+            if (FAILED(hr) || read == 0) break;
+        }
+        if (bytes.empty()) return false;
+        HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes.size());
+        if (!h) return false;
+        if (void* p = GlobalLock(h)) {
+            memcpy(p, bytes.data(), bytes.size());
+            GlobalUnlock(h);
+            out = h;
+            return true;
+        }
+        GlobalFree(h);
+        return false;
+    }
+
     template <typename Fn>
     bool withHGlobal(IDataObject* obj, CLIPFORMAT format, Fn&& fn)
     {
         STGMEDIUM stm{};
-        if (!oleGetData(obj, format, TYMED_HGLOBAL, stm)) return false;
-        const bool ok = fn(stm.hGlobal);
-        ReleaseStgMedium(&stm);
+        if (oleGetData(obj, format, TYMED_HGLOBAL, stm)) {
+            const bool ok = fn(stm.hGlobal);
+            ReleaseStgMedium(&stm);
+            return ok;
+        }
+        STGMEDIUM streamStm{};
+        if (!oleGetData(obj, format, TYMED_ISTREAM, streamStm)) return false;
+        bool ok = false;
+        if (HGLOBAL h = nullptr; streamToHGlobal(streamStm.pstm, h)) {
+            ok = fn(h);
+            GlobalFree(h);
+        }
+        ReleaseStgMedium(&streamStm);
         return ok;
     }
 
