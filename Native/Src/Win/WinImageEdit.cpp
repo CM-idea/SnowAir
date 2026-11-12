@@ -1593,6 +1593,20 @@ void WinImageEdit::switchModeDeferred(Mode m)
     rebuildForMode();
 }
 
+void WinImageEdit::openImage(const std::wstring& path)
+{
+    if (path.empty()) return;
+    if (mode_ != Mode::Collage) {
+        mode_ = Mode::Collage;
+        rebuildForMode();
+    }
+    if (!collage_) return;
+    collage_->clear();
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    onFilesDropped({ path }, POINT{ (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 });
+}
+
 void WinImageEdit::rebuildForMode()
 {
     if (!canvasHost_) return;

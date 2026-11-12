@@ -9,6 +9,7 @@
 #include "../Win/PinMenu.h"
 #include "../Win/WinPin.h"
 #include "../Win/ClipPin.h"
+#include "../Win/WinImageEdit.h"
 
 #include <algorithm>
 #include <cstring>
@@ -820,6 +821,16 @@ int localDataSet(void*, const wchar_t* key, const wchar_t* json)
     return s->setLocalDataText(key, json) ? 1 : 0;
 }
 
+int openImageEditor(void*, const wchar_t* path)
+{
+    if (!path || !*path) return 0;
+    WinImageEdit::init();
+    auto* editor = WinImageEdit::get();
+    if (!editor) return 0;
+    editor->openImage(path);
+    return 1;
+}
+
 void openSettings(void*)
 {
     WinSetting::init(3);
@@ -925,6 +936,7 @@ void PluginHost::init()
     host_.config_set_int = setConfigInt;
     host_.local_data_get = localDataGet;
     host_.local_data_set = localDataSet;
+    host_.open_image_editor = openImageEditor;
     host_.open_settings = openSettings;
     host_.log = logMessage;
     host_.history_count = ::historyCount;

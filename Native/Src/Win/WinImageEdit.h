@@ -28,6 +28,8 @@ public:
 
     Mode mode() const { return mode_; }
     void setMode(Mode mode);
+    // 用指定图片新建一张编辑画布（供插件右键「图片编辑」使用）。
+    void openImage(const std::wstring& path);
     bool hasContent() const;
 
     // —— 标注（工具属性栏 / 画布标注）——

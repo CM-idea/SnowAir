@@ -23,7 +23,7 @@
 #endif
 #include <wchar.h>
 
-#define SNOWAIR_PLUGIN_API 5
+#define SNOWAIR_PLUGIN_API 6
 
 /*
  * The plugin is loaded with GetProcAddress("SnowAirPluginEntry"), so it does not
@@ -227,6 +227,9 @@ typedef struct SnowAirHost {
      */
     int  (*local_data_get)(void* user, const wchar_t* key, wchar_t* out, int capacity);
     int  (*local_data_set)(void* user, const wchar_t* key, const wchar_t* json);
+
+    /* v5 — 用 SnowAir 的图片编辑打开指定图片。 */
+    int  (*open_image_editor)(void* user, const wchar_t* path);
 } SnowAirHost;
 
 /* Settings item kind. */
