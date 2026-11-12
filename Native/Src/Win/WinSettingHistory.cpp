@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cwctype>
+#include <set>
+#include <shlobj.h>
 #include "../Lang.h"
 #include "../Setting.h"
 #include "../History.h"
@@ -736,6 +738,7 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 
 	// ---- 顶部一行：导航（全部/截图/录屏） + 时间筛选（贴最右） ----
 	auto* topRow = makeChild<Ling::Node>();
+	this->topRow = topRow;
 	topRow->setFlexDirection(Ling::FlexDirection::Row);
 	topRow->setWidthPercent(100.f);
 	topRow->setAlignItems(Ling::Align::Center);
@@ -747,10 +750,12 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 		  Lang::get(L"setting.historyTabClipboard") },
 		sourceTab,
 		[this](int idx) {
+			this->closeWindowBlacklist();
 			sourceTab = idx;
 			shownCount = kBatch;
 			this->closeFilterPanel();
 			this->closeModal();
+			if (blacklistBtn) idx == 4 ? blacklistBtn->show() : blacklistBtn->hide();
 			// 筛选对所有分类通用（剪切板也按时间 / 关键词 / 标签筛）
 			if (filterHost) filterHost->show();
 			if (clearBtn) clearBtn->setText(Lang::get(clearLabelKeyFor(idx)));
@@ -833,6 +838,92 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 	gridHost->setFlexDirection(Ling::FlexDirection::Column);
 	gridHost->setWidthPercent(100.f);
 
+	// ---- 剪切板「窗口黑名单」页：替换导航以下内容，底部按钮保留用于关闭 ----
+	blacklistPage = makeChild<Ling::Node>();
+	blacklistPage->setFlexDirection(Ling::FlexDirection::Column);
+	blacklistPage->setWidthPercent(100.f);
+	blacklistPage->setFlexGrow(1.f);
+	blacklistPage->setFlexShrink(1.f);
+	blacklistPage->hide();
+
+	auto* blacklistContent = blacklistPage->makeChild<Ling::Node>();
+	blacklistContent->setFlexDirection(Ling::FlexDirection::Column);
+	blacklistContent->setWidthPercent(100.f);
+	blacklistContent->setFlexGrow(1.f);
+	blacklistContent->setFlexShrink(1.f);
+
+	auto* blacklistInputRow = blacklistContent->makeChild<Ling::Node>();
+	blacklistInputRow->setFlexDirection(Ling::FlexDirection::Row);
+	blacklistInputRow->setAlignItems(Ling::Align::Center);
+	blacklistInputRow->setWidthPercent(100.f);
+
+	blacklistInput = blacklistInputRow->makeChild<Ling::TextBox>();
+	blacklistInput->setHeight(SettingTheme::ctrlH);
+	blacklistInput->setFlexGrow(1.f);
+	blacklistInput->setBorderRadius(SettingTheme::radiusSm);
+	blacklistInput->setBorder(1.f, SettingTheme::input);
+	blacklistInput->setBg(SettingTheme::inputBg);
+	blacklistInput->setColor(SettingTheme::textPrimary);
+	blacklistInput->setPadding(SettingTheme::sp2, SettingTheme::sp1,
+		SettingTheme::sp2, SettingTheme::sp1);
+	blacklistInput->setFontSize(SettingTheme::fontBase);
+	blacklistInput->setVerticalCenter(true);
+	blacklistInput->setPlaceholder(Lang::get(L"setting.blacklistPlaceholder"));
+	blacklistInput->setPlaceholderColor(SettingTheme::placeholder);
+	blacklistInput->onTextChanged.add([this](Ling::TextBox*, const std::wstring& text) {
+		if (this->blacklistSyncing) return;
+		this->refreshBlacklistSuggestions(text);
+	});
+
+	auto* blacklistAdd = SettingUi::btnPrimary(blacklistInputRow,
+		Lang::get(L"setting.add"), [this]() { this->addWindowBlacklistEntry(); }, 70.f);
+	blacklistAdd->setBorder(0.f, 0);
+	blacklistAdd->setBg(0x262626FFu);
+	blacklistAdd->setHoverBg(0xFAFAFAFFu);
+	blacklistAdd->setColor(SettingTheme::textPrimary);
+	blacklistAdd->setHoverColor(0x171717FFu);
+	blacklistAdd->setMarginLeft(SettingTheme::sp2);
+
+	auto* blacklistScroll = blacklistContent->makeChild<Ling::ScrollerBox>();
+	this->blacklistScroll = blacklistScroll;
+	blacklistScroll->setWidthPercent(100.f);
+	blacklistScroll->setFlexGrow(1.f);
+	blacklistScroll->setFlexShrink(1.f);
+	blacklistScroll->setMarginTop(SettingTheme::blockGap);
+	blacklistScroll->setScrollBarVisible(false);
+	blacklistScroll->content->setFlexDirection(Ling::FlexDirection::Column);
+	blacklistScroll->content->setWidthPercent(100.f);
+
+	blacklistList = blacklistScroll->makeChild<Ling::Node>();
+	blacklistList->setFlexDirection(Ling::FlexDirection::Column);
+	blacklistList->setWidthPercent(100.f);
+
+	blacklistEmpty = blacklistContent->makeChild<Ling::Label>();
+	blacklistEmpty->setText(Lang::get(L"setting.blacklistEmpty"));
+	blacklistEmpty->setFontSize(SettingTheme::fontBase);
+	blacklistEmpty->setColor(SettingTheme::textMuted);
+	blacklistEmpty->setPositionType(Ling::Position::Absolute);
+	blacklistEmpty->setPosition(Ling::Edge::Left, 0.f);
+	blacklistEmpty->setPosition(Ling::Edge::Top, 0.f);
+	blacklistEmpty->setPosition(Ling::Edge::Right, 0.f);
+	blacklistEmpty->setPosition(Ling::Edge::Bottom, 0.f);
+	blacklistEmpty->setJustifyContent(Ling::Justify::Center);
+	blacklistEmpty->setAlignItems(Ling::Align::Center);
+	blacklistEmpty->hide();
+
+	// 自动补全：绝对定位覆盖在内容上方，不挤压下面的列表。
+	blacklistSuggest = blacklistContent->makeChild<Ling::Node>();
+	blacklistSuggest->setPositionType(Ling::Position::Absolute);
+	blacklistSuggest->setPosition(Ling::Edge::Left, 0.f);
+	blacklistSuggest->setPosition(Ling::Edge::Right, 0.f);
+	blacklistSuggest->setPosition(Ling::Edge::Top,
+		SettingTheme::ctrlH + SettingTheme::sp1);
+	blacklistSuggest->setFlexDirection(Ling::FlexDirection::Column);
+	blacklistSuggest->setPadding(4.f, 4.f, 4.f, 4.f);
+	blacklistSuggest->setBg(0x262626FFu);
+	blacklistSuggest->setBorderRadius(SettingTheme::radiusMd);
+	blacklistSuggest->hide();
+
 	// ---- 底部一行：左「打开目录 / 清空历史」，右「当前条目」 ----
 	auto* footer = makeChild<Ling::Node>();
 	footer->setFlexDirection(Ling::FlexDirection::Row);
@@ -863,8 +954,22 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 		});
 	openDirBtn->setMarginRight(SettingTheme::sp2);
 
+	blacklistBtn = SettingUi::btnOutline(footer, Lang::get(L"setting.windowBlacklist"),
+		[this]() { this->toggleWindowBlacklist(); });
+	blacklistBtn->setMarginRight(SettingTheme::sp2);
+	blacklistBtn->hide();
+
 	// 清空按钮：文案随导航切换（全部/截图/录屏/其他/剪切板）
 	clearBtn = SettingUi::btnDestructive(footer, Lang::get(clearLabelKeyFor(sourceTab)), [this]() {
+		if (blacklistOpen) {
+			blacklistDismissingClick = false;
+			closeWindowBlacklist();
+			return;
+		}
+		if (blacklistDismissingClick) {
+			blacklistDismissingClick = false;
+			return;
+		}
 		// 确认文案与动作都跟随当前导航分类
 		const wchar_t* msgKey = L"setting.clearHistoryConfirmAll";
 		switch (this->sourceTab) {
@@ -944,6 +1049,7 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 	mouseDownTok = win->onMouseDown.add([this, weak](POINT pos, bool) {
 		if (!weak.lock()) return;
 		this->dismissingClick = false;
+		this->blacklistDismissingClick = false;
 		this->closeTransientUi(pos);
 		});
 	keyTok = win->onKeyDown.add([this, weak](UINT key) {
@@ -1950,9 +2056,246 @@ void WinSettingHistory::rebuildFilterPanel()
 	applyMode();
 }
 
+void WinSettingHistory::ensureInstalledApps()
+{
+	if (installedAppsLoaded) return;
+	installedAppsLoaded = true;
+	std::set<std::wstring> seen;
+	auto addFolder = [&](REFKNOWNFOLDERID folder) {
+		PWSTR raw = nullptr;
+		if (FAILED(SHGetKnownFolderPath(folder, 0, nullptr, &raw)) || !raw) return;
+		std::error_code ec;
+		for (std::filesystem::recursive_directory_iterator it(raw, ec), end; it != end;
+			it.increment(ec)) {
+			if (ec) { ec.clear(); continue; }
+			if (!it->is_regular_file(ec)) continue;
+			if (_wcsicmp(it->path().extension().c_str(), L".lnk") != 0) continue;
+			std::wstring name = it->path().stem().wstring();
+			const auto first = name.find_first_not_of(L" \t");
+			const auto last = name.find_last_not_of(L" \t");
+			if (first == std::wstring::npos || last == std::wstring::npos) continue;
+			name = name.substr(first, last - first + 1);
+			if (name.empty()) continue;
+			std::wstring lower = name;
+			for (auto& ch : lower) ch = static_cast<wchar_t>(towlower(ch));
+			if (!seen.insert(lower).second) continue;
+			installedApps.push_back(std::move(name));
+		}
+		CoTaskMemFree(raw);
+	};
+	addFolder(FOLDERID_Programs);
+	addFolder(FOLDERID_CommonPrograms);
+	std::sort(installedApps.begin(), installedApps.end(),
+		[](const std::wstring& a, const std::wstring& b) {
+			return _wcsicmp(a.c_str(), b.c_str()) < 0;
+		});
+}
+
+void WinSettingHistory::refreshBlacklistSuggestions(const std::wstring& text)
+{
+	if (!blacklistSuggest) return;
+	blacklistSuggest->removeAllChildren();
+	blacklistSuggest->hide();
+	std::wstring query = text;
+	const auto first = query.find_first_not_of(L" \t");
+	const auto last = query.find_last_not_of(L" \t");
+	query = (first == std::wstring::npos) ? L"" : query.substr(first, last - first + 1);
+	if (query.empty()) return;
+	for (auto& ch : query) ch = static_cast<wchar_t>(towlower(ch));
+	ensureInstalledApps();
+	int shown = 0;
+	for (const auto& app : installedApps) {
+		std::wstring lower = app;
+		for (auto& ch : lower) ch = static_cast<wchar_t>(towlower(ch));
+		if (lower.find(query) == std::wstring::npos) continue;
+		auto* item = SettingUi::btnGhost(blacklistSuggest, app, [this, app]() {
+			if (!blacklistInput) return;
+			blacklistSyncing = true;
+			blacklistInput->setText(app);
+			blacklistSyncing = false;
+			blacklistSuggest->hide();
+			blacklistInput->focus();
+		});
+		item->setWidthPercent(100.f);
+		item->setHeight(SettingTheme::ctrlH);
+		item->setJustifyContent(Ling::Justify::Start);
+		item->setAlignItems(Ling::Align::Center);
+		item->setBorder(0.f, 0);
+		item->setBorderRadius(SettingTheme::radiusSm);
+		item->setBg(0x262626FFu);
+		item->setHoverBg(0x424242FFu);
+		item->setColor(SettingTheme::textPrimary);
+		item->setHoverColor(SettingTheme::textPrimary);
+		item->setPadding(8.f, 0.f, 8.f, 0.f);
+		item->setMarginBottom(2.f);
+		blacklistSuggest->show();
+		if (++shown >= 8) break;
+	}
+}
+
+void WinSettingHistory::addWindowBlacklistEntry()
+{
+	if (!blacklistInput) return;
+	std::wstring text = blacklistInput->getText();
+	const auto first = text.find_first_not_of(L" \t");
+	const auto last = text.find_last_not_of(L" \t");
+	if (first == std::wstring::npos) return;
+	text = text.substr(first, last - first + 1);
+	auto list = Setting::get()->getWindowBlacklist();
+	for (const auto& item : list) {
+		if (_wcsicmp(item.c_str(), text.c_str()) == 0) {
+			blacklistInput->setText(L"");
+			blacklistSuggest->hide();
+			return;
+		}
+	}
+	list.push_back(text);
+	Setting::get()->setWindowBlacklist(list);
+	blacklistSyncing = true;
+	blacklistInput->setText(L"");
+	blacklistSyncing = false;
+	blacklistSuggest->hide();
+	refreshWindowBlacklist();
+	blacklistInput->focus();
+}
+
+void WinSettingHistory::removeWindowBlacklistEntry(const std::wstring& entry)
+{
+	auto list = Setting::get()->getWindowBlacklist();
+	list.erase(std::remove_if(list.begin(), list.end(), [&](const std::wstring& item) {
+		return _wcsicmp(item.c_str(), entry.c_str()) == 0;
+	}), list.end());
+	Setting::get()->setWindowBlacklist(list);
+	refreshWindowBlacklist();
+}
+
+void WinSettingHistory::refreshWindowBlacklist()
+{
+	if (!blacklistList) return;
+	blacklistList->removeAllChildren();
+	const auto list = Setting::get()->getWindowBlacklist();
+	if (list.empty()) {
+		if (blacklistScroll) blacklistScroll->hide();
+		blacklistEmpty->show();
+		return;
+	}
+	blacklistEmpty->hide();
+	if (blacklistScroll) blacklistScroll->show();
+	const float halfGap = SettingTheme::optionGap * 0.5f;
+	auto addCell = [this, halfGap](Ling::Node* row, const std::wstring& entry, bool right) {
+		auto* col = row->makeChild<Ling::Node>();
+		col->setWidthPercent(50.f);
+		col->setFlexDirection(Ling::FlexDirection::Column);
+		if (right) col->setPaddingLeft(halfGap);
+		else col->setPaddingRight(halfGap);
+		auto ref = SettingUi::optionRow(col, entry, L"", true);
+		ref.row->setMarginBottom(0.f);
+		auto* del = SettingUi::btnGhost(ref.ctrlBox, Icon::Remove,
+			[this, entry]() { this->removeWindowBlacklistEntry(entry); },
+			SettingTheme::ctrlH);
+		del->setFontFamily(Icon::Family);
+		del->setFontSize(16.f);
+		del->setPadding(0.f, 0.f, 0.f, 0.f);
+		del->setColor(SettingTheme::textMuted);
+		del->setHoverColor(SettingTheme::textPrimary);
+		del->setWidth(SettingTheme::ctrlH);
+		del->setHeight(SettingTheme::ctrlH);
+	};
+	for (size_t i = 0; i < list.size(); i += 2) {
+		auto* row = blacklistList->makeChild<Ling::Node>();
+		row->setFlexDirection(Ling::FlexDirection::Row);
+		row->setWidthPercent(100.f);
+		if (i + 2 < list.size()) row->setMarginBottom(SettingTheme::optionGap);
+		addCell(row, list[i], false);
+		if (i + 1 < list.size()) addCell(row, list[i + 1], true);
+	}
+}
+
+void WinSettingHistory::setBlacklistBtnActive(bool on)
+{
+	if (!blacklistBtn) return;
+	if (on) {
+		// 与「初始属性」按钮相同的选中态：浅灰实心胶囊，不保留描边。
+		const uint32_t selBg = 0xE5E5E5FFu;
+		const uint32_t selFg = SettingTheme::isDark() ? 0x171717FFu : SettingTheme::textPrimary;
+		blacklistBtn->setBorder(0.f, 0);
+		blacklistBtn->setBg(selBg);
+		blacklistBtn->setHoverBg(selBg);
+		blacklistBtn->setColor(selFg);
+		blacklistBtn->setHoverColor(selFg);
+	}
+	else {
+		blacklistBtn->setBorder(1.f, SettingTheme::input);
+		blacklistBtn->setBg(SettingTheme::cardBg);
+		blacklistBtn->setHoverBg(SettingTheme::outlineHoverBg);
+		blacklistBtn->setColor(SettingTheme::textPrimary);
+		blacklistBtn->setHoverColor(SettingTheme::textPrimary);
+	}
+}
+
+void WinSettingHistory::openWindowBlacklist()
+{
+	if (blacklistOpen || !blacklistPage) return;
+	closeFilterPanel();
+	blacklistOpen = true;
+	if (emptyLabel) emptyLabel->hide();
+	if (gridScroll) gridScroll->hide();
+	if (topRow) topRow->hide();
+	if (clearBtn) clearBtn->hide();
+	if (openDirBtn) openDirBtn->hide();
+	blacklistPage->show();
+	if (filterHost) filterHost->hide();
+	if (countLabel) countLabel->hide();
+	if (blacklistBtn) blacklistBtn->show();
+	setBlacklistBtnActive(true);
+	refreshWindowBlacklist();
+	if (blacklistInput) {
+		blacklistSyncing = true;
+		blacklistInput->setText(L"");
+		blacklistSyncing = false;
+	}
+	if (blacklistSuggest) blacklistSuggest->hide();
+}
+
+void WinSettingHistory::closeWindowBlacklist()
+{
+	if (!blacklistOpen) return;
+	blacklistOpen = false;
+	if (blacklistPage) blacklistPage->hide();
+	if (blacklistSuggest) blacklistSuggest->hide();
+	if (topRow) topRow->show();
+	if (filterHost) filterHost->show();
+	if (clearBtn) clearBtn->show();
+	if (openDirBtn) sourceTab == 4 ? openDirBtn->hide() : openDirBtn->show();
+	if (countLabel) countLabel->show();
+	if (blacklistBtn && sourceTab == 4) blacklistBtn->show();
+	setBlacklistBtnActive(false);
+	this->refreshGrid();
+}
+
+void WinSettingHistory::toggleWindowBlacklist()
+{
+	if (blacklistOpen) closeWindowBlacklist();
+	else openWindowBlacklist();
+}
+
 void WinSettingHistory::closeTransientUi(POINT pos)
 {
 	const bool esc = (pos.x == INT_MAX);
+	if (blacklistOpen) {
+		const bool inPage = blacklistPage && blacklistPage->isPosIn(pos);
+		const bool onBtn = blacklistBtn && blacklistBtn->isPosIn(pos);
+		if (!inPage && !onBtn) {
+			if (!esc) blacklistDismissingClick = true;
+			closeWindowBlacklist();
+			return;
+		}
+		// 点内容区（补全框和输入框以外）先收起补全；继续输入时会重新弹出。
+		const bool inSuggest = blacklistSuggest && blacklistSuggest->isPosIn(pos);
+		const bool inInput = blacklistInput && blacklistInput->isPosIn(pos);
+		if (!inSuggest && !inInput && blacklistSuggest) blacklistSuggest->hide();
+		return;
+	}
 	if (modal) {
 		if (esc || (modalCard && !modalCard->isPosIn(pos))) {
 			if (!esc) dismissingClick = true;
@@ -2218,6 +2561,7 @@ std::vector<Setting::HistoryItem> WinSettingHistory::collectItems(bool forceResc
 
 void WinSettingHistory::refreshGrid(bool forceRescan)
 {
+	if (blacklistOpen) return;
 	if (forceRescan) {
 		Setting::get()->pruneExpiredHistory();
 		Setting::get()->pruneOrphanThumbCache();
@@ -2478,42 +2822,57 @@ void WinSettingHistory::refreshGrid(bool forceRescan)
 			img->loadImg(svgPreview, 800.f * win->dpi, 3200.f * win->dpi);
 		}
 		else if (clipText) {
-			// 换行 / 制表都压成空格；只画四行，剩下的用同色块挡住
 			std::wstring preview = it.text;
 			for (auto& ch : preview)
 				if (ch == L'\r' || ch == L'\n' || ch == L'\t') ch = L' ';
-			auto* clip = thumbHost->makeChild<Ling::ScrollerBox>();
-			clip->setWidthPercent(100.f);
-			clip->setHeight(72.f);
-			clip->setScrollBarVisible(false);
-			clip->setWheelEnabled(false);
-			clip->content->setFlexDirection(Ling::FlexDirection::Column);
-			clip->content->setWidthPercent(100.f);
-			auto* tb = clip->makeChild<Ling::Label>();
-			tb->setWidthPercent(100.f);
-			tb->setPadding(8.f, 4.f, 8.f, 4.f);
-			tb->setBg(0);
-			tb->setJustifyContent(Ling::Justify::Start);
-			tb->setAlignItems(Ling::Align::FlexStart);
-			tb->setText(preview);
-			tb->setColor(SettingTheme::textPrimary);
-			tb->setFontSize(SettingTheme::fontSm);
-			uint32_t maskColor = SettingTheme::isDark() ? 0x111111FFu : SettingTheme::secondary;
-			// 色值条目：缩略图区直接铺这个颜色，并按亮度换文字色
 			uint32_t rgb{};
-			if (clipTextKind(it.text, &rgb) == ClipTextKind::Color) {
-				tb->setBg((rgb << 8) | 0xFFu);
-				maskColor = (rgb << 8) | 0xFFu;
+			const bool colorEntry = clipTextKind(it.text, &rgb) == ClipTextKind::Color;
+			if (colorEntry) {
+				// 色值条目：整个缩略图区域铺色，文字叠在上面；不画底部遮挡块。
+				auto* fill = thumbHost->makeChild<Ling::Node>();
+				fill->setWidthPercent(100.f);
+				fill->setHeightPercent(100.f);
+				fill->setBg((rgb << 8) | 0xFFu);
+				fill->setJustifyContent(Ling::Justify::Start);
+				fill->setAlignItems(Ling::Align::FlexStart);
+				auto* tb = fill->makeChild<Ling::Label>();
+				tb->setWidthPercent(100.f);
+				tb->setPadding(8.f, 4.f, 8.f, 4.f);
+				tb->setBg(0);
+				tb->setJustifyContent(Ling::Justify::Start);
+				tb->setAlignItems(Ling::Align::FlexStart);
+				tb->setText(preview);
 				const int lum = (((rgb >> 16) & 0xFF) * 299 + ((rgb >> 8) & 0xFF) * 587 + (rgb & 0xFF) * 114) / 1000;
 				tb->setColor(lum > 150 ? 0x14181CFFu : 0xFFFFFFFFu);
+				tb->setFontSize(SettingTheme::fontSm);
 			}
-			auto* mask = thumbHost->makeChild<Ling::Node>();
-			mask->setPositionType(Ling::Position::Absolute);
-			mask->setPosition(Ling::Edge::Left, 0.f);
-			mask->setWidthPercent(100.f);
-			mask->setPosition(Ling::Edge::Bottom, 0.f);
-			mask->setHeight(6.f);
-			mask->setBg(maskColor);
+			else {
+				// 换行 / 制表都压成空格；只画四行，剩下的用同色块挡住
+				auto* clip = thumbHost->makeChild<Ling::ScrollerBox>();
+				clip->setWidthPercent(100.f);
+				clip->setHeight(72.f);
+				clip->setScrollBarVisible(false);
+				clip->setWheelEnabled(false);
+				clip->content->setFlexDirection(Ling::FlexDirection::Column);
+				clip->content->setWidthPercent(100.f);
+				auto* tb = clip->makeChild<Ling::Label>();
+				tb->setWidthPercent(100.f);
+				tb->setPadding(8.f, 4.f, 8.f, 4.f);
+				tb->setBg(0);
+				tb->setJustifyContent(Ling::Justify::Start);
+				tb->setAlignItems(Ling::Align::FlexStart);
+				tb->setText(preview);
+				tb->setColor(SettingTheme::textPrimary);
+				tb->setFontSize(SettingTheme::fontSm);
+				const uint32_t maskColor = SettingTheme::isDark() ? 0x111111FFu : SettingTheme::secondary;
+				auto* mask = thumbHost->makeChild<Ling::Node>();
+				mask->setPositionType(Ling::Position::Absolute);
+				mask->setPosition(Ling::Edge::Left, 0.f);
+				mask->setWidthPercent(100.f);
+				mask->setPosition(Ling::Edge::Bottom, 0.f);
+				mask->setHeight(6.f);
+				mask->setBg(maskColor);
+			}
 		}
 		else if (!thumbPath.empty()) {
 			if (clip) {

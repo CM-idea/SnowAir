@@ -44,6 +44,16 @@ private:
 	void closeFilterPanel(bool keepMode = false);
 	void setFilterBtnActive(bool on);
 	void rebuildFilterPanel();
+	// 剪切板页的窗口黑名单：整页替换导航以下内容
+	void toggleWindowBlacklist();
+	void openWindowBlacklist();
+	void closeWindowBlacklist();
+	void setBlacklistBtnActive(bool on);
+	void refreshWindowBlacklist();
+	void refreshBlacklistSuggestions(const std::wstring& text);
+	void addWindowBlacklistEntry();
+	void removeWindowBlacklistEntry(const std::wstring& entry);
+	void ensureInstalledApps();
 	// 页内模态：标签编辑
 	void showTagDialog(const Setting::HistoryItem& it);
 	// 通用标签编辑：key = 标签存储键（文件历史用路径，剪切板用条目 id）
@@ -93,6 +103,7 @@ private:
 	Ling::Node* gridHost{ nullptr };
 	Ling::Label* emptyLabel{ nullptr };
 	Ling::Node* filterHost{ nullptr };      // 承载筛选按钮
+	Ling::Node* topRow{ nullptr };           // 顶部导航行（黑名单页打开时整行隐藏）
 	Ling::Button* filterBtn{ nullptr };
 	Ling::Node* filterPanel{ nullptr };     // 打开中的筛选气泡（页内绝对定位）
 	Ling::Node* filterDim{ nullptr };       // 气泡打开时整页压暗（气泡是它的子节点）
@@ -105,6 +116,18 @@ private:
 	int sourceTab{ 0 };                     // 0 全部 / 1 截图 / 2 录屏 / 3 其他 / 4 剪切板
 	Ling::Button* clearBtn{ nullptr };      // 底部「清空…」：文案随导航切换
 	Ling::Button* openDirBtn{ nullptr };    // 底部「打开历史目录」：剪切板分类隐藏（只存路径，没有本地目录）
+	Ling::Button* blacklistBtn{ nullptr };  // 底部「窗口黑名单」：只在剪切板导航显示
+	Ling::Node* blacklistPage{ nullptr };
+	Ling::TextBox* blacklistInput{ nullptr };
+	Ling::Node* blacklistSuggest{ nullptr };
+	Ling::Node* blacklistList{ nullptr };
+	Ling::ScrollerBox* blacklistScroll{ nullptr };
+	Ling::Label* blacklistEmpty{ nullptr };
+	bool blacklistOpen{ false };
+	bool blacklistDismissingClick{ false };
+	bool blacklistSyncing{ false };
+	bool installedAppsLoaded{ false };
+	std::vector<std::wstring> installedApps;
 
 	// —— 分屏渲染状态 ——
 	int shownCount{ 9 };                    // 目标渲染条数（只会随滚动增大）

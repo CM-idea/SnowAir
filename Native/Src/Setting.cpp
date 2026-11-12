@@ -735,6 +735,24 @@ namespace {
 
     // 采集流程：WM_CLIPBOARDUPDATE -> 300ms 去抖 -> 单次 OLE 读取 -> 序号校验 -> 写历史。
     // OLE 在 UI 线程执行，复用 Ling 已初始化的 STA。
+    std::wstring clipboardSourceTitle()
+    {
+        auto titleOf = [](HWND hwnd) -> std::wstring {
+            if (!hwnd) return {};
+            HWND root = GetAncestor(hwnd, GA_ROOT);
+            if (root) hwnd = root;
+            const int len = GetWindowTextLengthW(hwnd);
+            if (len <= 0) return {};
+            std::wstring title(static_cast<size_t>(len) + 1, L'\0');
+            const int got = GetWindowTextW(hwnd, title.data(), len + 1);
+            title.resize(got > 0 ? static_cast<size_t>(got) : 0);
+            return title;
+        };
+        std::wstring title = titleOf(GetClipboardOwner());
+        if (title.empty()) title = titleOf(GetForegroundWindow());
+        return title;
+    }
+
     void captureClipboardNow()
     {
         auto* s = Setting::get();
@@ -748,6 +766,9 @@ namespace {
         if (GetClipboardSequenceNumber() != seq) return;
         g_lastClipSeq = seq;
         if (!read) return;
+
+        // 来源窗口在剪切板黑名单里：这次复制不写入历史。
+        if (s->isWindowBlacklisted(clipboardSourceTitle())) return;
 
         if (snap.hasFiles) s->addClipboardFiles(snap.files);
         else if (snap.hasText) s->addClipboardText(snap.text);
@@ -2338,6 +2359,20 @@ void Setting::setWindowBlacklist(const std::vector<std::wstring>& titles)
     JsonArray arr;
     for (auto& t : titles) arr.Append(JsonValue::CreateStringValue(t));
     setFeatArray(L"windowBlacklist", arr);
+}
+
+bool Setting::isWindowBlacklisted(const std::wstring& windowTitle)
+{
+    if (windowTitle.empty()) return false;
+    std::wstring title = windowTitle;
+    for (auto& c : title) c = static_cast<wchar_t>(towlower(c));
+    for (auto& entry : getWindowBlacklist()) {
+        if (entry.empty()) continue;
+        std::wstring needle = entry;
+        for (auto& c : needle) c = static_cast<wchar_t>(towlower(c));
+        if (title.find(needle) != std::wstring::npos) return true;
+    }
+    return false;
 }
 
 // ================ 本机数据：local.json ================

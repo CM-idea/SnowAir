@@ -265,6 +265,7 @@ public:
 
 	std::vector<std::wstring> getWindowBlacklist();
 	void setWindowBlacklist(const std::vector<std::wstring>& titles);
+	bool isWindowBlacklisted(const std::wstring& windowTitle);
 
 	// —— 历史：只索引真实存在的输出文件，不复制内容 ——
 	struct HistoryItem {
