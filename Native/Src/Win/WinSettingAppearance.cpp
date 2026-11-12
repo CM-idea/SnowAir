@@ -500,6 +500,7 @@ void WinSettingAppearance::buildToolbarTab(Ling::Node* host)
 
     // 显示区（无标题，仅卡片分区；内容区统一不描边）
     tbActiveCard = SettingUi::card(content);
+    tbActiveCard->setBorderRadius(SettingTheme::radiusRow);
     tbActiveBox = tbActiveCard->makeChild<Ling::Node>();
     tbActiveBox->setFlexDirection(Ling::FlexDirection::Row);
     tbActiveBox->setFlexWrap(Ling::Wrap::Wrap);
@@ -507,6 +508,7 @@ void WinSettingAppearance::buildToolbarTab(Ling::Node* host)
 
     // 隐藏区（无标题；空时由 tbBuildChips 追加居中的预留提示文字；不描边）
     tbInactiveCard = SettingUi::card(content);
+    tbInactiveCard->setBorderRadius(SettingTheme::radiusRow);
     tbInactiveBox = tbInactiveCard->makeChild<Ling::Node>();
     tbInactiveBox->setFlexDirection(Ling::FlexDirection::Row);
     tbInactiveBox->setFlexWrap(Ling::Wrap::Wrap);
@@ -1465,6 +1467,7 @@ void WinSettingAppearance::tbBuildInitialEditor(Ling::Node* wrap)
 	tbInitialBarBox->setMarginBottom(SettingTheme::blockGap);
 	// 卡片2：选中工具的初始属性（未选中时是空卡片）
 	tbInitialEditorBox = SettingUi::card(wrap);
+	tbInitialEditorBox->setBorderRadius(SettingTheme::radiusRow);
 	tbInitialEditorBox->setMarginBottom(0.f);
 
 	// 拖拽替换时跟手的幽灵（绝对定位，随本页销毁）
