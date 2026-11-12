@@ -79,7 +79,7 @@ void ToolPicker::applyToolbarSize()
 {
 	if (!row) return;
 	const int mode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
-	ToolbarTheme::propBtnSize = (mode == 0) ? 48.f : (mode == 2 ? 40.f : 42.f);
+	ToolbarTheme::propBtnSize = (mode == 0) ? 48.f : (mode == 2 ? 39.f : 42.f);
 	ToolbarTheme::propIconInner = ToolbarTheme::propBtnSize - 8.f;
 	ToolbarTheme::iconSize = (mode == 0) ? 24.f : (mode == 2 ? 21.f : 22.f);
 	ToolbarTheme::propGap = (mode == 0) ? 18.f : (mode == 2 ? 14.f : 16.f);

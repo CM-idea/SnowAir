@@ -159,7 +159,7 @@ ToolSub::ToolSub(AnnotHost* win) : ToolbarWindow(), win(win)
 {
 	dpi = win->dpi;
 	const int sizeMode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
-	btnSize = (sizeMode == 0) ? 48.f : (sizeMode == 2 ? 40.f : 42.f);
+	btnSize = (sizeMode == 0) ? 48.f : (sizeMode == 2 ? 39.f : 42.f);
 	iconInner = btnSize - 8.f;
 	ToolbarTheme::propBtnSize = btnSize;
 	ToolbarTheme::propIconInner = iconInner;
@@ -3007,7 +3007,7 @@ void ToolSub::initSize(int btnCount, bool withColors, bool centerOnBtn, float ex
 	sizeWithColors = withColors;
 	sizeExtraW = extraLogicW;
 	const int sizeMode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
-	btnSize = (sizeMode == 0) ? 48.f : (sizeMode == 2 ? 40.f : 42.f);
+	btnSize = (sizeMode == 0) ? 48.f : (sizeMode == 2 ? 39.f : 42.f);
 	iconInner = btnSize - 8.f;
 	ToolbarTheme::propBtnSize = btnSize;
 	ToolbarTheme::propIconInner = iconInner;
@@ -3033,7 +3033,7 @@ void ToolSub::refreshSize()
 void ToolSub::applyToolbarSize()
 {
 	const int mode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
-	btnSize = (mode == 0) ? 48.f : (mode == 2 ? 40.f : 42.f);
+	btnSize = (mode == 0) ? 48.f : (mode == 2 ? 39.f : 42.f);
 	iconInner = btnSize - 8.f;
 	ToolbarTheme::propBtnSize = btnSize;
 	ToolbarTheme::propIconInner = iconInner;

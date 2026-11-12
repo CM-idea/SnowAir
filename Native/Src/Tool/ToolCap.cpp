@@ -70,7 +70,7 @@ void ToolCap::refreshSize()
 {
 	// 0 小 / 1 中 / 2 大：主工具栏高度 38 / 42 / 48。
 	const int sizeMode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
-	btnSize = (sizeMode == 0) ? 48.f : (sizeMode == 2 ? 40.f : 42.f);
+	btnSize = (sizeMode == 0) ? 48.f : (sizeMode == 2 ? 39.f : 42.f);
 	ToolbarTheme::iconSize = (sizeMode == 0) ? 24.f : (sizeMode == 2 ? 21.f : 22.f);
 	ToolbarTheme::propPad = (sizeMode == 0) ? 12.f : (sizeMode == 2 ? 9.f : 10.f);
 	ToolbarTheme::propGap = (sizeMode == 0) ? 18.f : (sizeMode == 2 ? 14.f : 16.f);
