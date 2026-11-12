@@ -121,14 +121,14 @@ Ling::Button* ToolNestedPanel::makeIconBtn(const wchar_t* icon, const std::wstri
 	std::function<void()> onClick)
 {
 	auto btn = contentNode->makeChild<Ling::Button>();
-	const float slot = Icon::Size + ToolbarTheme::propGap;
-	const float marginH = (slot - iconInner) * 0.5f;
-	const float marginV = (btnSize - iconInner) * 0.5f;
-	btn->setSize(iconInner, iconInner);
+	const float slot = ToolbarTheme::iconSize + ToolbarTheme::propGap;
+	const float marginH = (slot - ToolbarTheme::propIconInner) * 0.5f;
+	const float marginV = (ToolbarTheme::propBtnSize - ToolbarTheme::propIconInner) * 0.5f;
+	btn->setSize(ToolbarTheme::propIconInner, ToolbarTheme::propIconInner);
 	btn->setMargin(marginH, marginV, marginH, marginV);
 	btn->setText(icon);
 	btn->setFontFamily(Icon::Family);
-	btn->setFontSize(Icon::Size);
+	btn->setFontSize(ToolbarTheme::iconSize);
 	btn->setBg(0);
 	btn->setHoverBg(ToolbarTheme::hoverBg);
 	btn->setBorderRadius(ToolbarTheme::hoverRadius);
@@ -149,7 +149,7 @@ PropSlider::Pair ToolNestedPanel::addSlider(float minV, float maxV, float val, s
 
 void ToolNestedPanel::finishOpen(const RECT& workArea, Ling::Button* anchor, float logicW, float logicH)
 {
-	if (logicH <= 0.f) logicH = btnSize + marginTop + ToolbarTheme::shadowPad;
+	if (logicH <= 0.f) logicH = ToolbarTheme::propBtnSize + marginTop + ToolbarTheme::shadowPad;
 	setSize(logicW, logicH);
 	anchorBtn = anchor;
 	workArea_ = workArea;
@@ -334,7 +334,7 @@ void ToolNestedPanel::openTextStroke(const RECT& workArea, Ling::Button* anchor)
 		owner->notifyStyleChanged();
 	});
 	finishOpen(workArea, anchor,
-		ToolbarTheme::propPad * 2.f + (Icon::Size + ToolbarTheme::propGap)
+		ToolbarTheme::propPad * 2.f + (ToolbarTheme::iconSize + ToolbarTheme::propGap)
 		+ PropSlider::rowLogicW() + ToolbarTheme::shadowPad * 2.f);
 	owner->refreshNestedTrigger();
 }
@@ -416,7 +416,7 @@ void ToolNestedPanel::openPatinaWm(const RECT& workArea, Ling::Button* anchor)
 	rebuildPatinaWmRow();
 	finishOpen(workArea, anchor,
 		ToolbarTheme::propPad * 2.f
-		+ (Icon::Size + ToolbarTheme::propGap) * 3.f
+		+ (ToolbarTheme::iconSize + ToolbarTheme::propGap) * 3.f
 		+ PropSlider::rowLogicW() + ToolbarTheme::shadowPad * 2.f);
 	owner->refreshNestedTrigger();
 	owner->notifyStyleChanged();

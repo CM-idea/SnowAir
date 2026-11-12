@@ -192,10 +192,10 @@ void ToolColorPanel::rebuildBtns()
 	const size_t selected = owner->selectedColorIdx();
 	for (size_t i = 0; i < colors.size(); i++) {
 		auto btn = contentNode->makeChild<Ling::Button>();
-		const float slot = Icon::Size + ToolbarTheme::propGap;
-		const float marginH{ (slot - iconInner) * 0.5f };
-		const float marginV{ (btnSize - iconInner) * 0.5f };
-		btn->setSize(iconInner, iconInner);
+		const float slot = ToolbarTheme::iconSize + ToolbarTheme::propGap;
+		const float marginH{ (slot - ToolbarTheme::propIconInner) * 0.5f };
+		const float marginV{ (ToolbarTheme::propBtnSize - ToolbarTheme::propIconInner) * 0.5f };
+		btn->setSize(ToolbarTheme::propIconInner, ToolbarTheme::propIconInner);
 		btn->setMargin(marginH, marginV, marginH, marginV);
 		btn->setFlexGrow(0.f);
 		btn->setFlexShrink(0.f);
@@ -231,9 +231,9 @@ void ToolColorPanel::rebuildBtns()
 		applyActiveStyle(i, i == selected);
 	}
 	const float logicW = ToolbarTheme::propPad * 2.f
-		+ (Icon::Size + ToolbarTheme::propGap) * static_cast<float>(colors.size())
+		+ (ToolbarTheme::iconSize + ToolbarTheme::propGap) * static_cast<float>(colors.size())
 		+ ToolbarTheme::shadowPad * 2.f;
-	const float logicH = btnSize + marginTop + ToolbarTheme::shadowPad;
+	const float logicH = ToolbarTheme::propBtnSize + marginTop + ToolbarTheme::shadowPad;
 	setSize(logicW, logicH);
 }
 

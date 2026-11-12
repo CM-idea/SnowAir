@@ -73,7 +73,7 @@ void ToolPicker::rebuildButtons()
 	if (!row) return;
 	row->removeAllChildren();
 	pickBtns.clear();
-	const float slot = Icon::Size + ToolbarTheme::propGap;
+	const float slot = ToolbarTheme::iconSize + ToolbarTheme::propGap;
 	const float marginH = (slot - ToolbarTheme::propIconInner) * 0.5f;
 	const float marginV = (ToolbarTheme::propBtnSize - ToolbarTheme::propIconInner) * 0.5f;
 	for (auto& item : items) {
@@ -86,7 +86,7 @@ void ToolPicker::rebuildButtons()
 		const auto* form = def ? ToolInitial::currentForm(*def) : nullptr;
 		if (form && form->overlayGlyph) {
 			btn->setText(L"");
-			ToolIcon::overlayGlyph(btn, form->glyph, form->overlayGlyph, Icon::Size,
+			ToolIcon::overlayGlyph(btn, form->glyph, form->overlayGlyph, ToolbarTheme::iconSize,
 				color, ToolIcon::withAlpha(color, 0x40));
 		}
 		else {
@@ -98,7 +98,7 @@ void ToolPicker::rebuildButtons()
 			btn->setText(icon);
 		}
 		btn->setFontFamily(Icon::Family);
-		btn->setFontSize(Icon::Size);
+		btn->setFontSize(ToolbarTheme::iconSize);
 		btn->setBg(0);
 		btn->setColor(color);
 		btn->setHoverColor(color);
@@ -162,7 +162,7 @@ void ToolPicker::showFor(Ling::WinBase* bar, Ling::Button* anchorBtn, const std:
 	selectedId = selected;
 	const float n = (float)items.size();
 	const float edge = (ToolbarTheme::propBtnSize - ToolbarTheme::propIconInner) * 0.5f; // 与主栏上下一致
-	const float slot = Icon::Size + ToolbarTheme::propGap;
+	const float slot = ToolbarTheme::iconSize + ToolbarTheme::propGap;
 	setSize(edge * 2.f + n * slot + ToolbarTheme::shadowPad * 2.f,
 		ToolbarTheme::propBtnSize + ToolbarTheme::caretSize + ToolbarTheme::shadowPad * 2.f);
 	dpi = bar->dpi;

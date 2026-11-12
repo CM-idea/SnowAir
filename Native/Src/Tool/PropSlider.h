@@ -15,8 +15,8 @@ namespace PropSlider
 	// 滑条左 margin：与前一图标槽拼出「图标本体 ↔ 滑条」= propGap
 	inline float marginH()
 	{
-		const float iconSlot = Icon::Size + ToolbarTheme::propGap;
-		const float iconSide = (ToolbarTheme::propIconInner - Icon::Size) * 0.5f;
+		const float iconSlot = ToolbarTheme::iconSize + ToolbarTheme::propGap;
+		const float iconSide = (ToolbarTheme::propIconInner - ToolbarTheme::iconSize) * 0.5f;
 		const float marginHIcon = (iconSlot - ToolbarTheme::propIconInner) * 0.5f;
 		return ToolbarTheme::propGap - iconSide - marginHIcon;
 	}
