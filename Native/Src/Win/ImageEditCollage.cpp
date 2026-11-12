@@ -2237,12 +2237,79 @@ void ImageEditCollage::mirrorSelectedContent(bool horizontal)
     }
 }
 
+void ImageEditCollage::rotateSelectedContainer(int dir)
+{
+    for (int idx : selectedCellIndices()) {
+        if (idx < 0 || idx >= (int)cells_.size()) continue;
+        auto& c = cells_[idx];
+        auto b = boundsOf(c.poly);
+        const float cx = (b.left + b.right) * 0.5f;
+        const float cy = (b.top + b.bottom) * 0.5f;
+        const float w = std::max(1.f, b.right - b.left);
+        const float h = std::max(1.f, b.bottom - b.top);
+        Pt imgCenter{ cx + c.imgOffX * w, cy + c.imgOffY * h };
+        // 旋转前图片的绝对绘制尺寸；转完后按新容器反算归一化尺寸，
+        // 这样容器和图片一起转 90°，图片不会被新宽高二次拉伸。
+        // 原本是拉伸填充的图片，也固定成旋转前的实际尺寸，再跟着容器转。
+        const float absW = c.stretch
+            ? w
+            : w * (c.imgNW > 0.f ? c.imgNW : 1.f) * c.imgScale;
+        const float absH = c.stretch
+            ? h
+            : h * (c.imgNH > 0.f ? c.imgNH : 1.f) * c.imgScale;
+        const bool wasStretch = c.stretch;
+        for (auto& p : c.poly) {
+            const float dx = p.x - cx, dy = p.y - cy;
+            if (dir > 0) { p.x = cx - dy; p.y = cy + dx; }
+            else { p.x = cx + dy; p.y = cy - dx; }
+        }
+        if (c.image.empty()) continue;
+        c.rotation = std::fmod(c.rotation + (float)dir * 90.f, 360.f);
+        if (c.rotation < 0.f) c.rotation += 360.f;
+        if (c.flipH != c.flipV) std::swap(c.flipH, c.flipV);
+        const auto nb = boundsOf(c.poly);
+        const float nw = std::max(1.f, nb.right - nb.left);
+        const float nh = std::max(1.f, nb.bottom - nb.top);
+        if (wasStretch) c.stretch = false;
+        if (!c.stretch && c.imgScale > 0.f) {
+            c.imgNW = absW / (nw * c.imgScale);
+            c.imgNH = absH / (nh * c.imgScale);
+        }
+        c.imgOffX = (imgCenter.x - (nb.left + nb.right) * 0.5f) / nw;
+        c.imgOffY = (imgCenter.y - (nb.top + nb.bottom) * 0.5f) / nh;
+    }
+}
+
+void ImageEditCollage::mirrorSelectedContainer(bool horizontal)
+{
+    for (int idx : selectedCellIndices()) {
+        if (idx < 0 || idx >= (int)cells_.size()) continue;
+        auto& c = cells_[idx];
+        auto b = boundsOf(c.poly);
+        const float cx = (b.left + b.right) * 0.5f;
+        const float cy = (b.top + b.bottom) * 0.5f;
+        for (auto& p : c.poly) {
+            if (horizontal) p.x = cx - (p.x - cx);
+            else p.y = cy - (p.y - cy);
+        }
+        if (c.image.empty()) continue;
+        if (horizontal) {
+            c.flipH = !c.flipH;
+            c.imgOffX = -c.imgOffX;
+        }
+        else {
+            c.flipV = !c.flipV;
+            c.imgOffY = -c.imgOffY;
+        }
+    }
+}
+
 void ImageEditCollage::rotateLayoutGroup(int group, int dir)
 {
     auto it = layoutGroups_.find(group);
     if (it == layoutGroups_.end()) return;
     auto& g = it->second;
-    // 格内图片跟着换向
+    // 整组带着格内图片一起换向。
     for (int idx : g.members) {
         if (idx < 0 || idx >= (int)cells_.size()) continue;
         auto& c = cells_[idx];
@@ -2354,9 +2421,9 @@ void ImageEditCollage::applyQuickAction(int action)
         transformSplitGroup(gid, action);                   // 分割组整组变换
     }
     else {
-        if (action == 0) rotateSelectedContent(1);
-        else if (action == 1) rotateSelectedContent(-1);
-        else mirrorSelectedContent(action == 2);
+        if (action == 0) rotateSelectedContainer(1);
+        else if (action == 1) rotateSelectedContainer(-1);
+        else mirrorSelectedContainer(action == 2);
     }
     notifyChanged();
     if (win) win->refresh();
@@ -3388,7 +3455,7 @@ void ImageEditCollage::onMouseMove(POINT pos)
         Pt w = p;
         snapGuides_.clear();
         {
-            // 拖边/拖角缩放时，正在拖的边吸附到其它容器与画板边缘
+            // 拖边/拖角缩放时，正在拖的边吸附到其它容器、画板边缘，以及图片自身的边缘。
             const float tolW = kSnapTol / std::max(0.01f, viewScale());
             const auto h = resizeHandle_;
             const bool doX = (h == Handle::TL || h == Handle::L || h == Handle::BL
@@ -3396,15 +3463,41 @@ void ImageEditCollage::onMouseMove(POINT pos)
             const bool doY = (h == Handle::TL || h == Handle::T || h == Handle::TR
                 || h == Handle::BL || h == Handle::B || h == Handle::BR);
             const std::vector<int> ignore{ selected_ };
+            auto addImageTargets = [&](std::vector<float>& targets, bool verticalAxis) {
+                for (const auto& c : cells_) {
+                    if (c.image.empty()) continue;
+                    const auto f = imageFrameOf(c);
+                    if (!f.valid) continue;
+                    const float hw = f.w * 0.5f, hh = f.h * 0.5f;
+                    const float ca = std::cos(f.angleRad), sa = std::sin(f.angleRad);
+                    float lo = std::numeric_limits<float>::max();
+                    float hi = std::numeric_limits<float>::lowest();
+                    for (int sx = -1; sx <= 1; sx += 2) {
+                        for (int sy = -1; sy <= 1; sy += 2) {
+                            const float x = f.cx + sx * hw * ca - sy * hh * sa;
+                            const float y = f.cy + sx * hw * sa + sy * hh * ca;
+                            const float v = verticalAxis ? x : y;
+                            lo = std::min(lo, v);
+                            hi = std::max(hi, v);
+                        }
+                    }
+                    if (lo <= hi) {
+                        targets.push_back(lo);
+                        targets.push_back(hi);
+                    }
+                }
+            };
             float g = 0.f, d = 0.f;
             bool s = false;
             if (doX) {
-                const auto tx = snapTargets(true, ignore);
+                auto tx = snapTargets(true, ignore);
+                addImageTargets(tx, true);
                 d = snapEdge(w.x, w.x, tx, tolW, g, s);
                 if (s) { w.x += d; snapGuides_.push_back({ true, g }); }
             }
             if (doY) {
-                const auto ty = snapTargets(false, ignore);
+                auto ty = snapTargets(false, ignore);
+                addImageTargets(ty, false);
                 d = snapEdge(w.y, w.y, ty, tolW, g, s);
                 if (s) { w.y += d; snapGuides_.push_back({ false, g }); }
             }
@@ -4066,40 +4159,82 @@ void ImageEditCollage::resizeSelected(Handle h, const Pt& world, bool keepRatio)
 
     const float sx = (b.right - b.left) > 0.01f ? (nr - nl) / (b.right - b.left) : 1.f;
     const float sy = (b.bottom - b.top) > 0.01f ? (nb - nt) / (b.bottom - b.top) : 1.f;
+
+    // 拖容器边只改容器，图片保持原来的绝对大小和中心（多出来的部分由容器裁剪）。
+    // 只有双击进入图片模式后按 Shift 才允许单独拉伸图片。
+    struct ImageSnap { float cx = 0, cy = 0, w = 0, h = 0; bool valid = false; };
+    auto snapOf = [this](const Cell& c) {
+        ImageSnap s;
+        if (c.image.empty()) return s;
+        auto cb = boundsOf(c.poly);
+        const float cw = std::max(1.f, cb.right - cb.left);
+        const float ch = std::max(1.f, cb.bottom - cb.top);
+        const float nw = c.stretch ? 1.f : (c.imgNW > 0.f ? c.imgNW : 1.f);
+        const float nh = c.stretch ? 1.f : (c.imgNH > 0.f ? c.imgNH : 1.f);
+        s.cx = (cb.left + cb.right) * 0.5f + c.imgOffX * cw;
+        s.cy = (cb.top + cb.bottom) * 0.5f + c.imgOffY * ch;
+        s.w = cw * nw * c.imgScale;
+        s.h = ch * nh * c.imgScale;
+        s.valid = s.w > 0.f && s.h > 0.f;
+        return s;
+    };
+    auto applySnap = [this](Cell& c, const ImageSnap& s) {
+        if (!s.valid || c.image.empty()) return;
+        c.stretch = false;   // 固定成当前实际尺寸，不再跟着容器重新铺满
+        auto cb = boundsOf(c.poly);
+        const float cw = std::max(1.f, cb.right - cb.left);
+        const float ch = std::max(1.f, cb.bottom - cb.top);
+        if (c.imgScale <= 0.f) return;
+        c.imgNW = s.w / (cw * c.imgScale);
+        c.imgNH = s.h / (ch * c.imgScale);
+        c.imgOffX = (s.cx - (cb.left + cb.right) * 0.5f) / cw;
+        c.imgOffY = (s.cy - (cb.top + cb.bottom) * 0.5f) / ch;
+    };
+
     if (layoutResize) {
         // 整组缩放：所有格子按外框映射（比例不变）
         auto& grp = layoutGroups_[selGroup];
+        std::vector<std::pair<int, ImageSnap>> snaps;
         for (int idx : grp.members) {
             if (idx < 0 || idx >= (int)cells_.size()) continue;
+            snaps.emplace_back(idx, snapOf(cells_[idx]));
             for (auto& p : cells_[idx].poly) {
                 p.x = nl + (p.x - b.left) * sx;
                 p.y = nt + (p.y - b.top) * sy;
             }
         }
         grp.rect = D2D1::RectF(nl, nt, nr, nb);
+        for (auto& [idx, snap] : snaps) applySnap(cells_[idx], snap);
         return;
     }
     if (splitResize) {
         // 分割组整体缩放：原容器、分割线、各块一起按外框映射
         auto& grp = splitIt->second;
+        std::vector<std::pair<int, ImageSnap>> snaps;
+        for (int idx : selectedCellIndices()) {
+            if (idx < 0 || idx >= (int)cells_.size()) continue;
+            if (cells_[idx].group != selGroup) continue;
+            snaps.emplace_back(idx, snapOf(cells_[idx]));
+        }
         auto mapPt = [&](Pt& q) {
             q.x = nl + (q.x - b.left) * sx;
             q.y = nt + (q.y - b.top) * sy;
             };
         for (auto& q : grp.original) mapPt(q);
         for (auto& L : grp.lines) { mapPt(L.a); mapPt(L.b); }
-        for (int idx : selectedCellIndices()) {
-            if (idx < 0 || idx >= (int)cells_.size()) continue;
-            if (cells_[idx].group != selGroup) continue;
+        for (auto& [idx, snap] : snaps) {
             for (auto& q : cells_[idx].poly) mapPt(q);
+            applySnap(cells_[idx], snap);
         }
         return;
     }
     auto& c = cells_[selected_];
+    const ImageSnap snap = snapOf(c);
     for (auto& p : c.poly) {
         p.x = nl + (p.x - b.left) * sx;
         p.y = nt + (p.y - b.top) * sy;
     }
+    applySnap(c, snap);
 }
 
 // ---------------- 图片位图 ----------------

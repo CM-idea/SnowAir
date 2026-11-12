@@ -252,6 +252,8 @@ private:
     void applyQuickAction(int action);
     void rotateSelectedContent(int dir);            // 单容器：图片旋转 ±90（无图则容器换向）
     void mirrorSelectedContent(bool horizontal);
+    void rotateSelectedContainer(int dir);          // 容器旋转 ±90（图片保持朝向）
+    void mirrorSelectedContainer(bool horizontal);  // 容器镜像（图片保持朝向）
     void rotateLayoutGroup(int group, int dir);     // 布局组换向/旋转
     void mirrorLayoutGroup(int group, bool horizontal);
     // 分割组整组旋转/镜像：各块、分割线、原容器与块内图片一起变换
