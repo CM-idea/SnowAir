@@ -13,7 +13,7 @@ namespace ToolbarTheme
 
 	// 主栏：【12】拖拽【12】工具…【24】；工具本体间距 20
 	inline constexpr float paddingLeft{ 12.f };
-	inline constexpr float paddingRight{ 24.f };
+	inline float paddingRight{ 24.f };
 	inline constexpr float dragGap{ 12.f };
 	inline constexpr float dragIconSize{ 24.f };
 	inline constexpr float iconGap{ 20.f };
