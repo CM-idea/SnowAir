@@ -792,7 +792,7 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 {
 	auto* s = Setting::get();
 	// Lite 版不提供云端 / API 识图：只保留本地 PP-OCRv6 与系统 OCR。
-	// PP-OCRv6 有轻量/标准两档，已装哪档就在「模型规格」里列出哪档。
+	// PP-OCRv6 有轻量/标准两档；只有装了多档时才需要「模型规格」选择。
 	std::vector<OcrPackVariant> installed;
 	for (int i = 0; i < OcrPack::kCount; ++i) {
 		const auto v = OcrPack::clampVariant(i);
@@ -820,7 +820,7 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 				[](int i, const std::wstring&) { Setting::get()->setOcrResultMode(i); }, true);
 		};
 
-		const bool tierShown = (s->getOcrEngine() == 0 && !installed.empty());
+		const bool tierShown = (s->getOcrEngine() == 0 && installed.size() > 1);
 
 		auto* row1 = halfRow(p);
 		SettingUi::selectRow(halfCol(row1, false), Lang::get(L"setting.fnOcrModel"), labels, cur,
@@ -832,7 +832,7 @@ void WinSettingFeatures::buildOcr(Ling::Node* p)
 				if (changed) this->deferRebuildTab(3);
 			}, true);
 
-		// 模型规格：只有选中 PP-OCRv6 且装了模型才出现；系统 OCR 不需要模型，不显示
+		// 模型规格：只有选中 PP-OCRv6 且装了多档时才需要选择；只有一档不显示
 		if (tierShown) {
 			// 识别结果版式放第一行右列（与文本识别模型并排）
 			addResultRow(halfCol(row1, true));
