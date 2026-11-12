@@ -295,6 +295,7 @@ private:
 	void beginTool(const std::wstring& id);
 	void initSize(int btnCount, bool withColors, bool centerOnBtn = false, float extraLogicW = 0.f);
 	void refreshSize();
+	void applyToolbarSize();
 	float toPx(float logical) const;
 	void styleToolbarBtn(Ling::Button* btn);
 	void applyTipDirection(bool tipDown);
