@@ -36,8 +36,8 @@ void ToolPicker::onCreated()
 	row->setPositionType(Ling::Position::Absolute);
 	row->setFlexDirection(Ling::FlexDirection::Row);
 	row->setAlignItems(Ling::Align::Center);
-	row->setPaddingLeft((ToolbarTheme::propBtnSize - ToolbarTheme::propIconInner) * 0.5f);
-	row->setPaddingRight((ToolbarTheme::propBtnSize - ToolbarTheme::propIconInner) * 0.5f);
+	row->setPaddingLeft(12.f);
+	row->setPaddingRight(12.f);
 	applyRowInsets();
 	onMouseMove.add([this](POINT pos) {
 		if (pos.x == INT_MAX) {
@@ -161,7 +161,9 @@ void ToolPicker::showFor(Ling::WinBase* bar, Ling::Button* anchorBtn, const std:
 	items = list;
 	selectedId = selected;
 	const float n = (float)items.size();
-	const float edge = (ToolbarTheme::propBtnSize - ToolbarTheme::propIconInner) * 0.5f; // 与主栏上下一致
+	const float edge = 12.f;
+	row->setPaddingLeft(edge);
+	row->setPaddingRight(edge);
 	const float slot = ToolbarTheme::iconSize + ToolbarTheme::propGap;
 	setSize(edge * 2.f + n * slot + ToolbarTheme::shadowPad * 2.f,
 		ToolbarTheme::propBtnSize + ToolbarTheme::caretSize + ToolbarTheme::shadowPad * 2.f);
