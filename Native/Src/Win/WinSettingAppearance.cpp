@@ -1926,7 +1926,7 @@ void WinSettingAppearance::tbRefreshPreview()
     if (!tbPreviewShown) return;
     ToolbarTheme::refresh();   // 预览条与实际工具栏共用同一套运行时色板
     const int sizeMode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
-    const float previewBtn = (sizeMode == 0) ? 36.f : (sizeMode == 2 ? 26.f : 30.f);
+    const float previewBtn = (sizeMode == 0) ? 36.f : (sizeMode == 2 ? 28.f : 30.f);
     // 预览条**镜像实际工具栏**（同一套 ToolbarTheme 常量）——所见即所得：
     // 实际是白底就画白底，另加 1px 描边（白底叠在白色卡片上才看得出边界）。
     auto* bar = tbPreviewWrap->makeChild<Ling::Node>();

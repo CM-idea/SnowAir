@@ -159,11 +159,11 @@ ToolSub::ToolSub(AnnotHost* win) : ToolbarWindow(), win(win)
 {
 	dpi = win->dpi;
 	const int sizeMode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
-	btnSize = (sizeMode == 0) ? 48.f : (sizeMode == 2 ? 38.f : 42.f);
+	btnSize = (sizeMode == 0) ? 48.f : (sizeMode == 2 ? 40.f : 42.f);
 	iconInner = btnSize - 8.f;
 	ToolbarTheme::propBtnSize = btnSize;
 	ToolbarTheme::propIconInner = iconInner;
-	ToolbarTheme::iconSize = (sizeMode == 0) ? 24.f : (sizeMode == 2 ? 20.f : 22.f);
+	ToolbarTheme::iconSize = (sizeMode == 0) ? 24.f : (sizeMode == 2 ? 21.f : 22.f);
 	ToolbarTheme::propPad = (sizeMode == 0) ? 12.f : (sizeMode == 2 ? 9.f : 10.f);
 	ToolbarTheme::propGap = (sizeMode == 0) ? 18.f : (sizeMode == 2 ? 14.f : 16.f);
 	g_toolSubs.push_back(this);
@@ -3007,11 +3007,11 @@ void ToolSub::initSize(int btnCount, bool withColors, bool centerOnBtn, float ex
 	sizeWithColors = withColors;
 	sizeExtraW = extraLogicW;
 	const int sizeMode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
-	btnSize = (sizeMode == 0) ? 48.f : (sizeMode == 2 ? 38.f : 42.f);
+	btnSize = (sizeMode == 0) ? 48.f : (sizeMode == 2 ? 40.f : 42.f);
 	iconInner = btnSize - 8.f;
 	ToolbarTheme::propBtnSize = btnSize;
 	ToolbarTheme::propIconInner = iconInner;
-	ToolbarTheme::iconSize = (sizeMode == 0) ? 24.f : (sizeMode == 2 ? 20.f : 22.f);
+	ToolbarTheme::iconSize = (sizeMode == 0) ? 24.f : (sizeMode == 2 ? 21.f : 22.f);
 	ToolbarTheme::propPad = (sizeMode == 0) ? 12.f : (sizeMode == 2 ? 9.f : 10.f);
 	ToolbarTheme::propGap = (sizeMode == 0) ? 18.f : (sizeMode == 2 ? 14.f : 16.f);
 	const int nIcons = btnCount + (withColors ? 1 : 0);
@@ -3033,11 +3033,11 @@ void ToolSub::refreshSize()
 void ToolSub::applyToolbarSize()
 {
 	const int mode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
-	btnSize = (mode == 0) ? 48.f : (mode == 2 ? 38.f : 42.f);
+	btnSize = (mode == 0) ? 48.f : (mode == 2 ? 40.f : 42.f);
 	iconInner = btnSize - 8.f;
 	ToolbarTheme::propBtnSize = btnSize;
 	ToolbarTheme::propIconInner = iconInner;
-	ToolbarTheme::iconSize = (mode == 0) ? 24.f : (mode == 2 ? 20.f : 22.f);
+	ToolbarTheme::iconSize = (mode == 0) ? 24.f : (mode == 2 ? 21.f : 22.f);
 	ToolbarTheme::propPad = (mode == 0) ? 12.f : (mode == 2 ? 9.f : 10.f);
 	ToolbarTheme::propGap = (mode == 0) ? 18.f : (mode == 2 ? 14.f : 16.f);
 	if (contentNode) {
