@@ -1,6 +1,7 @@
 #include "pch.h"
 #include <include/Ling.h>
 #include <wincodec.h>
+#include <ole2.h>
 #include <chrono>
 #include <fstream>
 #include <mutex>
@@ -590,6 +591,7 @@ namespace {
     }
 
     DWORD g_lastClipSeq{ 0 };
+    bool g_oleReady{ false };
     constexpr UINT_PTR kClipPollTimer{ 1 };
     constexpr UINT_PTR kClipDebounceTimer{ 2 };
     constexpr UINT kClipPollMs{ 1000 };
@@ -597,14 +599,93 @@ namespace {
     // 不在通知或轮询里直接 OpenClipboard。
     constexpr UINT kClipDebounceMs{ 300 };
 
-    // 读取只尝试一次；失败交给轮询下一轮，不原地重试抢锁。
-    struct ClipboardGuard
+    bool ensureOle()
     {
-        bool opened{ false };
-        explicit ClipboardGuard(HWND owner) : opened(OpenClipboard(owner) != FALSE) {}
-        ~ClipboardGuard() { if (opened) CloseClipboard(); }
-        void release() { if (opened) { CloseClipboard(); opened = false; } }
-    };
+        if (!g_oleReady) g_oleReady = SUCCEEDED(OleInitialize(nullptr));
+        return g_oleReady;
+    }
+
+    // OLE 数据对象：读取期间不长期独占系统剪贴板。
+    bool oleGetData(IDataObject* obj, CLIPFORMAT format, DWORD tymed, STGMEDIUM& stm)
+    {
+        FORMATETC fe{ format, nullptr, DVASPECT_CONTENT, -1, tymed };
+        return obj && SUCCEEDED(obj->GetData(&fe, &stm));
+    }
+
+    template <typename Fn>
+    bool withHGlobal(IDataObject* obj, CLIPFORMAT format, Fn&& fn)
+    {
+        STGMEDIUM stm{};
+        if (!oleGetData(obj, format, TYMED_HGLOBAL, stm)) return false;
+        const bool ok = fn(stm.hGlobal);
+        ReleaseStgMedium(&stm);
+        return ok;
+    }
+
+    // 通过 OLE 数据对象读取，避免在读取期间独占系统剪贴板。
+    bool readClipboardOle(std::vector<std::wstring>& files, std::wstring& text,
+        std::vector<BYTE>& px, int& imgW, int& imgH,
+        bool& hasFiles, bool& hasText, bool& hasImage)
+    {
+        if (!ensureOle()) return false;
+        Microsoft::WRL::ComPtr<IDataObject> obj;
+        if (FAILED(OleGetClipboard(obj.GetAddressOf())) || !obj) return false;
+
+        hasFiles = withHGlobal(obj.Get(), CF_HDROP, [&](HGLOBAL h) {
+            HDROP drop = static_cast<HDROP>(h);
+            const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+            for (UINT i = 0; i < count; ++i) {
+                const UINT len = DragQueryFileW(drop, i, nullptr, 0);
+                if (len == 0) continue;
+                std::wstring path(len, L'\0');
+                if (DragQueryFileW(drop, i, path.data(), len + 1) == 0) continue;
+                files.push_back(std::move(path));
+            }
+            return !files.empty();
+        });
+
+        if (!hasFiles) {
+            hasText = withHGlobal(obj.Get(), CF_UNICODETEXT, [&](HGLOBAL h) {
+                if (const auto* p = static_cast<const wchar_t*>(GlobalLock(h))) {
+                    text = p;
+                    GlobalUnlock(h);
+                }
+                return !text.empty();
+            });
+            if (!hasText) {
+                hasText = withHGlobal(obj.Get(), CF_TEXT, [&](HGLOBAL h) {
+                    if (const auto* p = static_cast<const char*>(GlobalLock(h))) {
+                        const int len = MultiByteToWideChar(CP_ACP, 0, p, -1, nullptr, 0);
+                        if (len > 1) {
+                            text.resize((size_t)len - 1);
+                            MultiByteToWideChar(CP_ACP, 0, p, -1, text.data(), len);
+                        }
+                        GlobalUnlock(h);
+                    }
+                    return !text.empty();
+                });
+            }
+        }
+
+        if (!hasFiles && !hasText) {
+            static const UINT pngFmt = RegisterClipboardFormatW(L"PNG");
+            if (pngFmt)
+                hasImage = withHGlobal(obj.Get(), pngFmt, [&](HGLOBAL h) { return pngToBgra(h, imgW, imgH, px); });
+            if (!hasImage)
+                hasImage = withHGlobal(obj.Get(), CF_DIBV5, [&](HGLOBAL h) { return dibToBgra(h, imgW, imgH, px); });
+            if (!hasImage)
+                hasImage = withHGlobal(obj.Get(), CF_DIB, [&](HGLOBAL h) { return dibToBgra(h, imgW, imgH, px); });
+            if (!hasImage) {
+                STGMEDIUM stm{};
+                if (oleGetData(obj.Get(), CF_BITMAP, TYMED_GDI, stm)) {
+                    hasImage = hbitmapToBgra(stm.hBitmap, imgW, imgH, px);
+                    ReleaseStgMedium(&stm);
+                }
+            }
+        }
+
+        return hasFiles || hasText || hasImage;
+    }
 
     void captureClipboardNow(bool force = false)
     {
@@ -620,63 +701,11 @@ namespace {
         int imgW = 0, imgH = 0;
         bool hasFiles = false, hasText = false, hasImage = false;
 
-        {
-            // 仍被写入方占用：本次放弃，等待轮询重新排延迟读取。
-            ClipboardGuard clip(g_clipWnd);
-            if (!clip.opened) return;
-            g_lastClipSeq = seq;
-
-            if (HANDLE hf = GetClipboardData(CF_HDROP)) {
-                // 文件列表（资源管理器 / Word / PPT 等）：只记路径，不复制内容
-                HDROP drop = static_cast<HDROP>(hf);
-                const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
-                for (UINT i = 0; i < count; ++i) {
-                    const UINT len = DragQueryFileW(drop, i, nullptr, 0);
-                    if (len == 0) continue;
-                    std::wstring path(len, L'\0');
-                    if (DragQueryFileW(drop, i, path.data(), len + 1) == 0) continue;
-                    files.push_back(std::move(path));
-                }
-                hasFiles = !files.empty();
-            }
-            if (!hasFiles) {
-                if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
-                    if (const auto* p = static_cast<const wchar_t*>(GlobalLock(h))) {
-                        text = p;
-                        hasText = !text.empty();
-                        GlobalUnlock(h);
-                    }
-                }
-                else if (HANDLE ha = GetClipboardData(CF_TEXT)) {
-                    // 老程序只给 ANSI 文本：按本地代码页转一次
-                    if (const auto* p = static_cast<const char*>(GlobalLock(ha))) {
-                        const int len = MultiByteToWideChar(CP_ACP, 0, p, -1, nullptr, 0);
-                        if (len > 1) {
-                            text.resize((size_t)len - 1);
-                            MultiByteToWideChar(CP_ACP, 0, p, -1, text.data(), len);
-                            hasText = !text.empty();
-                        }
-                        GlobalUnlock(ha);
-                    }
-                }
-                else {
-                    // 优先级：PNG（浏览器/Electron，体积小且带 alpha）→ DIBV5/DIB → CF_BITMAP
-                    static const UINT pngFmt = RegisterClipboardFormatW(L"PNG");
-                    if (HANDLE hp = GetClipboardData(pngFmt)) hasImage = pngToBgra(hp, imgW, imgH, px);
-                    if (!hasImage) {
-                        HANDLE hb = GetClipboardData(CF_DIBV5);
-                        if (!hb) hb = GetClipboardData(CF_DIB);
-                        if (hb) hasImage = dibToBgra(hb, imgW, imgH, px);
-                    }
-                    if (!hasImage) {
-                        if (HBITMAP hbm = (HBITMAP)GetClipboardData(CF_BITMAP))
-                            hasImage = hbitmapToBgra(hbm, imgW, imgH, px);
-                    }
-                }
-            }
-            // 读完先关剪贴板，后续落盘不再占用。
-            clip.release();
-        }
+        const bool read = readClipboardOle(files, text, px, imgW, imgH, hasFiles, hasText, hasImage);
+        // 读取期间内容又变了：本次快照作废，交给下一次通知。
+        if (GetClipboardSequenceNumber() != seq) return;
+        g_lastClipSeq = seq;
+        if (!read) return;
 
         if (hasFiles) s->addClipboardFiles(files);
         else if (hasText) s->addClipboardText(text);
@@ -717,10 +746,10 @@ namespace {
             0, 0, 0, 0, nullptr, nullptr, wc.hInstance, nullptr);
         if (g_clipWnd) {
             AddClipboardFormatListener(g_clipWnd);
-            // 兜底轮询（800ms）：WM_CLIPBOARDUPDATE 偶发收不到时也能接住
+            // 兜底轮询（1s）：WM_CLIPBOARDUPDATE 偶发收不到时也能接住
             SetTimer(g_clipWnd, kClipPollTimer, kClipPollMs, nullptr);
-            // 启动时先把当前剪贴板里的内容记一条，用户打开「剪切板」页不至于空空如也
-            g_lastClipSeq = GetClipboardSequenceNumber();   // no capture on startup
+            // 启动时不读当前剪贴板，只记序列号
+            g_lastClipSeq = GetClipboardSequenceNumber();
         }
     }
 
@@ -733,6 +762,10 @@ namespace {
         DestroyWindow(g_clipWnd);
         g_clipWnd = nullptr;
         UnregisterClassW(kClipWndClass, GetModuleHandleW(nullptr));
+        if (g_oleReady) {
+            OleUninitialize();
+            g_oleReady = false;
+        }
     }
 }
 
