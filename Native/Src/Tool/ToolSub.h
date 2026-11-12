@@ -345,10 +345,10 @@ private:
 	MultiStyleFlags multiMixed_;
 	int multiFormKey_{ 0 };
 	bool resettingMultiSlider_{ false };
-	inline static float btnSize{ ToolbarTheme::propBtnSize };
+	static constexpr float btnSize{ ToolbarTheme::propBtnSize };
 	static constexpr float hoverRadius{ ToolbarTheme::hoverRadius };
 	static constexpr float hoverInset{ 4.f };
-	inline static float iconInner{ ToolbarTheme::propIconInner };
+	static constexpr float iconInner{ ToolbarTheme::propIconInner };
 	static constexpr float marginTop{ ToolbarTheme::caretSize };
 	static constexpr float swatchSize{ ToolbarTheme::swatchSize };
 	static constexpr float swatchRing{ ToolbarTheme::swatchRing };
@@ -356,7 +356,6 @@ private:
 	static constexpr size_t customColorIndex{ 6 };
 	float arrowX{0.f};
 	bool tipDown_{ false }; // false=在主栏下方（尖朝上）；true=上方（尖朝下）
-	bool dwmFrameFixed_{ false };
 	AnnotHost* win;
 	bool isVisible{ false };
 	bool hasTools{ false };

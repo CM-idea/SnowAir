@@ -3,7 +3,6 @@
 #include <commdlg.h>
 #include <cstdlib>
 #include <cwctype>
-#include <dwmapi.h>
 #include "../App.h"
 #include "../Win/AnnotHost.h"
 #include "../Win/WinCap.h"
@@ -158,12 +157,6 @@ namespace {
 ToolSub::ToolSub(AnnotHost* win) : ToolbarWindow(), win(win)
 {
 	dpi = win->dpi;
-	const int sizeMode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
-	btnSize = (sizeMode == 0) ? 48.f : (sizeMode == 2 ? 38.f : 42.f);
-	iconInner = btnSize - 8.f;
-	ToolbarTheme::propBtnSize = btnSize;
-	ToolbarTheme::propIconInner = iconInner;
-	ToolbarTheme::iconSize = (sizeMode == 0) ? 28.f : (sizeMode == 2 ? 22.f : 24.f);
 	onDpiChanged.add([this]() { dpiChanged = true; });
 	onSizeChanged.add([this]() {
 		if (!dpiChanged) return;
@@ -183,18 +176,6 @@ ToolSub::ToolSub(AnnotHost* win) : ToolbarWindow(), win(win)
 		this->win->forwardKey(key);
 	});
 	createNativeWindow(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, WS_POPUP);
-	// Windows 11 会给顶层窗口额外描一圈 DWM 边框/圆角，截图工具不会把它算进窗口像素，
-	// 但屏幕上会和自绘圆角叠成一层毛刺。属性栏/气泡自己画边框，关掉系统这层。
-	{
-		const DWORD noneColor = 0xFFFFFFFEu;   // DWMWA_COLOR_NONE
-		DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &noneColor, sizeof(noneColor));
-		const int corner = 1;                  // DWMWCP_DONOTROUND
-		DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
-		const DWMNCRENDERINGPOLICY nc = DWMNCRP_DISABLED;
-		DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &nc, sizeof(nc));
-		MARGINS margins{ 0, 0, 0, 0 };
-		DwmExtendFrameIntoClientArea(hwnd, &margins);
-	}
 	colorPanel = std::make_unique<ToolColorPanel>(this);
 	nestedPanel = std::make_unique<ToolNestedPanel>(this);
 }
@@ -382,7 +363,7 @@ void ToolSub::showRectTools()
 		b->setText(icon);
 		styleToolbarBtn(b);
 		b->setFontFamily(Icon::Family);
-		b->setFontSize(ToolbarTheme::iconSize);
+		b->setFontSize(Icon::Size);
 		applyToggleStyle(b, rectKind == kind && !isEllipse);
 		tip->bind(b, Lang::get(tipKey));
 		b->onClick.add([this, kind](Ling::Button* btn) {
@@ -453,7 +434,7 @@ void ToolSub::showRectTools()
 			rectBtn->setText(c.glyph ? c.glyph : Icon::Rect);
 			styleToolbarBtn(rectBtn);
 			rectBtn->setFontFamily(Icon::Family);
-			rectBtn->setFontSize(ToolbarTheme::iconSize);
+			rectBtn->setFontSize(Icon::Size);
 			applyToggleStyle(rectBtn, !isEllipse && rectKind == RectShape);
 			tip->bind(rectBtn, Lang::get(c.tipKey ? c.tipKey : L"tool.rectDefault"));
 			rectBtn->onClick.add([this](Ling::Button*) {
@@ -558,7 +539,7 @@ void ToolSub::showArrowTools()
 	lineBtn->setText(Icon::Line);
 	styleToolbarBtn(lineBtn);
 	lineBtn->setFontFamily(Icon::Family);
-	lineBtn->setFontSize(ToolbarTheme::iconSize);
+	lineBtn->setFontSize(Icon::Size);
 	applyToggleStyle(lineBtn, isLine);
 	tip->bind(lineBtn, Lang::get(L"tool.lineDefault"));
 	lineBtn->onClick.add([this](Ling::Button*) {
@@ -667,7 +648,7 @@ void ToolSub::showLineTools(int forceKind)
 		b->setText(icon);
 		styleToolbarBtn(b);
 		b->setFontFamily(Icon::Family);
-		b->setFontSize(ToolbarTheme::iconSize);
+		b->setFontSize(Icon::Size);
 		applyToggleStyle(b, lineKind == kind);
 		tip->bind(b, Lang::get(tipKey));
 		b->onClick.add([this, kind, defaultLine](Ling::Button*) {
@@ -763,7 +744,7 @@ void ToolSub::showPenTools()
 			markerBtn->setText(c.glyph ? c.glyph : Icon::Marker);
 			styleToolbarBtn(markerBtn);
 			markerBtn->setFontFamily(Icon::Family);
-			markerBtn->setFontSize(ToolbarTheme::iconSize);
+			markerBtn->setFontSize(Icon::Size);
 			applyToggleStyle(markerBtn, isPenMarker);
 			tip->bind(markerBtn, Lang::get(c.tipKey ? c.tipKey : L"tool.marker"));
 			markerBtn->onClick.add([this, refreshPenForms](Ling::Button* b) {
@@ -780,7 +761,7 @@ void ToolSub::showPenTools()
 			softBtn->setText(c.glyph ? c.glyph : Icon::SoftPen);
 			styleToolbarBtn(softBtn);
 			softBtn->setFontFamily(Icon::Family);
-			softBtn->setFontSize(ToolbarTheme::iconSize);
+			softBtn->setFontSize(Icon::Size);
 			applyToggleStyle(softBtn, isPenSoft);
 			tip->bind(softBtn, Lang::get(c.tipKey ? c.tipKey : L"tool.softPen"));
 			softBtn->onClick.add([this, refreshPenForms](Ling::Button*) {
@@ -803,7 +784,7 @@ void ToolSub::showPenTools()
 			penBaseBtn->setText(c.glyph ? c.glyph : Icon::Pen);
 			styleToolbarBtn(penBaseBtn);
 			penBaseBtn->setFontFamily(Icon::Family);
-			penBaseBtn->setFontSize(ToolbarTheme::iconSize);
+			penBaseBtn->setFontSize(Icon::Size);
 			applyToggleStyle(penBaseBtn, !isPenMarker && !isPenSoft);
 			tip->bind(penBaseBtn, Lang::get(c.tipKey ? c.tipKey : L"tool.penDefault"));
 			penBaseBtn->onClick.add([this, refreshPenForms](Ling::Button*) {
@@ -827,7 +808,7 @@ void ToolSub::showPenTools()
 	dashBtn->setText(Icon::Dash);
 	styleToolbarBtn(dashBtn);
 	dashBtn->setFontFamily(Icon::Family);
-	dashBtn->setFontSize(ToolbarTheme::iconSize);
+	dashBtn->setFontSize(Icon::Size);
 	applyToggleStyle(dashBtn, isPenDash);
 	tip->bind(dashBtn, Lang::get(L"tool.dash"));
 	dashBtn->onClick.add([this](Ling::Button*) {
@@ -916,7 +897,7 @@ void ToolSub::showTextTools()
 	strokeBtn->setText(Icon::Stroke);
 	styleToolbarBtn(strokeBtn);
 	strokeBtn->setFontFamily(Icon::Family);
-	strokeBtn->setFontSize(ToolbarTheme::iconSize);
+	strokeBtn->setFontSize(Icon::Size);
 	applyToggleStyle(strokeBtn, isTextStroke);
 	tip->bind(strokeBtn, Lang::get(L"tool.textStroke"));
 	strokeBtn->onClick.add([this, b = strokeBtn](Ling::Button*) {
@@ -980,7 +961,7 @@ void ToolSub::showMosaicTools()
 			overlayBtn->setText(c.glyph ? c.glyph : Icon::Mosaic);
 			styleToolbarBtn(overlayBtn);
 			overlayBtn->setFontFamily(Icon::Family);
-			overlayBtn->setFontSize(ToolbarTheme::iconSize);
+			overlayBtn->setFontSize(Icon::Size);
 			applyToggleStyle(overlayBtn, !isMosaicBlur);
 			tip->bind(overlayBtn, Lang::get(c.tipKey ? c.tipKey : L"tool.mosaic"));
 			overlayBtn->onClick.add([this](Ling::Button*) {
@@ -1011,7 +992,7 @@ void ToolSub::showPatinaTools()
 	patinaWmBtn->setText(Icon::PatinaWatermark);
 	styleToolbarBtn(patinaWmBtn);
 	patinaWmBtn->setFontFamily(Icon::Family);
-	patinaWmBtn->setFontSize(ToolbarTheme::iconSize);
+	patinaWmBtn->setFontSize(Icon::Size);
 	applyToggleStyle(patinaWmBtn, isPatinaWatermark);
 	tip->bind(patinaWmBtn, Lang::get(L"tool.patinaWm"));
 	patinaWmBtn->onClick.add([this](Ling::Button*) {
@@ -1045,7 +1026,7 @@ void ToolSub::showWatermarkTools()
 		return std::clamp(tw + 16.f, wmInputMinW, wmInputMaxW);
 	};
 
-	const float slot = ToolbarTheme::iconSize + ToolbarTheme::propGap;
+	const float slot = Icon::Size + ToolbarTheme::propGap;
 	const float marginH = (slot - iconInner) * 0.5f;
 
 	auto syncWmWidth = [this, measureWmW, marginH]() {
@@ -1066,7 +1047,7 @@ void ToolSub::showWatermarkTools()
 	angleBtn->setText(Icon::Angle);
 	styleToolbarBtn(angleBtn);
 	angleBtn->setFontFamily(Icon::Family);
-	angleBtn->setFontSize(ToolbarTheme::iconSize);
+	angleBtn->setFontSize(Icon::Size);
 	applyToggleStyle(angleBtn, false);
 	tip->bind(angleBtn, Lang::get(L"tool.wmAngle"));
 	angleBtn->onClick.add([this](Ling::Button*) {
@@ -1134,7 +1115,7 @@ void ToolSub::showHighlightTools()
 			b->setText(c.glyph ? c.glyph : Icon::Rect);
 			styleToolbarBtn(b);
 			b->setFontFamily(Icon::Family);
-			b->setFontSize(ToolbarTheme::iconSize);
+			b->setFontSize(Icon::Size);
 			applyToggleStyle(b, !isHighlightEllipse);
 			tip->bind(b, Lang::get(c.tipKey ? c.tipKey : L"tool.highlightRect"));
 			b->onClick.add([this, b](Ling::Button*) {
@@ -1182,7 +1163,7 @@ void ToolSub::showBoardTools()
 		auto* b = contentNode->makeChild<Ling::Button>();
 		b->setText(code);
 		b->setFontFamily(Icon::Family);
-		b->setFontSize(ToolbarTheme::iconSize);
+		b->setFontSize(Icon::Size);
 		styleToolbarBtn(b);
 		applyToggleStyle(b, false);
 		tip->bind(b, text);
@@ -1220,7 +1201,7 @@ void ToolSub::showBoardTools()
 	boardRings.clear();
 	auto makeSwatch = [&](UINT32 color, const std::wstring& tipText, bool custom) {
 		auto* b = contentNode->makeChild<Ling::Button>();
-		const float slot = ToolbarTheme::iconSize + ToolbarTheme::propGap;
+		const float slot = Icon::Size + ToolbarTheme::propGap;
 		b->setSize(iconInner, iconInner);
 		b->setMargin((slot - iconInner) * 0.5f, (btnSize - iconInner) * 0.5f,
 			(slot - iconInner) * 0.5f, (btnSize - iconInner) * 0.5f);
@@ -1288,7 +1269,7 @@ void ToolSub::showDemoRecTools()
 		auto* b = contentNode->makeChild<Ling::Button>();
 		b->setText(code);
 		b->setFontFamily(Icon::Family);
-		b->setFontSize(ToolbarTheme::iconSize);
+		b->setFontSize(Icon::Size);
 		styleToolbarBtn(b);
 		applyToggleStyle(b, false);
 		tip->bind(b, text);
@@ -1477,17 +1458,6 @@ float ToolSub::setShapeSliderVal(const std::wstring& tool, float px)
 
 void ToolSub::drawChrome(ID2D1DeviceContext* ctx)
 {
-	if (hwnd && !dwmFrameFixed_) {
-		dwmFrameFixed_ = true;
-		const DWORD noneColor = 0xFFFFFFFEu;   // DWMWA_COLOR_NONE
-		DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &noneColor, sizeof(noneColor));
-		const int corner = 1;                  // DWMWCP_DONOTROUND
-		DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
-		const DWMNCRENDERINGPOLICY nc = DWMNCRP_DISABLED;
-		DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &nc, sizeof(nc));
-		SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
-			SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-	}
 	if (flatPopup_) {
 		// 平底板：只画圆角底，不带边框/尖角
 		ToolbarChrome::paintRoundBar(ctx,
@@ -2330,7 +2300,7 @@ bool ToolSub::pickCustomColor()
 void ToolSub::styleToolbarBtn(Ling::Button* btn)
 {
 	// propGap=16：槽宽 = 字形 + 间距
-	const float slot = ToolbarTheme::iconSize + ToolbarTheme::propGap;
+	const float slot = Icon::Size + ToolbarTheme::propGap;
 	const float marginH{ (slot - iconInner) * 0.5f };
 	const float marginV{ (btnSize - iconInner) * 0.5f };
 	btn->setSize(iconInner, iconInner);
@@ -2364,7 +2334,7 @@ Ling::Button* ToolSub::makeToggleBtn(const std::wstring& text, bool* flag, const
 	btn->setText(text);
 	styleToolbarBtn(btn);
 	btn->setFontFamily(Icon::Family);
-	btn->setFontSize(ToolbarTheme::iconSize);
+	btn->setFontSize(Icon::Size);
 	applyToggleStyle(btn, *flag);
 	tip->bind(btn, Lang::get(tipKey));
 	btn->onClick.add([this, flag](Ling::Button* b) {
@@ -2394,7 +2364,7 @@ Ling::Button* ToolSub::makeOverlayToggleBtn(const std::wstring& baseGlyph, const
 		auto label = stack->makeChild<Ling::Label>();
 		label->setText(code);
 		label->setFontFamily(Icon::Family);
-		label->setFontSize(ToolbarTheme::iconSize);
+		label->setFontSize(Icon::Size);
 		// 铺满叠层 + 居中：两个字形的中心必然重合
 		label->setPositionType(Ling::Position::Absolute);
 		label->setPosition(Ling::Edge::Left, 0.f);
@@ -2450,7 +2420,7 @@ void ToolSub::makeNumberStyleBtns()
 		btn->setText(icon);
 		styleToolbarBtn(btn);
 		btn->setFontFamily(Icon::Family);
-		btn->setFontSize(ToolbarTheme::iconSize);
+		btn->setFontSize(Icon::Size);
 		tip->bind(btn, Lang::get(tipKey));
 		btn->onClick.add([this, style, defaultNum](Ling::Button*) {
 			numberStyle = toggledForm(numberStyle, style, defaultNum);
@@ -2764,7 +2734,7 @@ void ToolSub::makeRectStyleBtns()
 	fillBtn->setText(Icon::Fill);
 	styleToolbarBtn(fillBtn);
 	fillBtn->setFontFamily(Icon::Family);
-	fillBtn->setFontSize(ToolbarTheme::iconSize);
+	fillBtn->setFontSize(Icon::Size);
 	applyToggleStyle(fillBtn, isRectFill);
 	tip->bind(fillBtn, Lang::get(L"tool.rectFill"));
 	fillBtn->onClick.add([this](Ling::Button*) {
@@ -2782,7 +2752,7 @@ void ToolSub::makeRectStyleBtns()
 	dashBtn->setText(Icon::DashRect);
 	styleToolbarBtn(dashBtn);
 	dashBtn->setFontFamily(Icon::Family);
-	dashBtn->setFontSize(ToolbarTheme::iconSize);
+	dashBtn->setFontSize(Icon::Size);
 	applyToggleStyle(dashBtn, isRectDash);
 	tip->bind(dashBtn, Lang::get(L"tool.dash"));
 	dashBtn->onClick.add([this](Ling::Button*) {
@@ -2800,7 +2770,7 @@ void ToolSub::makeRectStyleBtns()
 	roundBtn->setText(Icon::RoundCorner);
 	styleToolbarBtn(roundBtn);
 	roundBtn->setFontFamily(Icon::Family);
-	roundBtn->setFontSize(ToolbarTheme::iconSize);
+	roundBtn->setFontSize(Icon::Size);
 	refreshRoundBtnStyle();
 	tip->bind(roundBtn, Lang::get(isEllipse ? L"tool.roundCornerEllipse" : L"tool.roundCorner"));
 	roundBtn->onClick.add([this](Ling::Button*) {
@@ -2834,7 +2804,7 @@ void ToolSub::makeArrowHeadBtn(const wchar_t* icon, int style, const wchar_t* ti
 	btn->setText(icon);
 	styleToolbarBtn(btn);
 	btn->setFontFamily(Icon::Family);
-	btn->setFontSize(ToolbarTheme::iconSize);
+	btn->setFontSize(Icon::Size);
 	tip->bind(btn, Lang::get(tipKey));
 	btn->onClick.add([this, style](Ling::Button*) {
 		arrowHead = (arrowHead == style) ? ArrowDefault : style;
@@ -3018,14 +2988,8 @@ void ToolSub::initSize(int btnCount, bool withColors, bool centerOnBtn, float ex
 	sizeBtnCount = btnCount;
 	sizeWithColors = withColors;
 	sizeExtraW = extraLogicW;
-	const int sizeMode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
-	btnSize = (sizeMode == 0) ? 48.f : (sizeMode == 2 ? 38.f : 42.f);
-	iconInner = btnSize - 8.f;
-	ToolbarTheme::propBtnSize = btnSize;
-	ToolbarTheme::propIconInner = iconInner;
-	ToolbarTheme::iconSize = (sizeMode == 0) ? 28.f : (sizeMode == 2 ? 22.f : 24.f);
 	const int nIcons = btnCount + (withColors ? 1 : 0);
-	const float iconSlot = ToolbarTheme::iconSize + ToolbarTheme::propGap;
+	const float iconSlot = Icon::Size + ToolbarTheme::propGap;
 	auto pxW = toPx(ToolbarTheme::propPad) * 2.f
 		+ toPx(iconSlot) * nIcons
 		+ toPx(sizeExtraW)

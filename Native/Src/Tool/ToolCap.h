@@ -131,7 +131,7 @@ private:
 	Ling::Button* hoverSuppress{ nullptr };
 	static constexpr UINT pickerHideTimerId{ 210 };
 	Ling::Button* dragHandle{ nullptr };
-	inline static float btnSize{ 42.f };
+	static constexpr float btnSize{ 42.f };
 	static constexpr float toolbarRadius{ ToolbarTheme::borderRadius };
 	static constexpr float hoverRadius{ ToolbarTheme::hoverRadius };
 	static constexpr float hoverInset{ 4.f };

@@ -42,9 +42,9 @@ private:
 	bool tipDown_{ false };
 	bool open_{ false };
 	bool borderless_{ false };
-	inline static float btnSize{ 42.f };
+	static constexpr float btnSize{ ToolbarTheme::propBtnSize };
 	static constexpr float hoverInset{ 4.f };
-	inline static float iconInner{ 34.f };
+	static constexpr float iconInner{ ToolbarTheme::propIconInner };
 	static constexpr float hoverRadius{ ToolbarTheme::hoverRadius };
 	static constexpr float marginTop{ ToolbarTheme::caretSize };
 	static constexpr float swatchSize{ ToolbarTheme::swatchSize };

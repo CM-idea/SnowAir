@@ -1447,8 +1447,6 @@ bool Setting::getPinZoomAtCursor() { return featBool(L"pinZoomAtCursor", true); 
 void Setting::setPinZoomAtCursor(bool on) { setFeatBool(L"pinZoomAtCursor", on); }
 int Setting::getCaptureToolbarAlign() { return featInt(L"captureToolbarAlign", 0); }
 void Setting::setCaptureToolbarAlign(int v) { setFeatInt(L"captureToolbarAlign", v < 0 ? 0 : (v > 2 ? 2 : v)); }
-int Setting::getToolbarSize() { return featInt(L"toolbarSize", 1); }
-void Setting::setToolbarSize(int v) { setFeatInt(L"toolbarSize", v < 0 ? 0 : (v > 2 ? 2 : v)); }
 bool Setting::getSilentCapture() { return featBool(L"silentCapture", true); }
 void Setting::setSilentCapture(bool on) { setFeatBool(L"silentCapture", on); }
 bool Setting::getPinAutoOcr() { return featBool(L"pinAutoOcr", false); }
