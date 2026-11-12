@@ -2352,6 +2352,20 @@ std::recursive_mutex& localDataMutex()
     static std::recursive_mutex m;
     return m;
 }
+
+std::vector<std::wstring> splitLocalKey(const std::wstring& key)
+{
+    std::vector<std::wstring> parts;
+    size_t start = 0;
+    for (;;) {
+        const size_t dot = key.find(L'.', start);
+        const std::wstring part = key.substr(start, dot == std::wstring::npos ? std::wstring::npos : dot - start);
+        if (!part.empty()) parts.push_back(part);
+        if (dot == std::wstring::npos) break;
+        start = dot + 1;
+    }
+    return parts;
+}
 }
 
 std::filesystem::path Setting::getLocalDataPath()
@@ -2382,6 +2396,47 @@ bool Setting::saveLocalData(const JsonObject& data)
 {
     std::lock_guard<std::recursive_mutex> lock(localDataMutex());
     return writeConfigAtomic(getLocalDataPath(), std::wstring{ data.Stringify() });
+}
+
+std::wstring Setting::getLocalDataText(const std::wstring& key)
+{
+    const auto parts = splitLocalKey(key);
+    if (parts.empty()) return {};
+    JsonObject cur = loadLocalData();
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (!cur || !cur.HasKey(parts[i])) return {};
+        const JsonValue value = cur.GetNamedValue(parts[i]);
+        if (i + 1 == parts.size())
+            return value.ValueType() == JsonValueType::Object ? std::wstring{ value.Stringify() } : std::wstring{};
+        if (value.ValueType() != JsonValueType::Object) return {};
+        cur = value.GetObjectW();
+    }
+    return {};
+}
+
+bool Setting::setLocalDataText(const std::wstring& key, const std::wstring& json)
+{
+    const auto parts = splitLocalKey(key);
+    if (parts.empty()) return false;
+    JsonObject value{ nullptr };
+    if (!JsonObject::TryParse(json, value) || !value) return false;
+    // 插件启动时可能重复保存同一份数据，内容没变就不写盘。
+    if (getLocalDataText(key) == std::wstring{ value.Stringify() }) return true;
+
+    JsonObject data = loadLocalData();
+    if (!data) data = JsonObject();
+    JsonObject cur = data;
+    for (size_t i = 0; i + 1 < parts.size(); ++i) {
+        if (cur.HasKey(parts[i]) && cur.GetNamedValue(parts[i]).ValueType() == JsonValueType::Object) {
+            cur = cur.GetNamedValue(parts[i]).GetObjectW();
+            continue;
+        }
+        JsonObject next;
+        cur.SetNamedValue(parts[i], next);
+        cur = next;
+    }
+    cur.SetNamedValue(parts.back(), value);
+    return saveLocalData(data);
 }
 
 // 将旧版本分散的本机数据迁移到 local.json：

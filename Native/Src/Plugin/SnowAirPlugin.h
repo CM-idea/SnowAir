@@ -23,7 +23,7 @@
 #endif
 #include <wchar.h>
 
-#define SNOWAIR_PLUGIN_API 4
+#define SNOWAIR_PLUGIN_API 5
 
 /*
  * The plugin is loaded with GetProcAddress("SnowAirPluginEntry"), so it does not
@@ -218,6 +218,15 @@ typedef struct SnowAirHost {
 
     /* 按 id 删除文本记录。成功返回 1。 */
     int  (*entry_delete_id)(void* user, const wchar_t* id);
+
+    /*
+     * v5 — 本地数据（SnowAir 的 local.json）。
+     * key 用点分路径，例如 "rack.items"；值必须是 JSON 对象。
+     * get 返回所需 wchar 数（含结尾 0），没有返回 0；set 成功返回 1。
+     * 旧宿主没有这两个字段，插件按 api_version 回退到自己的文件。
+     */
+    int  (*local_data_get)(void* user, const wchar_t* key, wchar_t* out, int capacity);
+    int  (*local_data_set)(void* user, const wchar_t* key, const wchar_t* json);
 } SnowAirHost;
 
 /* Settings item kind. */

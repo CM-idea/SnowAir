@@ -798,6 +798,28 @@ void setConfigInt(void*, const wchar_t* key, int value)
     if (auto* s = Setting::get(); s && key) s->setRackInt(key, value);
 }
 
+int localDataGet(void*, const wchar_t* key, wchar_t* out, int capacity)
+{
+    auto* s = Setting::get();
+    if (!s || !key) return 0;
+    const std::wstring text = s->getLocalDataText(key);
+    if (text.empty()) return 0;
+    const int need = static_cast<int>(text.size()) + 1;
+    if (out && capacity > 0) {
+        const int n = std::min(static_cast<int>(text.size()), capacity - 1);
+        memcpy(out, text.c_str(), static_cast<size_t>(n) * sizeof(wchar_t));
+        out[n] = 0;
+    }
+    return need;
+}
+
+int localDataSet(void*, const wchar_t* key, const wchar_t* json)
+{
+    auto* s = Setting::get();
+    if (!s || !key || !json) return 0;
+    return s->setLocalDataText(key, json) ? 1 : 0;
+}
+
 void openSettings(void*)
 {
     WinSetting::init(3);
@@ -901,6 +923,8 @@ void PluginHost::init()
     host_.config_set_bool = setConfigBool;
     host_.config_get_int = configInt;
     host_.config_set_int = setConfigInt;
+    host_.local_data_get = localDataGet;
+    host_.local_data_set = localDataSet;
     host_.open_settings = openSettings;
     host_.log = logMessage;
     host_.history_count = ::historyCount;

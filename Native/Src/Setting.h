@@ -330,6 +330,9 @@ public:
 	std::filesystem::path getClipboardDir();
 	std::vector<ClipboardItem> getClipboardItems();
 	std::vector<std::wstring> getClipboardTags(const std::wstring& id);
+	// 插件本地数据（local.json）：key 用点分路径，如 "rack.items"，值为 JSON 对象。
+	std::wstring getLocalDataText(const std::wstring& key);
+	bool setLocalDataText(const std::wstring& key, const std::wstring& json);
 	void setClipboardTags(const std::wstring& id, const std::vector<std::wstring>& tags);
 	void addClipboardText(const std::wstring& text, bool dedup = true);
 	// 插件便签：按 id 改写文本（挪到最前）；id 不存在或不是文本返回 false
