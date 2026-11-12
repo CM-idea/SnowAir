@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "ToolPicker.h"
 #include "../Lang.h"
+#include "../Setting.h"
 #include "../Tip.h"
 #include "IconCodes.h"
 #include "ToolSub.h"
@@ -11,13 +12,27 @@
 
 using Microsoft::WRL::ComPtr;
 
+namespace {
+	std::vector<ToolPicker*> g_toolPickers;
+}
+
 ToolPicker::ToolPicker() : Ling::WinBase()
 {
 	createNativeWindow(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, WS_POPUP);
+	g_toolPickers.push_back(this);
+	static bool sizeHookInstalled = false;
+	if (!sizeHookInstalled && Setting::get()) {
+		sizeHookInstalled = true;
+		Setting::get()->addToolbarSizeListener([] {
+			for (auto* picker : g_toolPickers) picker->applyToolbarSize();
+		});
+	}
 }
 
 ToolPicker::~ToolPicker()
 {
+	g_toolPickers.erase(std::remove(g_toolPickers.begin(), g_toolPickers.end(), this),
+		g_toolPickers.end());
 	// WinBase 析构不销毁 HWND：不 close 就析构会留下"幽灵窗"，WndProc 重入已释放对象
 	if (hwnd) { close(); hwnd = nullptr; }
 }
@@ -55,6 +70,26 @@ void ToolPicker::applyRowInsets()
 	ToolbarChrome::applyPropBubbleContentPad(row, preferAbove);
 	row->setPosition(Ling::Edge::Left, ToolbarTheme::shadowPad);
 	row->setPosition(Ling::Edge::Right, ToolbarTheme::shadowPad);
+}
+
+void ToolPicker::applyToolbarSize()
+{
+	if (!isVisible || !row) return;
+	const int mode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
+	ToolbarTheme::propBtnSize = (mode == 0) ? 48.f : (mode == 2 ? 38.f : 42.f);
+	ToolbarTheme::propIconInner = ToolbarTheme::propBtnSize - 8.f;
+	ToolbarTheme::iconSize = (mode == 0) ? 24.f : (mode == 2 ? 20.f : 22.f);
+	const float edge = 12.f;
+	const float n = static_cast<float>(items.size());
+	const float slot = ToolbarTheme::iconSize + ToolbarTheme::propGap;
+	row->setPaddingLeft(edge);
+	row->setPaddingRight(edge);
+	setSize(edge * 2.f + n * slot + ToolbarTheme::shadowPad * 2.f,
+		ToolbarTheme::propBtnSize + ToolbarTheme::caretSize + ToolbarTheme::shadowPad * 2.f);
+	rebuildButtons();
+	placeNearAnchor();
+	layout();
+	refresh();
 }
 
 void ToolPicker::layout()

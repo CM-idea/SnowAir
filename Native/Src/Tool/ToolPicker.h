@@ -33,6 +33,7 @@ private:
 	void rebuildButtons();
 	void placeNearAnchor();
 	void applyRowInsets();
+	void applyToolbarSize();
 private:
 	Ling::WinBase* toolbar{ nullptr };
 	Ling::Button* anchor{ nullptr };

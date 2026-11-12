@@ -168,9 +168,9 @@ ToolSub::ToolSub(AnnotHost* win) : ToolbarWindow(), win(win)
 	static bool sizeHookInstalled = false;
 	if (!sizeHookInstalled && Setting::get()) {
 		sizeHookInstalled = true;
-		Setting::get()->toolbarSizeChanged = [] {
+		Setting::get()->addToolbarSizeListener([] {
 			for (auto* sub : g_toolSubs) sub->applyToolbarSize();
-		};
+		});
 	}
 	onDpiChanged.add([this]() { dpiChanged = true; });
 	onSizeChanged.add([this]() {

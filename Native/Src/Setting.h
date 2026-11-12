@@ -353,7 +353,8 @@ public:
 	void markOwnClipboardWrite();
 	// 剪切板历史变化通知：设置页停在「剪切板」页时据此即时刷新列表
 	std::function<void()> clipboardChanged;
-	std::function<void()> toolbarSizeChanged;
+	std::vector<std::function<void()>> toolbarSizeListeners;
+	void addToolbarSizeListener(std::function<void()> listener);
 private:
 	Setting();
 	// 剪切板索引写回（含上限裁剪）：新条目在前

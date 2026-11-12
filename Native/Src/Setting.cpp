@@ -1451,7 +1451,14 @@ int Setting::getToolbarSize() { return featInt(L"toolbarSize", 1); }
 void Setting::setToolbarSize(int v)
 {
     setFeatInt(L"toolbarSize", v < 0 ? 0 : (v > 2 ? 2 : v));
-    if (toolbarSizeChanged) toolbarSizeChanged();
+    for (auto& listener : toolbarSizeListeners) {
+        if (listener) listener();
+    }
+}
+
+void Setting::addToolbarSizeListener(std::function<void()> listener)
+{
+    if (listener) toolbarSizeListeners.push_back(std::move(listener));
 }
 bool Setting::getSilentCapture() { return featBool(L"silentCapture", true); }
 void Setting::setSilentCapture(bool on) { setFeatBool(L"silentCapture", on); }
