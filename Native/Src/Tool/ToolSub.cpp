@@ -3172,6 +3172,8 @@ void ToolSub::bindOwner(HWND ownerHwnd)
 void ToolSub::showNoActivate()
 {
 	if (!hwnd) return;
+	// 每次显示都重新套用当前工具栏尺寸，避免隐藏期间改尺寸后仍用旧布局。
+	applyToolbarSize();
 	// 确保 NOACTIVATE 始终在（防被外部改掉），并用不激活的显示命令：
 	// 否则 SW_SHOW 可能把激活抢到气泡上，宿主窗口标题栏随即变灰、画布失焦。
 	LONG_PTR ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE);

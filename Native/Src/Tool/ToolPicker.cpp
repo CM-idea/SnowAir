@@ -74,7 +74,7 @@ void ToolPicker::applyRowInsets()
 
 void ToolPicker::applyToolbarSize()
 {
-	if (!isVisible || !row) return;
+	if (!row) return;
 	const int mode = Setting::get() ? Setting::get()->getToolbarSize() : 1;
 	ToolbarTheme::propBtnSize = (mode == 0) ? 48.f : (mode == 2 ? 38.f : 42.f);
 	ToolbarTheme::propIconInner = ToolbarTheme::propBtnSize - 8.f;
@@ -195,16 +195,8 @@ void ToolPicker::showFor(Ling::WinBase* bar, Ling::Button* anchorBtn, const std:
 	anchor = anchorBtn;
 	items = list;
 	selectedId = selected;
-	const float n = (float)items.size();
-	const float edge = 12.f;
-	row->setPaddingLeft(edge);
-	row->setPaddingRight(edge);
-	const float slot = ToolbarTheme::iconSize + ToolbarTheme::propGap;
-	setSize(edge * 2.f + n * slot + ToolbarTheme::shadowPad * 2.f,
-		ToolbarTheme::propBtnSize + ToolbarTheme::caretSize + ToolbarTheme::shadowPad * 2.f);
 	dpi = bar->dpi;
-	rebuildButtons();
-	placeNearAnchor();
+	applyToolbarSize();
 	if (hwnd && bar->hwnd) {
 		SetWindowLongPtr(hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(bar->hwnd));
 	}
