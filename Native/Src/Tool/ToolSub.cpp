@@ -162,7 +162,7 @@ ToolSub::ToolSub(AnnotHost* win) : ToolbarWindow(), win(win)
 	iconInner = btnSize - 8.f;
 	ToolbarTheme::propBtnSize = btnSize;
 	ToolbarTheme::propIconInner = iconInner;
-	ToolbarTheme::iconSize = (sizeMode == 0) ? 28.f : (sizeMode == 2 ? 22.f : 24.f);
+	ToolbarTheme::iconSize = (sizeMode == 0) ? 24.f : (sizeMode == 2 ? 20.f : 22.f);
 	onDpiChanged.add([this]() { dpiChanged = true; });
 	onSizeChanged.add([this]() {
 		if (!dpiChanged) return;
@@ -2999,7 +2999,7 @@ void ToolSub::initSize(int btnCount, bool withColors, bool centerOnBtn, float ex
 	iconInner = btnSize - 8.f;
 	ToolbarTheme::propBtnSize = btnSize;
 	ToolbarTheme::propIconInner = iconInner;
-	ToolbarTheme::iconSize = (sizeMode == 0) ? 28.f : (sizeMode == 2 ? 22.f : 24.f);
+	ToolbarTheme::iconSize = (sizeMode == 0) ? 24.f : (sizeMode == 2 ? 20.f : 22.f);
 	const int nIcons = btnCount + (withColors ? 1 : 0);
 	const float iconSlot = ToolbarTheme::iconSize + ToolbarTheme::propGap;
 	auto pxW = toPx(ToolbarTheme::propPad) * 2.f
