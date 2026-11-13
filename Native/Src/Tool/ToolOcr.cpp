@@ -104,9 +104,9 @@ namespace {
 			// 竖排是"每字一行"的多行文本，行距由排版决定、不能再用 inkH 估算，直接按整列自然高度缩放。
 			const float s = vertical
 				? std::min(std::min(fitW / w, fitH * 0.98f / h), 1.f)
-				// 横排：允许 6% 以内的横向溢出，不为了几像素再缩一次 ——
+				// 横排：允许 20% 以内的横向溢出，不为了几像素再缩一次 ——
 				// 逐行缩放会让同一段里的字（包括圆点）大小忽大忽小，看着不齐
-				: std::min(std::min((w > fitW * 1.06f ? fitW / w : 1.f), fitH * vFill / inkH), 1.f);
+				: std::min(std::min((w > fitW * 1.20f ? fitW / w : 1.f), fitH * vFill / inkH), 1.f);
 			scale_ = s;
 			// 水平按原文对齐摆放：译文比原文短、装不满框时，居左/居中/居右的差别才看得出来。
 			// 居左 = 和原文一样从同一列起排；居中/居右照原样还原。
@@ -1337,7 +1337,7 @@ void ToolOcr::rebuildEditors()
 			// 不按语种区分墨迹比：统一用文本实际排版宽度适配字框。
 			// 中英混排时整行仍按同一字号排版，不会出现英文比中文小一圈。
 			constexpr float kTextInkRatio = 0.96f;
-			constexpr float kTextWidthFill = 1.05f;
+			constexpr float kTextWidthFill = 1.15f;
 			float fLogical = boxH * 0.98f / (kTextInkRatio * dpi);
 			float naturalW = 0.f, naturalH = 0.f;
 			if (measureTextSize(text, 10.f, dpi, reg.bold, naturalW, naturalH) && naturalW > 0.f) {
