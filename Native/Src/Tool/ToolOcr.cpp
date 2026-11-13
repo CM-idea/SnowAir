@@ -1336,8 +1336,8 @@ void ToolOcr::rebuildEditors()
 		else {
 			// 不按语种区分墨迹比：统一用文本实际排版宽度适配字框。
 			// 中英混排时整行仍按同一字号排版，不会出现英文比中文小一圈。
-			constexpr float kTextInkRatio = 0.84f;
-			constexpr float kTextWidthFill = 1.15f;
+			constexpr float kTextInkRatio = 0.89f;
+			constexpr float kTextWidthFill = 1.10f;
 			float fLogical = boxH * 0.98f / (kTextInkRatio * dpi);
 			float naturalW = 0.f, naturalH = 0.f;
 			if (measureTextSize(text, 10.f, dpi, reg.bold, naturalW, naturalH) && naturalW > 0.f) {
