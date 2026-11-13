@@ -1239,13 +1239,15 @@ void ToolOcr::rebuildEditors()
 			fg = (lum > 150) ? 0x14181CFF : 0xF8FBFBFF;
 		}
 
-		// 1) 背景块：**严格等于识别框**，整块盖住原文字 —— 这是"覆盖到位"的关键。
+		// 1) 背景块：盖住识别框，外扩 1 个物理像素 —— 识别框通常不含文字抗锯齿边缘，
+		//    严格贴框时边缘会漏出一点原文字。
 		{
+			const float bgPad = 1.f / dpi;
 			auto* bgNode = body->makeChild<Ling::Node>();
 			bgNode->setPositionType(Ling::Position::Absolute);
-			bgNode->setPosition(Ling::Edge::Left, rx);
-			bgNode->setPosition(Ling::Edge::Top, ry);
-			bgNode->setSize(rw, rh);
+			bgNode->setPosition(Ling::Edge::Left, rx - bgPad);
+			bgNode->setPosition(Ling::Edge::Top, ry - bgPad);
+			bgNode->setSize(rw + bgPad * 2.f, rh + bgPad * 2.f);
 			bgNode->setBg(bg);
 			bgNode->setBorderRadius(2.f);
 			bgs_.push_back(bgNode);
