@@ -4383,6 +4383,11 @@ namespace {
 		};
 		for (size_t i = 0; i < in.regions.size(); i++) {
 			const auto& r = in.regions[i];
+			// 四边形行直接独立成行：倾斜行的轴对齐外包会互相重叠，按矩形合并会把多行并成一块。
+			if (r.hasQuad) {
+				lines.push_back({ r.x, r.y, r.x + r.w, r.y + r.h, { i }, r.vertical });
+				continue;
+			}
 			Line* hit = nullptr;
 			for (auto& ln : lines) {
 				// 横排与竖排绝不合并：两条管线的"同一行"判据完全不同
@@ -4436,6 +4441,21 @@ namespace {
 				const auto& src = in.regions[ln.idx.front()];
 				reg.hasQuad = src.hasQuad;
 				for (int q = 0; q < 4; ++q) reg.quad[q] = src.quad[q];
+			}
+			else if (!ln.idx.empty()) {
+				// 同一视觉行被检测器拆成多块时，用首块左上、末块右上重建一条 quadrilateral，
+				// 保留整行倾斜角度，而不是退回水平矩形。
+				bool allQuad = true;
+				for (size_t k : ln.idx) if (!in.regions[k].hasQuad) { allQuad = false; break; }
+				if (allQuad) {
+					const auto& first = in.regions[ln.idx.front()];
+					const auto& last = in.regions[ln.idx.back()];
+					reg.hasQuad = true;
+					reg.quad[0] = first.quad[0];
+					reg.quad[1] = last.quad[1];
+					reg.quad[2] = last.quad[2];
+					reg.quad[3] = first.quad[3];
+				}
 			}
 			merged.push_back(reg);
 		}
