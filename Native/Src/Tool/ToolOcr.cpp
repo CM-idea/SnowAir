@@ -175,6 +175,124 @@ namespace {
 		return outW > 0.f && outH > 0.f;
 	}
 
+	// 字形实际墨迹包围盒：和按行高/墨迹比估算不同，这里直接量出每个 glyph 的轮廓边界，
+	// 中英文、粗体、混排都按同一把尺子算字号与落点。
+	class InkBoundsRenderer final : public IDWriteTextRenderer
+	{
+	public:
+		explicit InkBoundsRenderer(ID2D1Factory1* factory) : factory_(factory) {}
+
+		HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
+		{
+			if (!ppv) return E_POINTER;
+			if (riid == __uuidof(IUnknown) || riid == __uuidof(IDWriteTextRenderer)) {
+				*ppv = this;
+				AddRef();
+				return S_OK;
+			}
+			*ppv = nullptr;
+			return E_NOINTERFACE;
+		}
+		ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&ref_); }
+		ULONG STDMETHODCALLTYPE Release() override
+		{
+			const ULONG n = InterlockedDecrement(&ref_);
+			if (n == 0) delete this;
+			return n;
+		}
+
+		HRESULT STDMETHODCALLTYPE IsPixelSnappingDisabled(void*, BOOL* disabled) override
+		{
+			if (!disabled) return E_POINTER;
+			*disabled = TRUE;
+			return S_OK;
+		}
+		HRESULT STDMETHODCALLTYPE GetCurrentTransform(void*, DWRITE_MATRIX* transform) override
+		{
+			if (!transform) return E_POINTER;
+			*transform = DWRITE_MATRIX{ 1.f, 0.f, 0.f, 1.f, 0.f, 0.f };
+			return S_OK;
+		}
+		HRESULT STDMETHODCALLTYPE GetPixelsPerDip(void*, FLOAT* pixelsPerDip) override
+		{
+			if (!pixelsPerDip) return E_POINTER;
+			*pixelsPerDip = 1.f;
+			return S_OK;
+		}
+
+		HRESULT STDMETHODCALLTYPE DrawGlyphRun(void*, FLOAT baselineX, FLOAT baselineY,
+			DWRITE_MEASURING_MODE, const DWRITE_GLYPH_RUN* run,
+			const DWRITE_GLYPH_RUN_DESCRIPTION*, IUnknown*) override
+		{
+			if (!run || !run->fontFace || run->glyphCount == 0 || !factory_) return S_OK;
+			Microsoft::WRL::ComPtr<ID2D1PathGeometry> path;
+			if (FAILED(factory_->CreatePathGeometry(path.GetAddressOf())) || !path) return S_OK;
+			Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+			if (FAILED(path->Open(sink.GetAddressOf())) || !sink) return S_OK;
+			run->fontFace->GetGlyphRunOutline(run->fontEmSize, run->glyphIndices,
+				run->glyphAdvances, run->glyphOffsets, run->glyphCount, run->isSideways,
+				run->bidiLevel % 2 != 0, sink.Get());
+			sink->Close();
+			D2D1_RECT_F box{};
+			if (FAILED(path->GetBounds(nullptr, &box))) return S_OK;
+			box.left += baselineX;
+			box.right += baselineX;
+			box.top += baselineY;
+			box.bottom += baselineY;
+			if (!has_) {
+				bounds_ = box;
+				has_ = true;
+			}
+			else {
+				bounds_.left = std::min(bounds_.left, box.left);
+				bounds_.top = std::min(bounds_.top, box.top);
+				bounds_.right = std::max(bounds_.right, box.right);
+				bounds_.bottom = std::max(bounds_.bottom, box.bottom);
+			}
+			return S_OK;
+		}
+		HRESULT STDMETHODCALLTYPE DrawUnderline(void*, FLOAT, FLOAT,
+			const DWRITE_UNDERLINE*, IUnknown*) override { return S_OK; }
+		HRESULT STDMETHODCALLTYPE DrawStrikethrough(void*, FLOAT, FLOAT,
+			const DWRITE_STRIKETHROUGH*, IUnknown*) override { return S_OK; }
+		HRESULT STDMETHODCALLTYPE DrawInlineObject(void*, FLOAT, FLOAT,
+			IDWriteInlineObject*, BOOL, BOOL, IUnknown*) override { return S_OK; }
+
+		bool valid() const { return has_; }
+		D2D1_RECT_F bounds() const { return bounds_; }
+
+	private:
+		LONG ref_{ 1 };
+		ID2D1Factory1* factory_{ nullptr };
+		bool has_{ false };
+		D2D1_RECT_F bounds_{};
+	};
+
+	bool measureTextInk(const std::wstring& s, float fontSizeLogical, float dpi, bool bold,
+		float& left, float& top, float& width, float& height)
+	{
+		auto* d2d = Ling::D2D::get();
+		if (!d2d || !d2d->dwriteFactory || !d2d->d2dFactory || s.empty()) return false;
+		auto fmt = d2d->getTextFormat(L"");
+		if (!fmt) return false;
+		Microsoft::WRL::ComPtr<IDWriteTextLayout> tl;
+		if (FAILED(d2d->dwriteFactory->CreateTextLayout(s.c_str(), (UINT32)s.size(),
+			fmt, FLT_MAX, FLT_MAX, tl.GetAddressOf())) || !tl)
+			return false;
+		tl->SetFontSize(fontSizeLogical * dpi, { 0, INT_MAX });
+		tl->SetFontWeight(bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL, { 0, INT_MAX });
+		tl->SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
+		InkBoundsRenderer renderer(d2d->d2dFactory.Get());
+		if (FAILED(tl->Draw(nullptr, &renderer, 0.f, 0.f)) || !renderer.valid()) return false;
+		const D2D1_RECT_F b = renderer.bounds();
+		left = b.left;
+		top = b.top;
+		width = b.right - b.left;
+		height = b.bottom - b.top;
+		return width > 0.f && height > 0.f;
+	}
+
+
 	// 逐通道中位数
 	int medianOf(std::vector<int>& v)
 	{
@@ -1334,20 +1452,34 @@ void ToolOcr::rebuildEditors()
 			box->setText(stacked);
 		}
 		else {
-			// 不按语种区分墨迹比：统一用文本实际排版宽度适配字框。
-			// 中英混排时整行仍按同一字号排版，不会出现英文比中文小一圈。
-			constexpr float kTextInkRatio = 0.89f;
-			constexpr float kTextWidthFill = 1.10f;
-			float fLogical = boxH * 0.98f / (kTextInkRatio * dpi);
-			float naturalW = 0.f, naturalH = 0.f;
-			if (measureTextSize(text, 10.f, dpi, reg.bold, naturalW, naturalH) && naturalW > 0.f) {
-				fLogical = 10.f * fitBoxW / naturalW * kTextWidthFill;
+			// 直接量真实字形墨迹：字号和落点都按墨迹包围盒适配，中英文共用一套逻辑。
+			float inkL = 0.f, inkT = 0.f, inkW = 0.f, inkH = 0.f;
+			constexpr float probe = 10.f;
+			if (measureTextInk(text, probe, dpi, reg.bold, inkL, inkT, inkW, inkH)) {
+				const float fit = std::min(fitBoxW / inkW, fitBoxH / inkH);
+				const float fLogical = std::clamp(probe * fit, 7.f / dpi, 300.f / dpi);
+				const float k = fLogical / probe;
+				box->fitW = fitBoxW;
+				box->fitH = fitBoxH;
+				box->boxL = reg.x * scaleX + textPad - inkL * k;
+				box->boxT = reg.y * scaleY + textPad - inkT * k;
+				box->inkH = inkH * k;
+				box->vFill = 1.f;
+				box->setFontSize(fLogical);
+				box->setText(text);
 			}
-			fLogical = std::clamp(fLogical, 7.f / dpi, 300.f / dpi);
-			box->inkH = fLogical * dpi * kTextInkRatio;
-			box->vFill = 0.98f;
-			box->setFontSize(fLogical);
-			box->setText(text);
+			else {
+				// 量不到墨迹（极短/异常文本）：退回按排版宽度适配。
+				float fLogical = boxH * 0.98f / (0.89f * dpi);
+				float naturalW = 0.f, naturalH = 0.f;
+				if (measureTextSize(text, 10.f, dpi, reg.bold, naturalW, naturalH) && naturalW > 0.f)
+					fLogical = 10.f * fitBoxW / naturalW;
+				fLogical = std::clamp(fLogical, 7.f / dpi, 300.f / dpi);
+				box->inkH = fLogical * dpi * 0.89f;
+				box->vFill = 0.98f;
+				box->setFontSize(fLogical);
+				box->setText(text);
+			}
 		}
 		editors.push_back(box);
 	}
