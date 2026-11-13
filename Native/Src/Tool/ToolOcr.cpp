@@ -624,6 +624,8 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 		const SelPoint sp = hitSelPoint(pos);
 		if (sp.line < 0) return;
 		selDragging_ = true;
+		selSpatial_ = true;
+		selAnchor_ = selCurrent_ = pos;
 		selALine_ = selBLine_ = sp.line;
 		selAIdx_ = selBIdx_ = sp.index;
 		SetFocus(hwnd);
@@ -634,6 +636,7 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 		if (!selDragging_) return;
 		const SelPoint sp = hitSelPoint(pos);
 		if (sp.line < 0) return;
+		selCurrent_ = pos;
 		selBLine_ = sp.line;
 		selBIdx_ = sp.index;
 		applySelection();
@@ -661,6 +664,7 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 				// 全选不是"正在拖选"：这里只设端点。之前把 selActive_ 也置真，
 				// 于是全选后鼠标只是划过文字，onMouseMove 就把终点改到光标处。
 				selDragging_ = false;
+				selSpatial_ = false;
 				selALine_ = 0; selAIdx_ = 0;
 				selBLine_ = (int)editors.size() - 1;
 				selBIdx_ = (int)editors.back()->getText().size();
@@ -1612,6 +1616,7 @@ void ToolOcr::rebuildEditors()
 	}
 	// 选区状态跟着重建作废；镜像层保持在最上层
 	selDragging_ = false;
+	selSpatial_ = false;
 	selALine_ = selBLine_ = -1;
 	selAIdx_ = selBIdx_ = 0;
 	// 所有文字统一压在背景层之上：背景是逐框建的，后一框的外扩可能盖住前一框文字。
@@ -1827,6 +1832,68 @@ void ToolOcr::applySelection()
 	const int n = (int)editors.size();
 	if (n == 0) return;
 	if (selALine_ < 0 || selBLine_ < 0) { clearSelection(); return; }
+
+	// 竖排整版按空间矩形选：从左上拖到右下时，所有列、所有字的范围都应命中，
+	// 不能只依赖编辑器数组顺序（OCR 的列顺序和视觉左右顺序不一定一致）。
+	int verticalCount = 0;
+	for (auto* e : editors) {
+		auto* t = dynamic_cast<OcrText*>(e);
+		if (t && t->vertical) ++verticalCount;
+	}
+	if (selSpatial_ && verticalCount * 2 >= n) {
+		const int x0 = std::min(selAnchor_.x, selCurrent_.x);
+		const int x1 = std::max(selAnchor_.x, selCurrent_.x);
+		const int y0 = std::min(selAnchor_.y, selCurrent_.y);
+		const int y1 = std::max(selAnchor_.y, selCurrent_.y);
+		int first = -1, last = -1, firstA = 0, lastB = 0;
+		for (int i = 0; i < n; ++i) {
+			auto* e = editors[i];
+			if (!e) continue;
+			if (e->x + e->w < x0 || e->x > x1) { e->setSelectionRange(0, 0); continue; }
+			auto* ot = dynamic_cast<OcrText*>(e);
+			if (!ot || !ot->vertical) { e->setSelectionRange(0, 0); continue; }
+			if (y1 < e->y || y0 > e->y + e->h) { e->setSelectionRange(0, 0); continue; }
+			const std::wstring& stacked = e->getText();
+			auto toLogical = [&](int raw) {
+				int logical = 0;
+				for (int k = 0; k < raw && k < (int)stacked.size(); ++k)
+					if (stacked[k] != L'\r' && stacked[k] != L'\n') ++logical;
+				return logical;
+			};
+			auto indexAt = [&](int y) {
+				if (y <= e->y) return 0;
+				if (y >= e->y + e->h) return (int)ot->logical.size();
+				POINT p{ (LONG)(e->x + 1.f), (LONG)y };
+				return toLogical(e->hitTextIndex(p));
+			};
+			int a = indexAt(y0), b = indexAt(y1);
+			if (a > b) std::swap(a, b);
+			auto toRaw = [&](int logical) {
+				int raw = 0, seen = 0;
+				while (raw < (int)stacked.size() && seen < logical) {
+					if (stacked[raw] != L'\r' && stacked[raw] != L'\n') ++seen;
+					++raw;
+				}
+				return raw;
+			};
+			e->setSelectionRange(std::clamp(toRaw(a), 0, (int)stacked.size()),
+				std::clamp(toRaw(b), 0, (int)stacked.size()));
+			if (first < 0) { first = i; firstA = a; }
+			last = i;
+			lastB = b;
+		}
+		if (first < 0) {
+			clearSelection();
+		}
+		else {
+			selALine_ = first;
+			selAIdx_ = firstA;
+			selBLine_ = last;
+			selBIdx_ = lastB;
+		}
+		return;
+	}
+
 	// 阅读顺序（行优先）归一化
 	int sl = selALine_, si = selAIdx_, el = selBLine_, ei = selBIdx_;
 	if (sl > el || (sl == el && si > ei)) { std::swap(sl, el); std::swap(si, ei); }
@@ -1867,6 +1934,7 @@ void ToolOcr::clearSelection()
 {
 	for (auto* e : editors) if (e) e->setSelectionRange(0, 0);
 	selDragging_ = false;
+	selSpatial_ = false;
 	selALine_ = selBLine_ = -1;
 	selAIdx_ = selBIdx_ = 0;
 }

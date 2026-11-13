@@ -148,6 +148,8 @@ private:
 	// 否则鼠标只是移动（没有按下）也会被 onMouseMove 当成扩选，选区跟着光标跑。
 	bool selDragging_{ false };
 	int selALine_{ -1 }, selAIdx_{ 0 }, selBLine_{ -1 }, selBIdx_{ 0 };
+	POINT selAnchor_{}, selCurrent_{};
+	bool selSpatial_{ false };
 	// —— 标注镜像层：盖在识别文字之上的画布 ——
 	Ling::Canvas* annotCanvas_{ nullptr };
 	std::function<void(ID2D1DeviceContext*)> annotPainter_;
