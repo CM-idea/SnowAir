@@ -819,6 +819,10 @@ void ToolOcr::onCreated()
 	bgCanvas_ = body->makeChild<Ling::Canvas>();
 	bgCanvas_->enableSwapChain();
 	bgCanvas_->setSizePercent(100.f, 100.f);
+	// 四边形文字层在窗口创建期就建好，保证首次 layout 前已有 swapchain
+	textCanvas_ = body->makeChild<Ling::Canvas>();
+	textCanvas_->enableSwapChain();
+	textCanvas_->setSizePercent(100.f, 100.f);
 
 	rebuildEditors();
 	// 标注镜像层：盖在识别文字之上的透明画布（宿主注入 annotPainter_ 后才有内容）
@@ -1771,6 +1775,8 @@ void ToolOcr::rebuildEditors()
 				qt.q[k] = D2D1::Point2F(reg.quad[k].x * scaleX, reg.quad[k].y * scaleY);
 			quadTexts_.push_back(std::move(qt));
 			box->setColor(0);   // 文字由四边形画布绘制，控件只保留命中/选区
+			box->setSelectionBgColor(0);
+			box->setSelectionTextColor(0);
 		}
 	}
 	// 文本重排（或没有逐框结果时）落成一个整段文本框：可编辑、Enter 换行，
@@ -1910,12 +1916,7 @@ void ToolOcr::rebuildEditors()
 	for (auto* e : editors) {
 		if (e && e->parent == body.get()) body->bringToFront(e);
 	}
-	if (!quadTexts_.empty()) {
-		if (!textCanvas_) {
-			textCanvas_ = body->makeChild<Ling::Canvas>();
-			textCanvas_->enableSwapChain();
-			textCanvas_->setSizePercent(100.f, 100.f);
-		}
+	if (!quadTexts_.empty() && textCanvas_) {
 		body->bringToFront(textCanvas_);
 	}
 	paintQuadText();
