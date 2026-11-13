@@ -89,10 +89,10 @@ namespace {
 	// 翻译服务清单：与「功能设置 → 翻译」共用同一份（只含非 AI 引擎）
 	struct ProviderItem { const wchar_t* id; const wchar_t* labKey; };
 	const ProviderItem kProviders[] = {
-		{ L"microsoft", L"setting.fnTransMs" },
-		{ L"google",    L"setting.fnTransGoogle" },
 		{ L"youdao",    L"setting.fnTransYoudao" },
 		{ L"baidu",     L"setting.fnTransBaidu" },
+		{ L"microsoft", L"setting.fnTransMs" },
+		{ L"google",    L"setting.fnTransGoogle" },
 		{ L"offline",   L"setting.fnTransOffline" },
 	};
 	constexpr int kProviderCount = (int)(sizeof(kProviders) / sizeof(kProviders[0]));

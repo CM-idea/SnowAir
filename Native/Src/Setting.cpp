@@ -1448,7 +1448,7 @@ int Setting::getOcrPackVariant() { return std::clamp(featInt(L"ocrPackVariant", 
 void Setting::setOcrPackVariant(int v) { setFeatInt(L"ocrPackVariant", std::clamp(v, 0, 1)); }
 int Setting::getOcrResultMode() { return featInt(L"ocrResultMode", 0); }
 void Setting::setOcrResultMode(int v) { setFeatInt(L"ocrResultMode", std::clamp(v, 0, 1)); }
-std::wstring Setting::getTranslateProvider() { return featStr(L"translateProvider", L"microsoft"); }
+std::wstring Setting::getTranslateProvider() { return featStr(L"translateProvider", L"youdao"); }
 void Setting::setTranslateProvider(const std::wstring& v) { setFeatStr(L"translateProvider", v); }
 std::wstring Setting::getTranslateSourceLang() { return featStr(L"translateSourceLang", L"auto"); }
 void Setting::setTranslateSourceLang(const std::wstring& v) { setFeatStr(L"translateSourceLang", v); }
@@ -1719,7 +1719,7 @@ void Setting::restoreFunctionOcrDefaults()
 // 翻译：回到默认在线服务与「非」字典模式；语种不在本子页里，不动
 void Setting::restoreFunctionTranslateDefaults()
 {
-	setTranslateProvider(L"microsoft");
+	setTranslateProvider(L"youdao");
 	setTranslateDictMode(false);
 	setTranslateMsTone(L"standard");
 	setQuickTranslateNewSession(false);
@@ -1777,7 +1777,7 @@ bool Setting::functionOcrAtDefaults()
 
 bool Setting::functionTranslateAtDefaults()
 {
-	return getTranslateProvider() == L"microsoft" && !getTranslateDictMode()
+	return getTranslateProvider() == L"youdao" && !getTranslateDictMode()
 		&& getTranslateMsTone() == L"standard" && !getQuickTranslateNewSession();
 }
 

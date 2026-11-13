@@ -873,10 +873,10 @@ void WinSettingFeatures::buildTranslate(Ling::Node* p)
 	// （已移除 AI 模型翻译与「自定义 API」配置：不再有 URL / Key / 模型 / 提示词等设置。）
 	struct Item { const wchar_t* id; const wchar_t* labKey; };
 	const Item items[] = {
-		{ L"microsoft", L"setting.fnTransMs" },
-		{ L"google",    L"setting.fnTransGoogle" },
 		{ L"youdao",    L"setting.fnTransYoudao" },
 		{ L"baidu",     L"setting.fnTransBaidu" },
+		{ L"microsoft", L"setting.fnTransMs" },
+		{ L"google",    L"setting.fnTransGoogle" },
 		{ L"offline",   L"setting.fnTransOffline" },
 	};
 	std::vector<std::wstring> svcLabs, svcIds;

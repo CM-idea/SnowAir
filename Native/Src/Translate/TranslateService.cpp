@@ -27,21 +27,18 @@ std::wstring TranslateService::resolveProvider(const std::wstring& preferred)
 {
 	std::wstring p = preferred;
 	if (p.empty()) p = Setting::get()->getTranslateProvider();
-	if (p.empty()) p = TranslateProvider::Microsoft;
+	if (p.empty()) p = TranslateProvider::Youdao;
 	std::wstring lower = p;
 	for (auto& c : lower) c = (wchar_t)towlower(c);
-	// 老配置里可能残留已移除的 AI/第三方引擎名，统一回落到微软（唯一默认免费引擎）
+	// 老配置里可能残留已移除的 AI/第三方引擎名，统一回落到默认在线引擎
 	if (lower == L"ai" || lower == L"custom" || lower == L"qwen-flash" || lower == L"qwen-plus"
 		|| lower == L"deepseek-v4-flash" || lower == L"yandex" || lower == L"bing" || lower == L"deepl") {
-		return TranslateProvider::Microsoft;
+		return TranslateProvider::Youdao;
 	}
 	return p;
 }
 
-// 服务链：用户选的服务优先；失败后按「微软 > 有道 > 百度」依次回退，
-// 最后才用离线引擎兜底（装了离线包才有意义）。
-// Google **不参与自动兜底**：国内直连几乎必然超时，一次就要等满 20s，
-// 会把整条链（以及截图翻译的每一行）拖死；想用 Google 就在设置里明确选它。
+// 服务链：用户选的服务优先；其后按「有道 > 百度 > 微软 > 谷歌 > 离线」回退。
 std::vector<std::wstring> TranslateService::providerChain(const std::wstring& preferred,
 	const std::wstring& sourceLang, const std::wstring& targetLang)
 {
@@ -49,20 +46,19 @@ std::vector<std::wstring> TranslateService::providerChain(const std::wstring& pr
 	const std::wstring first = resolveProvider(preferred);
 	const bool offlineFirst = _wcsicmp(first.c_str(), TranslateProvider::Offline) == 0;
 	// 用户明确选了离线：方向装齐了就只走离线（隐私/断网，也不用为每行等在线超时）。
-	// 这个方向的语言包没装时不把离线放在链首 —— 它必然失败（"缺少该方向（ja-en）"），
-	// 直接改走在线，避免"OCR 认出了日文却翻不出结果"；离线仍留在链尾，
-	// 全挂时由它给出"去插件集成下载"的可操作错误。
+	// 这个方向的语言包没装时不把离线放在链首 —— 它必然失败，直接改走在线。
 	if (offlineFirst && offlineCanServe(sourceLang, targetLang))
 		return { first };
 	auto push = [&chain](const std::wstring& p) {
 		for (auto& c : chain) if (_wcsicmp(c.c_str(), p.c_str()) == 0) return;
 		chain.push_back(p);
 	};
-	if (!offlineFirst) push(first);   // 用户设置的翻译服务（选 Google 时只在这一步进链）
-	push(TranslateProvider::Microsoft);
+	push(first);
 	push(TranslateProvider::Youdao);
 	push(TranslateProvider::Baidu);
-	if (BergamotEngine::isAvailable()) push(TranslateProvider::Offline);   // 离线兜底
+	push(TranslateProvider::Microsoft);
+	push(TranslateProvider::Google);
+	if (BergamotEngine::isAvailable()) push(TranslateProvider::Offline);
 	return chain;
 }
 
