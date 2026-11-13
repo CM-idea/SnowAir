@@ -1775,8 +1775,6 @@ void ToolOcr::rebuildEditors()
 				qt.q[k] = D2D1::Point2F(reg.quad[k].x * scaleX, reg.quad[k].y * scaleY);
 			quadTexts_.push_back(std::move(qt));
 			box->setColor(0);   // 文字由四边形画布绘制，控件只保留命中/选区
-			box->setSelectionBgColor(0);
-			box->setSelectionTextColor(0);
 		}
 	}
 	// 文本重排（或没有逐框结果时）落成一个整段文本框：可编辑、Enter 换行，
