@@ -94,6 +94,7 @@ namespace {
 		bool rotated{ false };
 		float angleDeg{ 0.f };
 		D2D1_POINT_2F center{};
+		float drawFontSize{ 0.f };
 		std::wstring logical;
 	protected:
 		// layout() 里把节点几何改成了视觉矩形，命中测试要按同一比例换算回布局坐标
@@ -954,6 +955,44 @@ void ToolOcr::paintBgQuads()
 	bgCanvas_->finishPaint();
 }
 
+void ToolOcr::paintQuadText()
+{
+	if (!textCanvas_) return;
+	auto* ctx = textCanvas_->startPaint();
+	if (!ctx) return;
+	ctx->Clear(0);
+	auto* d2d = Ling::D2D::get();
+	if (d2d && d2d->dwriteFactory) {
+		for (const auto& qt : quadTexts_) {
+			auto layout = Ling::D2D::makeTextLayout(qt.text, qt.fontSize * dpi, FLT_MAX, FLT_MAX);
+			if (!layout) continue;
+			layout->SetFontWeight(qt.bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
+				{ 0, INT_MAX });
+			layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+			DWRITE_TEXT_METRICS tm{};
+			if (FAILED(layout->GetMetrics(&tm)) || tm.widthIncludingTrailingWhitespace <= 0.f
+				|| tm.height <= 0.f)
+				continue;
+			const float w = tm.widthIncludingTrailingWhitespace;
+			const float h = tm.height;
+			const D2D1_MATRIX_3X2_F matrix{
+				(qt.q[1].x - qt.q[0].x) / w, (qt.q[1].y - qt.q[0].y) / w,
+				(qt.q[3].x - qt.q[0].x) / h, (qt.q[3].y - qt.q[0].y) / h,
+				qt.q[0].x, qt.q[0].y
+			};
+			Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+			if (FAILED(ctx->CreateSolidColorBrush(Ling::Color(qt.color).getD2DColor(),
+				brush.GetAddressOf())))
+				continue;
+			ctx->SetTransform(matrix);
+			ctx->DrawTextLayout(D2D1::Point2F(0.f, 0.f), layout.Get(), brush.Get(),
+				D2D1_DRAW_TEXT_OPTIONS_CLIP);
+		}
+		ctx->SetTransform(D2D1::Matrix3x2F::Identity());
+	}
+	textCanvas_->finishPaint();
+}
+
 void ToolOcr::rebuildEditors()
 {
 	builtDpi_ = dpi;   // 这一版编辑框是用当前 dpi 排的（换屏后 syncToMask 据此判断要不要重排）
@@ -966,6 +1005,7 @@ void ToolOcr::rebuildEditors()
 	}
 	bgs_.clear();
 	bgQuads_.clear();
+	quadTexts_.clear();
 	trBoxes_.clear();
 	trTops_.clear();
 	trScrollY_ = 0.f;
@@ -1554,6 +1594,7 @@ void ToolOcr::rebuildEditors()
 			box->align = 1;                        // 竖排一律在列内水平居中
 			box->vertical = true;
 			box->logical = text;
+			box->drawFontSize = fLogical;
 			box->setFontSize(fLogical);
 			box->setText(stacked);
 		}
@@ -1571,6 +1612,7 @@ void ToolOcr::rebuildEditors()
 				box->boxT = reg.y * scaleY + textPad - inkT * k;
 				box->inkH = inkH * k;
 				box->vFill = 1.f;
+				box->drawFontSize = fLogical;
 				box->setFontSize(fLogical);
 				box->setText(text);
 			}
@@ -1583,11 +1625,23 @@ void ToolOcr::rebuildEditors()
 				fLogical = std::clamp(fLogical, 7.f / dpi, 300.f / dpi);
 				box->inkH = fLogical * dpi * 0.89f;
 				box->vFill = 0.98f;
+				box->drawFontSize = fLogical;
 				box->setFontSize(fLogical);
 				box->setText(text);
 			}
 		}
 		editors.push_back(box);
+		if (reg.hasQuad && !reg.vertical) {
+			QuadText qt;
+			qt.text = text;
+			qt.fontSize = box->drawFontSize;
+			qt.color = fg;
+			qt.bold = reg.bold;
+			for (int k = 0; k < 4; ++k)
+				qt.q[k] = D2D1::Point2F(reg.quad[k].x * scaleX, reg.quad[k].y * scaleY);
+			quadTexts_.push_back(std::move(qt));
+			box->setColor(0);   // 文字由四边形画布绘制，控件只保留命中/选区
+		}
 	}
 	// 文本重排（或没有逐框结果时）落成一个整段文本框：可编辑、Enter 换行，
 	// 和普通多行输入框一致。文本优先用整段识别结果，缺失时按识别框顺序拼。
@@ -1723,6 +1777,15 @@ void ToolOcr::rebuildEditors()
 	selAIdx_ = selBIdx_ = 0;
 	// 所有文字统一压在背景层之上：背景是逐框建的，后一框的外扩可能盖住前一框文字。
 	paintBgQuads();
+	if (!quadTexts_.empty()) {
+		if (!textCanvas_) {
+			textCanvas_ = body->makeChild<Ling::Canvas>();
+			textCanvas_->enableSwapChain();
+			textCanvas_->setSizePercent(100.f, 100.f);
+		}
+		body->bringToFront(textCanvas_);
+	}
+	paintQuadText();
 	for (auto* e : editors) {
 		if (e && e->parent == body.get()) body->bringToFront(e);
 	}
@@ -2080,6 +2143,7 @@ void ToolOcr::layout()
 	Ling::WinBase::layout();
 	// 背景画布要等首次 layout 拿到实际尺寸后再画，否则首帧 startPaint 拿不到 surface。
 	if (!bgQuads_.empty()) paintBgQuads();
+	if (!quadTexts_.empty()) paintQuadText();
 	// 标注/控件镜像层：两个窗口无法互相穿插，把宿主的内容镜像到本窗口顶层。
 	// 控件画在标注之后（同一层里最后画），保证锁定/编辑/关闭永远在文字与标注之上。
 	if (annotCanvas_ && hasMask_ && (annotPainter_ || chromePainter_)) {

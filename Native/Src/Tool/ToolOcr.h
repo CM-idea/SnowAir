@@ -130,6 +130,16 @@ private:
 	};
 	std::vector<BgQuad> bgQuads_;
 	Ling::Canvas* bgCanvas_{ nullptr };
+	struct QuadText {
+		std::wstring text;
+		float fontSize{ 0.f };
+		uint32_t color{ 0 };
+		bool bold{ false };
+		D2D1_POINT_2F q[4]{};
+	};
+	std::vector<QuadText> quadTexts_;
+	Ling::Canvas* textCanvas_{ nullptr };
+	void paintQuadText();
 	// 翻译：译文按原行宽折行后纵向顺延，超出选区时用滚轮滚动（不画滚动条）
 	std::vector<Ling::TextBox*> trBoxes_;
 	std::vector<float> trTops_;    // 各框未滚动时的顶端（物理像素）
