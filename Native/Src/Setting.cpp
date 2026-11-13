@@ -930,7 +930,8 @@ std::wstring Setting::getShortcutKey(const std::wstring& type)
     // 配置里"有这一行"就以它为准 —— 包括用户按 Backspace/Delete 清空后写进去的空串，
     // 空串 = 不绑定。只有从来没写过的行才回落到内置默认键位，
     // 否则"清空 capture"会被误当成"没配过"，又变回 F1，清空就永远清不掉。
-    if (obj && obj.HasKey(type)) {
+    if (obj && obj.HasKey(type)
+        && obj.GetNamedValue(type).ValueType() == JsonValueType::String) {
         return std::wstring{ obj.GetNamedString(type, L"") };
     }
     return defaultShortcutOf(type);
@@ -962,7 +963,9 @@ bool Setting::getLastCaptureRect(int& x, int& y, int& w, int& h)
     auto data = loadLocalData();
     if (data.HasKey(L"state") && data.GetNamedValue(L"state").ValueType() == JsonValueType::Object) {
         auto state = data.GetNamedObject(L"state");
-        v = state.GetNamedString(L"lastCaptureRect", L"").c_str();
+        if (state.HasKey(L"lastCaptureRect")
+            && state.GetNamedValue(L"lastCaptureRect").ValueType() == JsonValueType::String)
+            v = state.GetNamedString(L"lastCaptureRect", L"").c_str();
     }
     if (v.empty()) return false;
     int a[4]{ 0, 0, 0, 0 };
@@ -1276,6 +1279,8 @@ JsonObject Setting::getToolObj(const std::wstring& tool)
         root = JsonObject();
         configObj.SetNamedValue(L"toolPin", root);
     }
+    if (root.HasKey(tool) && root.GetNamedValue(tool).ValueType() != JsonValueType::Object)
+        root.SetNamedValue(tool, JsonObject{});
     auto obj = root.GetNamedObject(tool, nullptr);
     if (!obj) {
         obj = JsonObject();
@@ -1286,7 +1291,9 @@ JsonObject Setting::getToolObj(const std::wstring& tool)
 
 bool Setting::getToolFlag(const std::wstring& tool, const std::wstring& key, bool def)
 {
-    return getToolObj(tool).GetNamedBoolean(key, def);
+    auto obj = getToolObj(tool);
+    if (!obj.HasKey(key) || obj.GetNamedValue(key).ValueType() != JsonValueType::Boolean) return def;
+    return obj.GetNamedValue(key).GetBoolean();
 }
 
 void Setting::setToolFlag(const std::wstring& tool, const std::wstring& key, bool val)
@@ -1297,7 +1304,9 @@ void Setting::setToolFlag(const std::wstring& tool, const std::wstring& key, boo
 
 float Setting::getToolNum(const std::wstring& tool, const std::wstring& key, float def)
 {
-    return static_cast<float>(getToolObj(tool).GetNamedNumber(key, def));
+    auto obj = getToolObj(tool);
+    if (!obj.HasKey(key) || obj.GetNamedValue(key).ValueType() != JsonValueType::Number) return def;
+    return static_cast<float>(obj.GetNamedValue(key).GetNumber());
 }
 
 void Setting::setToolNum(const std::wstring& tool, const std::wstring& key, float val)
@@ -1309,8 +1318,8 @@ void Setting::setToolNum(const std::wstring& tool, const std::wstring& key, floa
 UINT32 Setting::getToolUInt(const std::wstring& tool, const std::wstring& key, UINT32 def)
 {
     auto obj = getToolObj(tool);
-    if (!obj.HasKey(key)) return def;
-    return static_cast<UINT32>(obj.GetNamedNumber(key));
+    if (!obj.HasKey(key) || obj.GetNamedValue(key).ValueType() != JsonValueType::Number) return def;
+    return static_cast<UINT32>(obj.GetNamedValue(key).GetNumber());
 }
 
 void Setting::setToolUInt(const std::wstring& tool, const std::wstring& key, UINT32 val)
@@ -1322,8 +1331,8 @@ void Setting::setToolUInt(const std::wstring& tool, const std::wstring& key, UIN
 std::wstring Setting::getToolStr(const std::wstring& tool, const std::wstring& key, const std::wstring& def)
 {
     auto obj = getToolObj(tool);
-    if (!obj.HasKey(key)) return def;
-    return std::wstring{ obj.GetNamedString(key, def) };
+    if (!obj.HasKey(key) || obj.GetNamedValue(key).ValueType() != JsonValueType::String) return def;
+    return std::wstring{ obj.GetNamedValue(key).GetString().c_str() };
 }
 
 void Setting::setToolStr(const std::wstring& tool, const std::wstring& key, const std::wstring& val)
@@ -1389,6 +1398,26 @@ void Setting::normalizeConfigSections()
             configObj.SetNamedValue(key, JsonObject{});
         }
     }
+    auto ensureType = [](JsonObject& obj, const wchar_t* key, JsonValueType type) {
+        if (obj.HasKey(key) && obj.GetNamedValue(key).ValueType() != type) obj.Remove(key);
+    };
+    if (auto common = configObj.GetNamedObject(L"common", nullptr)) {
+        ensureType(common, L"autoStart", JsonValueType::Boolean);
+        ensureType(common, L"runAsAdmin", JsonValueType::Boolean);
+        ensureType(common, L"language", JsonValueType::String);
+        ensureType(common, L"pluginDir", JsonValueType::String);
+        ensureType(common, L"autoStartExe", JsonValueType::String);
+        ensureType(common, L"updateCheckFreq", JsonValueType::Number);
+        ensureType(common, L"updateCheckDay", JsonValueType::Number);
+    }
+    if (auto features = configObj.GetNamedObject(L"features", nullptr)) {
+        ensureType(features, L"lastCaptureRect", JsonValueType::String);
+        ensureType(features, L"trayIconStyle", JsonValueType::Number);
+        ensureType(features, L"trayIconStyle2", JsonValueType::Number);
+        ensureType(features, L"trayCustomColor", JsonValueType::Number);
+        ensureType(features, L"pinBorderColor", JsonValueType::Number);
+        ensureType(features, L"mouseHighlightColor", JsonValueType::Number);
+    }
 }
 
 JsonObject Setting::featuresObj()
@@ -1404,7 +1433,9 @@ JsonObject Setting::featuresObj()
 
 bool Setting::featBool(const wchar_t* key, bool def)
 {
-	return featuresObj().GetNamedBoolean(key, def);
+	auto f = featuresObj();
+	if (!f.HasKey(key) || f.GetNamedValue(key).ValueType() != JsonValueType::Boolean) return def;
+	return f.GetNamedValue(key).GetBoolean();
 }
 void Setting::setFeatBool(const wchar_t* key, bool v)
 {
@@ -1413,7 +1444,9 @@ void Setting::setFeatBool(const wchar_t* key, bool v)
 }
 int Setting::featInt(const wchar_t* key, int def)
 {
-	return (int)featuresObj().GetNamedNumber(key, def);
+	auto f = featuresObj();
+	if (!f.HasKey(key) || f.GetNamedValue(key).ValueType() != JsonValueType::Number) return def;
+	return static_cast<int>(f.GetNamedValue(key).GetNumber());
 }
 void Setting::setFeatInt(const wchar_t* key, int v)
 {
@@ -1422,7 +1455,9 @@ void Setting::setFeatInt(const wchar_t* key, int v)
 }
 std::wstring Setting::featStr(const wchar_t* key, const wchar_t* def)
 {
-	return featuresObj().GetNamedString(key, def).c_str();
+	auto f = featuresObj();
+	if (!f.HasKey(key) || f.GetNamedValue(key).ValueType() != JsonValueType::String) return def;
+	return std::wstring{ f.GetNamedValue(key).GetString().c_str() };
 }
 void Setting::setFeatStr(const wchar_t* key, const std::wstring& v)
 {
@@ -1830,8 +1865,10 @@ void Setting::setMouseHighlight(bool on) { setFeatBool(L"mouseHighlight", on); }
 UINT32 Setting::getMouseHighlightColor()
 {
 	auto f = featuresObj();
-	if (!f.HasKey(L"mouseHighlightColor")) return 0x0FDC78FF;   // 默认品牌绿
-	return static_cast<UINT32>(f.GetNamedNumber(L"mouseHighlightColor"));
+	if (!f.HasKey(L"mouseHighlightColor")
+		|| f.GetNamedValue(L"mouseHighlightColor").ValueType() != JsonValueType::Number)
+		return 0x0FDC78FF;   // 默认品牌绿
+	return static_cast<UINT32>(f.GetNamedValue(L"mouseHighlightColor").GetNumber());
 }
 void Setting::setMouseHighlightColor(UINT32 rgba)
 {
@@ -2328,8 +2365,10 @@ void Setting::setPinBorderRadius(int v) { setFeatInt(L"pinBorderRadius", v); }
 UINT32 Setting::getPinBorderColor()
 {
     auto f = featuresObj();
-    if (!f.HasKey(L"pinBorderColor")) return 0x34C759FF; // 默认主题绿
-    return static_cast<UINT32>(f.GetNamedNumber(L"pinBorderColor"));
+    if (!f.HasKey(L"pinBorderColor")
+        || f.GetNamedValue(L"pinBorderColor").ValueType() != JsonValueType::Number)
+        return 0x34C759FF; // 默认主题绿
+    return static_cast<UINT32>(f.GetNamedValue(L"pinBorderColor").GetNumber());
 }
 void Setting::setPinBorderColor(UINT32 argb)
 {
@@ -2345,13 +2384,16 @@ int Setting::getTrayIconStyle()
     // 用新键 trayIconStyle2 存 4 档（0 跟随系统 / 1 主题 / 2 自定义颜色 / 3 自定义图标）。
     // 不能就地复用旧键：旧的 5 档里 暗色=2、亮色=3 与新方案的 2/3 撞号，会互相污染。
     auto f = featuresObj();
-    if (f.HasKey(L"trayIconStyle2")) {
-        const int v = static_cast<int>(f.GetNamedNumber(L"trayIconStyle2"));
+    if (f.HasKey(L"trayIconStyle2")
+        && f.GetNamedValue(L"trayIconStyle2").ValueType() == JsonValueType::Number) {
+        const int v = static_cast<int>(f.GetNamedValue(L"trayIconStyle2").GetNumber());
         return (v < 0 || v > 3) ? 1 : v;
     }
     // 首次读取：从旧键一次性迁移（旧：0 跟随系统 / 1 主题 / 2 暗色 / 3 亮色 / 4 自定义）
     int old = 1;
-    if (f.HasKey(L"trayIconStyle")) old = static_cast<int>(f.GetNamedNumber(L"trayIconStyle"));
+    if (f.HasKey(L"trayIconStyle")
+        && f.GetNamedValue(L"trayIconStyle").ValueType() == JsonValueType::Number)
+        old = static_cast<int>(f.GetNamedValue(L"trayIconStyle").GetNumber());
     int nv = 1;
     if (old == 4) nv = 3;                   // 旧「自定义」→ 自定义图标
     else if (old == 2 || old == 3) nv = 1;  // 旧 暗色/亮色 → 主题
@@ -2366,8 +2408,10 @@ void Setting::setTrayIconStyle(int v)
 UINT32 Setting::getTrayCustomColor()
 {
     auto f = featuresObj();
-    if (!f.HasKey(L"trayCustomColor")) return 0x34C759FF;   // 默认主题绿
-    return static_cast<UINT32>(f.GetNamedNumber(L"trayCustomColor"));
+    if (!f.HasKey(L"trayCustomColor")
+        || f.GetNamedValue(L"trayCustomColor").ValueType() != JsonValueType::Number)
+        return 0x34C759FF;   // 默认主题绿
+    return static_cast<UINT32>(f.GetNamedValue(L"trayCustomColor").GetNumber());
 }
 void Setting::setTrayCustomColor(UINT32 rgba)
 {
@@ -2568,7 +2612,8 @@ void Setting::migrateLocalDataToFile()
                 && features.GetNamedValue(L"history").ValueType() == JsonValueType::Object) {
                 data.SetNamedValue(L"history", features.GetNamedValue(L"history").GetObject());
             }
-            if (!data.HasKey(L"state") && features.HasKey(L"lastCaptureRect")) {
+            if (!data.HasKey(L"state") && features.HasKey(L"lastCaptureRect")
+                && features.GetNamedValue(L"lastCaptureRect").ValueType() == JsonValueType::String) {
                 JsonObject state{ nullptr };
                 state.SetNamedValue(L"lastCaptureRect",
                     JsonValue::CreateStringValue(features.GetNamedString(L"lastCaptureRect", L"")));
