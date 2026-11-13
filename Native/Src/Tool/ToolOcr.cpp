@@ -850,10 +850,18 @@ void ToolOcr::rebuildEditors()
 		std::sort(sorted.begin(), sorted.end());
 		const float bodyRef = sorted.empty() ? 0.f : sorted[sorted.size() / 2];
 		const float headingThresh = bodyRef * 1.45f;
+		// 英文标题常是粗体短行，字身比正文高 1.2~1.4 倍，达不到 1.45 的通用阈值；
+		// 只按通用阈值会把标题压回正文大小。短行 + 略高单独判为标题。
+		auto isHeading = [&](size_t i) {
+			if (ik[i] < bodyRef * 1.18f) return false;
+			if (ik[i] >= headingThresh) return true;
+			const auto& r = result_.regions[i];
+			return r.text.size() <= 40 && r.w <= imgW * 0.45f;
+		};
 		float bodySum = 0.f;
 		int bodyN = 0;
 		for (size_t i = 0; i < n; i++) {
-			if (ik[i] < headingThresh) { bodySum += ik[i]; ++bodyN; }
+			if (!isHeading(i)) { bodySum += ik[i]; ++bodyN; }
 		}
 		float bodyInk = (bodyN > 0) ? bodySum / (float)bodyN : bodyRef;
 		// 可读性下限：正文换算成字号后如果太小，按方块字 13px / 西文 12px 兜底。
@@ -871,7 +879,7 @@ void ToolOcr::rebuildEditors()
 			if (bodyPx > 0.f && bodyPx < minReadPx && bodyN > 0) {
 				int tiny = 0;
 				for (size_t i = 0; i < n; i++) {
-					if (ik[i] >= headingThresh) continue;
+					if (isHeading(i)) continue;
 					if (ik[i] / (kCjkInkRatio * dpi) < minReadPx) ++tiny;
 				}
 				// 不到八成的小字 → 说明是"个别行偏小"，抬到可读下限
@@ -879,13 +887,13 @@ void ToolOcr::rebuildEditors()
 			}
 		}
 		for (size_t i = 0; i < n; i++) {
-			hEff[i] = (ik[i] < headingThresh) ? bodyInk : ik[i];
+			hEff[i] = isHeading(i) ? ik[i] : bodyInk;
 			inkEff[i] = hEff[i];
 		}
 		// 表格里的"高个子"不是标题：标题独占一行，表格一行里有好几个格子。
 		// 带图标的格子墨迹会被图标撑高，不压回正文就会比同排其他格子大一圈。
 		for (size_t i = 0; i < n; i++) {
-			if (ik[i] < headingThresh) continue;
+			if (!isHeading(i)) continue;
 			const auto& a = result_.regions[i];
 			for (size_t j = 0; j < n; j++) {
 				if (j == i) continue;
