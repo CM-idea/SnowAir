@@ -1805,19 +1805,15 @@ ToolOcr::SelPoint ToolOcr::hitSelPoint(POINT p) const
 	sp.line = best;
 	auto* ot = dynamic_cast<OcrText*>(e);
 	if (ot && ot->vertical) {
-		// 竖排是"每字一行"的堆叠文本，按 Y 轴均分到字符格
-		const int n = (int)ot->logical.size();
-		const float extent = e->h;
-		const float offset = (float)p.y - e->y;
-		if (n > 0 && extent > 1.f) {
-			const float f = std::clamp(offset / extent, 0.f, 1.f);
-			const float pos = f * (float)n;            // 0~n：落在第几个字符边界上
-			// 首尾各放宽半格到 0.75 格：起手/收手常按在第一个字符上，
-			// 按"最近边界"取整就会从第二个字开始选（用户反馈拖选老是从第二字起）。
-			if (pos <= 0.75f) sp.index = 0;
-			else if (pos >= (float)n - 0.75f) sp.index = n;
-			else sp.index = std::clamp((int)std::lround(pos), 0, n);
+		// 竖排控件是「字\n字\n字」，按真实文本命中后再换算回逻辑字符下标；
+		// 直接按控件高度均分会忽略行距/字高差异，拖选容易整体偏移。
+		const int raw = e->hitTextIndex(p);
+		const std::wstring& stacked = e->getText();
+		int logical = 0;
+		for (int k = 0; k < raw && k < (int)stacked.size(); ++k) {
+			if (stacked[k] != L'\r' && stacked[k] != L'\n') ++logical;
 		}
+		sp.index = logical;
 	}
 	else {
 		// 横排（含翻译框）：按真实字形边界命中；点在框外时 DWrite 夹到首/尾，正是边缘起手/收手要的
@@ -1847,10 +1843,18 @@ void ToolOcr::applySelection()
 		else if (i == el) { a = 0; b = ei; }
 		else { a = 0; b = len; }
 		if (vert) {
-			// 竖排控件的文本是"字\n字\n字"：逻辑下标换算回控件下标再做高亮
-			const int rawLen = (int)e->getText().size();
-			const int rawA = std::clamp(a * 2, 0, rawLen);
-			const int rawB = (b > a) ? std::clamp(b * 2 - 1, 0, rawLen) : rawA;
+			// 逻辑字符下标 → 竖排控件下标（控件里每个字之间有换行符）
+			const std::wstring& stacked = e->getText();
+			auto toRaw = [&](int index) {
+				int raw = 0, seen = 0;
+				while (raw < (int)stacked.size() && seen < index) {
+					if (stacked[raw] != L'\r' && stacked[raw] != L'\n') ++seen;
+					++raw;
+				}
+				return raw;
+			};
+			const int rawA = std::clamp(toRaw(a), 0, (int)stacked.size());
+			const int rawB = std::clamp(toRaw(b), rawA, (int)stacked.size());
 			e->setSelectionRange(rawA, rawB);
 		}
 		else {
