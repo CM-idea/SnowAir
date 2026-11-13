@@ -91,10 +91,6 @@ namespace {
 		int align{ 0 };      // 原文对齐：0=居左 1=居中 2=居右（译文比原文短时才有区别）
 		// 竖排：控件里的文本是"每字一行"（用换行符堆叠），logical 才是真正要复制/选区的串。
 		bool vertical{ false };
-		bool rotated{ false };
-		float angleDeg{ 0.f };
-		D2D1_POINT_2F center{};
-		float drawFontSize{ 0.f };
 		std::wstring logical;
 	protected:
 		// layout() 里把节点几何改成了视觉矩形，命中测试要按同一比例换算回布局坐标
@@ -122,16 +118,11 @@ namespace {
 			const float d = (win && win->dpi > 0.f) ? win->dpi : 1.f;
 			auto snap = [d](float v) { return std::round(v * d) / d; };
 			// ox 是"未缩放节点"的偏移：缩放绕节点自身中心，故视觉左边缘 = ox + (w - visW)/2
-			float ox = snap(visX - (w - visW) * 0.5f);
+			const float ox = snap(visX - (w - visW) * 0.5f);
 			// 纵向仍居中：文字块的墨迹落在识别框中间，和原文的墨迹位置对齐。
-			float oy = snap(boxT + (fitH - h) * 0.5f);
+			const float oy = snap(boxT + (fitH - h) * 0.5f);
 			visual.CenterPoint({ w * 0.5f, h * 0.5f, 0.f });
 			visual.Scale({ s, s, 1.f });
-			if (rotated) {
-				visual.RotationAngle(angleDeg);
-				ox = center.x - w * 0.5f;
-				oy = center.y - h * 0.5f;
-			}
 			visual.Offset({ ox, oy, 0.f });
 			// 以中心为锚缩放后的可见矩形，回写成节点几何（命中测试/选区映射都用它）。
 			x = ox + w * 0.5f - w * s * 0.5f;
@@ -815,15 +806,6 @@ void ToolOcr::onCreated()
 	bannerLabel = bannerNode->makeChild<Ling::Label>();
 	bannerLabel->setFontSize(12.f);
 
-	// 四边形背景画布：在所有文字块之前创建，后续文字统一压在它上面
-	bgCanvas_ = body->makeChild<Ling::Canvas>();
-	bgCanvas_->enableSwapChain();
-	bgCanvas_->setSizePercent(100.f, 100.f);
-	// 四边形文字层在窗口创建期就建好，保证首次 layout 前已有 swapchain
-	textCanvas_ = body->makeChild<Ling::Canvas>();
-	textCanvas_->enableSwapChain();
-	textCanvas_->setSizePercent(100.f, 100.f);
-
 	rebuildEditors();
 	// 标注镜像层：盖在识别文字之上的透明画布（宿主注入 annotPainter_ 后才有内容）
 	annotCanvas_ = body->makeChild<Ling::Canvas>();
@@ -934,199 +916,6 @@ bool fitTextToSlots(const std::wstring& text, float fontLogical, float dpi, bool
 	return !out.empty();
 }
 
-void ToolOcr::paintBgQuads()
-{
-	if (!bgCanvas_) return;
-	auto* ctx = bgCanvas_->startPaint();
-	if (!ctx) return;
-	ctx->Clear(0);
-	auto* d2d = Ling::D2D::get();
-	if (d2d && d2d->d2dFactory) {
-		for (const auto& q : bgQuads_) {
-			Microsoft::WRL::ComPtr<ID2D1PathGeometry> path;
-			if (FAILED(d2d->d2dFactory->CreatePathGeometry(path.GetAddressOf())) || !path) continue;
-			Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
-			if (FAILED(path->Open(sink.GetAddressOf())) || !sink) continue;
-			sink->BeginFigure(q.p[0], D2D1_FIGURE_BEGIN_FILLED);
-			for (int k = 1; k < 4; ++k) sink->AddLine(q.p[k]);
-			sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-			sink->Close();
-			Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
-			if (SUCCEEDED(ctx->CreateSolidColorBrush(Ling::Color(q.color).getD2DColor(), brush.GetAddressOf())))
-				ctx->FillGeometry(path.Get(), brush.Get());
-		}
-	}
-	bgCanvas_->finishPaint();
-}
-
-	bool solveLinear8(double a[8][9], double h[8])
-	{
-		for (int col = 0; col < 8; ++col) {
-			int pivot = col;
-			for (int row = col + 1; row < 8; ++row)
-				if (std::abs(a[row][col]) > std::abs(a[pivot][col])) pivot = row;
-			if (std::abs(a[pivot][col]) < 1e-9) return false;
-			if (pivot != col) for (int k = col; k < 9; ++k) std::swap(a[pivot][k], a[col][k]);
-			const double div = a[col][col];
-			for (int k = col; k < 9; ++k) a[col][k] /= div;
-			for (int row = 0; row < 8; ++row) {
-				if (row == col) continue;
-				const double f = a[row][col];
-				if (std::abs(f) < 1e-12) continue;
-				for (int k = col; k < 9; ++k) a[row][k] -= f * a[col][k];
-			}
-		}
-		for (int i = 0; i < 8; ++i) h[i] = a[i][8];
-		return true;
-	}
-
-	bool quadHomography(float srcW, float srcH, const D2D1_POINT_2F q[4], double h[9])
-	{
-		const float sx[4]{ 0.f, srcW, srcW, 0.f };
-		const float sy[4]{ 0.f, 0.f, srcH, srcH };
-		double a[8][9]{};
-		for (int i = 0; i < 4; ++i) {
-			const int r = i * 2;
-			a[r][0] = sx[i]; a[r][1] = sy[i]; a[r][2] = 1;
-			a[r][6] = -sx[i] * q[i].x; a[r][7] = -sy[i] * q[i].x; a[r][8] = q[i].x;
-			a[r + 1][3] = sx[i]; a[r + 1][4] = sy[i]; a[r + 1][5] = 1;
-			a[r + 1][6] = -sx[i] * q[i].y; a[r + 1][7] = -sy[i] * q[i].y; a[r + 1][8] = q[i].y;
-		}
-		double v[8]{};
-		if (!solveLinear8(a, v)) return false;
-		for (int i = 0; i < 8; ++i) h[i] = v[i];
-		h[8] = 1.0;
-		return true;
-	}
-
-	bool invert3(const double m[9], double inv[9])
-	{
-		const double det = m[0] * (m[4] * m[8] - m[5] * m[7])
-			- m[1] * (m[3] * m[8] - m[5] * m[6])
-			+ m[2] * (m[3] * m[7] - m[4] * m[6]);
-		if (std::abs(det) < 1e-12) return false;
-		const double id = 1.0 / det;
-		inv[0] = (m[4] * m[8] - m[5] * m[7]) * id;
-		inv[1] = (m[2] * m[7] - m[1] * m[8]) * id;
-		inv[2] = (m[1] * m[5] - m[2] * m[4]) * id;
-		inv[3] = (m[5] * m[6] - m[3] * m[8]) * id;
-		inv[4] = (m[0] * m[8] - m[2] * m[6]) * id;
-		inv[5] = (m[2] * m[3] - m[0] * m[5]) * id;
-		inv[6] = (m[3] * m[7] - m[4] * m[6]) * id;
-		inv[7] = (m[1] * m[6] - m[0] * m[7]) * id;
-		inv[8] = (m[0] * m[4] - m[1] * m[3]) * id;
-		return true;
-	}
-
-void ToolOcr::paintQuadText()
-{
-	if (!textCanvas_) return;
-	auto* ctx = textCanvas_->startPaint();
-	if (!ctx) return;
-	ctx->Clear(0);
-	auto* d2d = Ling::D2D::get();
-	if (!d2d || !d2d->dwriteFactory || !d2d->deviceContext) {
-		textCanvas_->finishPaint();
-		return;
-	}
-	for (const auto& qt : quadTexts_) {
-		auto layout = Ling::D2D::makeTextLayout(qt.text, qt.fontSize * dpi, FLT_MAX, FLT_MAX);
-		if (!layout) continue;
-		layout->SetFontWeight(qt.bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
-			{ 0, INT_MAX });
-		layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-		DWRITE_TEXT_METRICS tm{};
-		if (FAILED(layout->GetMetrics(&tm)) || tm.widthIncludingTrailingWhitespace <= 0.f
-			|| tm.height <= 0.f)
-			continue;
-		const UINT sw = (UINT)std::ceil(tm.widthIncludingTrailingWhitespace);
-		const UINT sh = (UINT)std::ceil(tm.height);
-		if (sw == 0 || sh == 0 || (UINT64)sw * sh > 16'000'000ull) continue;
-
-		Microsoft::WRL::ComPtr<ID2D1BitmapRenderTarget> rt;
-		if (FAILED(d2d->deviceContext->CreateCompatibleRenderTarget(
-			D2D1::SizeF((float)sw, (float)sh), rt.GetAddressOf())) || !rt)
-			continue;
-		rt->BeginDraw();
-		rt->Clear(0);
-		rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-		Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
-		if (FAILED(rt->CreateSolidColorBrush(Ling::Color(qt.color).getD2DColor(),
-			brush.GetAddressOf()))) {
-			rt->EndDraw();
-			continue;
-		}
-		rt->DrawTextLayout(D2D1::Point2F(0.f, 0.f), layout.Get(), brush.Get(),
-			D2D1_DRAW_TEXT_OPTIONS_CLIP);
-		rt->EndDraw();
-		Microsoft::WRL::ComPtr<ID2D1Bitmap> srcBmp;
-		if (FAILED(rt->GetBitmap(srcBmp.GetAddressOf())) || !srcBmp) continue;
-
-		const D2D1_BITMAP_PROPERTIES1 readProps = D2D1::BitmapProperties1(
-			D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-			D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-		Microsoft::WRL::ComPtr<ID2D1Bitmap1> readBmp;
-		if (FAILED(d2d->deviceContext->CreateBitmap(D2D1::SizeU(sw, sh), nullptr, 0, readProps,
-			readBmp.GetAddressOf())) || !readBmp)
-			continue;
-		if (FAILED(readBmp->CopyFromBitmap(nullptr, srcBmp.Get(), nullptr))) continue;
-		D2D1_MAPPED_RECT mapped{};
-		if (FAILED(readBmp->Map(D2D1_MAP_OPTIONS_READ, &mapped))) continue;
-
-		double h[9]{}, inv[9]{};
-		if (!quadHomography((float)sw, (float)sh, qt.q, h) || !invert3(h, inv)) {
-			readBmp->Unmap();
-			continue;
-		}
-		float minX = qt.q[0].x, maxX = minX, minY = qt.q[0].y, maxY = minY;
-		for (int k = 1; k < 4; ++k) {
-			minX = std::min(minX, qt.q[k].x); maxX = std::max(maxX, qt.q[k].x);
-			minY = std::min(minY, qt.q[k].y); maxY = std::max(maxY, qt.q[k].y);
-		}
-		const int x0 = (int)std::floor(minX) - 1, y0 = (int)std::floor(minY) - 1;
-		const int x1 = (int)std::ceil(maxX) + 1, y1 = (int)std::ceil(maxY) + 1;
-		const int dw = x1 - x0, dh = y1 - y0;
-		if (dw <= 0 || dh <= 0 || (int64_t)dw * dh > 32'000'000ll) {
-			readBmp->Unmap();
-			continue;
-		}
-		std::vector<BYTE> out((size_t)dw * dh * 4, 0);
-		for (int y = 0; y < dh; ++y) {
-			for (int x = 0; x < dw; ++x) {
-				const double dx = x0 + x + 0.5, dy = y0 + y + 0.5;
-				const double den = inv[6] * dx + inv[7] * dy + inv[8];
-				if (std::abs(den) < 1e-9) continue;
-				const double sx = (inv[0] * dx + inv[1] * dy + inv[2]) / den;
-				const double sy = (inv[3] * dx + inv[4] * dy + inv[5]) / den;
-				if (sx < 0.0 || sy < 0.0 || sx >= sw || sy >= sh) continue;
-				const int ix = (int)std::floor(sx), iy = (int)std::floor(sy);
-				const double fx = sx - ix, fy = sy - iy;
-				const BYTE* p00 = mapped.bits + (size_t)iy * mapped.pitch + (size_t)ix * 4;
-				const BYTE* p10 = p00 + 4;
-				const BYTE* p01 = p00 + mapped.pitch;
-				const BYTE* p11 = p01 + 4;
-				BYTE* d = out.data() + ((size_t)y * dw + x) * 4;
-				for (int c = 0; c < 4; ++c) {
-					const double v = (p00[c] * (1 - fx) + p10[c] * fx) * (1 - fy)
-						+ (p01[c] * (1 - fx) + p11[c] * fx) * fy;
-					d[c] = (BYTE)std::clamp(v, 0.0, 255.0);
-				}
-			}
-		}
-		readBmp->Unmap();
-		const D2D1_BITMAP_PROPERTIES1 outProps = D2D1::BitmapProperties1(
-			D2D1_BITMAP_OPTIONS_NONE,
-			D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-		Microsoft::WRL::ComPtr<ID2D1Bitmap1> outBmp;
-		if (FAILED(ctx->CreateBitmap(D2D1::SizeU((UINT)dw, (UINT)dh), out.data(),
-			(UINT32)dw * 4, outProps, outBmp.GetAddressOf())) || !outBmp)
-			continue;
-		const D2D1_RECT_F dst = D2D1::RectF((float)x0, (float)y0, (float)x1, (float)y1);
-		ctx->DrawBitmap(outBmp.Get(), &dst, 1.f, D2D1_INTERPOLATION_MODE_LINEAR, nullptr);
-	}
-	textCanvas_->finishPaint();
-}
-
 void ToolOcr::rebuildEditors()
 {
 	builtDpi_ = dpi;   // 这一版编辑框是用当前 dpi 排的（换屏后 syncToMask 据此判断要不要重排）
@@ -1138,8 +927,6 @@ void ToolOcr::rebuildEditors()
 		if (n) body->removeChild(n);
 	}
 	bgs_.clear();
-	bgQuads_.clear();
-	quadTexts_.clear();
 	trBoxes_.clear();
 	trTops_.clear();
 	trScrollY_ = 0.f;
@@ -1149,7 +936,6 @@ void ToolOcr::rebuildEditors()
 		// 正在翻译时依然顶着忙碌提示（识别失败也不能把"正在翻译…"换成红条）
 		showBanner(!busyMsg_.empty() ? busyMsg_
 			: (result_.error.empty() ? Lang::get(L"ocr.fail") : result_.error), busyMsg_.empty());
-		paintBgQuads();
 		if (bannerNode) body->bringToFront(bannerNode);
 		if (compareBtn) body->bringToFront(compareBtn);
 		if (copyBtn) body->bringToFront(copyBtn);
@@ -1583,49 +1369,17 @@ void ToolOcr::rebuildEditors()
 			fg = (lum > 150) ? 0x14181CFF : 0xF8FBFBFF;
 		}
 
-		// 1) 背景：四边形行用旋转矩形贴合行方向；其余退回轴对齐矩形。
+		// 1) 背景块：按识别框短边外扩 2~4px，覆盖文字抗锯齿外沿。
 		{
 			const float shortSide = std::min(reg.w * scaleX, reg.h * scaleY);
 			const float bgPad = std::clamp(shortSide * 0.08f, 2.f, 4.f) / dpi;
 			auto* bgNode = body->makeChild<Ling::Node>();
 			bgNode->setPositionType(Ling::Position::Absolute);
-			if (reg.hasQuad && !reg.vertical) {
-				const float dxTop = reg.quad[1].x - reg.quad[0].x;
-				const float dyTop = reg.quad[1].y - reg.quad[0].y;
-				const float dxBottom = reg.quad[2].x - reg.quad[3].x;
-				const float dyBottom = reg.quad[2].y - reg.quad[3].y;
-				const bool useTop = std::hypot(dxTop, dyTop) >= std::hypot(dxBottom, dyBottom);
-				const float dx = useTop ? dxTop : dxBottom;
-				const float dy = useTop ? dyTop : dyBottom;
-				float angle = static_cast<float>(std::atan2(dy, dx) * 180.0 / 3.14159265358979323846);
-				while (angle > 90.f) angle -= 180.f;
-				while (angle < -90.f) angle += 180.f;
-				float cx = 0.f, cy = 0.f;
-				for (int k = 0; k < 4; ++k) {
-					cx += reg.quad[k].x * scaleX * 0.25f;
-					cy += reg.quad[k].y * scaleY * 0.25f;
-				}
-				const float h0 = std::hypot(reg.quad[3].x - reg.quad[0].x, reg.quad[3].y - reg.quad[0].y);
-				const float h1 = std::hypot(reg.quad[2].x - reg.quad[1].x, reg.quad[2].y - reg.quad[1].y);
-				const float qw = std::max(1.f, std::hypot(dx, dy) * scaleX);
-				const float qh = std::max(1.f, (h0 + h1) * 0.5f * scaleY);
-				const float fw = (qw + bgPad * dpi * 2.f) / dpi;
-				const float fh = (qh + bgPad * dpi * 2.f) / dpi;
-				bgNode->setSize(fw, fh);
-				bgNode->setPosition(Ling::Edge::Left, cx / dpi - fw * 0.5f);
-				bgNode->setPosition(Ling::Edge::Top, cy / dpi - fh * 0.5f);
-				bgNode->setBg(bg);
-				bgNode->setBorderRadius(2.f);
-				bgNode->visual.CenterPoint({ fw * 0.5f, fh * 0.5f, 0.f });
-				bgNode->visual.RotationAngle(angle);
-			}
-			else {
-				bgNode->setPosition(Ling::Edge::Left, rx - bgPad);
-				bgNode->setPosition(Ling::Edge::Top, ry - bgPad);
-				bgNode->setSize(rw + bgPad * 2.f, rh + bgPad * 2.f);
-				bgNode->setBg(bg);
-				bgNode->setBorderRadius(2.f);
-			}
+			bgNode->setPosition(Ling::Edge::Left, rx - bgPad);
+			bgNode->setPosition(Ling::Edge::Top, ry - bgPad);
+			bgNode->setSize(rw + bgPad * 2.f, rh + bgPad * 2.f);
+			bgNode->setBg(bg);
+			bgNode->setBorderRadius(2.f);
 			bgs_.push_back(bgNode);
 		}
 
@@ -1639,52 +1393,22 @@ void ToolOcr::rebuildEditors()
 			stripLeadingBullet(text);
 			text = std::wstring(L"\u2022  ") + text;   // 圆点后留两个空格：和正文拉开一点
 		}
-		float boxW = std::max(1.f, reg.w * scaleX);   // 面板物理像素
+		const float boxW = std::max(1.f, reg.w * scaleX);   // 面板物理像素
 		// 识别框外圈带取样余量；文字定位和字号都按去掉余量后的真实字框算。
-		float textPad = std::min(reg.w * scaleX, reg.h * scaleY) * 0.115f;
-		float fitBoxW = std::max(1.f, boxW - textPad * 2.f);
-		float fitBoxH = std::max(1.f, reg.h * scaleY - textPad * 2.f);
+		const float textPad = std::min(reg.w * scaleX, reg.h * scaleY) * 0.115f;
+		const float fitBoxW = std::max(1.f, boxW - textPad * 2.f);
+		const float fitBoxH = std::max(1.f, reg.h * scaleY - textPad * 2.f);
 		// 竖排列高各不相同（长列 679、短列 111…），不能用横排那套"统一正文行高"，
 		// 否则长列被缩短上移、短列被撑高、字距拉大。竖排一律用它自己的框高。
-		float boxH = reg.vertical
+		const float boxH = reg.vertical
 			? std::max(1.f, reg.h * scaleY)
 			: ((hEff[i] > 0.f) ? hEff[i] : std::max(1.f, reg.h * scaleY));
-		float quadAngle = 0.f;
-		D2D1_POINT_2F quadCenter{};
-		if (reg.hasQuad && !reg.vertical) {
-			// 取较长的一对边作为文字行方向；再归一到 [-90°, 90°]，
-			// 避免检测器给的顶点顺序反过来时把文字画成 180° 倒置。
-			const float dxTop = reg.quad[1].x - reg.quad[0].x;
-			const float dyTop = reg.quad[1].y - reg.quad[0].y;
-			const float dxBottom = reg.quad[2].x - reg.quad[3].x;
-			const float dyBottom = reg.quad[2].y - reg.quad[3].y;
-			const bool useTop = std::hypot(dxTop, dyTop) >= std::hypot(dxBottom, dyBottom);
-			const float dx = useTop ? dxTop : dxBottom;
-			const float dy = useTop ? dyTop : dyBottom;
-			quadAngle = static_cast<float>(std::atan2(dy, dx) * 180.0 / 3.14159265358979323846);
-			while (quadAngle > 90.f) quadAngle -= 180.f;
-			while (quadAngle < -90.f) quadAngle += 180.f;
-			boxW = std::max(1.f, std::hypot(dx, dy) * scaleX);
-			const float h0 = std::hypot(reg.quad[3].x - reg.quad[0].x, reg.quad[3].y - reg.quad[0].y);
-			const float h1 = std::hypot(reg.quad[2].x - reg.quad[1].x, reg.quad[2].y - reg.quad[1].y);
-			boxH = std::max(1.f, (h0 + h1) * 0.5f * scaleY);
-			fitBoxW = boxW;
-			fitBoxH = boxH;
-			textPad = 0.f;
-			for (int k = 0; k < 4; ++k) {
-				quadCenter.x += reg.quad[k].x * scaleX * 0.25f;
-				quadCenter.y += reg.quad[k].y * scaleY * 0.25f;
-			}
-		}
 
 		auto* box = body->makeChild<OcrText>();
 		box->fitW = fitBoxW;
 		box->fitH = reg.vertical ? fitBoxH : boxH;
 		box->boxL = reg.x * scaleX + textPad;
 		box->boxT = reg.y * scaleY + textPad;
-		box->rotated = reg.hasQuad && !reg.vertical;
-		box->angleDeg = quadAngle;
-		box->center = quadCenter;
 		box->setPositionType(Ling::Position::Absolute);
 		// 节点自身几何按识别框摆放（文字命中选择用）；实际绘制位置由 layout() 精确定位。
 		box->setPosition(Ling::Edge::Left, rx);
@@ -1728,7 +1452,6 @@ void ToolOcr::rebuildEditors()
 			box->align = 1;                        // 竖排一律在列内水平居中
 			box->vertical = true;
 			box->logical = text;
-			box->drawFontSize = fLogical;
 			box->setFontSize(fLogical);
 			box->setText(stacked);
 		}
@@ -1746,7 +1469,6 @@ void ToolOcr::rebuildEditors()
 				box->boxT = reg.y * scaleY + textPad - inkT * k;
 				box->inkH = inkH * k;
 				box->vFill = 1.f;
-				box->drawFontSize = fLogical;
 				box->setFontSize(fLogical);
 				box->setText(text);
 			}
@@ -1759,23 +1481,11 @@ void ToolOcr::rebuildEditors()
 				fLogical = std::clamp(fLogical, 7.f / dpi, 300.f / dpi);
 				box->inkH = fLogical * dpi * 0.89f;
 				box->vFill = 0.98f;
-				box->drawFontSize = fLogical;
 				box->setFontSize(fLogical);
 				box->setText(text);
 			}
 		}
 		editors.push_back(box);
-		if (reg.hasQuad && !reg.vertical) {
-			QuadText qt;
-			qt.text = text;
-			qt.fontSize = box->drawFontSize;
-			qt.color = fg;
-			qt.bold = reg.bold;
-			for (int k = 0; k < 4; ++k)
-				qt.q[k] = D2D1::Point2F(reg.quad[k].x * scaleX, reg.quad[k].y * scaleY);
-			quadTexts_.push_back(std::move(qt));
-			box->setColor(0);   // 文字由四边形画布绘制，控件只保留命中/选区
-		}
 	}
 	// 文本重排（或没有逐框结果时）落成一个整段文本框：可编辑、Enter 换行，
 	// 和普通多行输入框一致。文本优先用整段识别结果，缺失时按识别框顺序拼。
@@ -1910,14 +1620,9 @@ void ToolOcr::rebuildEditors()
 	selALine_ = selBLine_ = -1;
 	selAIdx_ = selBIdx_ = 0;
 	// 所有文字统一压在背景层之上：背景是逐框建的，后一框的外扩可能盖住前一框文字。
-	paintBgQuads();
 	for (auto* e : editors) {
 		if (e && e->parent == body.get()) body->bringToFront(e);
 	}
-	if (!quadTexts_.empty() && textCanvas_) {
-		body->bringToFront(textCanvas_);
-	}
-	paintQuadText();
 	if (annotCanvas_) body->bringToFront(annotCanvas_);
 	// 提示条的收/顶一律放在**编辑框都建好之后**：先收条、再建框，中间那段（建框 + 首帧排版）
 	// 就是用户看到的"正在翻译…没了、结果还没出来"。顺序换过来，收条的同一帧结果已在场。
@@ -2117,15 +1822,7 @@ ToolOcr::SelPoint ToolOcr::hitSelPoint(POINT p) const
 	}
 	else {
 		// 横排（含翻译框）：按真实字形边界命中；点在框外时 DWrite 夹到首/尾，正是边缘起手/收手要的
-		POINT hit = p;
-		if (ot && ot->rotated) {
-			const float rad = -ot->angleDeg * 3.14159265358979323846f / 180.f;
-			const float dx = static_cast<float>(p.x) - ot->center.x;
-			const float dy = static_cast<float>(p.y) - ot->center.y;
-			hit.x = static_cast<LONG>(ot->center.x + dx * std::cos(rad) - dy * std::sin(rad));
-			hit.y = static_cast<LONG>(ot->center.y + dx * std::sin(rad) + dy * std::cos(rad));
-		}
-		sp.index = e->hitTextIndex(hit);
+		sp.index = e->hitTextIndex(p);
 	}
 	return sp;
 }
@@ -2270,9 +1967,6 @@ std::wstring ToolOcr::selectedText() const
 void ToolOcr::layout()
 {
 	Ling::WinBase::layout();
-	// 背景画布要等首次 layout 拿到实际尺寸后再画，否则首帧 startPaint 拿不到 surface。
-	if (!bgQuads_.empty()) paintBgQuads();
-	if (!quadTexts_.empty()) paintQuadText();
 	// 标注/控件镜像层：两个窗口无法互相穿插，把宿主的内容镜像到本窗口顶层。
 	// 控件画在标注之后（同一层里最后画），保证锁定/编辑/关闭永远在文字与标注之上。
 	if (annotCanvas_ && hasMask_ && (annotPainter_ || chromePainter_)) {

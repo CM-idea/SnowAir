@@ -294,8 +294,6 @@ OcrResult LwPpOcrEngine::recognize(int w, int h, const BYTE* bgra)
 		std::wstring text;
 		float score{ 0.f };
 		float x{ 0.f }, y{ 0.f }, w{ 0.f }, h{ 0.f };
-		OcrPoint quad[4]{};
-		bool hasQuad{ false };
 		bool vertical{ false };
 	};
 
@@ -394,11 +392,6 @@ OcrResult LwPpOcrEngine::recognize(int w, int h, const BYTE* bgra)
 				line.y = minY * invScale;
 				line.w = (maxX - minX) * invScale;
 				line.h = (maxY - minY) * invScale;
-				const float qxs[4]{ ln.box.x1, ln.box.x2, ln.box.x3, ln.box.x4 };
-				const float qys[4]{ ln.box.y1, ln.box.y2, ln.box.y3, ln.box.y4 };
-				for (int q = 0; q < 4; ++q)
-					line.quad[q] = OcrPoint{ qxs[q] * invScale, qys[q] * invScale };
-				line.hasQuad = true;
 				out.push_back(std::move(line));
 			}
 			return out;
@@ -432,8 +425,6 @@ OcrResult LwPpOcrEngine::recognize(int w, int h, const BYTE* bgra)
 			reg.text = line.text;
 			reg.displayText = line.text;
 			reg.vertical = line.vertical;
-			reg.hasQuad = line.hasQuad;
-			for (int q = 0; q < 4; ++q) reg.quad[q] = line.quad[q];
 			const float x0 = (std::max)(0.f, line.x - pad);
 			const float y0 = (std::max)(0.f, line.y - pad);
 			const float x1 = (std::min)(line.x + line.w + pad, (float)fw);

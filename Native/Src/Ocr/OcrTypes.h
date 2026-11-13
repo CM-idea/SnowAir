@@ -11,17 +11,10 @@ enum class OcrEngineKind {
 	Cloud = 5,
 };
 
-struct OcrPoint {
-	float x{ 0 }, y{ 0 };
-};
-
 struct OcrRegion {
 	std::wstring text;
 	std::wstring displayText;
 	float x{ 0 }, y{ 0 }, w{ 0 }, h{ 0 }; // 相对识别图左上角
-	// 检测器给出的四点多边形（顺时针）；没有时由 x/y/w/h 的矩形兜底。
-	OcrPoint quad[4]{};
-	bool hasQuad{ false };
 	// 竖排（日文/中文竖写）：检测框高明显大于宽时置位。叠加层需逐字竖排，
 	// 否则横排文字在 54px 宽的窄框内会被压缩成一条线。
 	bool vertical{ false };
