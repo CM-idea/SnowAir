@@ -1777,6 +1777,9 @@ void ToolOcr::rebuildEditors()
 	selAIdx_ = selBIdx_ = 0;
 	// 所有文字统一压在背景层之上：背景是逐框建的，后一框的外扩可能盖住前一框文字。
 	paintBgQuads();
+	for (auto* e : editors) {
+		if (e && e->parent == body.get()) body->bringToFront(e);
+	}
 	if (!quadTexts_.empty()) {
 		if (!textCanvas_) {
 			textCanvas_ = body->makeChild<Ling::Canvas>();
@@ -1786,9 +1789,6 @@ void ToolOcr::rebuildEditors()
 		body->bringToFront(textCanvas_);
 	}
 	paintQuadText();
-	for (auto* e : editors) {
-		if (e && e->parent == body.get()) body->bringToFront(e);
-	}
 	if (annotCanvas_) body->bringToFront(annotCanvas_);
 	// 提示条的收/顶一律放在**编辑框都建好之后**：先收条、再建框，中间那段（建框 + 首帧排版）
 	// 就是用户看到的"正在翻译…没了、结果还没出来"。顺序换过来，收条的同一帧结果已在场。
