@@ -2060,6 +2060,8 @@ std::wstring ToolOcr::selectedText() const
 void ToolOcr::layout()
 {
 	Ling::WinBase::layout();
+	// 背景画布要等首次 layout 拿到实际尺寸后再画，否则首帧 startPaint 拿不到 surface。
+	if (!bgQuads_.empty()) paintBgQuads();
 	// 标注/控件镜像层：两个窗口无法互相穿插，把宿主的内容镜像到本窗口顶层。
 	// 控件画在标注之后（同一层里最后画），保证锁定/编辑/关闭永远在文字与标注之上。
 	if (annotCanvas_ && hasMask_ && (annotPainter_ || chromePainter_)) {
