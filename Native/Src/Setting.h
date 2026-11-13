@@ -364,8 +364,13 @@ private:
 	std::filesystem::path getLocalDataPath();
 	JsonObject loadLocalData();
 	bool saveLocalData(const JsonObject& data);
+	std::wstring getLocalStateString(const wchar_t* key);
+	void setLocalStateString(const wchar_t* key, const std::wstring& value);
+	long long getLocalStateInt(const wchar_t* key, long long def);
+	void setLocalStateInt(const wchar_t* key, long long value);
 	void migrateLocalDataToFile();
 	void normalizeConfigSections();
+	void purgeNonUserConfig();
 	bool writeClipboardItemsToFile(const std::vector<ClipboardItem>& items);
 	JsonObject loadHistoryStore();
 	bool saveHistoryStore(const JsonObject& store);

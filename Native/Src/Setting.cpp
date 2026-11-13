@@ -1099,9 +1099,8 @@ void Setting::setAutoStart(bool autoStart)
         configObj.SetNamedValue(L"common", common);
     }
     common.SetNamedValue(L"autoStart", JsonValue::CreateBooleanValue(autoStart));
-    // 记账：这次为哪个 exe 登记的自启。启动时据此判断登记项是否还指着自己（换目录/升级后接管）
-    if (autoStart) common.SetNamedValue(L"autoStartExe", JsonValue::CreateStringValue(selfPath));
-    else if (common.HasKey(L"autoStartExe")) common.Remove(L"autoStartExe");
+    // 自启登记指向哪个 exe 属于本机状态，写入 local.json
+    setLocalStateString(L"autoStartExe", autoStart ? selfPath : L"");
     save();
 }
 
@@ -1122,9 +1121,8 @@ void Setting::takeOverAutoStart()
     wchar_t buffer[MAX_PATH]{};
     if (!GetModuleFileName(nullptr, buffer, MAX_PATH)) return;
     const std::wstring cur{ buffer };
-    auto common = configObj.GetNamedObject(L"common", nullptr);
-    const std::wstring recorded = common
-        ? std::wstring{ common.GetNamedString(L"autoStartExe", L"") } : L"";
+    const std::wstring recorded = getLocalStateString(L"autoStartExe");
+    if (!recorded.empty() && _wcsicmp(recorded.c_str(), cur.c_str()) == 0) return;
     if (!recorded.empty() && _wcsicmp(recorded.c_str(), cur.c_str()) == 0) return;
     setAutoStart(true);
 }
@@ -1354,18 +1352,12 @@ void Setting::removeToolKey(const std::wstring& tool, const std::wstring& key)
 
 long long Setting::getUpdateCheckDay()
 {
-    auto common = configObj.GetNamedObject(L"common", nullptr);
-    if (!common) return 0;
-    return static_cast<long long>(common.GetNamedNumber(L"updateCheckDay", 0));
+    return getLocalStateInt(L"updateCheckDay", 0);
 }
 
 void Setting::setUpdateCheckDay(long long day)
 {
-    auto common = configObj.GetNamedObject(L"common", nullptr);
-    if (!common) return;
-    // 这项不写进 defaultConfig：它是程序自己的记账，不是给用户改的配置
-    common.SetNamedValue(L"updateCheckDay", JsonValue::CreateNumberValue(static_cast<double>(day)));
-    save();
+    setLocalStateInt(L"updateCheckDay", day);
 }
 
 int Setting::getUpdateCheckFreq()
@@ -2518,6 +2510,56 @@ bool Setting::saveLocalData(const JsonObject& data)
     return writeConfigAtomic(getLocalDataPath(), std::wstring{ data.Stringify() });
 }
 
+std::wstring Setting::getLocalStateString(const wchar_t* key)
+{
+    std::lock_guard<std::recursive_mutex> lock(localDataMutex());
+    auto data = loadLocalData();
+    if (!data.HasKey(L"state") || data.GetNamedValue(L"state").ValueType() != JsonValueType::Object)
+        return {};
+    auto state = data.GetNamedObject(L"state");
+    if (!state.HasKey(key) || state.GetNamedValue(key).ValueType() != JsonValueType::String)
+        return {};
+    return std::wstring{ state.GetNamedString(key, L"") };
+}
+
+void Setting::setLocalStateString(const wchar_t* key, const std::wstring& value)
+{
+    std::lock_guard<std::recursive_mutex> lock(localDataMutex());
+    auto data = loadLocalData();
+    JsonObject state{ nullptr };
+    if (data.HasKey(L"state") && data.GetNamedValue(L"state").ValueType() == JsonValueType::Object)
+        state = data.GetNamedObject(L"state");
+    if (!state) state = JsonObject{};
+    state.SetNamedValue(key, JsonValue::CreateStringValue(value));
+    data.SetNamedValue(L"state", state);
+    saveLocalData(data);
+}
+
+long long Setting::getLocalStateInt(const wchar_t* key, long long def)
+{
+    std::lock_guard<std::recursive_mutex> lock(localDataMutex());
+    auto data = loadLocalData();
+    if (!data.HasKey(L"state") || data.GetNamedValue(L"state").ValueType() != JsonValueType::Object)
+        return def;
+    auto state = data.GetNamedObject(L"state");
+    if (!state.HasKey(key) || state.GetNamedValue(key).ValueType() != JsonValueType::Number)
+        return def;
+    return static_cast<long long>(state.GetNamedValue(key).GetNumber());
+}
+
+void Setting::setLocalStateInt(const wchar_t* key, long long value)
+{
+    std::lock_guard<std::recursive_mutex> lock(localDataMutex());
+    auto data = loadLocalData();
+    JsonObject state{ nullptr };
+    if (data.HasKey(L"state") && data.GetNamedValue(L"state").ValueType() == JsonValueType::Object)
+        state = data.GetNamedObject(L"state");
+    if (!state) state = JsonObject{};
+    state.SetNamedValue(key, JsonValue::CreateNumberValue(static_cast<double>(value)));
+    data.SetNamedValue(L"state", state);
+    saveLocalData(data);
+}
+
 std::wstring Setting::getLocalDataText(const std::wstring& key)
 {
     const auto parts = splitLocalKey(key);
@@ -2631,24 +2673,17 @@ void Setting::migrateLocalDataToFile()
         std::error_code ec;
         std::filesystem::remove(dataPath / name, ec);
     };
-    removeLegacy(L"clipboard.json", tookClipboard);
-    removeLegacy(L"history.json", tookHistory);
-    removeLegacy(L"state.json", tookState);
+    // 旧文件保留：新版本以 local.json 为准，但回退旧版本时仍要能读到 clipboard/history/state。
+    (void)removeLegacy;
 
-    auto features = getFeaturesObjectOrNull(configObj);
-    bool configChanged = false;
-    if (features) {
-        for (const wchar_t* key : { L"clipboard", L"history", L"lastCaptureRect" }) {
-            if (features.HasKey(key)) {
-                features.Remove(key);
-                configChanged = true;
-            }
-        }
-    }
-    if (configChanged) {
-        save();
-        backupConfigFile();
-    }
+    // 旧字段保留在 config.json：新版本以 local.json 为准，但旧版本仍要能读同一份配置。
+    // 不再删除 clipboard / history / lastCaptureRect，避免回退旧版本后数据消失。
+}
+
+void Setting::purgeNonUserConfig()
+{
+    // 保留为兼容入口：旧版本可能仍读取这些字段，新版本只把 local.json 当权威数据源，
+    // 不再从 config.json 删除历史字段。后续确认旧版本完全退场后再启用清理。
 }
 
 JsonObject Setting::loadHistoryStore()
