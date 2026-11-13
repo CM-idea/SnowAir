@@ -365,6 +365,7 @@ private:
 	JsonObject loadLocalData();
 	bool saveLocalData(const JsonObject& data);
 	void migrateLocalDataToFile();
+	void normalizeConfigSections();
 	bool writeClipboardItemsToFile(const std::vector<ClipboardItem>& items);
 	JsonObject loadHistoryStore();
 	bool saveHistoryStore(const JsonObject& store);

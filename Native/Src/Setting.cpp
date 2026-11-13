@@ -249,6 +249,15 @@ namespace {
 
 // —— config.json 的读取与落盘 ——
 namespace {
+    // 旧配置的 features 可能不是对象；GetNamedObject 遇到错误类型会崩溃。
+    JsonObject getFeaturesObjectOrNull(const JsonObject& root)
+    {
+        if (!root || !root.HasKey(L"features")) return JsonObject{ nullptr };
+        if (root.GetNamedValue(L"features").ValueType() != JsonValueType::Object)
+            return JsonObject{ nullptr };
+        return root.GetNamedObject(L"features");
+    }
+
     // 读配置文件。返回 false = 读不出来（被占用 / 没权限 / IO 错误），与「文件是空的」区分开。
     // 旧实现直接用 readFileText：读失败也返回空串，于是启动时会把读不到的配置当成空文件、
     // 立刻写回默认值 —— 一次临时的读取失败（杀软扫描、另一个实例正在保存）就会清空用户的
@@ -837,6 +846,8 @@ void Setting::init()
 {
     auto ptr = new Setting();
     setting.reset(ptr);
+    // 旧配置的顶层节可能不是对象；进入业务代码前统一归一化。
+    setting->normalizeConfigSections();
     // 将旧版本分散在 config.json、clipboard.json、history.json、state.json 中的本机数据
     // 迁移到 local.json。此后本机数据只写入 local.json，用户设置只写入 config.json。
     setting->migrateLocalDataToFile();
@@ -1004,11 +1015,13 @@ void Setting::purgeRemovedAiSettings()
     };
     bool changed = false;
     if (configObj.HasKey(L"features")) {
-        auto features = configObj.GetNamedObject(L"features");
-        for (auto* key : kRemovedFeatKeys) {
-            if (features.HasKey(key)) {
-                features.Remove(key);
-                changed = true;
+        auto features = getFeaturesObjectOrNull(configObj);
+        if (features) {
+            for (auto* key : kRemovedFeatKeys) {
+                if (features.HasKey(key)) {
+                    features.Remove(key);
+                    changed = true;
+                }
             }
         }
     }
@@ -1366,12 +1379,27 @@ void Setting::setUpdateCheckFreq(int v)
     save();
 }
 
+void Setting::normalizeConfigSections()
+{
+    if (!configObj) configObj = JsonObject{};
+    // 顶层节按对象读取；类型异常时统一修正，避免 GetNamedObject 崩溃。
+    for (const wchar_t* key : { L"common", L"features", L"toolPin", L"shortcutKey" }) {
+        if (configObj.HasKey(key)
+            && configObj.GetNamedValue(key).ValueType() != JsonValueType::Object) {
+            configObj.SetNamedValue(key, JsonObject{});
+        }
+    }
+}
+
 JsonObject Setting::featuresObj()
 {
-	if (!configObj.HasKey(L"features")) {
+	if (!configObj) configObj = JsonObject{};
+	auto features = getFeaturesObjectOrNull(configObj);
+	if (!features) {
 		configObj.SetNamedValue(L"features", JsonObject{});
+		return configObj.GetNamedObject(L"features");
 	}
-	return configObj.GetNamedObject(L"features");
+	return features;
 }
 
 bool Setting::featBool(const wchar_t* key, bool def)
@@ -2530,7 +2558,7 @@ void Setting::migrateLocalDataToFile()
         tookHistory = takeFile(L"history.json", L"history");
         tookState = takeFile(L"state.json", L"state");
 
-        auto features = configObj.GetNamedObject(L"features", nullptr);
+        auto features = getFeaturesObjectOrNull(configObj);
         if (features) {
             if (!data.HasKey(L"clipboard") && features.HasKey(L"clipboard")
                 && features.GetNamedValue(L"clipboard").ValueType() == JsonValueType::Object) {
@@ -2562,7 +2590,7 @@ void Setting::migrateLocalDataToFile()
     removeLegacy(L"history.json", tookHistory);
     removeLegacy(L"state.json", tookState);
 
-    auto features = configObj.GetNamedObject(L"features", nullptr);
+    auto features = getFeaturesObjectOrNull(configObj);
     bool configChanged = false;
     if (features) {
         for (const wchar_t* key : { L"clipboard", L"history", L"lastCaptureRect" }) {
