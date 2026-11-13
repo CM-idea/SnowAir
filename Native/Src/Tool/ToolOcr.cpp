@@ -1239,10 +1239,10 @@ void ToolOcr::rebuildEditors()
 			fg = (lum > 150) ? 0x14181CFF : 0xF8FBFBFF;
 		}
 
-		// 1) 背景块：盖住识别框，外扩 1 个物理像素 —— 识别框通常不含文字抗锯齿边缘，
-		//    严格贴框时边缘会漏出一点原文字。
+		// 1) 背景块：按识别框短边外扩 2~4px，覆盖文字抗锯齿外沿。
 		{
-			const float bgPad = 1.f / dpi;
+			const float shortSide = std::min(reg.w * scaleX, reg.h * scaleY);
+			const float bgPad = std::clamp(shortSide * 0.08f, 2.f, 4.f) / dpi;
 			auto* bgNode = body->makeChild<Ling::Node>();
 			bgNode->setPositionType(Ling::Position::Absolute);
 			bgNode->setPosition(Ling::Edge::Left, rx - bgPad);

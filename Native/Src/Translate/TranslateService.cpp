@@ -144,55 +144,109 @@ void TranslateService::translateSegments(const std::vector<std::wstring>& segmen
 		r.providerUsed = resolveProvider(base.provider);
 		size_t okCount = 0;
 		std::wstring lastErr;
+		enum class LineAction { Keep, Translate };
+		struct LinePlan {
+			LineAction action{ LineAction::Translate };
+			std::wstring sourceLang;
+		};
+		std::vector<LinePlan> plans(segments.size());
 		for (size_t i = 0; i < segments.size(); i++) {
-			std::wstring line;
-			// ① 这一段本身就是目标语（脚本可确认：目标为中日韩时）→ 原样保留：
-			//    既不浪费一次请求，也不会被"反向翻译"翻坏。多语混排的选区就靠这条各按各的。
+			// 已是目标语的行原样保留，不送翻译。
 			if (TranslateLangs::isSameLang(req.targetLang, segments[i])) {
-				line = segments[i];
+				plans[i].action = LineAction::Keep;
 				okCount++;
+				continue;
 			}
-			else {
-				TranslateRequest one = req;
-				one.text = segments[i];
-				// ② 逐段定源语：用户设的是 auto 时按这一段的脚本判（混排时各行方向可以不同）；
-				//    用户显式指定了源语就尊重用户，不覆盖。
-				std::wstring detected;
-				const bool hasHan = TranslateLangs::countScripts(segments[i]).han > 0;
-				if (srcAuto) {
-					detected = TranslateLangs::detect(segments[i]);
-					if (!detected.empty()) one.sourceLang = detected;
-				}
-				// ③ 这一行本来就是目标语（英文截图配目标 en 最常见）：原样保留。
-				//    isSameLang 只敢判中日韩，en 这类拉丁目标判不出来，会把英文行送进 en→en ——
-				//    离线没有该方向，以前接着走完整条在线链，一行就可能卡几十秒。含汉字的
-				//    混排行（"翻译 Translate"）不算"已是英文"，仍要翻。
-				if (srcAuto && !detected.empty() && !hasHan
+			LinePlan& plan = plans[i];
+			plan.sourceLang = req.sourceLang;
+			// 自动检测时按行定源语；显式指定源语时尊重用户设置。
+			const bool hasHan = TranslateLangs::countScripts(segments[i]).han > 0;
+			if (srcAuto) {
+				const std::wstring detected = TranslateLangs::detect(segments[i]);
+				if (!detected.empty()) plan.sourceLang = detected;
+				if (!detected.empty() && !hasHan
 					&& _wcsicmp(detected.c_str(), req.targetLang.c_str()) == 0) {
-					line = segments[i];
+					plan.action = LineAction::Keep;
 					okCount++;
+					continue;
 				}
-				else {
-					// 拉丁字母占多、又夹汉字的行会被 detect 判成 en，目标也是 en 时同样是
-					// en→en 空转；这种行按中文处理，让中文部分真的被翻出来。
-					if (srcAuto && hasHan && _wcsicmp(one.sourceLang.c_str(), req.targetLang.c_str()) == 0)
-						one.sourceLang = L"zh-CN";
+			}
+			// 拉丁字母占多、又夹汉字的行会被判成 en；目标也是 en 时按中文处理。
+			if (srcAuto && hasHan && _wcsicmp(plan.sourceLang.c_str(), req.targetLang.c_str()) == 0)
+				plan.sourceLang = L"zh-CN";
+		}
+
+		std::vector<std::wstring> translated(segments.size());
+		for (size_t i = 0; i < segments.size(); i++)
+			if (plans[i].action == LineAction::Keep) translated[i] = segments[i];
+
+		for (size_t i = 0; i < segments.size();) {
+			if (plans[i].action == LineAction::Keep) {
+				i++;
+				continue;
+			}
+			// 连续的、同源语的行合成一批；批量失败或行数对不上时退回逐行。
+			size_t end = i;
+			size_t chars = 0;
+			while (end < segments.size() && plans[end].action == LineAction::Translate
+				&& plans[end].sourceLang == plans[i].sourceLang && end - i < 20) {
+				if (end > i && chars + segments[end].size() > 4000) break;
+				chars += segments[end].size();
+				end++;
+			}
+
+			bool batched = false;
+			if (end - i > 1) {
+				std::wstring text;
+				for (size_t k = i; k < end; k++) {
+					if (!text.empty()) text += L'\n';
+					text += segments[k];
+				}
+				TranslateRequest one = req;
+				one.sourceLang = plans[i].sourceLang;
+				one.text = text;
+				auto tr = runChain(one, chain);
+				if (tr.ok) {
+					std::vector<std::wstring> lines;
+					size_t start = 0;
+					for (size_t pos = 0; pos <= tr.text.size(); pos++) {
+						if (pos != tr.text.size() && tr.text[pos] != L'\n') continue;
+						std::wstring line = tr.text.substr(start, pos - start);
+						if (!line.empty() && line.back() == L'\r') line.pop_back();
+						lines.push_back(std::move(line));
+						start = pos + 1;
+					}
+					if (lines.size() == end - i) {
+						for (size_t k = i; k < end; k++) translated[k] = std::move(lines[k - i]);
+						okCount += end - i;
+						r.providerUsed = tr.providerUsed;
+						batched = true;
+					}
+				}
+			}
+			if (!batched) {
+				for (size_t k = i; k < end; k++) {
+					TranslateRequest one = req;
+					one.sourceLang = plans[k].sourceLang;
+					one.text = segments[k];
 					auto tr = runChain(one, chain);
 					if (tr.ok) {
+						translated[k] = tr.text;
 						r.providerUsed = tr.providerUsed;
-						line = tr.text;
 						okCount++;
 					}
 					else {
-						// 这一行失败：保留原文，不拖垮其它已经翻好的行
-						line = segments[i];
+						translated[k] = segments[k];
 						if (lastErr.empty()) lastErr = tr.error.empty() ? L"未知错误" : tr.error;
 					}
 				}
 			}
-			// 每段译文在结果里只占一行：调用方（截图翻译）按 '\n' 切分后与识别框**一一对应**。
-			// 译文里若自带换行（离线引擎长句回排、服务端按句断行），切出来的行数就会比识别框多，
-			// 后面的译文全被塞进错误的框里 —— 表现为"有些框字很小、位置也不对"。
+			i = end;
+		}
+
+		for (size_t i = 0; i < segments.size(); i++) {
+			std::wstring line = std::move(translated[i]);
+			// 每段译文只占一行，调用方按 '\n' 与识别框一一对应。
 			for (auto& c : line) {
 				if (c == L'\r' || c == L'\n') c = L' ';
 			}
