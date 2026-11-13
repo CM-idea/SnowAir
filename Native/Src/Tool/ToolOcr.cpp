@@ -42,7 +42,7 @@ namespace {
 	}
 
 	// Microsoft YaHei 的西文墨迹高 / 字号实测约 0.85，用它把字号和实际占高互相换算。
-	constexpr float kYaheiInkRatio = 0.82f;
+	constexpr float kYaheiInkRatio = 0.8f;
 	// 收框时文字纵向允许占到的框高比例。识别框本身就是贴着文字的，取 1.0 才等于"还原原来的大小"，
 	// 留白（如 0.9）会把紧框的字又压小一圈。
 	constexpr float kBoxHeightFill = 1.0f;
