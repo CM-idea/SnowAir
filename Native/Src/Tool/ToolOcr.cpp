@@ -1279,10 +1279,13 @@ void ToolOcr::rebuildEditors()
 			: ((hEff[i] > 0.f) ? hEff[i] : std::max(1.f, reg.h * scaleY));
 
 		auto* box = body->makeChild<OcrText>();
-		box->fitW = boxW;
-		box->fitH = boxH;
-		box->boxL = reg.x * scaleX;
-		box->boxT = reg.y * scaleY;
+		// 识别框在外圈带了约 15% 短边的取样余量；文字定位要回到真实字框，
+		// 否则会整体向左上偏出几个像素。背景仍用带余量的框。
+		const float textPad = std::min(reg.w * scaleX, reg.h * scaleY) * 0.115f;
+		box->fitW = std::max(1.f, boxW - textPad * 2.f);
+		box->fitH = reg.vertical ? std::max(1.f, boxH - textPad * 2.f) : boxH;
+		box->boxL = reg.x * scaleX + textPad;
+		box->boxT = reg.y * scaleY + textPad;
 		box->setPositionType(Ling::Position::Absolute);
 		// 节点自身几何按识别框摆放（文字命中选择用）；实际绘制位置由 layout() 精确定位。
 		box->setPosition(Ling::Edge::Left, rx);
