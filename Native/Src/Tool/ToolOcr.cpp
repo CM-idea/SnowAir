@@ -91,6 +91,9 @@ namespace {
 		int align{ 0 };      // 原文对齐：0=居左 1=居中 2=居右（译文比原文短时才有区别）
 		// 竖排：控件里的文本是"每字一行"（用换行符堆叠），logical 才是真正要复制/选区的串。
 		bool vertical{ false };
+		bool rotated{ false };
+		float angleDeg{ 0.f };
+		D2D1_POINT_2F center{};
 		std::wstring logical;
 	protected:
 		// layout() 里把节点几何改成了视觉矩形，命中测试要按同一比例换算回布局坐标
@@ -118,11 +121,16 @@ namespace {
 			const float d = (win && win->dpi > 0.f) ? win->dpi : 1.f;
 			auto snap = [d](float v) { return std::round(v * d) / d; };
 			// ox 是"未缩放节点"的偏移：缩放绕节点自身中心，故视觉左边缘 = ox + (w - visW)/2
-			const float ox = snap(visX - (w - visW) * 0.5f);
+			float ox = snap(visX - (w - visW) * 0.5f);
 			// 纵向仍居中：文字块的墨迹落在识别框中间，和原文的墨迹位置对齐。
-			const float oy = snap(boxT + (fitH - h) * 0.5f);
+			float oy = snap(boxT + (fitH - h) * 0.5f);
 			visual.CenterPoint({ w * 0.5f, h * 0.5f, 0.f });
 			visual.Scale({ s, s, 1.f });
+			if (rotated) {
+				visual.RotationAngle(angleDeg);
+				ox = center.x - w * 0.5f;
+				oy = center.y - h * 0.5f;
+			}
 			visual.Offset({ ox, oy, 0.f });
 			// 以中心为锚缩放后的可见矩形，回写成节点几何（命中测试/选区映射都用它）。
 			x = ox + w * 0.5f - w * s * 0.5f;
@@ -1448,22 +1456,43 @@ void ToolOcr::rebuildEditors()
 			stripLeadingBullet(text);
 			text = std::wstring(L"\u2022  ") + text;   // 圆点后留两个空格：和正文拉开一点
 		}
-		const float boxW = std::max(1.f, reg.w * scaleX);   // 面板物理像素
+		float boxW = std::max(1.f, reg.w * scaleX);   // 面板物理像素
 		// 识别框外圈带取样余量；文字定位和字号都按去掉余量后的真实字框算。
-		const float textPad = std::min(reg.w * scaleX, reg.h * scaleY) * 0.115f;
-		const float fitBoxW = std::max(1.f, boxW - textPad * 2.f);
-		const float fitBoxH = std::max(1.f, reg.h * scaleY - textPad * 2.f);
+		float textPad = std::min(reg.w * scaleX, reg.h * scaleY) * 0.115f;
+		float fitBoxW = std::max(1.f, boxW - textPad * 2.f);
+		float fitBoxH = std::max(1.f, reg.h * scaleY - textPad * 2.f);
 		// 竖排列高各不相同（长列 679、短列 111…），不能用横排那套"统一正文行高"，
 		// 否则长列被缩短上移、短列被撑高、字距拉大。竖排一律用它自己的框高。
-		const float boxH = reg.vertical
+		float boxH = reg.vertical
 			? std::max(1.f, reg.h * scaleY)
 			: ((hEff[i] > 0.f) ? hEff[i] : std::max(1.f, reg.h * scaleY));
+		float quadAngle = 0.f;
+		D2D1_POINT_2F quadCenter{};
+		if (reg.hasQuad && !reg.vertical) {
+			const float dx = reg.quad[1].x - reg.quad[0].x;
+			const float dy = reg.quad[1].y - reg.quad[0].y;
+			quadAngle = static_cast<float>(std::atan2(dy, dx) * 180.0 / 3.14159265358979323846);
+			boxW = std::max(1.f, std::hypot(dx, dy) * scaleX);
+			const float h0 = std::hypot(reg.quad[3].x - reg.quad[0].x, reg.quad[3].y - reg.quad[0].y);
+			const float h1 = std::hypot(reg.quad[2].x - reg.quad[1].x, reg.quad[2].y - reg.quad[1].y);
+			boxH = std::max(1.f, (h0 + h1) * 0.5f * scaleY);
+			fitBoxW = boxW;
+			fitBoxH = boxH;
+			textPad = 0.f;
+			for (int k = 0; k < 4; ++k) {
+				quadCenter.x += reg.quad[k].x * scaleX * 0.25f;
+				quadCenter.y += reg.quad[k].y * scaleY * 0.25f;
+			}
+		}
 
 		auto* box = body->makeChild<OcrText>();
 		box->fitW = fitBoxW;
 		box->fitH = reg.vertical ? fitBoxH : boxH;
 		box->boxL = reg.x * scaleX + textPad;
 		box->boxT = reg.y * scaleY + textPad;
+		box->rotated = reg.hasQuad && !reg.vertical;
+		box->angleDeg = quadAngle;
+		box->center = quadCenter;
 		box->setPositionType(Ling::Position::Absolute);
 		// 节点自身几何按识别框摆放（文字命中选择用）；实际绘制位置由 layout() 精确定位。
 		box->setPosition(Ling::Edge::Left, rx);
@@ -1878,7 +1907,15 @@ ToolOcr::SelPoint ToolOcr::hitSelPoint(POINT p) const
 	}
 	else {
 		// 横排（含翻译框）：按真实字形边界命中；点在框外时 DWrite 夹到首/尾，正是边缘起手/收手要的
-		sp.index = e->hitTextIndex(p);
+		POINT hit = p;
+		if (ot && ot->rotated) {
+			const float rad = -ot->angleDeg * 3.14159265358979323846f / 180.f;
+			const float dx = static_cast<float>(p.x) - ot->center.x;
+			const float dy = static_cast<float>(p.y) - ot->center.y;
+			hit.x = static_cast<LONG>(ot->center.x + dx * std::cos(rad) - dy * std::sin(rad));
+			hit.y = static_cast<LONG>(ot->center.y + dx * std::sin(rad) + dy * std::cos(rad));
+		}
+		sp.index = e->hitTextIndex(hit);
 	}
 	return sp;
 }
