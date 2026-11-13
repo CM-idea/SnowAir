@@ -1409,41 +1409,50 @@ void ToolOcr::rebuildEditors()
 			fg = (lum > 150) ? 0x14181CFF : 0xF8FBFBFF;
 		}
 
-		// 1) 背景：有检测四边形时画多边形，否则退回矩形；文字始终建在背景之上。
+		// 1) 背景：四边形行用旋转矩形贴合行方向；其余退回轴对齐矩形。
 		{
 			const float shortSide = std::min(reg.w * scaleX, reg.h * scaleY);
 			const float bgPad = std::clamp(shortSide * 0.08f, 2.f, 4.f) / dpi;
 			auto* bgNode = body->makeChild<Ling::Node>();
 			bgNode->setPositionType(Ling::Position::Absolute);
-			bgNode->setPosition(Ling::Edge::Left, rx - bgPad);
-			bgNode->setPosition(Ling::Edge::Top, ry - bgPad);
-			bgNode->setSize(rw + bgPad * 2.f, rh + bgPad * 2.f);
-			bgNode->setBg(reg.hasQuad ? 0u : bg);
-			bgNode->setBorderRadius(2.f);
-			bgs_.push_back(bgNode);
-
-			if (reg.hasQuad) {
-				BgQuad q{};
-				q.color = bg;
+			if (reg.hasQuad && !reg.vertical) {
+				const float dxTop = reg.quad[1].x - reg.quad[0].x;
+				const float dyTop = reg.quad[1].y - reg.quad[0].y;
+				const float dxBottom = reg.quad[2].x - reg.quad[3].x;
+				const float dyBottom = reg.quad[2].y - reg.quad[3].y;
+				const bool useTop = std::hypot(dxTop, dyTop) >= std::hypot(dxBottom, dyBottom);
+				const float dx = useTop ? dxTop : dxBottom;
+				const float dy = useTop ? dyTop : dyBottom;
+				float angle = static_cast<float>(std::atan2(dy, dx) * 180.0 / 3.14159265358979323846);
+				while (angle > 90.f) angle -= 180.f;
+				while (angle < -90.f) angle += 180.f;
 				float cx = 0.f, cy = 0.f;
 				for (int k = 0; k < 4; ++k) {
-					q.p[k] = D2D1::Point2F(reg.quad[k].x * scaleX, reg.quad[k].y * scaleY);
-					cx += q.p[k].x;
-					cy += q.p[k].y;
+					cx += reg.quad[k].x * scaleX * 0.25f;
+					cy += reg.quad[k].y * scaleY * 0.25f;
 				}
-				cx *= 0.25f;
-				cy *= 0.25f;
-				const float pad = bgPad * dpi;
-				for (int k = 0; k < 4; ++k) {
-					const float dx = q.p[k].x - cx, dy = q.p[k].y - cy;
-					const float len = std::sqrt(dx * dx + dy * dy);
-					if (len > 0.1f) {
-						q.p[k].x += dx / len * pad;
-						q.p[k].y += dy / len * pad;
-					}
-				}
-				bgQuads_.push_back(q);
+				const float h0 = std::hypot(reg.quad[3].x - reg.quad[0].x, reg.quad[3].y - reg.quad[0].y);
+				const float h1 = std::hypot(reg.quad[2].x - reg.quad[1].x, reg.quad[2].y - reg.quad[1].y);
+				const float qw = std::max(1.f, std::hypot(dx, dy) * scaleX);
+				const float qh = std::max(1.f, (h0 + h1) * 0.5f * scaleY);
+				const float fw = (qw + bgPad * dpi * 2.f) / dpi;
+				const float fh = (qh + bgPad * dpi * 2.f) / dpi;
+				bgNode->setSize(fw, fh);
+				bgNode->setPosition(Ling::Edge::Left, cx / dpi - fw * 0.5f);
+				bgNode->setPosition(Ling::Edge::Top, cy / dpi - fh * 0.5f);
+				bgNode->setBg(bg);
+				bgNode->setBorderRadius(2.f);
+				bgNode->visual.CenterPoint({ fw * 0.5f, fh * 0.5f, 0.f });
+				bgNode->visual.RotationAngle(angle);
 			}
+			else {
+				bgNode->setPosition(Ling::Edge::Left, rx - bgPad);
+				bgNode->setPosition(Ling::Edge::Top, ry - bgPad);
+				bgNode->setSize(rw + bgPad * 2.f, rh + bgPad * 2.f);
+				bgNode->setBg(bg);
+				bgNode->setBorderRadius(2.f);
+			}
+			bgs_.push_back(bgNode);
 		}
 
 		// 2) 文字：字号按"字形高度 = 识别框高"取，再交给 OcrText 在 layout() 里
@@ -1469,9 +1478,18 @@ void ToolOcr::rebuildEditors()
 		float quadAngle = 0.f;
 		D2D1_POINT_2F quadCenter{};
 		if (reg.hasQuad && !reg.vertical) {
-			const float dx = reg.quad[1].x - reg.quad[0].x;
-			const float dy = reg.quad[1].y - reg.quad[0].y;
+			// 取较长的一对边作为文字行方向；再归一到 [-90°, 90°]，
+			// 避免检测器给的顶点顺序反过来时把文字画成 180° 倒置。
+			const float dxTop = reg.quad[1].x - reg.quad[0].x;
+			const float dyTop = reg.quad[1].y - reg.quad[0].y;
+			const float dxBottom = reg.quad[2].x - reg.quad[3].x;
+			const float dyBottom = reg.quad[2].y - reg.quad[3].y;
+			const bool useTop = std::hypot(dxTop, dyTop) >= std::hypot(dxBottom, dyBottom);
+			const float dx = useTop ? dxTop : dxBottom;
+			const float dy = useTop ? dyTop : dyBottom;
 			quadAngle = static_cast<float>(std::atan2(dy, dx) * 180.0 / 3.14159265358979323846);
+			while (quadAngle > 90.f) quadAngle -= 180.f;
+			while (quadAngle < -90.f) quadAngle += 180.f;
 			boxW = std::max(1.f, std::hypot(dx, dy) * scaleX);
 			const float h0 = std::hypot(reg.quad[3].x - reg.quad[0].x, reg.quad[3].y - reg.quad[0].y);
 			const float h1 = std::hypot(reg.quad[2].x - reg.quad[1].x, reg.quad[2].y - reg.quad[1].y);
