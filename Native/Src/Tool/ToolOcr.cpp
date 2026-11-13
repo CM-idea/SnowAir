@@ -955,6 +955,65 @@ void ToolOcr::paintBgQuads()
 	bgCanvas_->finishPaint();
 }
 
+	bool solveLinear8(double a[8][9], double h[8])
+	{
+		for (int col = 0; col < 8; ++col) {
+			int pivot = col;
+			for (int row = col + 1; row < 8; ++row)
+				if (std::abs(a[row][col]) > std::abs(a[pivot][col])) pivot = row;
+			if (std::abs(a[pivot][col]) < 1e-9) return false;
+			if (pivot != col) for (int k = col; k < 9; ++k) std::swap(a[pivot][k], a[col][k]);
+			const double div = a[col][col];
+			for (int k = col; k < 9; ++k) a[col][k] /= div;
+			for (int row = 0; row < 8; ++row) {
+				if (row == col) continue;
+				const double f = a[row][col];
+				if (std::abs(f) < 1e-12) continue;
+				for (int k = col; k < 9; ++k) a[row][k] -= f * a[col][k];
+			}
+		}
+		for (int i = 0; i < 8; ++i) h[i] = a[i][8];
+		return true;
+	}
+
+	bool quadHomography(float srcW, float srcH, const D2D1_POINT_2F q[4], double h[9])
+	{
+		const float sx[4]{ 0.f, srcW, srcW, 0.f };
+		const float sy[4]{ 0.f, 0.f, srcH, srcH };
+		double a[8][9]{};
+		for (int i = 0; i < 4; ++i) {
+			const int r = i * 2;
+			a[r][0] = sx[i]; a[r][1] = sy[i]; a[r][2] = 1;
+			a[r][6] = -sx[i] * q[i].x; a[r][7] = -sy[i] * q[i].x; a[r][8] = q[i].x;
+			a[r + 1][3] = sx[i]; a[r + 1][4] = sy[i]; a[r + 1][5] = 1;
+			a[r + 1][6] = -sx[i] * q[i].y; a[r + 1][7] = -sy[i] * q[i].y; a[r + 1][8] = q[i].y;
+		}
+		double v[8]{};
+		if (!solveLinear8(a, v)) return false;
+		for (int i = 0; i < 8; ++i) h[i] = v[i];
+		h[8] = 1.0;
+		return true;
+	}
+
+	bool invert3(const double m[9], double inv[9])
+	{
+		const double det = m[0] * (m[4] * m[8] - m[5] * m[7])
+			- m[1] * (m[3] * m[8] - m[5] * m[6])
+			+ m[2] * (m[3] * m[7] - m[4] * m[6]);
+		if (std::abs(det) < 1e-12) return false;
+		const double id = 1.0 / det;
+		inv[0] = (m[4] * m[8] - m[5] * m[7]) * id;
+		inv[1] = (m[2] * m[7] - m[1] * m[8]) * id;
+		inv[2] = (m[1] * m[5] - m[2] * m[4]) * id;
+		inv[3] = (m[5] * m[6] - m[3] * m[8]) * id;
+		inv[4] = (m[0] * m[8] - m[2] * m[6]) * id;
+		inv[5] = (m[2] * m[3] - m[0] * m[5]) * id;
+		inv[6] = (m[3] * m[7] - m[4] * m[6]) * id;
+		inv[7] = (m[1] * m[6] - m[0] * m[7]) * id;
+		inv[8] = (m[0] * m[4] - m[1] * m[3]) * id;
+		return true;
+	}
+
 void ToolOcr::paintQuadText()
 {
 	if (!textCanvas_) return;
@@ -962,33 +1021,104 @@ void ToolOcr::paintQuadText()
 	if (!ctx) return;
 	ctx->Clear(0);
 	auto* d2d = Ling::D2D::get();
-	if (d2d && d2d->dwriteFactory) {
-		for (const auto& qt : quadTexts_) {
-			auto layout = Ling::D2D::makeTextLayout(qt.text, qt.fontSize * dpi, FLT_MAX, FLT_MAX);
-			if (!layout) continue;
-			layout->SetFontWeight(qt.bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
-				{ 0, INT_MAX });
-			layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-			DWRITE_TEXT_METRICS tm{};
-			if (FAILED(layout->GetMetrics(&tm)) || tm.widthIncludingTrailingWhitespace <= 0.f
-				|| tm.height <= 0.f)
-				continue;
-			const float w = tm.widthIncludingTrailingWhitespace;
-			const float h = tm.height;
-			const D2D1_MATRIX_3X2_F matrix{
-				(qt.q[1].x - qt.q[0].x) / w, (qt.q[1].y - qt.q[0].y) / w,
-				(qt.q[3].x - qt.q[0].x) / h, (qt.q[3].y - qt.q[0].y) / h,
-				qt.q[0].x, qt.q[0].y
-			};
-			Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
-			if (FAILED(ctx->CreateSolidColorBrush(Ling::Color(qt.color).getD2DColor(),
-				brush.GetAddressOf())))
-				continue;
-			ctx->SetTransform(matrix);
-			ctx->DrawTextLayout(D2D1::Point2F(0.f, 0.f), layout.Get(), brush.Get(),
-				D2D1_DRAW_TEXT_OPTIONS_CLIP);
+	if (!d2d || !d2d->dwriteFactory || !d2d->deviceContext) {
+		textCanvas_->finishPaint();
+		return;
+	}
+	for (const auto& qt : quadTexts_) {
+		auto layout = Ling::D2D::makeTextLayout(qt.text, qt.fontSize * dpi, FLT_MAX, FLT_MAX);
+		if (!layout) continue;
+		layout->SetFontWeight(qt.bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
+			{ 0, INT_MAX });
+		layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+		DWRITE_TEXT_METRICS tm{};
+		if (FAILED(layout->GetMetrics(&tm)) || tm.widthIncludingTrailingWhitespace <= 0.f
+			|| tm.height <= 0.f)
+			continue;
+		const UINT sw = (UINT)std::ceil(tm.widthIncludingTrailingWhitespace);
+		const UINT sh = (UINT)std::ceil(tm.height);
+		if (sw == 0 || sh == 0 || (UINT64)sw * sh > 16'000'000ull) continue;
+
+		Microsoft::WRL::ComPtr<ID2D1BitmapRenderTarget> rt;
+		if (FAILED(d2d->deviceContext->CreateCompatibleRenderTarget(
+			D2D1::SizeF((float)sw, (float)sh), rt.GetAddressOf())) || !rt)
+			continue;
+		rt->BeginDraw();
+		rt->Clear(0);
+		rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+		Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+		if (FAILED(rt->CreateSolidColorBrush(Ling::Color(qt.color).getD2DColor(),
+			brush.GetAddressOf()))) {
+			rt->EndDraw();
+			continue;
 		}
-		ctx->SetTransform(D2D1::Matrix3x2F::Identity());
+		rt->DrawTextLayout(D2D1::Point2F(0.f, 0.f), layout.Get(), brush.Get(),
+			D2D1_DRAW_TEXT_OPTIONS_CLIP);
+		rt->EndDraw();
+		Microsoft::WRL::ComPtr<ID2D1Bitmap> srcBmp;
+		if (FAILED(rt->GetBitmap(srcBmp.GetAddressOf())) || !srcBmp) continue;
+
+		const D2D1_BITMAP_PROPERTIES1 readProps = D2D1::BitmapProperties1(
+			D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+			D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+		Microsoft::WRL::ComPtr<ID2D1Bitmap1> readBmp;
+		if (FAILED(d2d->deviceContext->CreateBitmap(D2D1::SizeU(sw, sh), nullptr, 0, readProps,
+			readBmp.GetAddressOf())) || !readBmp)
+			continue;
+		if (FAILED(readBmp->CopyFromBitmap(nullptr, srcBmp.Get(), nullptr))) continue;
+		D2D1_MAPPED_RECT mapped{};
+		if (FAILED(readBmp->Map(D2D1_MAP_OPTIONS_READ, &mapped))) continue;
+
+		double h[9]{}, inv[9]{};
+		if (!quadHomography((float)sw, (float)sh, qt.q, h) || !invert3(h, inv)) {
+			readBmp->Unmap();
+			continue;
+		}
+		float minX = qt.q[0].x, maxX = minX, minY = qt.q[0].y, maxY = minY;
+		for (int k = 1; k < 4; ++k) {
+			minX = std::min(minX, qt.q[k].x); maxX = std::max(maxX, qt.q[k].x);
+			minY = std::min(minY, qt.q[k].y); maxY = std::max(maxY, qt.q[k].y);
+		}
+		const int x0 = (int)std::floor(minX) - 1, y0 = (int)std::floor(minY) - 1;
+		const int x1 = (int)std::ceil(maxX) + 1, y1 = (int)std::ceil(maxY) + 1;
+		const int dw = x1 - x0, dh = y1 - y0;
+		if (dw <= 0 || dh <= 0 || (int64_t)dw * dh > 32'000'000ll) {
+			readBmp->Unmap();
+			continue;
+		}
+		std::vector<BYTE> out((size_t)dw * dh * 4, 0);
+		for (int y = 0; y < dh; ++y) {
+			for (int x = 0; x < dw; ++x) {
+				const double dx = x0 + x + 0.5, dy = y0 + y + 0.5;
+				const double den = inv[6] * dx + inv[7] * dy + inv[8];
+				if (std::abs(den) < 1e-9) continue;
+				const double sx = (inv[0] * dx + inv[1] * dy + inv[2]) / den;
+				const double sy = (inv[3] * dx + inv[4] * dy + inv[5]) / den;
+				if (sx < 0.0 || sy < 0.0 || sx >= sw || sy >= sh) continue;
+				const int ix = (int)std::floor(sx), iy = (int)std::floor(sy);
+				const double fx = sx - ix, fy = sy - iy;
+				const BYTE* p00 = mapped.bits + (size_t)iy * mapped.pitch + (size_t)ix * 4;
+				const BYTE* p10 = p00 + 4;
+				const BYTE* p01 = p00 + mapped.pitch;
+				const BYTE* p11 = p01 + 4;
+				BYTE* d = out.data() + ((size_t)y * dw + x) * 4;
+				for (int c = 0; c < 4; ++c) {
+					const double v = (p00[c] * (1 - fx) + p10[c] * fx) * (1 - fy)
+						+ (p01[c] * (1 - fx) + p11[c] * fx) * fy;
+					d[c] = (BYTE)std::clamp(v, 0.0, 255.0);
+				}
+			}
+		}
+		readBmp->Unmap();
+		const D2D1_BITMAP_PROPERTIES1 outProps = D2D1::BitmapProperties1(
+			D2D1_BITMAP_OPTIONS_NONE,
+			D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+		Microsoft::WRL::ComPtr<ID2D1Bitmap1> outBmp;
+		if (FAILED(ctx->CreateBitmap(D2D1::SizeU((UINT)dw, (UINT)dh), out.data(),
+			(UINT32)dw * 4, outProps, outBmp.GetAddressOf())) || !outBmp)
+			continue;
+		const D2D1_RECT_F dst = D2D1::RectF((float)x0, (float)y0, (float)x1, (float)y1);
+		ctx->DrawBitmap(outBmp.Get(), &dst, 1.f, D2D1_INTERPOLATION_MODE_LINEAR, nullptr);
 	}
 	textCanvas_->finishPaint();
 }
