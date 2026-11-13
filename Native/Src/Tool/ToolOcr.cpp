@@ -48,12 +48,11 @@ namespace {
 	constexpr float kBoxHeightFill = 1.0f;
 	// 墨迹高 → 字号 的换算系数（见 kYaheiInkRatio）。
 	constexpr float kInkToFont = 1.f / kYaheiInkRatio;
-	// 中日韩的方块字几乎占满整个 em，不像西文只占 ≈0.875。用同一个墨迹比换算，中文会被放大一档、
-	// 溢出识别框，上下两行贴到一起（翻译成中文时尤其明显）。所以按脚本分别取墨迹比。
-	// 方块字墨迹比取 1.0（保守：不同字体的字面还可能略超 em），再留 10% 纵向余量 ——
-	// 余量给太少时，贴边的那几行会被面板窗口裁掉（用户反馈"译文还是可能被裁剪"）。
-	constexpr float kCjkInkRatio = 1.0f;
-	constexpr float kCjkVFill = 0.90f;
+	// 方块字在 Microsoft YaHei 下实测墨迹高 / 字号 ≈ 0.96，并不占满整个 em。
+	// 之前按 1.0 换算会把字号算小，中文重绘明显比原文小一圈。
+	constexpr float kCjkInkRatio = 0.96f;
+	// 识别框本身贴着文字，留 2% 余量防止贴边行被面板裁掉。
+	constexpr float kCjkVFill = 0.98f;
 
 	// 是否含"方块字"（汉字/假名/谚文/全角标点）——决定用哪个墨迹比
 	bool hasWideGlyph(const std::wstring& s)
