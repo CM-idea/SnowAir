@@ -1272,6 +1272,10 @@ void ToolOcr::rebuildEditors()
 			text = std::wstring(L"\u2022  ") + text;   // 圆点后留两个空格：和正文拉开一点
 		}
 		const float boxW = std::max(1.f, reg.w * scaleX);   // 面板物理像素
+		// 识别框外圈带取样余量；文字定位和字号都按去掉余量后的真实字框算。
+		const float textPad = std::min(reg.w * scaleX, reg.h * scaleY) * 0.115f;
+		const float fitBoxW = std::max(1.f, boxW - textPad * 2.f);
+		const float fitBoxH = std::max(1.f, reg.h * scaleY - textPad * 2.f);
 		// 竖排列高各不相同（长列 679、短列 111…），不能用横排那套"统一正文行高"，
 		// 否则长列被缩短上移、短列被撑高、字距拉大。竖排一律用它自己的框高。
 		const float boxH = reg.vertical
@@ -1279,11 +1283,8 @@ void ToolOcr::rebuildEditors()
 			: ((hEff[i] > 0.f) ? hEff[i] : std::max(1.f, reg.h * scaleY));
 
 		auto* box = body->makeChild<OcrText>();
-		// 识别框在外圈带了约 15% 短边的取样余量；文字定位要回到真实字框，
-		// 否则会整体向左上偏出几个像素。背景仍用带余量的框。
-		const float textPad = std::min(reg.w * scaleX, reg.h * scaleY) * 0.115f;
-		box->fitW = std::max(1.f, boxW - textPad * 2.f);
-		box->fitH = reg.vertical ? std::max(1.f, boxH - textPad * 2.f) : boxH;
+		box->fitW = fitBoxW;
+		box->fitH = reg.vertical ? fitBoxH : boxH;
 		box->boxL = reg.x * scaleX + textPad;
 		box->boxT = reg.y * scaleY + textPad;
 		box->setPositionType(Ling::Position::Absolute);
@@ -1333,23 +1334,17 @@ void ToolOcr::rebuildEditors()
 			box->setText(stacked);
 		}
 		else {
-			const bool wide = hasWideGlyph(text);
-			const float inkRatio = wide ? kCjkInkRatio : kYaheiInkRatio;
-			const float vFill = wide ? kCjkVFill : 1.f;
-			float fLogical = std::clamp(boxH * vFill / (inkRatio * dpi), 7.f / dpi, 300.f / dpi);
-			// 用**字号**把文字适配到识别框：先量当前字号的自然宽高，再把字号乘上
-			// "宽/高哪个先顶满"的倍率。以前是绘完再用 visual.Scale 拉伸位图，短行放大后
-			// 边缘会糊；改字号是重新排版，字形始终按最终尺寸栅格化，边缘是清楚的。
+			// 不按语种区分墨迹比：统一用文本实际排版宽度适配字框。
+			// 中英混排时整行仍按同一字号排版，不会出现英文比中文小一圈。
+			constexpr float kTextInkRatio = 0.96f;
+			float fLogical = boxH * 0.98f / (kTextInkRatio * dpi);
 			float naturalW = 0.f, naturalH = 0.f;
-			if (measureTextSize(text, fLogical, dpi, reg.bold, naturalW, naturalH)) {
-				const float inkH = fLogical * dpi * inkRatio;
-				const float fitS = std::min(
-					naturalW > 0.f ? boxW / naturalW : 1.f,
-					inkH > 0.f ? boxH * vFill / inkH : 1.f);
-				fLogical = std::clamp(fLogical * fitS, 7.f / dpi, 300.f / dpi);
+			if (measureTextSize(text, 10.f, dpi, reg.bold, naturalW, naturalH) && naturalW > 0.f) {
+				fLogical = 10.f * fitBoxW / naturalW;
 			}
-			box->inkH = fLogical * dpi * inkRatio;
-			box->vFill = vFill;
+			fLogical = std::clamp(fLogical, 7.f / dpi, 300.f / dpi);
+			box->inkH = fLogical * dpi * kTextInkRatio;
+			box->vFill = 0.98f;
 			box->setFontSize(fLogical);
 			box->setText(text);
 		}
