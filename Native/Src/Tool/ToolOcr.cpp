@@ -806,6 +806,11 @@ void ToolOcr::onCreated()
 	bannerLabel = bannerNode->makeChild<Ling::Label>();
 	bannerLabel->setFontSize(12.f);
 
+	// 四边形背景画布：在所有文字块之前创建，后续文字统一压在它上面
+	bgCanvas_ = body->makeChild<Ling::Canvas>();
+	bgCanvas_->enableSwapChain();
+	bgCanvas_->setSizePercent(100.f, 100.f);
+
 	rebuildEditors();
 	// 标注镜像层：盖在识别文字之上的透明画布（宿主注入 annotPainter_ 后才有内容）
 	annotCanvas_ = body->makeChild<Ling::Canvas>();
@@ -916,6 +921,31 @@ bool fitTextToSlots(const std::wstring& text, float fontLogical, float dpi, bool
 	return !out.empty();
 }
 
+void ToolOcr::paintBgQuads()
+{
+	if (!bgCanvas_) return;
+	auto* ctx = bgCanvas_->startPaint();
+	if (!ctx) return;
+	ctx->Clear(0);
+	auto* d2d = Ling::D2D::get();
+	if (d2d && d2d->d2dFactory) {
+		for (const auto& q : bgQuads_) {
+			Microsoft::WRL::ComPtr<ID2D1PathGeometry> path;
+			if (FAILED(d2d->d2dFactory->CreatePathGeometry(path.GetAddressOf())) || !path) continue;
+			Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+			if (FAILED(path->Open(sink.GetAddressOf())) || !sink) continue;
+			sink->BeginFigure(q.p[0], D2D1_FIGURE_BEGIN_FILLED);
+			for (int k = 1; k < 4; ++k) sink->AddLine(q.p[k]);
+			sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+			sink->Close();
+			Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+			if (SUCCEEDED(ctx->CreateSolidColorBrush(Ling::Color(q.color).getD2DColor(), brush.GetAddressOf())))
+				ctx->FillGeometry(path.Get(), brush.Get());
+		}
+	}
+	bgCanvas_->finishPaint();
+}
+
 void ToolOcr::rebuildEditors()
 {
 	builtDpi_ = dpi;   // 这一版编辑框是用当前 dpi 排的（换屏后 syncToMask 据此判断要不要重排）
@@ -927,6 +957,7 @@ void ToolOcr::rebuildEditors()
 		if (n) body->removeChild(n);
 	}
 	bgs_.clear();
+	bgQuads_.clear();
 	trBoxes_.clear();
 	trTops_.clear();
 	trScrollY_ = 0.f;
@@ -936,6 +967,7 @@ void ToolOcr::rebuildEditors()
 		// 正在翻译时依然顶着忙碌提示（识别失败也不能把"正在翻译…"换成红条）
 		showBanner(!busyMsg_.empty() ? busyMsg_
 			: (result_.error.empty() ? Lang::get(L"ocr.fail") : result_.error), busyMsg_.empty());
+		paintBgQuads();
 		if (bannerNode) body->bringToFront(bannerNode);
 		if (compareBtn) body->bringToFront(compareBtn);
 		if (copyBtn) body->bringToFront(copyBtn);
@@ -1369,7 +1401,7 @@ void ToolOcr::rebuildEditors()
 			fg = (lum > 150) ? 0x14181CFF : 0xF8FBFBFF;
 		}
 
-		// 1) 背景块：按识别框短边外扩 2~4px，覆盖文字抗锯齿外沿。
+		// 1) 背景：有检测四边形时画多边形，否则退回矩形；文字始终建在背景之上。
 		{
 			const float shortSide = std::min(reg.w * scaleX, reg.h * scaleY);
 			const float bgPad = std::clamp(shortSide * 0.08f, 2.f, 4.f) / dpi;
@@ -1378,9 +1410,32 @@ void ToolOcr::rebuildEditors()
 			bgNode->setPosition(Ling::Edge::Left, rx - bgPad);
 			bgNode->setPosition(Ling::Edge::Top, ry - bgPad);
 			bgNode->setSize(rw + bgPad * 2.f, rh + bgPad * 2.f);
-			bgNode->setBg(bg);
+			bgNode->setBg(reg.hasQuad ? 0u : bg);
 			bgNode->setBorderRadius(2.f);
 			bgs_.push_back(bgNode);
+
+			if (reg.hasQuad) {
+				BgQuad q{};
+				q.color = bg;
+				float cx = 0.f, cy = 0.f;
+				for (int k = 0; k < 4; ++k) {
+					q.p[k] = D2D1::Point2F(reg.quad[k].x * scaleX, reg.quad[k].y * scaleY);
+					cx += q.p[k].x;
+					cy += q.p[k].y;
+				}
+				cx *= 0.25f;
+				cy *= 0.25f;
+				const float pad = bgPad * dpi;
+				for (int k = 0; k < 4; ++k) {
+					const float dx = q.p[k].x - cx, dy = q.p[k].y - cy;
+					const float len = std::sqrt(dx * dx + dy * dy);
+					if (len > 0.1f) {
+						q.p[k].x += dx / len * pad;
+						q.p[k].y += dy / len * pad;
+					}
+				}
+				bgQuads_.push_back(q);
+			}
 		}
 
 		// 2) 文字：字号按"字形高度 = 识别框高"取，再交给 OcrText 在 layout() 里
@@ -1620,6 +1675,7 @@ void ToolOcr::rebuildEditors()
 	selALine_ = selBLine_ = -1;
 	selAIdx_ = selBIdx_ = 0;
 	// 所有文字统一压在背景层之上：背景是逐框建的，后一框的外扩可能盖住前一框文字。
+	paintBgQuads();
 	for (auto* e : editors) {
 		if (e && e->parent == body.get()) body->bringToFront(e);
 	}

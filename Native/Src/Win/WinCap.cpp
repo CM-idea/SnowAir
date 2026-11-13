@@ -4432,6 +4432,11 @@ namespace {
 			reg.y = ln.y0;
 			reg.w = std::max(2.f, ln.x1 - ln.x0);
 			reg.h = std::max(2.f, ln.y1 - ln.y0);
+			if (ln.idx.size() == 1) {
+				const auto& src = in.regions[ln.idx.front()];
+				reg.hasQuad = src.hasQuad;
+				for (int q = 0; q < 4; ++q) reg.quad[q] = src.quad[q];
+			}
 			merged.push_back(reg);
 		}
 
