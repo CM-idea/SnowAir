@@ -2633,80 +2633,78 @@ bool Setting::setLocalDataText(const std::wstring& key, const std::wstring& json
 // 将旧版本分散的本机数据迁移到 local.json：
 //   - 旧版本拆分出的 clipboard.json / history.json / state.json
 //   - 更早版本直接写在 config.json 的 features.clipboard / features.history / features.lastCaptureRect
-// 迁移成功后再删除旧文件和 config 中的旧键；任一步骤失败则保留原数据，下次启动重试。
+// 按节补齐：local.json 里已有且合法的节不覆盖，缺的节才从旧文件/旧配置导入，
+// 所以「新版本先跑过一次、之后才放入旧配置」也能把数据带过来。迁移成功也不删除旧文件与
+// config 旧键，回退旧版本时仍能读到。
 void Setting::migrateLocalDataToFile()
 {
     std::lock_guard<std::recursive_mutex> lock(localDataMutex());
     const auto path = getLocalDataPath();
 
-    std::wstring existing;
+    // 读现有 local.json（可能还没有）。已经写进去的节就是本机权威数据，之后只补缺的节：
+    // 不能因为 local.json 里已经有 state（新版本先跑过一次就会写 state）就整个跳过，
+    // 否则用户随后放进来的旧配置里的剪贴板/历史永远不会被导入。
     JsonObject data{ nullptr };
-    bool localReady = false;
+    std::wstring existing;
     if (readConfigContent(path, existing) && !isBlankConfig(existing)) {
         JsonObject parsed{ nullptr };
-        const bool parsedOk = JsonObject::TryParse(existing, parsed);
-        if (parsedOk && (parsed.HasKey(L"clipboard") || parsed.HasKey(L"history") || parsed.HasKey(L"state"))) {
+        if (JsonObject::TryParse(existing, parsed)) {
             data = parsed;
-            localReady = true;
         }
-        else if (!parsedOk) {
+        else {
             // 文件损坏：备份为 .bad，避免迁移直接覆盖
             std::error_code ec;
             std::filesystem::copy_file(path, siblingOf(path, L".bad"),
                 std::filesystem::copy_options::overwrite_existing, ec);
         }
     }
+    if (!data) data = JsonObject{};
 
-    bool tookClipboard = false, tookHistory = false, tookState = false;
-    if (!localReady) {
-        data = JsonObject{};
+    bool changed = false;
+    auto takeLegacyFile = [&](const wchar_t* name, const wchar_t* section) {
+        if (data.HasKey(section)) return;
+        std::wstring text;
+        if (!readConfigContent(dataPath / name, text) || isBlankConfig(text)) return;
+        JsonObject obj{ nullptr };
+        if (!JsonObject::TryParse(text, obj)) return;   // 解析失败则保留原文件，不参与迁移
+        data.SetNamedValue(section, obj);
+        changed = true;
+    };
+    takeLegacyFile(L"clipboard.json", L"clipboard");
+    takeLegacyFile(L"history.json", L"history");
+    takeLegacyFile(L"state.json", L"state");
 
-        auto takeFile = [&](const wchar_t* name, const wchar_t* section) -> bool {
-            std::wstring text;
-            if (!readConfigContent(dataPath / name, text) || isBlankConfig(text)) return false;
-            JsonObject obj{ nullptr };
-            if (!JsonObject::TryParse(text, obj)) return false;   // 解析失败则保留原文件，不参与迁移
-            data.SetNamedValue(section, obj);
-            return true;
-        };
-        tookClipboard = takeFile(L"clipboard.json", L"clipboard");
-        tookHistory = takeFile(L"history.json", L"history");
-        tookState = takeFile(L"state.json", L"state");
-
-        auto features = getFeaturesObjectOrNull(configObj);
-        if (features) {
-            if (!data.HasKey(L"clipboard") && features.HasKey(L"clipboard")
-                && features.GetNamedValue(L"clipboard").ValueType() == JsonValueType::Object) {
-                data.SetNamedValue(L"clipboard", features.GetNamedValue(L"clipboard").GetObject());
-            }
-            if (!data.HasKey(L"history") && features.HasKey(L"history")
-                && features.GetNamedValue(L"history").ValueType() == JsonValueType::Object) {
-                data.SetNamedValue(L"history", features.GetNamedValue(L"history").GetObject());
-            }
-            if (!data.HasKey(L"state") && features.HasKey(L"lastCaptureRect")
-                && features.GetNamedValue(L"lastCaptureRect").ValueType() == JsonValueType::String) {
-                JsonObject state{ nullptr };
+    auto features = getFeaturesObjectOrNull(configObj);
+    if (features) {
+        if (!data.HasKey(L"clipboard") && features.HasKey(L"clipboard")
+            && features.GetNamedValue(L"clipboard").ValueType() == JsonValueType::Object) {
+            data.SetNamedValue(L"clipboard", features.GetNamedValue(L"clipboard").GetObject());
+            changed = true;
+        }
+        if (!data.HasKey(L"history") && features.HasKey(L"history")
+            && features.GetNamedValue(L"history").ValueType() == JsonValueType::Object) {
+            data.SetNamedValue(L"history", features.GetNamedValue(L"history").GetObject());
+            changed = true;
+        }
+        // 上次选区：local.json 的 state 可能已被自动启动/更新检查写过，只补缺的
+        // lastCaptureRect。这里必须是真正的空对象，空句柄直接 SetNamedValue 会闪退。
+        if (features.HasKey(L"lastCaptureRect")
+            && features.GetNamedValue(L"lastCaptureRect").ValueType() == JsonValueType::String) {
+            JsonObject state;
+            if (data.HasKey(L"state") && data.GetNamedValue(L"state").ValueType() == JsonValueType::Object)
+                state = data.GetNamedObject(L"state");
+            if (!state.HasKey(L"lastCaptureRect")) {
                 state.SetNamedValue(L"lastCaptureRect",
                     JsonValue::CreateStringValue(features.GetNamedString(L"lastCaptureRect", L"")));
                 data.SetNamedValue(L"state", state);
+                changed = true;
             }
         }
-
-        bool hasAny = data.HasKey(L"clipboard") || data.HasKey(L"history") || data.HasKey(L"state");
-        if (hasAny && !saveLocalData(data)) return;
     }
 
-    // 清理旧位置：仅删除已成功迁移的文件，损坏文件保留
-    auto removeLegacy = [&](const wchar_t* name, bool taken) {
-        if (!taken && !localReady) return;
-        std::error_code ec;
-        std::filesystem::remove(dataPath / name, ec);
-    };
-    // 旧文件保留：新版本以 local.json 为准，但回退旧版本时仍要能读到 clipboard/history/state。
-    (void)removeLegacy;
+    if (changed) saveLocalData(data);
 
-    // 旧字段保留在 config.json：新版本以 local.json 为准，但旧版本仍要能读同一份配置。
-    // 不再删除 clipboard / history / lastCaptureRect，避免回退旧版本后数据消失。
+    // 旧文件与 config 旧字段都保留：新版本以 local.json 为准，回退旧版本时仍能读到。
 }
 
 void Setting::purgeNonUserConfig()
