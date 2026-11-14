@@ -316,30 +316,6 @@ void ImageEditAnnotHost::paintOnScreen(ID2D1DeviceContext* ctx)
     paintAnnotPublic(ctx);
 }
 
-void ImageEditAnnotHost::paintPunchBackground(ID2D1DeviceContext* ctx, const D2D1_RECT_F& r)
-{
-    if (!ctx) return;
-    // 屏幕预览：画板允许透明（空画布 / 无背景色），screenImg 也可能是透明图；
-    // 先铺一层画布底色，再把画板内容盖上去，文字区域才能稳定把线断开。
-    // 离屏合成时 punchSource_ 就是最终底图，直接用它开洞，不能铺画布色（会破坏透明导出）。
-    if (!punchSource_) {
-        const uint32_t c = ImageEditTheme::canvasBg;
-        const D2D1_COLOR_F col = D2D1::ColorF(
-            ((c >> 24) & 0xFF) / 255.f,
-            ((c >> 16) & 0xFF) / 255.f,
-            ((c >> 8) & 0xFF) / 255.f,
-            (c & 0xFF) / 255.f);
-        if (!punchBgBrush_) {
-            ctx->CreateSolidColorBrush(col, punchBgBrush_.GetAddressOf());
-        }
-        else {
-            punchBgBrush_->SetColor(col);
-        }
-        if (punchBgBrush_) ctx->FillRectangle(r, punchBgBrush_.Get());
-    }
-    AnnotHost::paintPunchBackground(ctx, r);
-}
-
 void ImageEditAnnotHost::onToolChanged()
 {
     // 改样式（含从颜色面板选色）后确保属性栏仍然显示：

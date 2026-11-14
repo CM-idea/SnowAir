@@ -137,21 +137,42 @@ std::wstring AnnotHost::styleToolId() const
 	return id == L"dimension" ? L"arrow" : id;
 }
 
-// 线上文字开洞：默认用屏幕捕获图把文字区域原样盖回去。
-// 宿主可以重写（图片编辑器的画板可能是透明的，需要先铺画布底色）。
-void AnnotHost::paintPunchBackground(ID2D1DeviceContext* ctx, const D2D1_RECT_F&)
+// 线上文字开洞：把宿主线在洞内的部分剪掉（洞内一条线都不画），洞外照常。
+// 早先的做法是往洞里铺一张底图，虽然也能把线断开，但会把该区域内后画的/先画的
+// 其他标注一起盖住 —— 两个尺寸线交叉时就会互相"吃"掉对方的线，洞也无法叠加。
+// 用图层遮罩则只作用于当前这条线，别的标注完全不受影响。
+bool AnnotHost::pushPunchMask(ID2D1DeviceContext* ctx, const ShapeBase* host)
 {
-	ID2D1Bitmap1* src = punchSource_ ? punchSource_ : screenImg.Get();
-	if (!ctx || !src) return;
-	// 底图按自身像素尺寸铺（贴图缩放时客户区尺寸 ≠ 图像尺寸，用 w/h 会抠错位置）；
-	// 尺寸对不上时仍按窗口尺寸铺，保持白板/演示的原行为
-	const D2D1_SIZE_U srcPx = src->GetPixelSize();
-	const float sc = scale > 0.001f ? scale : 1.f;
-	const bool sameSpace = std::fabs((float)srcPx.width - (float)w / sc) <= 2.f
-		&& std::fabs((float)srcPx.height - (float)h / sc) <= 2.f;
-	ctx->DrawBitmap(src, sameSpace
-		? D2D1::RectF(0.f, 0.f, (float)srcPx.width, (float)srcPx.height)
-		: D2D1::RectF(0.f, 0.f, (float)w, (float)h));
+	if (!ctx || !host || !history) return false;
+	D2D1_RECT_F hole{};
+	bool found = false;
+	for (auto& s : history->shapes) {
+		auto* t = dynamic_cast<ShapeText*>(s.get());
+		if (!t || t->attachTo != host || s->isUndo) continue;
+		if (t->punchHole(hole)) { found = true; break; }
+	}
+	if (!found) return false;
+	auto* d2d = Ling::D2D::get();
+	if (!d2d || !d2d->d2dFactory) return false;
+	Microsoft::WRL::ComPtr<ID2D1RectangleGeometry> outer, inner;
+	// 遮罩范围取窗口的两倍：窗口外的线本来就被裁掉，这里只是保证"除洞以外都画"
+	const float l = -(float)w, t = -(float)h;
+	if (FAILED(d2d->d2dFactory->CreateRectangleGeometry(
+		D2D1::RectF(l, t, (float)w * 2.f, (float)h * 2.f), outer.GetAddressOf())) || !outer)
+		return false;
+	if (FAILED(d2d->d2dFactory->CreateRectangleGeometry(hole, inner.GetAddressOf())) || !inner)
+		return false;
+	Microsoft::WRL::ComPtr<ID2D1PathGeometry> mask;
+	if (FAILED(d2d->d2dFactory->CreatePathGeometry(mask.GetAddressOf())) || !mask) return false;
+	Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+	if (FAILED(mask->Open(sink.GetAddressOf())) || !sink) return false;
+	if (FAILED(outer->CombineWithGeometry(inner.Get(), D2D1_COMBINE_MODE_EXCLUDE, nullptr, sink.Get())))
+		return false;
+	sink->Close();
+	Microsoft::WRL::ComPtr<ID2D1Layer> layer;
+	if (FAILED(ctx->CreateLayer(nullptr, layer.GetAddressOf())) || !layer) return false;
+	ctx->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), mask.Get()), layer.Get());
+	return true;
 }
 
 // 按住 Alt = 强制落笔：跳过"按下先命中已有标注"，让当前工具直接压在旧标注上作画。
@@ -2761,10 +2782,8 @@ bool AnnotHost::composeAnnotOnImage(const BYTE* bgra, int imgW, int imgH, std::v
 	d2d->deviceContext->Clear(D2D1::ColorF(0, 0.f));
 	d2d->deviceContext->SetTransform(D2D1::Matrix3x2F::Identity());
 	d2d->deviceContext->DrawBitmap(srcBmp.Get(), D2D1::RectF(0, 0, (float)imgW, (float)imgH));
-	// 离屏合成：开洞就从这张底图上抠，不能用画布兜底色（透明导出会被垫成实色）
-	punchSource_ = srcBmp.Get();
+	// 离屏合成：洞由图层遮罩挖，底图（透明）原样透出
 	paintShapes(d2d->deviceContext.Get(), false, true);
-	punchSource_ = nullptr;
 	if (FAILED(d2d->deviceContext->EndDraw())) {
 		d2d->deviceContext->SetTarget(nullptr);
 		return false;

@@ -22,8 +22,10 @@ public:
 	virtual HWND annotInputHwnd() const { return hwnd; }
 	// 供嵌入画布把标注画到自己的 D2D 上下文里（坐标系由调用方先设好）
 	void paintAnnotPublic(ID2D1DeviceContext* ctx) { paintShapes(ctx); }
-	// 线上文字「开洞」时，用宿主自己的背景填这块区域（截图=捕获图；图片编辑=画板/画布底）
-	virtual void paintPunchBackground(ID2D1DeviceContext* ctx, const D2D1_RECT_F& r);
+	// 线上文字「开洞」：用图层遮罩把宿主这条线在洞内的部分剪掉，洞外照常画。
+	// 不能把底图铺进洞里 —— 那样会把该区域内别的标注（交叉的尺寸/箭头）一起盖掉，
+	// 多个洞也叠不起来。返回 true 时调用方负责 PopLayer。
+	bool pushPunchMask(ID2D1DeviceContext* ctx, const ShapeBase* host);
 	Ling::TextBox* getTextBox();
 	void setEditingText(ShapeText* shape);
 	// 属性滑条实时作用的形状：优先二次选中的；否则是刚画完、且仍属于当前工具的标注
@@ -145,8 +147,6 @@ public:
 	ShapeBase* styleLoadCandidate{ nullptr };
 	std::unique_ptr<History> history;
 	Microsoft::WRL::ComPtr<ID2D1Bitmap1> screenImg;
-	// 离屏合成时的「开洞底图」：保存/导出时当前目标就是这张底图，不能再用画布兜底色
-	ID2D1Bitmap1* punchSource_{ nullptr };
 protected:
 	AnnotHost();
 	void ensureHistory();

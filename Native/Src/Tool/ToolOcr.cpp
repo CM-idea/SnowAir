@@ -3,10 +3,13 @@
 #include "../Lang.h"
 #include "../Setting.h"
 #include "../Tip.h"
+#include "../Ocr/OcrInk.h"
 #include "ToolOcr.h"
 #include "ToolOcrCompare.h"
 #include "IconCodes.h"
 #include "ToolbarTheme.h"
+#include <timeapi.h>
+#pragma comment(lib, "winmm.lib")
 
 namespace {
 	// 去掉段首圆点（• · ● …）及其后的空白：翻译前后都自己管圆点，左右才齐
@@ -53,6 +56,7 @@ namespace {
 	constexpr float kCjkInkRatio = 0.96f;
 	// 识别框本身贴着文字，留 2% 余量防止贴边行被面板裁掉。
 	constexpr float kCjkVFill = 0.98f;
+	constexpr float kPi = 3.14159265358979323846f;
 
 	// 是否含"方块字"（汉字/假名/谚文/全角标点）——决定用哪个墨迹比
 	bool hasWideGlyph(const std::wstring& s)
@@ -63,14 +67,6 @@ namespace {
 				|| (c >= 0xFF00 && c <= 0xFFEF)) return true;
 		}
 		return false;
-	}
-
-	// 单个字符是不是方块字（合并折行时决定要不要补空格：中文之间不用，西文之间要）
-	bool isCjkChar(wchar_t c)
-	{
-		return (c >= 0x3000 && c <= 0x303F) || (c >= 0x3040 && c <= 0x30FF)
-			|| (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0xAC00 && c <= 0xD7AF)
-			|| (c >= 0xFF00 && c <= 0xFFEF);
 	}
 
 	// 叠加用文字块：把文字**按真实排版尺寸**等比缩放并居中到识别框。
@@ -92,6 +88,12 @@ namespace {
 		// 竖排：控件里的文本是"每字一行"（用换行符堆叠），logical 才是真正要复制/选区的串。
 		bool vertical{ false };
 		std::wstring logical;
+		// 斜排原位覆盖：文字框绕识别框中心旋转回原文角度（度，屏幕坐标顺时针为正）。
+		// 斜排文字用包围盒排版会"拉平"，只有连同背景块一起旋转才能贴住原文。
+		bool rotated{ false };
+		float rotDeg{ 0.f };
+		float rotCx{ 0.f };   // 识别框中心 X（父视觉坐标，物理像素）
+		float rotCy{ 0.f };   // 识别框中心 Y
 	protected:
 		// layout() 里把节点几何改成了视觉矩形，命中测试要按同一比例换算回布局坐标
 		float hitTestScale() const override { return scale_; }
@@ -108,6 +110,38 @@ namespace {
 				// 逐行缩放会让同一段里的字（包括圆点）大小忽大忽小，看着不齐
 				: std::min(std::min((w > fitW * 1.20f ? fitW / w : 1.f), fitH * vFill / inkH), 1.f);
 			scale_ = s;
+			const float d = (win && win->dpi > 0.f) ? win->dpi : 1.f;
+			auto snap = [d](float v) { return std::round(v * d) / d; };
+			if (rotated) {
+				// 斜排：文字整体绕识别框中心旋转。先按未旋转坐标系把文字缩放到
+				// 「基线长 × 行厚」，再以识别框中心为锚摆放，最后让视觉层绕自身中心
+				// 旋转到原文角度 —— 文字基线与原文字平行、字身盖住原字形。
+				const float rad = rotDeg * kPi / 180.f;
+				const float cosR = std::cos(rad), sinR = std::sin(rad);
+				const float visW = w * s;
+				// 对齐位移要沿**基线方向**走：只挪 X 的话，倾斜时文字会被推向基线的
+				// 一侧（居中/居右、或文字比框短时明显），在原位覆盖里就看不齐。
+				float along = -1.f;                                  // 居左
+				if (align == 1) along = 0.f;                          // 居中
+				else if (align == 2) along = 1.f;                     // 居右
+				const float t = along * (fitW - visW) * 0.5f;
+				const float cx = rotCx + t * cosR, cy = rotCy + t * sinR;
+				const float ox = snap(cx - w * 0.5f);
+				const float oy = snap(cy - h * 0.5f);
+				visual.CenterPoint({ w * 0.5f, h * 0.5f, 0.f });
+				visual.Scale({ s, s, 1.f });
+				visual.RotationAngleInDegrees(rotDeg);
+				visual.Offset({ ox, oy, 0.f });
+				// 命中/选区映射按旋转后的轴对齐包围盒回写（节点几何是屏幕坐标）。
+				const float ca = std::fabs(cosR), sa = std::fabs(sinR);
+				const float ex = visW * 0.5f * ca + h * s * 0.5f * sa;
+				const float ey = visW * 0.5f * sa + h * s * 0.5f * ca;
+				x = cx - ex;
+				y = cy - ey;
+				w = ex * 2.f;
+				h = ey * 2.f;
+				return;
+			}
 			// 水平按原文对齐摆放：译文比原文短、装不满框时，居左/居中/居右的差别才看得出来。
 			// 居左 = 和原文一样从同一列起排；居中/居右照原样还原。
 			const float visW = w * s;
@@ -115,8 +149,6 @@ namespace {
 			if (align == 1) visX = boxL + (fitW - visW) * 0.5f;     // 居中
 			else if (align == 2) visX = boxL + (fitW - visW);       // 居右
 			// 位置对齐到物理像素：合成层按小数坐标摆放时会把文字画布重采样一遍，边缘也会发虚。
-			const float d = (win && win->dpi > 0.f) ? win->dpi : 1.f;
-			auto snap = [d](float v) { return std::round(v * d) / d; };
 			// ox 是"未缩放节点"的偏移：缩放绕节点自身中心，故视觉左边缘 = ox + (w - visW)/2
 			const float ox = snap(visX - (w - visW) * 0.5f);
 			// 纵向仍居中：文字块的墨迹落在识别框中间，和原文的墨迹位置对齐。
@@ -131,6 +163,38 @@ namespace {
 			h = h * s;
 		}
 	};
+
+	// 斜排识别框在面板上的几何（物理像素）：中心、基线长度、行厚与旋转角。
+	// 斜排框的要素都在四点里，包围盒（x/y/w/h）只用于取色和命中。
+	struct RotatedRegion {
+		bool valid{ false };
+		float cx{ 0.f }, cy{ 0.f };
+		float len{ 0.f }, thick{ 0.f };
+		float deg{ 0.f };
+	};
+	RotatedRegion rotatedRegionGeometry(const OcrRegion& reg, float scaleX, float scaleY)
+	{
+		RotatedRegion g;
+		if (!reg.rotated) return g;
+		float px[4], py[4];
+		for (int k = 0; k < 4; ++k) {
+			px[k] = reg.quadX[k] * scaleX;
+			py[k] = reg.quadY[k] * scaleY;
+		}
+		g.cx = (px[0] + px[1] + px[2] + px[3]) * 0.25f;
+		g.cy = (py[0] + py[1] + py[2] + py[3]) * 0.25f;
+		const float dx = (px[1] - px[0]) + (px[2] - px[3]);
+		const float dy = (py[1] - py[0]) + (py[2] - py[3]);
+		g.deg = std::atan2(dy, dx) * (180.f / kPi);
+		g.len = 0.5f * (std::hypot(px[1] - px[0], py[1] - py[0])
+			+ std::hypot(px[2] - px[3], py[2] - py[3]));
+		g.thick = 0.5f * (std::hypot(px[3] - px[0], py[3] - py[0])
+			+ std::hypot(px[2] - px[1], py[2] - py[1]));
+		// 角度太接近 0 说明实际是横排（引擎抖出来的假斜排），超过 60° 多半是竖排/误检
+		g.valid = g.len > 1.f && g.thick > 1.f
+			&& std::fabs(g.deg) > 1.f && std::fabs(g.deg) < 60.f;
+		return g;
+	}
 
 	// 量一段文本按指定宽度折行后的总高度，设备像素（折行设置与 TextBox 保持一致）。
 	float measureTextHeight(const std::wstring& s, float fontSizeLogical, float maxWidthLogical, float dpi,
@@ -588,7 +652,11 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 	// 每行是独立控件，跨行选中由本类统一接管（见 hitSelPoint/applySelection）：禁用各行
 	// 自身的鼠标选区，避免"点到的位置"和"眼睛看到的文字"各算各的。
 	onMouseDown.add([this](POINT pos, bool isRight) {
-		if (isRight) return;
+		if (isRight) {
+			// 右键先收起结果面板（贴图宿主保留自己的右键菜单）
+			if (!pinOverlay_ && onDismiss_) onDismiss_();
+			return;
+		}
 		// 贴图上方的宿主控件（锁定/编辑/关闭）：压在浮层最上面，点击要先交给它
 		if (pinOverlay_ && chromeDown_ && chromeDown_(pos)) return;
 		// 点在上方悬浮按钮上：交给按钮自己处理，不参与"双击复制结果"，
@@ -721,11 +789,19 @@ ToolOcr::ToolOcr(Ling::WinBase* host, OcrResult result, bool translateMode,
 	// 右上角按钮的显示/隐藏靠轮询：面板除文字块外全穿透，空白处的悬停事件收不到
 	onTimer.add([this](UINT id) {
 		if (id == kHoverTimerId) updateButtonsHover();
-		if (id == kTypingTimerId) {
-			// 点动画：0 → 1 → 2 → 3 循环，让提示条一直"在动"，不打字
-			busyDots_ = (busyDots_ + 1) % 4;
-			if (bannerLabel) bannerLabel->setText(busyBase_ + std::wstring((size_t)busyDots_, L'.'));
-			repaint();
+		else if (id == kScanTimerId) {
+			// 推进扫描线相位：一轮 kScanSweepMs 扫到底，然后从头再来
+			scanPhase_ += (float)kScanTickMs / kScanSweepMs;
+			if (scanPhase_ >= 1.f) scanPhase_ -= 1.f;
+			layoutScanLine();
+			// 结果早到了（识别很快 / 走缓存）：等扫描线走够最短时长再落地，动画才看得见
+			if (pendingApply_ && GetTickCount64() - scanStartTick_ >= kScanMinMs) {
+				auto apply = std::move(pendingApply_);
+				pendingApply_ = nullptr;
+				apply();   // 内部会 stopScanLine（杀掉本定时器）并重绘
+				return;
+			}
+			refresh();
 		}
 	});
 }
@@ -735,6 +811,8 @@ ToolOcr::~ToolOcr()
 	// WinBase 的析构不销毁 HWND：不先 close 就 reset，窗口会变成"幽灵窗"，
 	// 其 WndProc 仍指向已释放的对象 —— 鼠标划过即重入已释放内存，反复开关几次就闪退。
 	if (hwnd) killTimer(kHoverTimerId);
+	if (hwnd) killTimer(kScanTimerId);
+	if (scanLineOn_) timeEndPeriod(1);   // 关窗前还在扫：把提高过的定时器节拍还回去
 	if (hwnd) { close(); hwnd = nullptr; }
 }
 
@@ -871,53 +949,9 @@ void ToolOcr::refreshCompareBtnState()
 	compareBtn->setHoverColor(color);
 }
 
-// 把一段译文按"原文各行宽度"逐行塞满：方块字逐字、西文按词，塞不下（行数不够）返回 false。
-// 成功时 out 的每一行正好对应原文的一行，可以直接贴回原位。
-bool fitTextToSlots(const std::wstring& text, float fontLogical, float dpi, bool bold,
-	const std::vector<float>& slotWidths, std::vector<std::wstring>& out)
-{
-	out.clear();
-	if (slotWidths.empty() || text.empty()) return false;
-	size_t pos = 0;
-	for (size_t k = 0; k < slotWidths.size() && pos < text.size(); ++k) {
-		const float lim = std::max(8.f, slotWidths[k]);
-		std::wstring line;
-		while (pos < text.size()) {
-			// 取一个排版单元：方块字一个字；西文一个词（连同后面的空格）
-			size_t next = pos + 1;
-			if (!isCjkChar(text[pos])) {
-				while (next < text.size() && !isCjkChar(text[next]) && text[next] != L' ') ++next;
-				while (next < text.size() && text[next] == L' ') ++next;
-			}
-			const std::wstring cand = text.substr(pos, next - pos);
-			float w = 0.f, h = 0.f;
-			if (!measureTextSize(line + cand, fontLogical, dpi, bold, w, h)) { out.clear(); return false; }
-			if (!line.empty() && w > lim) break;
-			if (line.empty() && w > lim) {
-				// 单元本身比整行还宽：退回按字硬断
-				std::wstring cut;
-				for (size_t t = pos; t < next; ++t) {
-					float cw = 0.f, ch = 0.f;
-					if (!measureTextSize(cut + text[t], fontLogical, dpi, bold, cw, ch)) break;
-					if (cw > lim && !cut.empty()) break;
-					cut += text[t];
-				}
-				if (cut.empty()) return false;
-				line = cut;
-				pos += cut.size();
-				break;
-			}
-			line += cand;
-			pos = next;
-		}
-		out.push_back(line);
-	}
-	if (pos < text.size()) { out.clear(); return false; }   // 行数不够，交给整段排版
-	return !out.empty();
-}
-
 void ToolOcr::rebuildEditors()
 {
+	++buildGen_;
 	builtDpi_ = dpi;   // 这一版编辑框是用当前 dpi 排的（换屏后 syncToMask 据此判断要不要重排）
 	for (auto* e : editors) {
 		if (e) body->removeChild(e);
@@ -927,15 +961,18 @@ void ToolOcr::rebuildEditors()
 		if (n) body->removeChild(n);
 	}
 	bgs_.clear();
+	for (auto* s : scopes_) {
+		if (s) body->removeChild(s);
+	}
+	scopes_.clear();
+	// 扫描线画在独立画布上（铺满面板），不参与这里的重建
 	trBoxes_.clear();
 	trTops_.clear();
 	trScrollY_ = 0.f;
 	trMaxScroll_ = 0.f;
 
 	if (!result_.ok) {
-		// 正在翻译时依然顶着忙碌提示（识别失败也不能把"正在翻译…"换成红条）
-		showBanner(!busyMsg_.empty() ? busyMsg_
-			: (result_.error.empty() ? Lang::get(L"ocr.fail") : result_.error), busyMsg_.empty());
+		showBanner(result_.error.empty() ? Lang::get(L"ocr.fail") : result_.error, true);
 		if (bannerNode) body->bringToFront(bannerNode);
 		if (compareBtn) body->bringToFront(compareBtn);
 		if (copyBtn) body->bringToFront(copyBtn);
@@ -965,7 +1002,15 @@ void ToolOcr::rebuildEditors()
 		std::vector<float> ik(n, 0.f);
 		for (size_t i = 0; i < n; i++) {
 			const auto& r = result_.regions[i];
-			ik[i] = estimateInkHeight(srcImage_, imgW, imgH, r.x, r.y, r.w, r.h) * scaleY;
+			if (r.rotated) {
+				// 斜排框的包围盒被角度撑高，按它估墨迹会把正文误判成标题；
+				// 用检测框的真实行厚换算（行厚 ≈ 行高 + 两侧取样余量）。
+				const RotatedRegion g = rotatedRegionGeometry(r, scaleX, scaleY);
+				ik[i] = g.valid ? g.thick * 0.72f : 0.f;
+			}
+			else {
+				ik[i] = estimateInkHeight(srcImage_, imgW, imgH, r.x, r.y, r.w, r.h) * scaleY;
+			}
 			if (ik[i] < 3.f) ik[i] = std::max(1.f, r.h * scaleY) * 0.72f;
 		}
 		std::vector<float> sorted = ik;
@@ -1122,7 +1167,8 @@ void ToolOcr::rebuildEditors()
 	if (translateMode_ && !result_.regions.empty()) {
 		// 译文不再原位覆盖原文，行被推开后空档会露出原字 —— 整块用采样底色盖死
 		body->setBg(palBg_);
-		float cursorY = 0.f;   // 物理像素：下一段允许的最上端
+		float pushDown = 0.f;    // 物理像素：前面段落放不下时，后续段落整体下移的量
+		float maxBottom = 0.f;   // 物理像素：所有段落的最下沿（用于滚动范围）
 		const size_t n = result_.regions.size();
 		// 全块字身中位：判断"这段是不是大字标题"用
 		float bodyInkAll = 0.f;
@@ -1135,23 +1181,17 @@ void ToolOcr::rebuildEditors()
 		std::vector<size_t> paras;   // 每段的段首 region 下标
 		for (size_t k = 0; k < n; ++k)
 			if (k == 0 || result_.regions[k].para != result_.regions[k - 1].para) paras.push_back(k);
-		// 整块是不是"圆点列表"：过半左对齐段落带圆点。是的话，中段被 OCR 漏掉圆点的条目
-		// 也按条目补一个 —— 否则它比上下条目左移一个"• "的宽度，看着就是"中间不齐"。
-		int bulletParas = 0, leftParas = 0;
-		for (size_t k = 0; k < paras.size(); ++k) {
-			if (aligns[paras[k]] != 0) continue;
-			++leftParas;
-			if (result_.regions[paras[k]].bullet) ++bulletParas;
-		}
-		const bool isBulletList = (bulletParas > 0 && bulletParas * 2 >= leftParas);
 		for (size_t p = 0; p < paras.size(); ++p) {
 			// 本段范围 [i, j)：同 para 的行算一段（段落归并在 ocrResultMergedToLines 里做）
 			const size_t i = paras[p];
 			const size_t j = (p + 1 < paras.size()) ? paras[p + 1] : n;
 			const auto& reg = result_.regions[i];
-			const bool betweenBullets = p > 0 && p + 1 < paras.size()
-				&& result_.regions[paras[p - 1]].bullet && result_.regions[paras[p + 1]].bullet;
-			const bool bullet = reg.bullet || (isBulletList && betweenBullets);
+			// 圆点：引擎识别到的直接用，漏掉的从原图像素里找回
+			bool bullet = reg.bullet;
+			float bulletX = -1.f;   // 像素里找到的圆点左边界（image 像素）：排版按它左对齐
+			if (!bullet && !reg.rotated && !reg.vertical)
+				bulletX = ocr::leadingBulletDotX(srcImage_, imgW, imgH, reg.x, reg.y, reg.h);
+			if (bulletX >= 0.f) bullet = true;
 			std::wstring text = reg.displayText;
 			if (text.empty()) {
 				// 没有译文（例如目标语言与原文相同）：退回原文，按行拼起来（原文自带圆点）
@@ -1169,9 +1209,11 @@ void ToolOcr::rebuildEditors()
 			const float py = reg.y * scaleY;
 			const float ph = (hEff[i] > 0.f) ? hEff[i] : std::max(1.f, reg.h * scaleY);
 			float rightMost = (reg.x + reg.w) * scaleX;   // 段内最右（段宽按它算）
+			float bottomMost = (reg.y + reg.h) * scaleY;  // 段内最下（可用高度按它算）
 			for (size_t k = i + 1; k < j; ++k) {
 				const auto& rk = result_.regions[k];
 				rightMost = std::max(rightMost, (rk.x + rk.w) * scaleX);
+				bottomMost = std::max(bottomMost, (rk.y + rk.h) * scaleY);
 			}
 			const bool wide = hasWideGlyph(text);
 			const bool srcWide = hasWideGlyph(reg.text);
@@ -1194,134 +1236,32 @@ void ToolOcr::rebuildEditors()
 			// 目标语言的字形大小补偿：英→中放一点、中→英收一点
 			const float scriptAdj = (wide && !srcWide) ? 1.0f : (!wide && srcWide) ? 0.95f : 1.f;
 			const float fLogical = std::max(7.f / dpi, f * scriptAdj);
-			// 方案一：把译文按原文各行的槽位贴回去 —— 每行贴在自己的原位置、原宽度里，
-			// 行数够且每行都塞得下才成功；否则落到下面的整段排版。
-			if (aligns[i] == 0 && j > i) {
-				std::vector<float> slotW;
-				slotW.reserve(j - i);
-				for (size_t k = i; k < j; ++k) {
-				// 元素查找到的选区：宽度按**元素外框**满排（右边到面板右边界），
-				// 译文正好铺满元素，和原布局严丝合缝；手拖的选区仍按每行框宽。
-				const float lineW = elementBlock_
-					? std::max(8.f, w * dpi - result_.regions[k].x * scaleX - 4.f * dpi)
-					: std::max(8.f, result_.regions[k].w * scaleX);
-				slotW.push_back(lineW);
-				}
-				std::vector<std::wstring> slotLines;
-				// 字号不再为塞进槽位而缩小：排不下就退回整段排版，字号保持一致
-				const float slotFont = fitTextToSlots(text, fLogical, dpi, reg.bold, slotW, slotLines) ? fLogical : 0.f;
-				if (slotFont > 0.f) {
-					const float lineH = slotFont * dpi * 1.2f;
-					// 行距沿原文的行距；译文行数比原文少时**往上收**，不留空洞
-					// （原文那一行由面板底色盖住，不会露出残影）。
-					float pitch = lineH;
-					if (j - i > 1) {
-						const float y0 = result_.regions[i].y * scaleY;
-						const float y1 = result_.regions[j - 1].y * scaleY;
-						pitch = std::max(lineH, (y1 - y0) / (float)(j - i - 1));
-					}
-					// 段落起点：原文位置和"紧接上一段"取更靠上的那个 —— 译文比原文短时
-					// 后面不会空出一大块；比原文长时也不会压到上一段。
-					const float want = result_.regions[i].y * scaleY;
-					float paraGap = lineH * 0.45f;
-					if (i > 0) {
-						const auto& prev = result_.regions[i - 1];
-						const float g = std::max(0.f, want - (prev.y + prev.h) * scaleY);
-						paraGap = std::clamp(g, lineH * 0.25f, lineH * 0.8f);
-					}
-					// 段落起点：只有"接在上一段下面"（同一列往下走）才做上下压缩；
-					// 并排的表格单元 want 和上一段几乎相同，必须保持原位 —— 否则每格都被
-					// "紧接上一段"往下推一格，整行表格就挤成一团。
-					float top0 = want;
-					if (cursorY > 1.f && want >= cursorY - lineH * 0.6f) {
-						top0 = std::min(want, cursorY + paraGap);
-					}
-					for (size_t k = i; k < j && (k - i) < slotLines.size(); ++k) {
-						const auto& rk = result_.regions[k];
-						const float sx = rk.x * scaleX;
-						const float sy = top0 + (float)(k - i) * pitch;
-						auto* box = body->makeChild<Ling::TextBox>();
-						box->setPositionType(Ling::Position::Absolute);
-						box->setPosition(Ling::Edge::Left, sx / dpi);
-						box->setPosition(Ling::Edge::Top, (sy + (std::max(rk.h * scaleY, lineH) - lineH) * 0.5f) / dpi);
-						box->setSize(std::max(slotW[k - i], 1.f) / dpi, lineH / dpi);
-						box->setColor(palFg_);
-						box->setPadding(0.f);
-						box->setFontSize(slotFont);
-						if (reg.bold) box->setBold(true);
-						box->setScrollBarVisible(false);
-						box->setSelectionBgColor(0x1890FFFF);
-						box->setSelectionTextColor(0xFFFFFFFF);
-						box->setMouseSelectionEnabled(false);
-						box->setText(slotLines[k - i]);
-						editors.push_back(box);
-						trBoxes_.push_back(box);
-						trTops_.push_back(sy);
-					}
-					cursorY = top0 + (float)(slotLines.size() - 1) * pitch + lineH;
-					continue;
-				}
-			}
+			// 段内所有行统一按这一段的宽度重排：早先"译文逐行贴回原行槽位"会让译文继承
+			// 原行折行留下的参差右边（一段三行的正文被拆成三条短行、右侧空一大截）。
 			// 段首对齐：整段用**第一行**的起点（续行的缩进是同一段的折行，不能再带出来）；
 			// 圆点没被并进文字的行会偏出一两个字符宽，按整块左边界吸一下。
 			float px = reg.x * scaleX;
-			if (aligns[i] == 0 && px > blockLeftPx && px - blockLeftPx <= 3.0f * fLogical * dpi)
+			if (bulletX >= 0.f) px = bulletX * scaleX;   // 圆点是从像素里找回来的：条目左端按圆点列对齐
+			else if (aligns[i] == 0 && px > blockLeftPx && px - blockLeftPx <= 3.0f * fLogical * dpi)
 				px = blockLeftPx;
 			const float pw = std::max(1.f, rightMost - px);
-			// 折行宽度：右边有空间就伸到选区右边界，只被同一段高度上的右侧文本挡住
-			// （左右分栏时才保留原列宽，免得跟邻栏打架）；居中/右对齐保持原段宽，避免对齐跑偏。
-			float rightLimit = w;
-			if (aligns[i] == 0 && !elementBlock_) {
-				const float iy0 = reg.y * scaleY;
-				const auto& last = result_.regions[j - 1];
-				const float iy1 = (last.y + last.h) * scaleY;
+			// 中文译文按原段落的墨迹宽度折行，避免比原文宽出一圈。
+			// **英文等西文译文不这么做**：西文比中文长，塞进原段宽度会折出很多行、只能靠缩字号
+			// 硬塞，缩完没法读。西文改为借右侧空白加宽折行（右侧有别的文字就停在它左边界）。
+			float boxWidth = pw;
+			if (!wide) {
+				float rightLimit = w;
 				for (size_t k = 0; k < n; ++k) {
 					if (k >= i && k < j) continue;
 					const auto& o = result_.regions[k];
 					const float ox = o.x * scaleX;
-					if (ox <= px + 0.5f) continue;   // 只受右侧文本限制
+					if (ox <= px + 0.5f) continue;   // 只看右侧的文本
 					const float oy0 = o.y * scaleY, oy1 = (o.y + o.h) * scaleY;
-					if (std::min(oy1, iy1) - std::max(oy0, iy0) <= 0.f) continue;
+					if (std::min(oy1, bottomMost) - std::max(oy0, py) <= 0.f) continue;
 					rightLimit = std::min(rightLimit, ox);
 				}
+				boxWidth = std::max(pw, std::min(rightLimit, w) - px);
 			}
-			else {
-				rightLimit = px + pw;
-			}
-			const float boxW = std::max(pw, std::min(rightLimit, w) - px);
-			// 右/居中段落：原框可能比译文窄（一行日期被折成两行）。按译文实际宽度朝外侧撑开，
-			// 右对齐的右边界、居中的中线保持不动。
-			float boxX = px;
-			float boxWidth = boxW;
-			if (aligns[i] != 0) {
-				float nw = 0.f, nh = 0.f;
-				if (measureTextSize(text, fLogical, dpi, reg.bold, nw, nh) && nw + 2.f > boxW) {
-					const float extra = nw + 2.f - boxW;
-					boxWidth = nw + 2.f;
-					boxX = (aligns[i] == 2) ? px - extra : px - extra * 0.5f;
-					if (boxX < 0.f) { boxWidth += boxX; boxX = 0.f; }
-				}
-			}
-			const float measured = measureTextHeight(text, fLogical, boxWidth / dpi, dpi, reg.bold);
-			const float boxH = std::max(1.f, measured > 0.f ? measured + 1.f : ph);
-			// 段与段之间的空隙：英文比中文长，一段常折成多行，把下一段顶下来后两段就贴死了。
-			// 被顶下来时按原文行距补一点空隙（至少 0.3 行、最多 0.8 行）。
-			float origGap = 0.f;
-			if (i > 0) {
-				const auto& prev = result_.regions[i - 1];
-				origGap = std::max(0.f, py - (prev.y + prev.h) * scaleY);
-			}
-			const float lineH = fLogical * dpi;
-			const float paraGap = std::clamp(origGap, lineH * 0.30f, lineH * 0.80f);
-			const float top = (cursorY > py) ? cursorY + paraGap : py;
-			auto* box = body->makeChild<Ling::TextBox>();
-			box->setPositionType(Ling::Position::Absolute);
-			box->setPosition(Ling::Edge::Left, boxX / dpi);
-			box->setPosition(Ling::Edge::Top, top / dpi);
-			box->setSize(boxWidth / dpi, boxH / dpi);
-			box->setColor(palFg_);
-			box->setPadding(0.f);
-			box->setFontSize(fLogical);
 			// 加粗只给整段都是大字的段落：OCR 把标题和正文并成一段时，不能因为首行是标题
 			// 就把整段都加粗（否则正文看着比标题还重）
 			bool paraBold = false;
@@ -1335,6 +1275,30 @@ void ToolOcr::rebuildEditors()
 					paraBold = pi > 3.f && bodyInkAll > 3.f && pi > bodyInkAll * 1.2f;
 				}
 			}
+			// 中文译文装不下本段原本的高度时缩字号（不往下顶）：顶部锚在原段首行、高度限制在原段
+			// 最后一行，段落位置保持不变。西文不缩字号（缩了没法读），改为按实际高度往后顺延。
+			const float availH = std::max(1.f, bottomMost - py);
+			float fDraw = fLogical;
+			float measured = measureTextHeight(text, fDraw, boxWidth / dpi, dpi, paraBold);
+			if (wide) {
+				const float minF = 8.f / dpi;
+				for (int it = 0; it < 3 && measured > availH && fDraw > minF; ++it) {
+					const float next = std::max(minF, fDraw * (availH / measured) * 0.97f);
+					if (next >= fDraw - 0.01f) break;
+					fDraw = next;
+					measured = measureTextHeight(text, fDraw, boxWidth / dpi, dpi, paraBold);
+				}
+			}
+			const float boxH = std::max(1.f, measured > 0.f ? measured + 1.f : ph);
+			const float top = py + pushDown;
+			auto* box = body->makeChild<Ling::TextBox>();
+			box->setPositionType(Ling::Position::Absolute);
+			box->setPosition(Ling::Edge::Left, px / dpi);
+			box->setPosition(Ling::Edge::Top, top / dpi);
+			box->setSize(boxWidth / dpi, boxH / dpi);
+			box->setColor(palFg_);
+			box->setPadding(0.f);
+			box->setFontSize(fDraw);
 			if (paraBold) box->setBold(true);
 			box->setScrollBarVisible(false);   // 单个框不滚（高度已按内容给足），滚动只发生在整层
 			box->setTextAlignCenter(aligns[i] == 1);
@@ -1345,9 +1309,11 @@ void ToolOcr::rebuildEditors()
 			editors.push_back(box);
 			trBoxes_.push_back(box);
 			trTops_.push_back(top);
-			cursorY = top + boxH;
+			// 这一段比原文高出的部分，让后面的段落整体下移，避免压到下一段
+			pushDown += std::max(0.f, boxH - availH);
+			maxBottom = std::max(maxBottom, top + boxH);
 		}
-		trMaxScroll_ = std::max(0.f, cursorY - h);
+		trMaxScroll_ = std::max(0.f, maxBottom - h);
 	}
 
 	// 文本重排：整段落进一个可编辑文本框（见下面的智能排版分支）
@@ -1358,6 +1324,8 @@ void ToolOcr::rebuildEditors()
 		const float ry = reg.y * scaleY / dpi;
 		const float rw = std::max(1.f, reg.w * scaleX) / dpi;
 		const float rh = std::max(1.f, reg.h * scaleY) / dpi;
+		// 斜排：包围盒只用来取色/命中，绘制按四点的真实基线长度、行厚和角度来。
+		const RotatedRegion rotGeo = rotatedRegionGeometry(reg, scaleX, scaleY);
 
 		// 该框自己的底色（按框外圈中位色采样）+ 按底色亮度反相的文字色。
 		// 逐框取色而不是整层一个色 —— 底色有渐变/多块时才能"贴"住原来那块背景。
@@ -1370,7 +1338,28 @@ void ToolOcr::rebuildEditors()
 		}
 
 		// 1) 背景块：按识别框短边外扩 2~4px，覆盖文字抗锯齿外沿。
-		{
+		//    斜排按"基线长 × 行厚"建块并绕中心旋转 —— 直接盖包围盒会把上下相邻的
+		//    文字也一起盖掉（书页拍照的包围盒被角度撑得很高）。
+		if (rotGeo.valid) {
+			const float bgPad = std::clamp(rotGeo.thick * 0.08f, 2.f, 4.f);   // 物理像素
+			const float bgW = rotGeo.len + bgPad * 2.f;
+			// 行厚里已经含引擎盖抗锯齿留的 15% 外扩，再按「行厚 + 外扩」铺块就比字高出一圈
+			// （实测每边多 6~7px，看着像块比字大一号）。按墨迹实高取块：仍比字形每边多 2px
+			// 左右，既盖得住原字，又不会显得比文字高。
+			const float bgH = rotGeo.thick * 0.88f;
+			auto* bgNode = body->makeChild<Ling::Node>();
+			bgNode->setPositionType(Ling::Position::Absolute);
+			bgNode->setPosition(Ling::Edge::Left, (rotGeo.cx - bgW * 0.5f) / dpi);
+			bgNode->setPosition(Ling::Edge::Top, (rotGeo.cy - bgH * 0.5f) / dpi);
+			bgNode->setSize(bgW / dpi, bgH / dpi);
+			bgNode->setBg(bg);
+			bgNode->setBorderRadius(2.f);
+			// 旋转绕块中心：节点几何仍是未旋转的矩形，肉眼看到的才是斜排覆盖块。
+			bgNode->visual.CenterPoint({ bgW * 0.5f, bgH * 0.5f, 0.f });
+			bgNode->visual.RotationAngleInDegrees(rotGeo.deg);
+			bgs_.push_back(bgNode);
+		}
+		else {
 			const float shortSide = std::min(reg.w * scaleX, reg.h * scaleY);
 			const float bgPad = std::clamp(shortSide * 0.08f, 2.f, 4.f) / dpi;
 			auto* bgNode = body->makeChild<Ling::Node>();
@@ -1393,11 +1382,12 @@ void ToolOcr::rebuildEditors()
 			stripLeadingBullet(text);
 			text = std::wstring(L"\u2022  ") + text;   // 圆点后留两个空格：和正文拉开一点
 		}
-		const float boxW = std::max(1.f, reg.w * scaleX);   // 面板物理像素
+		const float boxW = rotGeo.valid ? rotGeo.len : std::max(1.f, reg.w * scaleX);   // 面板物理像素
+		const float boxHPx = rotGeo.valid ? rotGeo.thick : std::max(1.f, reg.h * scaleY);
 		// 识别框外圈带取样余量；文字定位和字号都按去掉余量后的真实字框算。
-		const float textPad = std::min(reg.w * scaleX, reg.h * scaleY) * 0.115f;
+		const float textPad = std::min(boxW, boxHPx) * 0.115f;
 		const float fitBoxW = std::max(1.f, boxW - textPad * 2.f);
-		const float fitBoxH = std::max(1.f, reg.h * scaleY - textPad * 2.f);
+		const float fitBoxH = std::max(1.f, boxHPx - textPad * 2.f);
 		// 竖排列高各不相同（长列 679、短列 111…），不能用横排那套"统一正文行高"，
 		// 否则长列被缩短上移、短列被撑高、字距拉大。竖排一律用它自己的框高。
 		const float boxH = reg.vertical
@@ -1406,9 +1396,16 @@ void ToolOcr::rebuildEditors()
 
 		auto* box = body->makeChild<OcrText>();
 		box->fitW = fitBoxW;
-		box->fitH = reg.vertical ? fitBoxH : boxH;
+		box->fitH = (reg.vertical || rotGeo.valid) ? fitBoxH : boxH;
 		box->boxL = reg.x * scaleX + textPad;
 		box->boxT = reg.y * scaleY + textPad;
+		if (rotGeo.valid) {
+			// 斜排：交给 OcrText 绕识别框中心旋转排版（见 OcrText::layout）。
+			box->rotated = true;
+			box->rotDeg = rotGeo.deg;
+			box->rotCx = rotGeo.cx;
+			box->rotCy = rotGeo.cy;
+		}
 		box->setPositionType(Ling::Position::Absolute);
 		// 节点自身几何按识别框摆放（文字命中选择用）；实际绘制位置由 layout() 精确定位。
 		box->setPosition(Ling::Edge::Left, rx);
@@ -1474,7 +1471,7 @@ void ToolOcr::rebuildEditors()
 			}
 			else {
 				// 量不到墨迹（极短/异常文本）：退回按排版宽度适配。
-				float fLogical = boxH * 0.98f / (0.89f * dpi);
+				float fLogical = (rotGeo.valid ? fitBoxH : boxH) * 0.98f / (0.89f * dpi);
 				float naturalW = 0.f, naturalH = 0.f;
 				if (measureTextSize(text, 10.f, dpi, reg.bold, naturalW, naturalH) && naturalW > 0.f)
 					fLogical = 10.f * fitBoxW / naturalW;
@@ -1623,17 +1620,232 @@ void ToolOcr::rebuildEditors()
 	for (auto* e : editors) {
 		if (e && e->parent == body.get()) body->bringToFront(e);
 	}
+	// 结果落地：先逐行扫框，再让内容淡入。放在镜像层/按钮置顶之前，
+	// 扫描框才压在文字之上、标注与按钮之下。
+	if (revealPending_ && !editors.empty()) startReveal();
+	// 翻译等待期：尺寸/DPI 变化会重建面板，把循环扫框补回来
+	if (scanWait_ && scopes_.empty() && !scanRegions_.empty()) {
+		buildScopes(scanRegions_);
+		animateReveal(true);
+	}
 	if (annotCanvas_) body->bringToFront(annotCanvas_);
-	// 提示条的收/顶一律放在**编辑框都建好之后**：先收条、再建框，中间那段（建框 + 首帧排版）
-	// 就是用户看到的"正在翻译…没了、结果还没出来"。顺序换过来，收条的同一帧结果已在场。
-	// 翻译进行中（busyMsg_ 非空）则无论如何都顶着，只有 finishOcrTranslate 落地结果时才清。
-	if (!busyMsg_.empty()) showBanner(busyMsg_, false);
-	else if (!result_.regions.empty()) clearBanner();
+	// 扫描线节点压在文字块之上（重建出来的文字块会排到它们前面）
+	if (scanLineOn_ && scanTrail_) body->bringToFront(scanTrail_);
+	// 提示条（只用于报错）的收/顶放在**编辑框都建好之后**：先收条、再建框，
+	// 中间那段就是用户看到的"提示没了、结果还没出来"。顺序换过来，收条的同一帧结果已在场。
+	if (!result_.regions.empty()) clearBanner();
 	else if (!banner_.empty()) showBanner(banner_, bannerError_);
 	// 右上角按钮始终在识别结果、标注镜像层与提示条之上（重建文字块会重新排到前面）
 	if (compareBtn) body->bringToFront(compareBtn);
 	if (copyBtn) body->bringToFront(copyBtn);
 	// 不自动选中/聚焦：结果只是"叠在原图上供阅读"，一进来就整段高亮并不合适；点哪块再编辑哪块。
+}
+
+// 逐行建扫描框：描边 + 极淡填充，斜排按四点还原成"中心 + 基长 × 行厚 + 角度"。
+void ToolOcr::buildScopes(const std::vector<OcrRegion>& regions)
+{
+	const float scaleX = (imgW > 0) ? (w / (float)imgW) : 1.f;
+	const float scaleY = (imgH > 0) ? (h / (float)imgH) : 1.f;
+	const float dp = (dpi > 0.f) ? dpi : 1.f;
+	// 扫描框统一用主题色（和工具栏选中态同一支强调色），只改透明度区分描边/填充
+	const uint32_t accent = ToolbarTheme::selection;
+	const uint32_t scopeFill = (accent & 0xFFFFFF00u) | 0x1Au;
+	const uint32_t scopeStroke = (accent & 0xFFFFFF00u) | 0xCCu;
+	for (const auto& reg : regions) {
+		const RotatedRegion rg = rotatedRegionGeometry(reg, scaleX, scaleY);
+		float left = reg.x * scaleX, top = reg.y * scaleY;
+		float sw = std::max(1.f, reg.w * scaleX), sh = std::max(1.f, reg.h * scaleY);
+		if (rg.valid) {
+			left = rg.cx - rg.len * 0.5f;
+			top = rg.cy - rg.thick * 0.5f;
+			sw = rg.len;
+			sh = rg.thick;
+		}
+		auto* scope = body->makeChild<Ling::Node>();
+		scope->setPositionType(Ling::Position::Absolute);
+		scope->setPosition(Ling::Edge::Left, left / dp);
+		scope->setPosition(Ling::Edge::Top, top / dp);
+		scope->setSize(sw / dp, sh / dp);
+		scope->setBg(scopeFill);             // 极淡填充
+		scope->setBorder(1.f, scopeStroke);  // 主题色描边（80%）
+		scope->setBorderRadius(3.f);
+		scope->visual.Opacity(0.f);          // 等动画这一拍再亮起来
+		if (rg.valid) {
+			scope->visual.CenterPoint({ sw * 0.5f, sh * 0.5f, 0.f });
+			scope->visual.RotationAngleInDegrees(rg.deg);
+		}
+		scopes_.push_back(scope);
+	}
+}
+
+// 结果落地动效（第一步，同步）：逐行画一个扫描框，并把内容透明度归零。
+// 动画放到下一拍再下发：onCreated 之后紧跟的 syncToMask 往往还会重建一次，这一拍的节点
+// 可能立刻被销毁 —— 代次一变，排的队直接作废，只播最后一次重建出来的那批节点。
+void ToolOcr::startReveal()
+{
+	const size_t n = result_.regions.size();
+	if (n == 0 || editors.empty()) { revealPending_ = false; return; }
+
+	// 内容先归零：扫框扫到哪一行，哪一行才淡入
+	for (auto* b : bgs_) if (b) b->visual.Opacity(0.f);
+	for (auto* e : editors) if (e) e->visual.Opacity(0.f);
+	buildScopes(result_.regions);
+
+	const unsigned gen = buildGen_;
+	auto weak = body->getWeakThis();
+	auto run = [this, weak, gen] { if (weak.lock() && gen == buildGen_) animateReveal(); };
+	if (auto* app = Ling::App::get()) app->dq.TryEnqueue(run);
+	else run();
+}
+
+// 翻译等待期：只按识别到的行循环扫框，不显示任何文字（这时还没有编辑框）。
+// 复用 scopes_ 与动画：结果落地重建时统一删掉，再由 startReveal 接内容淡入。
+void ToolOcr::startScanWait(OcrResult scan)
+{
+	if (!body) return;
+	if (scan.regions.empty()) { stopScanWait(); return; }
+	// 结果已经落地（翻译可能比识别的回投先到）就不再扫框
+	if (!result_.regions.empty() || !editors.empty()) return;
+	stopScanLine();   // 行已知：扫描线换成逐行识别框
+	scanWait_ = true;
+	scanRegions_ = std::move(scan.regions);
+	for (auto* s : scopes_) if (s) body->removeChild(s);
+	scopes_.clear();
+	buildScopes(scanRegions_);
+	animateReveal(true);
+}
+
+// 识别还没回来（还不知道行在哪）：一条横贯选区的扫描线从上往下扫，
+// 点下识别/翻译立刻有反馈。识别完成后由 startScanWait / startReveal 换成逐行识别框。
+void ToolOcr::startScanPending()
+{
+	if (!body || scanLineOn_) return;
+	scanLineOn_ = true;
+	scanPhase_ = 0.f;
+	buildScanLine();
+}
+
+// 扫描线：只有一个渐变拖尾节点（本体亮线和柔光都已去掉，避免出现"多一根线"），
+// 定时器每帧改它的布局坐标。
+// 不用 Composition 位移动画：layout 每帧都会把 Offset 写回布局值，动画会被直接盖掉
+// （上一版"只有顶部闪一下"就是这么来的）；改布局坐标则是走 layout 的正常通路。
+void ToolOcr::buildScanLine()
+{
+	if (!body || scanTrail_) return;
+	const uint32_t accent = ToolbarTheme::selection;
+	const float dp = (dpi > 0.f) ? dpi : 1.f;
+	const float W = w / dp;   // 节点尺寸/坐标是逻辑像素
+	auto make = [&](uint32_t color, float height) {
+		auto* n = body->makeChild<Ling::Node>();
+		n->setPositionType(Ling::Position::Absolute);
+		n->setPosition(Ling::Edge::Left, 0.f);
+		n->setPosition(Ling::Edge::Top, 0.f);
+		n->setSize(W, height);
+		n->setBg(color);
+		return n;
+	};
+	// 拖尾：一个节点 + 一支竖向线性渐变刷（上全透明 → 线下 30%），是真渐变不是色块
+	scanTrail_ = make(0, 1.f);
+	{
+		auto comp = scanTrail_->visual.Compositor();
+		auto brush = comp.CreateLinearGradientBrush();
+		// 相对坐标：起止点按节点自身大小算，节点多高都不用改刷子
+		brush.MappingMode(winrt::Windows::UI::Composition::CompositionMappingMode::Relative);
+		brush.StartPoint({ 0.f, 0.f });
+		brush.EndPoint({ 0.f, 1.f });
+		auto addStop = [&](float offset, uint8_t alpha) {
+			brush.ColorStops().Append(comp.CreateColorGradientStop(
+				offset, Ling::Color((accent & 0xFFFFFF00u) | alpha).getUIColor()));
+		};
+		addStop(0.f, 0x00);   // 拖尾最上端 0%
+		addStop(1.f, 0xFF);   // 贴着线头端 100%（整体再由节点 Opacity 压到 12%）
+		scanTrail_->visual.Brush(brush);
+		scanTrail_->visual.Opacity(0.12f);
+	}
+	scanStartTick_ = GetTickCount64();
+	if (hwnd) {
+		// 系统默认定时器节拍 ~15.6ms，8ms 的定时器不提高分辨率根本拿不到 ——
+		// 扫这么快必须让节拍真的细下来，否则每隔一帧才动一次，看着又顿又淡
+		timeBeginPeriod(1);
+		setTimer(kScanTickMs, kScanTimerId);
+	}
+	layoutScanLine();
+	refresh();
+}
+
+// 按当前相位把柔光/拖尾摆到位置上（坐标是逻辑像素，layout 会乘 dpi）
+void ToolOcr::layoutScanLine()
+{
+	if (!scanTrail_) return;
+	const float dp = (dpi > 0.f) ? dpi : 1.f;
+	const float H = h / dp;
+	if (H <= 1.f) return;
+	const float trail = std::min(H * 0.45f, 100.f);   // 拖尾总长（逻辑像素）
+	// 相位 0 时整条在选区上方之外，相位 1 时完全扫出下边界：进出都不生硬
+	const float y = -trail + scanPhase_ * (H + trail);
+	scanTrail_->setSize(w / dp, trail);
+	scanTrail_->setPosition(Ling::Edge::Top, y - trail);
+}
+
+void ToolOcr::stopScanLine()
+{
+	const bool wasOn = scanLineOn_;
+	scanLineOn_ = false;
+	if (hwnd) killTimer(kScanTimerId);
+	if (wasOn) timeEndPeriod(1);   // 与 buildScanLine 的 timeBeginPeriod 配对
+	if (scanTrail_) { if (body) body->removeChild(scanTrail_); scanTrail_ = nullptr; }
+	scanPhase_ = 0.f;
+	if (hwnd) refresh();
+}
+
+void ToolOcr::stopScanWait()
+{
+	stopScanLine();
+	pendingApply_ = nullptr;   // 等不到结果了，压着的那个也别落地
+	scanWait_ = false;
+	scanRegions_.clear();
+	for (auto* s : scopes_) if (s && body) body->removeChild(s);
+	scopes_.clear();
+}
+
+// 结果落地动效（第二步）：每行一个透明度关键帧，结果落地总时长固定 460ms，
+// 行延迟用关键帧的归一化时间表达，行数多时自动压缩错开步长。
+// loop=true 是翻译等待的循环扫框：同样逐行亮起再淡出，但一轮 660ms、永续播放。
+void ToolOcr::animateReveal(bool loop)
+{
+	if (!loop) revealPending_ = false;
+	const size_t n = loop ? scopes_.size() : result_.regions.size();
+	const float kTotal = loop ? 660.f : 460.f;   // ms：一轮动画的时长
+	// 逐行错开：行数多时压小步长，最多错开 200ms
+	const float step = (n > 1) ? std::min(20.f, 200.f / (float)(n - 1)) : 0.f;
+
+	auto fade = [&](Ling::Node* node, std::initializer_list<std::pair<float, float>> keys) {
+		if (!node) return;
+		auto anim = node->visual.Compositor().CreateScalarKeyFrameAnimation();
+		float last = -1.f;
+		for (const auto& k : keys) {
+			const float t = std::clamp(k.first / kTotal, 0.f, 1.f);
+			if (t <= last) continue;   // 同一时间点只留第一个关键帧
+			anim.InsertKeyFrame(t, k.second);
+			last = t;
+		}
+		anim.Duration(std::chrono::milliseconds{ (int)kTotal });
+		if (loop) anim.IterationBehavior(winrt::Windows::UI::Composition::AnimationIterationBehavior::Forever);
+		node->visual.StartAnimation(L"Opacity", anim);
+	};
+
+	for (size_t i = 0; i < scopes_.size() && (loop || i < n); ++i) {
+		const float d = (float)i * step;
+		// 亮框：55ms 淡入、停留 85ms、130ms 淡出。末尾几行不能越过总时长 ——
+		// 越界会被归一化夹到 1.0，淡出关键帧就被丢掉，框会一直亮着。
+		const float outEnd = std::min(d + 270.f, kTotal - 1.f);
+		fade(scopes_[i], { {d, 0.f}, {d + 55.f, 1.f}, {d + 140.f, 1.f}, {outEnd, 0.f}, {kTotal, 0.f} });
+		if (loop) continue;   // 等待期没有内容可淡入
+		// 框亮起后内容再淡入（翻译模式的段落框按顺序错开，不特殊处理）
+		const float cd = 140.f + d;
+		if (i < bgs_.size()) fade(bgs_[i], { {0.f, 0.f}, {cd, 0.f}, {cd + 120.f, 1.f}, {kTotal, 1.f} });
+		if (i < editors.size()) fade(editors[i], { {0.f, 0.f}, {cd, 0.f}, {cd + 120.f, 1.f}, {kTotal, 1.f} });
+	}
 }
 
 void ToolOcr::applyTranslateLines(const std::vector<std::wstring>& lines)
@@ -1671,6 +1883,11 @@ void ToolOcr::applyTranslate(const std::vector<std::wstring>& lines)
 
 void ToolOcr::setTranslatedResult(OcrResult result, const std::vector<std::wstring>& lines)
 {
+	// 结果比扫描线先到（识别很快）：先压住，等扫描线走够最短时长再落地，动画才看得见
+	if (scanLineOn_ && GetTickCount64() - scanStartTick_ < kScanMinMs) {
+		pendingApply_ = [this, result, lines]() mutable { setTranslatedResult(std::move(result), lines); };
+		return;
+	}
 	result_ = std::move(result);
 	applyTranslateLines(lines);
 	// 翻译面板是先用**空结果**建的（识别在后台跑），那一步采样不到区域，底色只能是默认白。
@@ -1678,15 +1895,30 @@ void ToolOcr::setTranslatedResult(OcrResult result, const std::vector<std::wstri
 	// 和 OCR 识别模式的观感完全对不上。
 	if (!srcImage_.empty())
 		sampleLayerPalette(srcImage_, imgW, imgH, result_.regions, palBg_, palFg_);
+	scanWait_ = false;   // 结果落地，等待期的循环扫框作废
+	scanRegions_.clear();
+	stopScanLine();      // 识别已回来：扫描线（画布 + 定时器）收掉
+	revealPending_ = !suppressReveal_;
+	suppressReveal_ = false;
 	rebuildEditors();
 }
 
 void ToolOcr::setResult(OcrResult result)
 {
+	// 同上：结果比扫描线先到时压住，等扫描线走够最短时长
+	if (scanLineOn_ && GetTickCount64() - scanStartTick_ < kScanMinMs) {
+		pendingApply_ = [this, result]() mutable { setResult(std::move(result)); };
+		return;
+	}
 	result_ = std::move(result);
 	// 同上：结果后到的路径也要重采底色（面板先建、识别后填）
 	if (!srcImage_.empty())
 		sampleLayerPalette(srcImage_, imgW, imgH, result_.regions, palBg_, palFg_);
+	scanWait_ = false;
+	scanRegions_.clear();
+	stopScanLine();
+	revealPending_ = !suppressReveal_;
+	suppressReveal_ = false;
 	rebuildEditors();
 }
 
@@ -1705,29 +1937,7 @@ void ToolOcr::showBanner(const std::wstring& msg, bool error)
 void ToolOcr::clearBanner()
 {
 	banner_.clear();
-	busyBase_.clear();
-	busyDots_ = 0;
-	killTimer(kTypingTimerId);
 	if (bannerNode) bannerNode->hide();
-}
-
-void ToolOcr::setBusy(const std::wstring& msg)
-{
-	// 识别/翻译可能几秒才出结果：提示条末尾循环点点（正在识别 → . → .. → ...），
-	// 让人一眼看出还在跑，而不是一条静止的文字。
-	busyMsg_ = msg;
-	busyBase_ = msg;
-	while (!busyBase_.empty() && (busyBase_.back() == L'.' || busyBase_.back() == L'\u2026' ||
-		busyBase_.back() == L' '))
-		busyBase_.pop_back();
-	busyDots_ = 0;
-	showBanner(busyBase_, false);
-	setTimer(kTypingTickMs, kTypingTimerId);
-}
-
-void ToolOcr::clearBusy()
-{
-	busyMsg_.clear();
 }
 
 void ToolOcr::undoRedoReflow(bool redo)

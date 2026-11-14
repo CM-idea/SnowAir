@@ -295,6 +295,13 @@ OcrResult LwPpOcrEngine::recognize(int w, int h, const BYTE* bgra)
 		float score{ 0.f };
 		float x{ 0.f }, y{ 0.f }, w{ 0.f }, h{ 0.f };
 		bool vertical{ false };
+		// 倾斜行：检测框四点（原图坐标，左上→右上→右下→左下）与真实行尺寸。
+		// 书页拍照、贴纸旋转这类场景检测框是斜的，包围盒（x/y/w/h）会被角度撑高，
+		// 叠加层靠 quad 还原角度，才能把背景和文字一起转回原位。
+		bool rotated{ false };
+		float quadX[4]{}, quadY[4]{};
+		float angle{ 0.f };           // 弧度，屏幕坐标正值 = 向右下倾斜
+		float lineW{ 0.f }, lineH{ 0.f };   // 基线长度 / 行厚（原图坐标）
 	};
 
 	// 把一张 BGRA（可能是放大后的图）跑一遍，坐标按 invScale 除回原图空间
@@ -351,6 +358,61 @@ OcrResult LwPpOcrEngine::recognize(int w, int h, const BYTE* bgra)
 					minX = std::min(minX, xs[k]); maxX = std::max(maxX, xs[k]);
 					minY = std::min(minY, ys[k]); maxY = std::max(maxY, ys[k]);
 				}
+				// 规范四点顺序：从「和最小」的角出发，保持屏幕顺时针，得到
+				// 左上→右上→右下→左下。再按上下两条边求文字方向，方向朝左时整体翻转 180°，
+				// 让 angle 落在 ±90° 内；倾斜超过 1.5° 且是横排长框才按斜排处理。
+				float nqx[4]{ xs[0], xs[1], xs[2], xs[3] };
+				float nqy[4]{ ys[0], ys[1], ys[2], ys[3] };
+				int start = 0;
+				for (int k = 1; k < 4; ++k) {
+					if (xs[k] + ys[k] < nqx[start] + nqy[start]) start = k;
+				}
+				{
+					float tmpX[4], tmpY[4];
+					for (int k = 0; k < 4; ++k) { tmpX[k] = xs[(start + k) & 3]; tmpY[k] = ys[(start + k) & 3]; }
+					// 叉积判断绕向：y 向下坐标系里顺时针为正；反了就倒序
+					const float area = (tmpX[1] - tmpX[0]) * (tmpY[3] - tmpY[0])
+						- (tmpY[1] - tmpY[0]) * (tmpX[3] - tmpX[0]);
+					for (int k = 0; k < 4; ++k) {
+						nqx[k] = (area >= 0.f) ? tmpX[k] : tmpX[(4 - k) & 3];
+						nqy[k] = (area >= 0.f) ? tmpY[k] : tmpY[(4 - k) & 3];
+					}
+				}
+				// 「和最小」在倾斜接近 45° 时可能落到短边的端点（斜框的"最上角"未必要
+				// 从左端起），那样 0→1 是行厚方向，长宽会判反、斜排被当成横排。
+				// 用两组对边的长度挑出真正的一组：长的那对才是文字方向。
+				auto edgePairLen = [&](int shift) {
+					int a = shift & 3, b = (shift + 1) & 3, c = (shift + 2) & 3, d = (shift + 3) & 3;
+					return std::hypot(nqx[b] - nqx[a], nqy[b] - nqy[a])
+						+ std::hypot(nqx[c] - nqx[d], nqy[c] - nqy[d]);
+				};
+				if (edgePairLen(1) > edgePairLen(0)) {
+					// 长边是 1→2 / 3→0：整体错开一位，让 0→1 变成文字方向（仍保持顺时针）
+					const float tx = nqx[0], ty = nqy[0];
+					for (int k = 0; k < 3; ++k) { nqx[k] = nqx[k + 1]; nqy[k] = nqy[k + 1]; }
+					nqx[3] = tx; nqy[3] = ty;
+				}
+				float dirX = (nqx[1] - nqx[0]) + (nqx[2] - nqx[3]);
+				float dirY = (nqy[1] - nqy[0]) + (nqy[2] - nqy[3]);
+				if (dirX < 0.f) {   // 方向朝左：等价于文字整体转了 180°
+					std::swap(nqx[0], nqx[2]); std::swap(nqy[0], nqy[2]);
+					std::swap(nqx[1], nqx[3]); std::swap(nqy[1], nqy[3]);
+					dirX = -dirX; dirY = -dirY;
+				}
+				const float angle = std::atan2(dirY, dirX);
+				const float lineW = 0.5f * (
+					std::hypot(nqx[1] - nqx[0], nqy[1] - nqy[0])
+					+ std::hypot(nqx[2] - nqx[3], nqy[2] - nqy[3]));
+				const float lineH = 0.5f * (
+					std::hypot(nqx[3] - nqx[0], nqy[3] - nqy[0])
+					+ std::hypot(nqx[2] - nqx[1], nqy[2] - nqy[1]));
+				// 竖排与否按四点的**真实长轴**判，而不是包围盒：书页拍照的横排长句
+				// 包围盒会被角度撑成高瘦框（60° 时高 ≈ 0.87 长），按包围盒判会把它
+				// 误当竖排列 —— 既不旋转、还按"每字一行"重排，与原图完全对不上。
+				// 阈值 58° 略小于叠加层接受的 60°，保证"这里判斜排"到那边一定能旋转。
+				const bool vertical = std::fabs(angle) > 1.02f;   // 长轴比 58° 更竖 = 竖排
+				const bool rotated = !vertical && lineH > 1.f && lineW > lineH * 1.2f
+					&& std::fabs(angle) > 0.026f;   // ≈1.5°：更小的倾斜按横排处理
 
 				// 行首图标：检测框把图标和中文标签并在了一起（侧栏 "H系统按键"），识别结果会多出一个
 				// 孤立字符，叠在原图上还会压住图标。判据：
@@ -362,19 +424,19 @@ OcrResult LwPpOcrEngine::recognize(int w, int h, const BYTE* bgra)
 				// 所以这里不限制首字符类型，只靠像素列上的空白判断。
 				const bool leadIsBullet = text[0] == L'\u2022' || text[0] == L'\u00B7' ||
 					text[0] == L'\u25CF' || text[0] == L'\u25CB';
-				if (text.size() >= 3 && ln.recognition_score < 0.99f && !leadIsBullet) {
+				if (!rotated && text.size() >= 3 && ln.recognition_score < 0.99f && !leadIsBullet) {
 					size_t k = 1;
 					if (k < text.size() && text[k] == L' ') ++k;
 					if (k < text.size() && isCjkChar(text[k])) {
 						int textStartX = 0, gapW = 0, clusterW = 0;
-						const float lineH = maxY - minY;
+						const float boxH = maxY - minY;
 						if (findLeadingIconGap(g_bgr.data(), sw, sh,
 								(int)std::floor(minX), (int)std::floor(minY),
 								(int)std::ceil(maxX), (int)std::ceil(maxY),
 								textStartX, gapW, clusterW)
-							&& (float)gapW >= std::max(4.f, lineH * 0.45f)
-							&& (float)clusterW >= lineH * 0.55f
-							&& (float)clusterW <= lineH * 1.2f) {
+							&& (float)gapW >= std::max(4.f, boxH * 0.45f)
+							&& (float)clusterW >= boxH * 0.55f
+							&& (float)clusterW <= boxH * 1.2f) {
 							text.erase(0, k);
 							// 图标后面常跟着一个空格，删图标时一起吃掉，否则文本会以空格开头
 							while (!text.empty() && (text[0] == L' ' || text[0] == L'\t')) text.erase(0, 1);
@@ -387,11 +449,19 @@ OcrResult LwPpOcrEngine::recognize(int w, int h, const BYTE* bgra)
 				RawLine line;
 				line.text = std::move(text);
 				line.score = ln.recognition_score;
-				line.vertical = (maxY - minY) >= (maxX - minX) * 1.5f;   // 高瘦框 = 竖排
+				line.vertical = vertical;
 				line.x = minX * invScale;
 				line.y = minY * invScale;
 				line.w = (maxX - minX) * invScale;
 				line.h = (maxY - minY) * invScale;
+				line.rotated = rotated;
+				line.angle = angle;
+				line.lineW = lineW * invScale;
+				line.lineH = lineH * invScale;
+				for (int k = 0; k < 4; ++k) {
+					line.quadX[k] = nqx[k] * invScale;
+					line.quadY[k] = nqy[k] * invScale;
+				}
 				out.push_back(std::move(line));
 			}
 			return out;
@@ -420,19 +490,50 @@ OcrResult LwPpOcrEngine::recognize(int w, int h, const BYTE* bgra)
 
 			// 按短边向外补 0.15 的边距：横排短边就是行高（与原来一致）；竖排按行高取会把
 			// 31px 宽的列撑到 240px、相邻列叠在一起。（背景取样与字号标定需要这圈边距）
-			const float pad = std::min(line.w, line.h) * 0.15f;
+			// 倾斜行的包围盒被角度撑高，边距必须按真实行厚算，否则会多扩出一大圈。
+			const float pad = (line.rotated
+				? std::min(line.lineW, line.lineH)
+				: std::min(line.w, line.h)) * 0.15f;
 			OcrRegion reg;
 			reg.text = line.text;
 			reg.displayText = line.text;
 			reg.vertical = line.vertical;
-			const float x0 = (std::max)(0.f, line.x - pad);
-			const float y0 = (std::max)(0.f, line.y - pad);
-			const float x1 = (std::min)(line.x + line.w + pad, (float)fw);
-			const float y1 = (std::min)(line.y + line.h + pad, (float)fh);
-			reg.x = x0;
-			reg.y = y0;
-			reg.w = std::max(2.f, x1 - x0);
-			reg.h = std::max(2.f, y1 - y0);
+			if (line.rotated && line.lineW > 1.f && line.lineH > 1.f) {
+				// 斜排：沿文字方向/法线方向外扩，保存外扩后的四点。
+				// 叠加层据此把背景块和文字一起旋转到原角度（包围盒仅用于取色和命中）。
+				const float cx = (line.quadX[0] + line.quadX[1] + line.quadX[2] + line.quadX[3]) * 0.25f;
+				const float cy = (line.quadY[0] + line.quadY[1] + line.quadY[2] + line.quadY[3]) * 0.25f;
+				const float ux = std::cos(line.angle), uy = std::sin(line.angle);
+				const float vx = -uy, vy = ux;
+				const float hw = line.lineW * 0.5f + pad;
+				const float hh = line.lineH * 0.5f + pad;
+				reg.quadX[0] = cx - ux * hw - vx * hh; reg.quadY[0] = cy - uy * hw - vy * hh;
+				reg.quadX[1] = cx + ux * hw - vx * hh; reg.quadY[1] = cy + uy * hw - vy * hh;
+				reg.quadX[2] = cx + ux * hw + vx * hh; reg.quadY[2] = cy + uy * hw + vy * hh;
+				reg.quadX[3] = cx - ux * hw + vx * hh; reg.quadY[3] = cy - uy * hw + vy * hh;
+				float qMinX = reg.quadX[0], qMaxX = reg.quadX[0];
+				float qMinY = reg.quadY[0], qMaxY = reg.quadY[0];
+				for (int k = 1; k < 4; ++k) {
+					qMinX = std::min(qMinX, reg.quadX[k]); qMaxX = std::max(qMaxX, reg.quadX[k]);
+					qMinY = std::min(qMinY, reg.quadY[k]); qMaxY = std::max(qMaxY, reg.quadY[k]);
+				}
+				reg.angle = line.angle;
+				reg.rotated = true;
+				reg.x = (std::max)(0.f, qMinX);
+				reg.y = (std::max)(0.f, qMinY);
+				reg.w = std::max(2.f, (std::min)(qMaxX, (float)fw) - reg.x);
+				reg.h = std::max(2.f, (std::min)(qMaxY, (float)fh) - reg.y);
+			}
+			else {
+				const float x0 = (std::max)(0.f, line.x - pad);
+				const float y0 = (std::max)(0.f, line.y - pad);
+				const float x1 = (std::min)(line.x + line.w + pad, (float)fw);
+				const float y1 = (std::min)(line.y + line.h + pad, (float)fh);
+				reg.x = x0;
+				reg.y = y0;
+				reg.w = std::max(2.f, x1 - x0);
+				reg.h = std::max(2.f, y1 - y0);
+			}
 			out.regions.push_back(reg);
 
 			if (!joined.empty()) joined += L'\n';

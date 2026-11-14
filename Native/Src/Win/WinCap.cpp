@@ -3742,7 +3742,6 @@ bool WinCap::handleLayerCancel(bool fromToolbar)
 			clearAnnotSelection();
 			return false;
 		}
-		// 属性开关层级：虚线 / 填充 / 圆头 / 圆角开启时，先关闭这些开关，再退出工具
 		if (toolSub && toolSub->hasActiveStyleOption() && toolSub->resetStyleOptions()) {
 			refresh();
 			return false;
@@ -3765,6 +3764,11 @@ bool WinCap::handleLayerCancel(bool fromToolbar)
 		// 鼠标穿透时本窗口根本收不到右键（RightUp/Down 直接归下层窗口），走不到这里。
 		if (capVideo && capVideo->isRecording()) return false;
 		return true;
+	}
+	// 识别/翻译结果面板：右键先收起结果，选区保持不变；再按一次才回查找元素
+	if (toolOcr) {
+		clearOcrPanel();
+		return false;
 	}
 	// 1) 文字编辑 → 完成并保留已输入
 	if (editingText) {
@@ -4031,7 +4035,6 @@ void WinCap::startLongAnnotate(const std::wstring& toolId)
 	ensureHistory();
 	if (toolSub) toolSub->bindOwner(hwnd);
 	annotLive = true;
-	// 保留已选标注：点所属工具应出属性栏，不应取消选中
 	setForcedToolId(toolId);
 	showAnnotToolBar(toolId);
 }
@@ -4040,7 +4043,6 @@ void WinCap::clearLongAnnotTool()
 {
 	clearForcedToolId();
 	if (toolSub) toolSub->hideTools();
-	// 取消工具后仍保留选中，方便继续改属性（点空白再清）
 	refresh();
 }
 
@@ -4351,16 +4353,70 @@ namespace {
 	void appendFragment(std::wstring& dst, const std::wstring& add)
 	{
 		if (add.empty()) return;
+		// 行末连字符断词（"informa-" + "tion"）：连字符是排版断词，不是原文内容
+		if (!dst.empty() && dst.back() == L'-' && dst.size() >= 2 && add.front() >= L'a'
+			&& add.front() <= L'z' && dst[dst.size() - 2] >= L'a' && dst[dst.size() - 2] <= L'z') {
+			dst.pop_back();
+			dst += add;
+			return;
+		}
 		if (!dst.empty() && !isCjkW(dst.back()) && !isCjkW(add.front())) dst += L' ';
 		dst += add;
 	}
 
-	OcrResult ocrResultMergedToLines(const OcrResult& in)
+	// 行尾是否一句话收尾（句号/叹号/问号/分号/冒号，含全角；跳过尾随的引号、括号）
+	bool lineClosesSentence(const std::wstring& t)
+	{
+		for (size_t k = t.size(); k > 0;) {
+			const wchar_t c = t[--k];
+			if (c == L' ' || c == L'\t') continue;
+			if (c == L'"' || c == L'\'' || c == L')' || c == L']' || c == L'}' ||
+				c == L'\u201D' || c == L'\u2019') continue;
+			return c == L'.' || c == L'!' || c == L'?' || c == L';' || c == L':' ||
+				c == L'\u3002' || c == L'\uFF01' || c == L'\uFF1F' || c == L'\uFF1B' ||
+				c == L'\uFF1A';
+		}
+		return false;
+	}
+
+	// 行首是否是西文大写字母（跳过前置的引号、括号）
+	bool beginsWithCapital(const std::wstring& t)
+	{
+		for (wchar_t c : t) {
+			if (c == L' ' || c == L'\t') continue;
+			if (c == L'"' || c == L'\'' || c == L'(' || c == L'[' || c == L'{' ||
+				c == L'\u201C' || c == L'\u2018') continue;
+			return c >= L'A' && c <= L'Z';
+		}
+		return false;
+	}
+
+	// 单独摆着的控件/短标签（"F1"、"Ctrl+S"、"OK"）：不和正文并段
+	bool isDetachedLabel(const std::wstring& t, float w, float h)
+	{
+		size_t b = 0, e = t.size();
+		while (b < e && (t[b] == L' ' || t[b] == L'\t')) ++b;
+		while (e > b && (t[e - 1] == L' ' || t[e - 1] == L'\t')) --e;
+		if (e <= b || e - b > 12) return false;                 // 一行字太多 = 正文
+		for (size_t k = b; k < e; ++k) if (t[k] == L' ' || t[k] == L'\t') return false;
+		if (h <= 0.f || w / h > 6.0f) return false;             // 太宽 = 一整句
+		return !lineClosesSentence(t.substr(b, e - b));
+	}
+
+	float middleValue(std::vector<float> v)
+	{
+		if (v.empty()) return 0.f;
+		std::sort(v.begin(), v.end());
+		return v[v.size() / 2];
+	}
+
+	OcrResult ocrResultMergedToLines(const OcrResult& in,
+		const std::vector<BYTE>& px, int pxW, int pxH)
 	{
 		OcrResult out = in;
 		if (in.regions.size() < 2) return out;   // 本来就一行一块：不动
 
-		struct Line { float x0, y0, x1, y1; std::vector<size_t> idx; bool vertical; };
+		struct Line { float x0, y0, x1, y1; std::vector<size_t> idx; bool vertical; bool rotated; };
 		std::vector<Line> lines;
 		// 判"同一视觉行"：纵向重叠超过较矮一方的一半；或几乎不重叠、但两条中线挨得够近
 		// （同一行里基线轻微上下漂移的情况也算）。否则一行会被拆成好几块。
@@ -4384,9 +4440,16 @@ namespace {
 		for (size_t i = 0; i < in.regions.size(); i++) {
 			const auto& r = in.regions[i];
 			Line* hit = nullptr;
+			// 斜排行不并框：包围盒被角度撑高，按纵向量重叠判"同一行"会把上下相邻的
+			// 斜排文字并成一整段（文字被拉直后与原位对不上）。引擎给的就是逐行框。
+			if (r.rotated) {
+				lines.push_back({ r.x, r.y, r.x + r.w, r.y + r.h, { i }, r.vertical, true });
+				continue;
+			}
 			for (auto& ln : lines) {
 				// 横排与竖排绝不合并：两条管线的"同一行"判据完全不同
 				if (ln.vertical != r.vertical) continue;
+				if (ln.rotated) continue;   // 斜排行逐行独立，别再往里并横排碎片
 				if (r.vertical) {
 					// 竖排只在**同一列**内合并（横向高度重合 + 纵向缝隙很小）。
 					// 不同列绝不并：竖排各列的 y 区间完全重叠，按横排规则会把整页
@@ -4403,7 +4466,7 @@ namespace {
 				}
 			}
 			if (!hit) {
-				lines.push_back({ r.x, r.y, r.x + r.w, r.y + r.h, { i }, r.vertical });
+				lines.push_back({ r.x, r.y, r.x + r.w, r.y + r.h, { i }, r.vertical, false });
 			}
 			else {
 				hit->x0 = std::min(hit->x0, r.x);
@@ -4432,6 +4495,19 @@ namespace {
 			reg.y = ln.y0;
 			reg.w = std::max(2.f, ln.x1 - ln.x0);
 			reg.h = std::max(2.f, ln.y1 - ln.y0);
+			// 斜排行是逐行单框（上面不参与合并），把旋转信息原样带下去，
+			// 叠加层要靠它把背景与文字转回原位。
+			if (ln.idx.size() == 1) {
+				const OcrRegion& src = in.regions[ln.idx.front()];
+				if (src.rotated) {
+					reg.rotated = true;
+					reg.angle = src.angle;
+					for (int k = 0; k < 4; ++k) {
+						reg.quadX[k] = src.quadX[k];
+						reg.quadY[k] = src.quadY[k];
+					}
+				}
+			}
 			merged.push_back(reg);
 		}
 
@@ -4472,35 +4548,102 @@ namespace {
 			}
 		};
 		{
-			// 字身中位：明显高于它的是标题行 —— 标题和正文之间必须断段，否则翻译会把两者当一句
-			float medH = 0.f;
+			// 文档级"正常行距"：先取所有相邻行的竖直间隙，只用偏小的那一半求中位
+			//（段间距会把整体中位抬高；这里要的是"同一段里折行之间通常隔多远"）。
+			float lineStep = 0.f;
 			{
-				std::vector<float> hs;
-				hs.reserve(merged.size());
-				for (const auto& m : merged) hs.push_back(m.h);
-				std::sort(hs.begin(), hs.end());
-				if (!hs.empty()) medH = hs[hs.size() / 2];
+				std::vector<float> tightGaps, allGaps;
+				for (size_t i = 1; i < merged.size(); ++i) {
+					const auto& a = merged[i - 1];
+					const auto& b = merged[i];
+					const float mh = std::max(1.f, std::min(a.h, b.h));
+					const float ov = std::min(a.y + a.h, b.y + b.h) - std::max(a.y, b.y);
+					if (ov > 0.25f * mh) continue;   // 同一视觉行
+					const float g = std::max(0.f, b.y - (a.y + a.h));
+					allGaps.push_back(g);
+					if (g <= mh * 0.65f) tightGaps.push_back(g);
+				}
+				if (!tightGaps.empty()) lineStep = middleValue(tightGaps);
+				else if (!allGaps.empty()) {
+					std::sort(allGaps.begin(), allGaps.end());
+					allGaps.resize(std::max<size_t>(1, allGaps.size() / 2));
+					lineStep = middleValue(allGaps);
+				}
 			}
 			int para = 0;
-			float paraX = merged.empty() ? 0.f : merged[0].x;
+			float headX = merged.empty() ? 0.f : merged[0].x;
+			// 本段续行起点的中位（= 正文列），判"首行缩进"用；首行可能是圆点或缩进
+			std::vector<float> columnXs;
+			float columnX = headX;
+			// 这一行是不是列表条目的第一行：文本里带圆点，或原图像素上有一颗条目圆点
+			auto isListHead = [&](size_t i) {
+				return startsWithBullet(merged[i].text)
+					|| ocr::leadingBulletDotX(px, pxW, pxH, merged[i].x, merged[i].y, merged[i].h) >= 0.f;
+			};
+			// 当前段落是列表条目：圆点占了行首一截，续行会比首行多缩进 1~2 个字宽
+			bool onList = !merged.empty() && isListHead(0);
 			if (!merged.empty()) merged[0].para = 0;
 			for (size_t i = 1; i < merged.size(); ++i) {
 				const auto& prev = merged[i - 1];
 				const float lineH = std::max(1.f, std::min(prev.h, merged[i].h));
 				const float gap = std::max(0.f, merged[i].y - (prev.y + prev.h));
-				// 同一栏：起点要贴着本段起点（续行最多缩进三个字），否则是另一栏 ——
-				// 两栏并排时右栏的起点只比左栏大得多，不加这条会把两栏的文字并成一段。
-				const bool sameColumn = std::fabs(merged[i].x - paraX) <= lineH * 1.0f;
-				// 字身变了就不是同一段：标题比正文高一大截，**不能并进下面的正文**
-				// （否则翻译会把"标题 + 正文"当成一句，排版也会错位）。
-				const bool sameStyle = (merged[i].h > medH * 1.15f) == (prev.h > medH * 1.15f);
-				const bool samePara = !prev.vertical && !merged[i].vertical
-					&& gap <= lineH * 0.9f
-					&& sameColumn
-					&& sameStyle
-					&& merged[i].x >= prev.x - 2.f
-					&& !startsWithBullet(merged[i].text);
-				if (!samePara) { ++para; paraX = merged[i].x; }
+				// 起点要贴着本段首行，否则是另一栏；列表条目的续行多缩进一个圆点位置，容差放开
+				const float startTol = lineH * (onList ? 3.0f : 1.0f);
+				const bool inSameColumn = std::fabs(merged[i].x - headX) <= startTol;
+				// 两行之间明显大于本文档的正常行距时，才可能是新段
+				const float paraGap = std::max(lineH * 0.75f,
+					std::min(lineStep, lineH * 0.4f) + lineH * 0.5f);
+				// 字号差一大截时，只有"上一行又短又像标题"或"本来隔着段落间距"才断段。
+				// 检测框高度会随字母升降部/括号抖动（同一段里能差 1.5 倍），只看字号会误拆折行。
+				const bool fontJump =
+					std::max(prev.h, merged[i].h) > std::min(prev.h, merged[i].h) * 1.35f;
+				const bool prevLooksLikeHeading = prev.w <= merged[i].w * 0.6f;
+				const bool lineStartsItem = isListHead(i);
+				bool keepInPara = !prev.vertical && !merged[i].vertical
+					&& !prev.rotated && !merged[i].rotated   // 斜排行包围盒相互重叠，按包围盒并段会把整页并成一段
+					&& gap <= lineH * 1.2f
+					&& inSameColumn
+					&& !(fontJump && (gap > paraGap || prevLooksLikeHeading))
+					&& merged[i].x >= prev.x - lineH   // 折行起点允许一个字宽内的左偏（检测框抖动）
+					&& !lineStartsItem;
+				// 段落切分：首行缩进 / 句末收尾 / 新句大写 / 短行回左。
+				// 只对非列表段落启用 —— 列表续行本来靠起点容差合并，这些规则会把条目拆碎。
+				if (keepInPara && !onList) {
+					const float sharedX = std::min(prev.x + prev.w, merged[i].x + merged[i].w)
+						- std::max(prev.x, merged[i].x);
+					const float overlapRatio = sharedX / std::max(1.f, std::min(prev.w, merged[i].w));
+					const float startOffset = merged[i].x - columnX;
+					const bool flushWithColumn = std::fabs(startOffset) <= lineH * 0.85f;
+					const bool indentedStart = startOffset >= lineH * 0.6f && startOffset <= lineH * 2.4f;
+					const bool prevFlush = prev.x <= columnX + lineH * 0.5f;
+					const bool prevLineShort = prev.w <= merged[i].w * 0.8f;
+					auto breaksNewParagraph = [&]() {
+						if (prevLineShort && prevFlush && indentedStart && overlapRatio >= 0.4f)
+							return true;                        // 上一段已收尾，这一行是缩进起头的新段
+						if (gap <= paraGap) return false;
+						if (lineClosesSentence(prev.text) && (flushWithColumn || indentedStart))
+							return true;                        // 上一行句子收尾
+						if (beginsWithCapital(merged[i].text) && (flushWithColumn || indentedStart))
+							return true;                        // 新句子以西文大写起头
+						return prevLineShort && merged[i].x <= prev.x + lineH * 0.4f && overlapRatio >= 0.45f;
+					};
+					if (breaksNewParagraph()) keepInPara = false;
+					// 单独摆着的控件/短标签不和上下文并段（按钮、快捷键、表格里的单词）
+					if (keepInPara && (isDetachedLabel(prev.text, prev.w, prev.h) ||
+						isDetachedLabel(merged[i].text, merged[i].w, merged[i].h)))
+						keepInPara = false;
+				}
+				if (!keepInPara) {
+					++para;
+					headX = merged[i].x;
+					onList = lineStartsItem;
+					columnXs.clear();
+					columnX = merged[i].x;
+				}
+				else {
+					columnXs.push_back(merged[i].x);
+					columnX = middleValue(columnXs);
+				}
 				merged[i].para = para;
 			}
 			// 段首圆点标记：翻译时把它从文本里摘掉，排版时再统一补 —— 否则有的条目
@@ -4540,24 +4683,42 @@ namespace {
 
 // 用「字身」再切一次段：OCR 给标题和正文的框高常常一样，光看框高分不出来，
 // 但笔画高度差很多（标题 20px vs 正文 16px）。归并之后再按字身断一次。
+// 判据必须和"全块正文基准"比、并且要求是短行：正文行之间有没有升/降部（p、y、g、括号、数字）
+// 本身就会差 1.3 倍，拿相邻两行直接比会把同一段拆回逐行，译文又变回逐行断句。
 OcrResult splitParagraphsByInk(OcrResult r, const std::vector<BYTE>& px, int w, int h)
 {
 	const size_t n = r.regions.size();
 	if (n < 2 || px.empty() || w <= 0 || h <= 0) return r;
 	std::vector<float> ink(n, 0.f);
+	float minL = 1e9f, maxR = -1e9f;
 	for (size_t i = 0; i < n; ++i) {
 		const auto& rr = r.regions[i];
 		ink[i] = ocr::ocrInkHeight(px, w, h, rr.x, rr.y, rr.w, rr.h);
+		minL = std::min(minL, rr.x);
+		maxR = std::max(maxR, rr.x + rr.w);
+	}
+	const float blockW = std::max(1.f, maxR - minL);
+	// 正文基准取偏低分位：标题是少数，不能让它把基准抬上去。
+	// **不能**拿相邻两行直接比 —— 正文行有没有升/降部（p、y、g、括号、数字）本身就会差 1.3 倍，
+	// 那样同一段里带降部的行会被判成"标题"，整段又被拆回逐行译文。
+	std::vector<float> sorted = ink;
+	std::sort(sorted.begin(), sorted.end());
+	const float bodyInk = sorted[n / 4];
+	// 标题：字身明显高于正文基准、本身是短行，而且**是段首行**。
+	// 最后那条短行（"…发行说明"这类）常带括号/降部、墨迹略高，不是标题；
+	// 不限制"段首"的话它会被拆成单独一段，译文又出现一句变两截。
+	// 段首按**归并结果原值**判（下面的重编号会覆盖 para，必须先把标记算完）。
+	std::vector<char> heading(n, 0);
+	for (size_t i = 0; i < n; ++i) {
+		const bool head = (i == 0) || r.regions[i].para != r.regions[i - 1].para;
+		heading[i] = head && ink[i] >= 3.f && bodyInk >= 3.f
+			&& ink[i] >= bodyInk * 1.35f && r.regions[i].w <= blockW * 0.7f;
 	}
 	int para = 0;
 	for (size_t i = 0; i < n; ++i) {
 		if (i > 0) {
 			bool same = r.regions[i].para == r.regions[i - 1].para;
-			if (same && ink[i] >= 3.f && ink[i - 1] >= 3.f) {
-				const float a = std::min(ink[i], ink[i - 1]);
-				const float b = std::max(ink[i], ink[i - 1]);
-				if (b > a * 1.25f) same = false;   // 字身突变 = 标题/正文交界
-			}
+			if (same && heading[i] != heading[i - 1]) same = false;   // 字身突变 = 标题/正文交界
 			if (!same) ++para;
 		}
 		r.regions[i].para = para;
@@ -4580,9 +4741,11 @@ void WinCap::startOcrInternal(bool translateMode)
 	if (!exportSelection(pixels, cw, ch, false, false)) return;
 
 	// 建面板（含建窗、标注镜像、对齐选区）；翻译模式会先建一次空壳，识别完再填内容
-	auto makePanel = [&](OcrResult res, std::vector<BYTE> px) {
+	auto makePanel = [&](OcrResult res, std::vector<BYTE> px, bool animate = true) {
 		closeQrcodeCard();   // 与识别面板互斥
 		toolOcr = std::make_unique<ToolOcr>(this, std::move(res), translateMode, std::move(px), cw, ch);
+		// 缓存命中的结果直接摆出来，不再播扫框/淡入
+		if (!animate) toolOcr->suppressReveal();
 		toolOcr->setElementBlock(selectionFromElement_);
 		toolOcr->createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP);
 		SetWindowLongPtr(toolOcr->hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(hwnd));
@@ -4598,6 +4761,14 @@ void WinCap::startOcrInternal(bool translateMode)
 					if (text.empty()) { cap->copyToClipboard(); return; }   // 双击：走「完成」原逻辑
 					Ling::Util::setTextToClipboard(text);                    // 拖选 Ctrl+C：只复制选中片段
 					cap->close();
+				});
+			});
+			// 右键落在浮层上：先收起结果面板（右键的第一层），保留选区
+			toolOcr->setOnDismiss([h]() {
+				Ling::App::get()->dq.TryEnqueue([h]() {
+					auto* cap = WinCap::get();
+					if (!cap || cap->hwnd != h || !IsWindow(h)) return;
+					cap->clearOcrPanel();
 				});
 			});
 		}
@@ -4617,6 +4788,13 @@ void WinCap::startOcrInternal(bool translateMode)
 		// 面板随截图会话结束而销毁，不会残留到下一次截图里，所以不排除不会造成"拍到上次结果"。
 	};
 
+	// 缓存复用：原始识别结果也要走和首次完全一样的后处理（并行 → 按字身再切段），
+	// 少了这一步，段边界和首次不一致，译文行就对不上段、看起来"丢了一部分"。
+	auto cachedToMerged = [&](const OcrResult& raw) {
+		const std::vector<BYTE> px = toolOcr ? toolOcr->srcImage() : std::vector<BYTE>{};
+		return splitParagraphsByInk(ocrResultMergedToLines(raw, px, cw, ch), px, cw, ch);
+	};
+
 	// 翻译模式：**识别与翻译全部放后台** —— 面板先摆出「正在翻译…」，从点击到出结果提示一直都在，
 	// 中途不再有任何一步去动这个面板（识别结果也不摆到前台），就不会出现"提示没了、结果还没来"。
 	// 顺带好处：识别（首次可能一两秒）不再卡住界面。
@@ -4624,13 +4802,9 @@ void WinCap::startOcrInternal(bool translateMode)
 		OcrResult pending;
 		pending.ok = true;   // ok=true 才不会由 rebuildEditors 判成「识别失败」
 		makePanel(std::move(pending), std::move(pixels));
-		if (toolOcr) {
-			// 置忙：从这一刻起提示条不允许被任何面板重建收掉，直到 finishOcrTranslate 落地结果
-			toolOcr->setBusy(Lang::get(L"ocr.translating"));
-			toolOcr->repaint();   // 主动刷一次面板，别只刷截图窗
-		}
+		// 点下去立刻出扫描线：识别/翻译都可能要等。整条缓存命中的情况在下面提前返回，
+		// 那里不走这句，结果直接摆出来
 		refresh();
-
 		const bool cached = g_ocrCacheValid && sameOcrRect(g_ocrCacheRect, sel);
 		const OcrResult cachedResult = cached ? g_ocrCache : OcrResult{};
 		const std::vector<BYTE> ocrPixels = toolOcr ? toolOcr->srcImage() : std::vector<BYTE>{};
@@ -4642,12 +4816,13 @@ void WinCap::startOcrInternal(bool translateMode)
 		const std::wstring trKey = translateCacheKey(req);
 
 		// 选区没动 + 识别出来的文字一致 + 服务/方向一致 → 直接复用上次译文：
-		// 识别与翻译请求都省掉（框选没动，结果必然一样）。
+		// 识别与翻译请求都省掉（框选没动，结果必然一样）。这种情况不播任何动效，直接出结果。
 		if (cached) {
-			const OcrResult mergedNow = ocrResultMergedToLines(cachedResult);
+			const OcrResult mergedNow = cachedToMerged(cachedResult);
 			if (g_trCacheValid && sameOcrRect(g_trCacheRect, sel)
 				&& g_trCacheKey == trKey && g_trCacheText == mergedNow.text) {
 				const TranslateResult tr = g_trCache;
+				if (toolOcr) toolOcr->suppressReveal();
 				HWND h = hwnd;
 				Ling::App::get()->dq.TryEnqueue([h, mergedNow, tr]() {
 					auto* cap = WinCap::get();
@@ -4658,6 +4833,10 @@ void WinCap::startOcrInternal(bool translateMode)
 			}
 		}
 
+		// 要真跑识别/翻译：这时才起扫描线（缓存命中的情况上面已经返回了）
+		if (toolOcr) toolOcr->startScanPending();
+
+		// 识别还要跑一段（首次还要加载模型）：扫描线已经在上面开始了。
 		HWND host = hwnd;
 		std::thread([host, sel, cached, cachedResult, ocrPixels, cw, ch, req, trKey]() {
 			// 后台线程里会碰 WinRT（系统 OCR），先初始化 apartment；已初始化会抛，忽略即可
@@ -4665,7 +4844,8 @@ void WinCap::startOcrInternal(bool translateMode)
 
 			const OcrResult raw = cached ? cachedResult
 				: OcrService::instance().recognize(cw, ch, ocrPixels.data());
-			const OcrResult merged = splitParagraphsByInk(ocrResultMergedToLines(raw), ocrPixels, cw, ch);
+			const OcrResult merged = splitParagraphsByInk(
+				ocrResultMergedToLines(raw, ocrPixels, cw, ch), ocrPixels, cw, ch);
 
 			std::vector<std::wstring> segments;
 			segments.reserve(merged.regions.size());
@@ -4697,13 +4877,21 @@ void WinCap::startOcrInternal(bool translateMode)
 				});
 			};
 
+			// 识别一完成就先按识别到的行循环扫框（不显示文字/译文）：翻译可能要等几秒，
+			// 这段时间不能空着 —— 扫框就是等待提示；译文到了由扫框接内容淡入（finishOcrTranslate）。
+			if (merged.ok && !segments.empty()) {
+				toUi([merged](WinCap& cap) {
+					if (cap.toolOcr) cap.toolOcr->startScanWait(merged);
+				});
+			}
+
 			if (!merged.ok || segments.empty()) {
 				toUi([raw, merged, sel](WinCap& cap) {
 					cap.storeOcrCache(raw, sel);
 					if (!cap.toolOcr) return;
+					cap.toolOcr->stopScanWait();
 					const std::wstring msg = (merged.ok || merged.error.empty())
 						? Lang::get(L"ocr.fail") : merged.error;
-					cap.toolOcr->clearBusy();   // 识别就失败了，别再顶着"正在翻译…"
 					cap.toolOcr->showBanner(msg, true);
 					cap.toolOcr->repaint();
 				});
@@ -4726,9 +4914,10 @@ void WinCap::startOcrInternal(bool translateMode)
 	// 第一次识别含模型加载（约 135ms）+ 推理（约 250ms），同步跑会把界面冻住；
 	// 与翻译模式一样先建空壳面板、置忙，识别完成后再回 UI 线程填结果。
 	if (g_ocrCacheValid && sameOcrRect(g_ocrCacheRect, sel)) {
-		// 同一块选区：识别结果直接用临时缓存（省掉识别那几百毫秒）
-		const OcrResult merged = ocrResultMergedToLines(g_ocrCache);
-		makePanel(merged, std::move(pixels));
+		// 同一块选区：识别结果直接用临时缓存（省掉识别那几百毫秒）。
+		// 已经有结果了就不再播动效，直接摆出来
+		const OcrResult merged = cachedToMerged(g_ocrCache);
+		makePanel(merged, std::move(pixels), false);
 		if (merged.ok && !merged.text.empty()) {
 			Ling::Util::setTextToClipboard(merged.text);
 		}
@@ -4740,10 +4929,8 @@ void WinCap::startOcrInternal(bool translateMode)
 		OcrResult pending;
 		pending.ok = true;   // ok=true 才不会由 rebuildEditors 判成「识别失败」
 		makePanel(std::move(pending), std::move(pixels));
-		if (toolOcr) {
-			toolOcr->setBusy(Lang::get(L"ocr.recognizing"));
-			toolOcr->repaint();   // 主动刷一次面板，别只刷截图窗
-		}
+		// 识别在后台跑：先给一条扫描线，结果一到就换成逐行识别框再淡入文字
+		if (toolOcr) toolOcr->startScanPending();
 		refresh();
 	}
 
@@ -4754,14 +4941,14 @@ void WinCap::startOcrInternal(bool translateMode)
 		try { winrt::init_apartment(winrt::apartment_type::multi_threaded); } catch (...) {}
 
 		const OcrResult raw = OcrService::instance().recognize(cw, ch, ocrPixels.data());
-		const OcrResult merged = splitParagraphsByInk(ocrResultMergedToLines(raw), ocrPixels, cw, ch);
+		const OcrResult merged = splitParagraphsByInk(
+			ocrResultMergedToLines(raw, ocrPixels, cw, ch), ocrPixels, cw, ch);
 
 		Ling::App::get()->dq.TryEnqueue([host, sel, raw, merged]() {
 			auto* cap = WinCap::get();
 			if (!cap || cap->hwnd != host) return;   // 会话已结束
 			cap->storeOcrCache(raw, sel);
 			if (cap->toolOcr) {
-				cap->toolOcr->clearBusy();
 				cap->toolOcr->setResult(merged);
 				cap->toolOcr->repaint();
 			}
@@ -4794,8 +4981,6 @@ void WinCap::storeTranslateCache(const OcrResult& merged, const D2D1_RECT_F& rec
 void WinCap::finishOcrTranslate(const OcrResult& merged, const TranslateResult& tr)
 {
 	if (!toolOcr) return;
-	// 先解忙：结果落地这一刻起，"正在翻译…"不再强制顶着，由下面按结果收/换
-	toolOcr->clearBusy();
 	std::vector<std::wstring> lines;
 	if (tr.ok) {
 		std::wistringstream ss(tr.text);

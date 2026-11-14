@@ -76,8 +76,10 @@ public:
 	// 一次文字编辑会话的起点：结束时作为一步撤销
 	std::wstring editStartText_;
 	std::vector<float> editStartGeo_;
-	// 「线段中间打字」：画字之前先用底图把这块抠回来，线段/箭头从文字下穿过就会断成两截
+	// 「线段中间打字」：文字这一块要让宿主线断开
 	bool punchBg{ false };
+	// 要挖的洞（标注坐标系，DIP）：文字矩形 + 2px 余量。没开洞或几何为空时返回 false
+	bool punchHole(D2D1_RECT_F& out) const;
 	// 这条文字挂在哪条箭头/线段上（不持有所有权；每次绘制前会验证它还在列表里）
 	class ShapeBase* attachTo{ nullptr };
 	float attachCx{ 0.f }, attachCy{ 0.f };   // 挂点（线段中点），编辑中也要按它居中
@@ -88,7 +90,6 @@ private:
 	D2D1_POINT_2F editCaretPos(float& lineH) const;
 	// 排版左上角在标注坐标系里的位置：普通文字贴 rect 内边，气泡/爆裂在框内居中
 	D2D1_POINT_2F editTextOrigin() const;
-	void paintPunch(ID2D1DeviceContext* ctx);
 	void setAttr();
 	void syncRectFromLayout();
 	void updateDraggers();

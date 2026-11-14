@@ -120,6 +120,16 @@ public:
 	// 当前前台窗口所属进程名（不含扩展名），本进程自己（截图覆盖窗等）返回空。
 	// 供文件名模板里的 {{FOCUS_WINDOW_APP_NAME}} 用，需在覆盖窗出现前调用。
 	static std::wstring foregroundAppName();
+	// 一个窗口的「身份」：剪贴板黑名单要按这三项一起判断才不会被改标题绕过去。
+	struct WindowIdentity {
+		std::wstring title;        // 窗口标题（软件可能随当前对话/模式实时改写）
+		std::wstring process;      // 任务管理器里的进程名（不含 .exe），本进程自己为空
+		std::wstring description;  // exe 版本信息里的文件说明/产品名（开始菜单显示名通常就是它）
+	};
+	// 取窗口（自动提升到根窗口）的身份；取不到的部分留空，不抛异常。
+	static WindowIdentity windowIdentity(HWND hwnd);
+	// 指定窗口所属进程名（不含扩展名，即任务管理器里显示的名字）；本进程或取不到时返回空
+	static std::wstring windowProcessName(HWND hwnd);
 	// 删除文件到系统回收站（失败才退回永久删除），避免用户误删
 	static bool moveToRecycleBin(const std::wstring& path);
 	// 自动落盘（取消/退出截图用）：用「自动保存文件名格式」+「保存格式」写到截图目录

@@ -38,12 +38,18 @@ public:
 	// 避免"先闪一下原文、再被译文替换"。
 	void setTranslatedResult(OcrResult result, const std::vector<std::wstring>& lines);
 	void setResult(OcrResult result);
+	// 结果来自缓存：直接显示，不播扫框/淡入动效
+	void suppressReveal() { revealPending_ = false; suppressReveal_ = true; }
+	// 翻译等待期：识别一完成就按识别到的行循环扫框（不显示文字/译文）。
+	// 译文到了之后由 setTranslatedResult 的扫框接内容淡入（复用同一套框）。
+	void startScanWait(OcrResult scan);
+	// 识别还没回来（没有行信息）时先给一条横贯选区的扫描线，点下去立刻有反馈；
+	// 识别一完成就换成逐行扫框（startScanWait / startReveal）。
+	void startScanPending();
+	// 收掉等待期的扫描线与循环扫框（识别失败、不再等待时用）
+	void stopScanWait();
 	void showBanner(const std::wstring& msg, bool error);
 	void clearBanner();
-	// 翻译进行中：置上后"正在翻译…"会一直顶着，直到结果落地由 finishOcrTranslate 清掉。
-	// 期间任何一次面板重建都不会把它收掉 —— 否则会出现"提示没了、结果还没出来"的空档。
-	void setBusy(const std::wstring& msg);
-	void clearBusy();
 	bool translateMode() const { return translateMode_; }
 	const OcrResult& result() const { return result_; }
 	// 选区原图（BGRA）。翻译模式先建面板、后识别，识别直接复用这份像素，省掉再留一份。
@@ -52,6 +58,8 @@ public:
 	// 非空表示拖选后按 Ctrl+C 的那一段 —— host 只复制这段并退出。
 	// 浮层是独立置顶窗口，双击/快捷键本来只会落到文字上，截图窗收不到。
 	void setOnConfirm(std::function<void(const std::wstring&)> fn) { onConfirm_ = std::move(fn); }
+	// 右键：收起结果面板（由宿主接着处理后续的右键层级）
+	void setOnDismiss(std::function<void()> fn) { onDismiss_ = std::move(fn); }
 	// 选区是"单击元素"得到的：此时选区就是元素外框，排版可以按这个宽度满排
 	void setElementBlock(bool v) { elementBlock_ = v; }
 	// 宿主注入：把（截图/贴图的）标注画到识别文字**之上**。识别结果浮层是独立置顶窗口，
@@ -69,6 +77,17 @@ private:
 	void onCreated() override;
 	void layout() override;
 	void rebuildEditors();
+	// 结果落地动效：逐行画描边框，框淡出后该行内容淡入（见 startReveal）
+	void startReveal();
+	// 动效第二步：真正下发透明度关键帧（下一拍执行，代次对不上就作废）。
+	// loop=true 用于翻译等待期：只循环扫框、不碰内容（这时还没有编辑框）。
+	void animateReveal(bool loop = false);
+	// 按识别框逐行建扫描框（描边 + 极淡填充；斜排跟随四点角度）
+	void buildScopes(const std::vector<OcrRegion>& regions);
+	// 等待识别的扫描线：亮线 + 拖尾都用普通节点画（识别框/文字也是节点，这条路确定能出画面）
+	void buildScanLine();
+	void layoutScanLine();
+	void stopScanLine();
 	void applyMaskGeometry();
 	// 把译文本行填进各区域的 displayText 并重算整段文字（不重绘）
 	void applyTranslateLines(const std::vector<std::wstring>& lines);
@@ -104,6 +123,25 @@ private:
 	int panelH_{ 0 };
 	// 每个识别框的"背景块"（严格等于识别框尺寸，负责盖住原文字）与文本框分开存。
 	std::vector<Ling::Node*> bgs_;
+	// 逐行动效的扫描框：动效结束后 Opacity=0 留在树上，下次重建统一删掉
+	std::vector<Ling::Node*> scopes_;
+	// 结果落地才播动效；选区/DPI 变化引起的重建不重播
+	bool revealPending_{ true };
+	// 缓存命中：下一次结果落地也不播动效（suppressReveal 设置，落地后自动复位）
+	bool suppressReveal_{ false };
+	// 翻译等待期的循环扫框：只画框不建文字，结果落地后作废
+	bool scanWait_{ false };
+	std::vector<OcrRegion> scanRegions_;
+	// 识别前的扫描线：节点从下往上扫，相位 0→1
+	bool scanLineOn_{ false };
+	float scanPhase_{ 0.f };
+	ULONGLONG scanStartTick_{ 0 };
+	Ling::Node* scanTrail_{ nullptr };   // 扫描线只有它：竖向线性渐变（0% → 100%，整体 20% 透明）
+	// 结果比扫描线先到：先压住，等扫描线走够最短时长再落地，动画才看得见
+	std::function<void()> pendingApply_;
+	static constexpr ULONGLONG kScanMinMs{ 550 };
+	// 重建代次：排队中的动效只在"最后一次重建"上生效
+	unsigned buildGen_{ 0 };
 	OcrResult result_;
 	bool translateMode_{ false };
 	// 文本重排：整段结果放进一个普通可编辑文本框（Enter 换行），不再逐框覆盖原位置
@@ -114,12 +152,6 @@ private:
 	bool reflowHistGuard_{ false };
 	std::wstring banner_;
 	bool bannerError_{ false };
-	// 非空 = 正在翻译：提示条在此期间必须一直可见（见 setBusy）
-	std::wstring busyMsg_;
-	// 忙等提示的点动画：识别/翻译可能几秒没有结果，静止文字看起来像卡住。
-	// busyBase_ 是不带点的基础文案，busyDots_ 是当前点数（0~3），定时器循环推进。
-	std::wstring busyBase_;
-	int busyDots_{ 0 };
 	Ling::Node* bannerNode{ nullptr };
 	Ling::Label* bannerLabel{ nullptr };
 	std::vector<Ling::TextBox*> editors;
@@ -135,10 +167,10 @@ private:
 	// 与其它窗口的定时器 id 错开（属性栏 0x5000 / 系统按键 0x5100）
 	static constexpr UINT kHoverTimerId{ 0x5200 };
 	static constexpr UINT kHoverPollMs{ 100 };
-	// 忙等提示的点动画：每 100ms 多一个点，0~3 循环（正在识别 → . → .. → ...），
-	// 节奏要快一点才有"还在跑"的感觉。
-	static constexpr UINT kTypingTimerId{ 0x5300 };
-	static constexpr UINT kTypingTickMs{ 100 };
+	// 扫描线：每帧推进相位，一轮扫完的时长
+	static constexpr UINT kScanTimerId{ 0x5300 };
+	static constexpr UINT kScanTickMs{ 8 };
+	static constexpr float kScanSweepMs{ 300.f };
 	int hostX_{ 0 }, hostY_{ 0 };   // 宿主窗口位置（覆盖矩形是宿主客户坐标）
 	// 上次建编辑框时的 dpi：换屏 / 改缩放后 DPI 变了，字号和坐标都得按新 dpi 重排。
 	float builtDpi_{ 0.f };
@@ -159,6 +191,7 @@ private:
 	std::function<bool(POINT)> chromeHit_;
 	std::function<bool(POINT)> chromeDown_;
 	std::function<void(const std::wstring&)> onConfirm_;
+	std::function<void()> onDismiss_;
 	// 双击判定自己做：Ling 的窗口类没带 CS_DBLCLKS，WM_LBUTTONDBLCLK 不会来
 	ULONGLONG lastDownTick_{ 0 };
 	POINT lastDownPt_{};

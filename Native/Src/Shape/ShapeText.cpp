@@ -520,7 +520,6 @@ void ShapeText::paint(ID2D1DeviceContext* ctx)
 	if (isEditing) {
 		// 编辑中的文字和插入符由形状直接绘制，键盘输入由宿主转发
 		updateDraggers();
-		paintPunch(ctx);   // 编辑态同样需要开洞，否则线段会压在文字框上
 		D2D1_MATRIX_3X2_F old{};
 		ctx->GetTransform(&old);
 		if (angle != 0.f) {
@@ -575,7 +574,6 @@ void ShapeText::paint(ID2D1DeviceContext* ctx)
 		return;
 	}
 	if (!textLayout && !isFrame()) return;
-	paintPunch(ctx);
 	D2D1_MATRIX_3X2_F old{};
 	ctx->GetTransform(&old);
 	// 普通文字可以自己拖角度（四角外一圈旋转）；线上文字角度恒为 0（一律横排）
@@ -641,22 +639,17 @@ void ShapeText::setAttachPose(float cx, float cy)
 	updateDraggers();
 }
 
-void ShapeText::paintPunch(ID2D1DeviceContext* ctx){
-	// 「线段中间打字」：用底图把文字这一块抠回来 —— 线段/箭头从文字下穿过就会断成两截，
-	// 正好是尺寸标注那种"文字压在线上但线不穿字"的样子。没开这个标记的文字不受影响。
-	// 编辑中也要挖洞：现在编辑与提交共用同一套几何（rect = setAttachPose 的锚点居中几何），
-	// 洞在编辑中就是提交后那个洞，不会再出现"编辑时挖歪"
-	if (!punchBg || !win || !ctx) return;
-	if (rect.right - rect.left < 1.f || rect.bottom - rect.top < 1.f) return;
-	// 开洞按文字实际边界计算，不使用 borderPadding（编辑框留白），否则洞宽大于字宽
-	const float pad = 2.f * (win ? win->dpi : 1.f);
-	const D2D1_RECT_F r = D2D1::RectF(rect.left - pad, rect.top - pad, rect.right + pad, rect.bottom + pad);
-	// 线上文字一律横排（angle==0），洞就是轴对齐的一块：多行文字（用户自己回车的竖列）
-	// 也整块抠掉，线在整列文字的上下/左右各留 pad 的间距
-	ctx->PushAxisAlignedClip(r, D2D1_ANTIALIAS_MODE_ALIASED);
-	// 背景由宿主决定：截图/贴图抠捕获图，图片编辑器铺画板/画布底再盖画板内容
-	win->paintPunchBackground(ctx, r);
-	ctx->PopAxisAlignedClip();
+bool ShapeText::punchHole(D2D1_RECT_F& out) const
+{
+	// 「线段中间打字」：宿主线要在文字这一块断开，正好是尺寸标注那种"文字压在线上但线不穿字"的样子。
+	// 洞只由宿主线自己剪（见 AnnotHost::pushPunchMask），这里只报几何 —— 洞内不铺底图，
+	// 否则交叉的另一条尺寸线会被这块底图一起盖掉，多个洞也叠不起来。
+	// 开洞按文字实际边界计算，不使用 borderPadding（编辑框留白），否则洞宽大于字宽。
+	if (!punchBg || !win) return false;
+	if (rect.right - rect.left < 1.f || rect.bottom - rect.top < 1.f) return false;
+	const float pad = 2.f * win->dpi;
+	out = D2D1::RectF(rect.left - pad, rect.top - pad, rect.right + pad, rect.bottom + pad);
+	return true;
 }
 
 void ShapeText::paintDragger(ID2D1DeviceContext* ctx)

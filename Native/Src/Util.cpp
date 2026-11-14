@@ -178,8 +178,8 @@ namespace {
 		return encodeImage(stream, w, h, data, GUID_ContainerFormatPng, -1.f);
 	}
 
-	// 取进程可执行文件名（不含扩展名），用于文件名模板里的 {{FOCUS_WINDOW_APP_NAME}}
-	std::wstring processBaseName(DWORD pid)
+	// 进程的可执行文件完整路径；取不到（受保护/权限不足/进程已退出）返回空
+	std::wstring processImagePath(DWORD pid)
 	{
 		if (!pid) return L"";
 		HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
@@ -188,9 +188,66 @@ namespace {
 		DWORD n = MAX_PATH;
 		std::wstring result;
 		if (QueryFullProcessImageNameW(h, 0, buf, &n))
-			result = std::filesystem::path(buf).stem().wstring();
+			result.assign(buf, static_cast<size_t>(n));
 		CloseHandle(h);
 		return result;
+	}
+
+	// 取进程可执行文件名（不含扩展名），用于文件名模板里的 {{FOCUS_WINDOW_APP_NAME}}
+	std::wstring processBaseName(DWORD pid)
+	{
+		const std::wstring path = processImagePath(pid);
+		if (path.empty()) return L"";
+		return std::filesystem::path(path).stem().wstring();
+	}
+
+	// 读 exe 版本信息里的一个字符串字段（FileDescription / ProductName …）
+	std::wstring exeVersionText(const std::wstring& exePath, const wchar_t* key)
+	{
+		if (exePath.empty() || !key) return L"";
+		DWORD dummy = 0;
+		const DWORD size = GetFileVersionInfoSizeW(exePath.c_str(), &dummy);
+		if (size == 0) return L"";
+		std::vector<BYTE> data(size);
+		if (!GetFileVersionInfoW(exePath.c_str(), 0, size, data.data())) return L"";
+		struct Translation { WORD language; WORD codePage; };
+		Translation* tr = nullptr;
+		UINT trBytes = 0;
+		std::wstring result;
+		if (VerQueryValueW(data.data(), L"\\VarFileInfo\\Translation",
+				reinterpret_cast<void**>(&tr), &trBytes) && tr && trBytes >= sizeof(Translation)) {
+			auto hex4 = [](WORD v) {
+				static const wchar_t digits[] = L"0123456789abcdef";
+				std::wstring s(4, L'0');
+				for (int i = 3; i >= 0; --i) { s[(size_t)i] = digits[v & 0xF]; v >>= 4; }
+				return s;
+			};
+			for (UINT i = 0; i < trBytes / sizeof(Translation) && result.empty(); ++i) {
+				const std::wstring sub = L"\\StringFileInfo\\" + hex4(tr[i].language)
+					+ hex4(tr[i].codePage) + L"\\" + key;
+				wchar_t* text = nullptr;
+				UINT textBytes = 0;
+				if (VerQueryValueW(data.data(), sub.c_str(), reinterpret_cast<void**>(&text), &textBytes)
+					&& text && textBytes > 0)
+					result = text;
+			}
+		}
+		return result;
+	}
+
+	// 程序在「开始菜单 / 设置页应用列表」里显示的名字（兜底到进程名），带缓存：
+	// 剪贴板每复制一次都要查，不能每次都重新读版本信息。
+	std::wstring exeDisplayName(const std::wstring& exePath)
+	{
+		static std::vector<std::pair<std::wstring, std::wstring>> cache;
+		for (const auto& item : cache)
+			if (_wcsicmp(item.first.c_str(), exePath.c_str()) == 0) return item.second;
+		std::wstring name = exeVersionText(exePath, L"FileDescription");
+		if (name.empty()) name = exeVersionText(exePath, L"ProductName");
+		if (name.empty()) name = std::filesystem::path(exePath).stem().wstring();
+		cache.emplace_back(exePath, name);
+		if (cache.size() > 64) cache.erase(cache.begin());   // 常驻程序不无限长
+		return name;
 	}
 
 	// 插件的查找顺序：先本 exe 同目录（绿色包一起解压的情况），
@@ -1277,6 +1334,44 @@ std::wstring Util::foregroundAppName()
 	if (!fg) return L"";
 	DWORD pid = 0;
 	GetWindowThreadProcessId(fg, &pid);
+	if (!pid || pid == GetCurrentProcessId()) return L"";
+	return processBaseName(pid);
+}
+
+// 指定窗口的「身份」：标题 + 任务管理器里的进程名 + 程序文件说明。
+// 窗口标题会被软件实时改写（AI 对话、编辑器常见），黑名单不能只靠它。
+Util::WindowIdentity Util::windowIdentity(HWND hwnd)
+{
+	WindowIdentity info;
+	if (!hwnd) return info;
+	if (HWND root = GetAncestor(hwnd, GA_ROOT)) hwnd = root;
+
+	const int len = GetWindowTextLengthW(hwnd);
+	if (len > 0) {
+		std::wstring text(static_cast<size_t>(len) + 1, L'\0');
+		const int got = GetWindowTextW(hwnd, text.data(), len + 1);
+		text.resize(got > 0 ? static_cast<size_t>(got) : 0);
+		info.title = std::move(text);
+	}
+
+	DWORD pid = 0;
+	GetWindowThreadProcessId(hwnd, &pid);
+	// 本进程自己（截图覆盖窗、设置页）不参与黑名单的进程名匹配
+	if (!pid || pid == GetCurrentProcessId()) return info;
+	const std::wstring path = processImagePath(pid);
+	if (path.empty()) return info;
+	info.process = std::filesystem::path(path).stem().wstring();
+	info.description = exeDisplayName(path);
+	return info;
+}
+
+// 只要进程名时走轻量版：不读版本信息（文件说明只给黑名单匹配用）
+std::wstring Util::windowProcessName(HWND hwnd)
+{
+	if (!hwnd) return L"";
+	if (HWND root = GetAncestor(hwnd, GA_ROOT)) hwnd = root;
+	DWORD pid = 0;
+	GetWindowThreadProcessId(hwnd, &pid);
 	if (!pid || pid == GetCurrentProcessId()) return L"";
 	return processBaseName(pid);
 }

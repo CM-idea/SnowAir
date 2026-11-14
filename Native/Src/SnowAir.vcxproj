@@ -332,6 +332,7 @@
     <ClInclude Include="Export\ImageExport.h" />
     <ClInclude Include="Export\PdfWriter.h" />
     <ClInclude Include="Export\PptxWriter.h" />
+    <ClInclude Include="BlacklistMatch.h" />
     <ClInclude Include="compat\CComPtr.h" />
     <ClInclude Include="History.h" />
     <ClInclude Include="Lang.h" />

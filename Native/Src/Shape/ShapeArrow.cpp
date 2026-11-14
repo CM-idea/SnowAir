@@ -285,16 +285,21 @@ void ShapeArrow::drawPolyline(ID2D1DeviceContext* ctx, const std::vector<D2D1_PO
 void ShapeArrow::paint(ID2D1DeviceContext* ctx)
 {
 	if (poly.pts.empty()) return;
+	// 线上文字处要把这条线断开：洞只剪自己这条线，交叉的别的标注不受影响
+	const bool mask = win && win->pushPunchMask(ctx, this);
+	bool popped = false;
+	auto popMask = [&] { if (mask && !popped) { ctx->PopLayer(); popped = true; } };
 	// 连线端点先贴回形状边缘（形状可能刚被拖动/缩放，甚至已经被删掉）
 	ShapeLink::sync(win, poly);
 	if (isBig()) {
 		if (!bigPath) makeBigPath();
 		if (bigPath) ctx->FillGeometry(bigPath.Get(), brush.Get());
+		popMask();
 		return;
 	}
 	// 钢笔形状按锚点生成平滑曲线；普通形状原样使用折线
 	const auto pts = poly.renderPoints();
-	if (pts.size() < 2) return;
+	if (pts.size() < 2) { popMask(); return; }
 	auto factory = Ling::D2D::get()->d2dFactory.Get();
 	const auto start = pts.front();
 	const auto startNext = pts[1];
@@ -334,6 +339,7 @@ void ShapeArrow::paint(ID2D1DeviceContext* ctx)
 			isFun() ? funHeadScale : 1.1f))
 			ctx->DrawGeometry(head.Get(), brush.Get(), strokeWidth, headStrokeStyle.Get());
 	}
+	popMask();
 }
 
 void ShapeArrow::paintDragger(ID2D1DeviceContext* ctx)

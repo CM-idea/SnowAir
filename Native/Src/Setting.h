@@ -267,7 +267,10 @@ public:
 
 	std::vector<std::wstring> getWindowBlacklist();
 	void setWindowBlacklist(const std::vector<std::wstring>& titles);
-	bool isWindowBlacklisted(const std::wstring& windowTitle);
+	// 黑名单匹配：窗口标题、进程名（任务管理器里的名字）、程序文件说明任一命中都算。
+	// 有些软件标题会随当前对话/模式实时改写，只比标题会漏。
+	bool isWindowBlacklisted(const std::wstring& windowTitle,
+		const std::wstring& processName = L"", const std::wstring& fileDescription = L"");
 
 	// —— 历史：只索引真实存在的输出文件，不复制内容 ——
 	struct HistoryItem {

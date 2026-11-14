@@ -14,6 +14,7 @@
 #include <oleacc.h>
 #include <UIAutomationClient.h>
 #include "Setting.h"
+#include "BlacklistMatch.h"
 #include "ConfigMerge.h"
 #include "Plugin/PluginHost.h"
 #include "Util.h"
@@ -744,22 +745,38 @@ namespace {
 
     // 采集流程：WM_CLIPBOARDUPDATE -> 300ms 去抖 -> 单次 OLE 读取 -> 序号校验 -> 写历史。
     // OLE 在 UI 线程执行，复用 Ling 已初始化的 STA。
-    std::wstring clipboardSourceTitle()
+    // 来源窗口身份要在「通知到达的那一刻」就取好：拖延 300ms 再问 GetClipboardOwner，
+    // 窗口可能已销毁/前台已切换，黑名单就会认错来源。前台窗口和剪贴板所有者都收：
+    // 前台是复制动作发生的地方，所有者则在后台窗口写剪贴板（浏览器/Office）时补位。
+    struct ClipboardSource {
+        std::vector<Util::WindowIdentity> windows;
+    };
+    ClipboardSource g_clipSource;
+    bool g_clipSourceTaken{ false };   // 已按本次剪贴板变化取过来源（空也算取过）
+
+    void takeClipboardSourceSnapshot()
     {
-        auto titleOf = [](HWND hwnd) -> std::wstring {
-            if (!hwnd) return {};
-            HWND root = GetAncestor(hwnd, GA_ROOT);
-            if (root) hwnd = root;
-            const int len = GetWindowTextLengthW(hwnd);
-            if (len <= 0) return {};
-            std::wstring title(static_cast<size_t>(len) + 1, L'\0');
-            const int got = GetWindowTextW(hwnd, title.data(), len + 1);
-            title.resize(got > 0 ? static_cast<size_t>(got) : 0);
-            return title;
+        g_clipSource.windows.clear();
+        g_clipSourceTaken = true;
+        // 本程序自己写剪贴板（复制图片/文件到剪贴板）：不是用户从别的软件复制，
+        // 不能因为当时前台恰好是黑名单里的软件就把这次写入也吞掉。
+        if (HWND owner = GetClipboardOwner()) {
+            DWORD ownerPid = 0;
+            GetWindowThreadProcessId(owner, &ownerPid);
+            if (ownerPid == GetCurrentProcessId()) return;
+        }
+        auto add = [](HWND hwnd) {
+            if (!hwnd) return;
+            Util::WindowIdentity info = Util::windowIdentity(hwnd);
+            if (info.title.empty() && info.process.empty()) return;
+            for (const auto& w : g_clipSource.windows) {
+                if (_wcsicmp(w.title.c_str(), info.title.c_str()) == 0
+                    && _wcsicmp(w.process.c_str(), info.process.c_str()) == 0) return;
+            }
+            g_clipSource.windows.push_back(std::move(info));
         };
-        std::wstring title = titleOf(GetClipboardOwner());
-        if (title.empty()) title = titleOf(GetForegroundWindow());
-        return title;
+        add(GetForegroundWindow());
+        add(GetClipboardOwner());
     }
 
     void captureClipboardNow()
@@ -777,7 +794,14 @@ namespace {
         if (!read) return;
 
         // 来源窗口在剪切板黑名单里：这次复制不写入历史。
-        if (s->isWindowBlacklisted(clipboardSourceTitle())) return;
+        // 标题和任务管理器里的进程名任一命中都算：标题会随内容变化，进程名是稳定的。
+        if (!g_clipSourceTaken) takeClipboardSourceSnapshot();   // 轮询路径兜底
+        const bool blocked = std::any_of(g_clipSource.windows.begin(), g_clipSource.windows.end(),
+            [s](const Util::WindowIdentity& w) {
+                return s->isWindowBlacklisted(w.title, w.process, w.description);
+            });
+        g_clipSourceTaken = false;
+        if (blocked) return;
 
         if (snap.hasFiles) s->addClipboardFiles(snap.files);
         else if (snap.hasText) s->addClipboardText(snap.text);
@@ -787,7 +811,8 @@ namespace {
     LRESULT CALLBACK clipboardWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         if (msg == WM_CLIPBOARDUPDATE) {
-            // 延迟读取，先让写入方完成粘贴；此处不直接 OpenClipboard。
+            // 先把来源窗口定下来（此刻前台/所有者还是复制它的那个软件），再延迟读取。
+            takeClipboardSourceSnapshot();
             SetTimer(hwnd, kClipDebounceTimer, kClipDebounceMs, nullptr);
             return 0;
         }
@@ -798,8 +823,10 @@ namespace {
         }
         if (msg == WM_TIMER && wp == kClipPollTimer) {
             // 轮询只发现变化，读取仍走延迟路径。
-            if (GetClipboardSequenceNumber() != g_lastClipSeq)
+            if (GetClipboardSequenceNumber() != g_lastClipSeq) {
+                takeClipboardSourceSnapshot();
                 SetTimer(hwnd, kClipDebounceTimer, kClipDebounceMs, nullptr);
+            }
             return 0;
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
@@ -857,6 +884,9 @@ void Setting::init()
     setting->purgeLegacyShortcutKeys();
     // 视频/录屏文件已经不在了：对应的封面缓存也不再保留
     setting->pruneOrphanThumbCache();
+    // 按「文件保留天数」清理过期历史：之前只在改设置或打开历史页时才跑，
+    // 用户设成 1 天后隔天启动程序，旧文件还留在盘里（本次修复）。
+    setting->pruneExpiredHistory();
     // 旧数据里同内容的剪贴板条目收敛成一条
     setting->dedupeClipboardItems();
     installClipboardWatch();
@@ -2438,16 +2468,15 @@ void Setting::setWindowBlacklist(const std::vector<std::wstring>& titles)
     setFeatArray(L"windowBlacklist", arr);
 }
 
-bool Setting::isWindowBlacklisted(const std::wstring& windowTitle)
+// 标题、进程名（任务管理器里的名字）、程序文件说明任一命中都算。
+// 有些软件（AI 对话、编辑器）的窗口标题会随当前内容/模式实时变，
+// 只按标题匹配会漏；进程名是稳定的，文件说明则兜住「开始菜单显示名 ≠ 进程名」的情况。
+bool Setting::isWindowBlacklisted(const std::wstring& windowTitle, const std::wstring& processName,
+    const std::wstring& fileDescription)
 {
-    if (windowTitle.empty()) return false;
-    std::wstring title = windowTitle;
-    for (auto& c : title) c = static_cast<wchar_t>(towlower(c));
+    if (windowTitle.empty() && processName.empty() && fileDescription.empty()) return false;
     for (auto& entry : getWindowBlacklist()) {
-        if (entry.empty()) continue;
-        std::wstring needle = entry;
-        for (auto& c : needle) c = static_cast<wchar_t>(towlower(c));
-        if (title.find(needle) != std::wstring::npos) return true;
+        if (BlacklistMatch::matches(entry, windowTitle, processName, fileDescription)) return true;
     }
     return false;
 }
@@ -2806,10 +2835,12 @@ bool Setting::isOwnHistoryFile(const std::wstring& filePath)
     if (manualFmt.empty()) manualFmt = defaultManualSaveFormat();
     std::wstring autoFmt = getAutoSaveFormat();
     if (autoFmt.empty()) autoFmt = defaultAutoSaveFormat();
+    std::wstring recFmt = getVideoRecordFormat();
+    if (recFmt.empty()) recFmt = defaultVideoRecordFormat();
     auto startsWith = [&](const std::wstring& p) {
         return !p.empty() && name.size() >= p.size() && name.compare(0, p.size(), p) == 0;
     };
-    return startsWith(prefixOf(manualFmt)) || startsWith(prefixOf(autoFmt));
+    return startsWith(prefixOf(manualFmt)) || startsWith(prefixOf(autoFmt)) || startsWith(prefixOf(recFmt));
 }
 
 std::vector<Setting::HistoryItem> Setting::getHistoryItemsForUi(bool forceRescan)
@@ -2993,6 +3024,9 @@ std::wstring Setting::addHistoryFile(const std::wstring& filePath, int width, in
     auto store = loadHistoryStore();
     store.SetNamedValue(L"items", arr);
     saveHistoryStore(store);
+    // 有新文件落盘时顺带清理一次过期历史：程序常驻托盘时不会重启，
+    // 只靠启动/改设置那两次会漏掉"跨天"的过期文件。
+    pruneExpiredHistory();
     PluginHost::instance().onCapture(filePath);
     return it.id;
 }
@@ -3089,6 +3123,26 @@ void Setting::pruneExpiredHistory()
         if (!it.filePath.empty()) deleteHistoryFile(it.filePath);
         std::filesystem::remove(getHistoryThumbDir() / (it.id + L".png"), ec);
     }
+    // 没登记进索引、但确实由本软件保存的文件（清空过历史、换过索引等）也按天数清掉。
+    // 只认本软件的文件名前缀，避免误删用户自己放进目录的文件。
+    auto pruneOwnedDir = [&](const std::filesystem::path& dir) {
+        std::error_code ec;
+        if (dir.empty() || !std::filesystem::is_directory(dir, ec)) return;
+        for (std::filesystem::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            std::error_code fec;
+            if (!it->is_regular_file(fec)) continue;
+            const std::wstring path = it->path().wstring();
+            if (!historyExtMatch(path, { L"png", L"jpg", L"jpeg", L"webp", L"bmp", L"avif", L"jxl",
+                                         L"mp4", L"gif", L"apng" })) continue;
+            if (!isOwnHistoryFile(path)) continue;
+            if (historyFileTimeMs(it->path()) >= cutoff) continue;
+            deleteHistoryFile(path);
+        }
+    };
+    pruneOwnedDir(Util::outputDir());
+    if (const auto rec = getRecordDir(); !rec.empty())
+        pruneOwnedDir(std::filesystem::path{ rec });
+
     // 写回
     JsonArray arr;
     for (auto& it : keep) arr.Append(historyItemToJson(it));

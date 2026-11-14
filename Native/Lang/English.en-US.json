@@ -1,4 +1,4 @@
-{
+﻿{
   "cap": {
     "mark": "Annotate Image",
     "long": "Scrolling Screenshot",
@@ -170,8 +170,8 @@
     "hotkeysDesc": "Manage system-wide hotkeys",
     "systemKeys": "System Keys",
     "systemKeysDesc": "Keys for in-app commands",
-    "systemKeysTip": "Shortcuts apply only in their own scene, and scenes are independent: the same key can be bound more than once without conflicts; general and annotation shortcuts work across all scenes. Backspace/Delete to clear, Esc to cancel.",
-    "hotkeysTip": "Click the right side to start recording. Up to 3 keys combined; press to save. Backspace/Delete to clear, Esc to cancel.",
+    "systemKeysTip": "Shortcuts apply only in their own scene, and scenes are independent: the same key can be bound more than once without conflicts; general and annotation shortcuts work across all scenes. Backspace/Delete to clear, Esc to cancel",
+    "hotkeysTip": "Click the right side to start recording. Up to 3 keys combined; press to save. Backspace/Delete to clear, Esc to cancel",
     "quick": "Quick Translate",
     "quickDesc": "Translate text quickly (Microsoft / Google / Youdao / Baidu / Offline)",
     "history": "Screenshot History",
@@ -287,7 +287,7 @@
     "toolDefaultWidth": "Default annotation width",
     "rememberToolStyle": "Remember tool style",
     "hoverPreview": "Hover Preview",
-    "hoverPreviewTip": "When enabled, pausing the pointer over a History or Clipboard card opens a preview: images at their original scale, full text, and files with a type icon, name and containing folder.",
+    "hoverPreviewTip": "When enabled, pausing the pointer over a History or Clipboard card opens a preview: images at their original scale, full text, and files with a type icon, name and containing folder",
     "restoreDefault": "Restore Defaults",
     "function": "Features",
     "functionDesc": "Screenshot, record, output, OCR and translate options",
@@ -338,7 +338,7 @@
     "hotkeyGrpOther": "Other",
     "features": "Features",
     "featuresDesc": "Screenshot, record, output, OCR and translate options",
-    "pluginsDesc": "Download local components and dependencies on demand; select a plan to install. Enable them in Settings → Features.",
+    "pluginsDesc": "Download local components and dependencies on demand; select a plan to install. Enable them in Settings → Features",
     "aboutDesc": "Version info and links",
     "commonDesc": "General",
     "shortcutDesc": "Shortcut settings",
@@ -433,7 +433,7 @@
     "fnTargetLang": "Target language",
     "pluginsSummary": "Installed components: %1",
     "plugOcrTitle": "Offline OCR",
-    "plugOcrDesc": "Powered by PP-OCR, the latest generation of general text recognition — Simplified Chinese, Traditional Chinese, English, Japanese plus 46 Latin-script languages, 50 languages in total.",
+    "plugOcrDesc": "Powered by PP-OCR, the latest generation of general text recognition — Simplified Chinese, Traditional Chinese, English, Japanese plus 46 Latin-script languages, 50 languages in total",
     "plugPlan": "Plan",
     "plugInstalled": "Installed",
     "plugNotInstalled": "Not installed",
@@ -445,7 +445,7 @@
     "pluginsDirBusy": "Components are downloading. Wait for the download to finish before changing the plugin folder.",
     "pluginsDirMoveFailed": "Failed to migrate plugins to the new folder:\n%1\n\nThe original folder is kept unchanged.",
     "plugTransTitle": "Offline Translate",
-    "plugTransDesc": "Powered by the Firefox solution, with mutual translation among Simplified Chinese, Traditional Chinese, English, Russian, Korean, Japanese and more; offline language packs download on demand.",
+    "plugTransDesc": "Powered by the Firefox solution, with mutual translation among Simplified Chinese, Traditional Chinese, English, Russian, Korean, Japanese and more; offline language packs download on demand",
     "plugDownloadDll": "Download DLL",
     "plugLangTitle": "Language pack en-zh",
     "plugLangZhEn": "Chinese → English",
@@ -457,9 +457,9 @@
     "plugLangEs": "Spanish",
     "plugLangDe": "German",
     "plugGhTitle": "GuoHe Image Viewer (author's pick)",
-    "plugGhDesc": "Full image decoding, supports HEIC, AVIF, WebP, RAW, SVG, PSD and more. 12MB* lightweight client, clean and ad-free.",
+    "plugGhDesc": "Full image decoding, supports HEIC, AVIF, WebP, RAW, SVG, PSD and more. 12MB* lightweight client, clean and ad-free",
     "plugGhOpen": "Open download page",
-    "plugGhTip": "An image viewer personally recommended by the author. It is NOT part of this app and does not use the plugin directory. The site may require normal network access; download and install at your own risk.",
+    "plugGhTip": "An image viewer personally recommended by the author. It is NOT part of this app and does not use the plugin directory. The site may require normal network access; download and install at your own risk",
     "blacklistClickDelete": "Click to remove",
     "appearanceToolbarPlaceholder": "Toolbar appearance editor: drag to reorder, show/hide, theme colors (coming in next version)."
   },
@@ -499,7 +499,7 @@
     "translate_selection": "Translate Selection",
     "show_main": "Open Settings",
     "quick_pin": "Quick Pin",
-    "quickPinTip": "Pin what you are using in one press: the file / folder / image / video selected in Explorer, or the text selected in the foreground window; otherwise the clipboard content (text / image / file).",
+    "quickPinTip": "Pin what you are using in one press: the file / folder / image / video selected in Explorer, or the text selected in the foreground window; otherwise the clipboard content (text / image / file)",
     "open_clipboard": "Open Clipboard",
     "open_screenshot_dir": "Open Screenshot Folder",
     "open_history": "Open Screenshot History",
@@ -566,7 +566,7 @@
   },
   "update": {
     "found": "New version available",
-    "tip": "The new version has been downloaded. Click OK to restart and finish the upgrade.",
+    "tip": "The new version has been downloaded. Click OK to restart and finish the upgrade",
     "noPermission": "The program folder is not writable, so it can not update itself. Click OK to open the download page."
   },
   "ocr": {

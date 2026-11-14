@@ -308,18 +308,24 @@ void ShapeLine::paint(ID2D1DeviceContext* ctx)
 {
 	// 连线端点先贴回形状边缘（形状可能刚被拖动/缩放，甚至已经被删掉）
 	ShapeLink::sync(win, poly);
+	// 线上文字处要把这条线断开：洞只剪自己这条线，交叉的别的标注不受影响
+	const bool mask = win && win->pushPunchMask(ctx, this);
+	bool popped = false;
+	auto popMask = [&] { if (mask && !popped) { ctx->PopLayer(); popped = true; } };
 	// 角度还在等第二个点：画一个点示意
 	if (kind_ == Angle && poly.pts.size() == 2
 		&& std::fabs(poly.pts[0].x - poly.pts[1].x) < 0.5f
 		&& std::fabs(poly.pts[0].y - poly.pts[1].y) < 0.5f) {
 		const float r = std::max(2.f, strokeWidth * 0.6f);
 		ctx->FillEllipse(D2D1::Ellipse(poly.pts[0], r, r), brush.Get());
+		popMask();
 		return;
 	}
 	auto factory = Ling::D2D::get()->d2dFactory.Get();
 	if (kind_ == Wave) {
 		auto wave = buildWavePath();
 		if (wave) ctx->DrawGeometry(wave.Get(), brush.Get(), strokeWidth, strokeStyle.Get());
+		popMask();
 		return;
 	}
 	// 钢笔形状按锚点生成平滑曲线；普通直线段原样使用折线
@@ -328,6 +334,7 @@ void ShapeLine::paint(ID2D1DeviceContext* ctx)
 		: ArrowParts::shaftPath(factory, poly.renderPoints());
 	if (path) ctx->DrawGeometry(path.Get(), brush.Get(), strokeWidth, strokeStyle.Get());
 	if (kind_ == Angle) paintAngleArc(ctx);
+	popMask();
 }
 
 // 波浪线：首尾两点之间铺一条正弦波，两端幅度收为 0（端点仍可拖）

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "SelfTest.h"
+#include "BlacklistMatch.h"
 #include "ConfigMerge.h"
 #include "Shape/RoundBox.h"
 #include "Shape/LinkGeom.h"
@@ -272,6 +273,30 @@ int RunSelfTest()
 		ConfigMerge::MergeObjects(latest2, base2, mine2);
 		check(!latest2.HasKey(L"features") && latest2.GetNamedBoolean(L"keep"),
 			L"配置合并 删除的键生效");
+	}
+
+	// —— 窗口黑名单：标题会变，必须同时认任务管理器里的进程名 ——
+	{
+		using BlacklistMatch::matches;
+		// AI 对话类软件的标题就是当前对话，标题里完全看不到应用名
+		check(matches(L"DeepSeek Harness", L"帮我改一下黑名单逻辑", L"DeepSeek Harness", L"DeepSeek Harness"),
+			L"黑名单 标题随对话变化时按进程名命中");
+		// 开始菜单显示名和进程名不同：Illustrator.exe / Code.exe
+		check(matches(L"Adobe Illustrator 2026", L"未命名-1.ai @ 100% (RGB/预览)", L"Illustrator", L"Adobe Illustrator"),
+			L"黑名单 显示名与进程名不同（Illustrator）也命中");
+		check(matches(L"Visual Studio Code", L"Setting.cpp - SnowAir", L"Code", L"Visual Studio Code"),
+			L"黑名单 进程名是显示名里的一个词（Code）也命中");
+		check(matches(L"ChatGPT.exe", L"新对话", L"ChatGPT", L"ChatGPT"),
+			L"黑名单 词条带 .exe 也能匹配进程名");
+		check(matches(L"deepseek-harness", L"某个会话", L"DeepSeek Harness", L""),
+			L"黑名单 空白/连字符写法差异也能匹配");
+		check(matches(L"Figma", L"设计稿 - Figma", L"Figma", L"Figma"),
+			L"黑名单 标题没变时仍按标题命中（旧词条不受影响）");
+		check(!matches(L"AI", L"email from boss", L"outlook", L"Microsoft Outlook"),
+			L"黑名单 两字母词条不会误伤 email");
+		check(matches(L"AI", L"AI 绘画 - 豆包", L"Doubao", L"豆包"),
+			L"黑名单 两字母词条按整词命中标题");
+		check(!matches(L"", L"任意标题", L"anything", L""), L"黑名单 空词条不匹配");
 	}
 
 	if (g_log)
