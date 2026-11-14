@@ -1052,12 +1052,16 @@ void WinSettingAppearance::initTrayCtrls(Ling::Node* p)
                 auto* img = iconBox->makeChild<Ling::ImageBox>();
                 img->setSize(32.f, 32.f);
                 img->setBorderRadius(SettingTheme::radiusInner);
-                img->setBorder(1.f, SettingTheme::border);
                 img->setFlexShrink(0.f);
                 img->hide();
                 this->trayCustomImg = img;
+                // 「上传」按钮同时充当图标预览的点击层：有图时透明覆盖在 32px 预览上，
+                // 点图标就能重新选图；没图时才显示成「上传」字样。
                 auto* up = iconBox->makeChild<Ling::Button>();
                 up->setSize(34.f, 34.f);
+                up->setPositionType(Ling::Position::Absolute);
+                up->setPosition(Ling::Edge::Left, 0.f);
+                up->setPosition(Ling::Edge::Top, 0.f);
                 up->setText(Lang::get(L"setting.trayUpload"));
                 up->setFontSize(10.f);
                 up->setColor(SettingTheme::textMuted);
@@ -1119,18 +1123,28 @@ void WinSettingAppearance::refreshTrayPreviews()
         trayColorGlyph->setColor(c);
         trayColorGlyph->setHoverColor(c);
     }
-    // 「自定义图标」格：有图显示图，没图显示「上传」
+    // 「自定义图标」格：有图直接显示图（预览本身可点，点了重新选图），没图显示「上传」
     if (!trayCustomImg || !trayUploadBtn) return;
     const std::wstring path = Setting::get()->getTrayCustomIconPath();
     const bool has = !path.empty() && GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
     if (has) {
         trayCustomImg->loadImg(path);
         trayCustomImg->show();
-        trayUploadBtn->hide();
+        // 透明点击层：去掉「上传」字样、底色和描边，图片本身不再套边框
+        trayUploadBtn->setText(L"");
+        trayUploadBtn->setBg(0);
+        trayUploadBtn->setHoverBg(0);
+        trayUploadBtn->setBorder(0.f, 0);
     }
     else {
         trayCustomImg->hide();
-        trayUploadBtn->show();
+        trayUploadBtn->setText(Lang::get(L"setting.trayUpload"));
+        trayUploadBtn->setFontSize(10.f);
+        trayUploadBtn->setColor(SettingTheme::textMuted);
+        trayUploadBtn->setHoverColor(SettingTheme::textMuted);
+        trayUploadBtn->setBg(SettingTheme::secondary);
+        trayUploadBtn->setHoverBg(SettingTheme::secondary);
+        trayUploadBtn->setBorder(1.f, SettingTheme::border);
     }
 }
 
