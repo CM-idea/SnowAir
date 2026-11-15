@@ -128,6 +128,8 @@ SnowAir is a local tool and does not upload any screenshots or text by default; 
 
 Thanks to [xland](https://github.com/xland) and [ScreenCapture](https://github.com/xland/ScreenCapture) for their open source and sharing.
 
+[![LINUX DO](https://img.shields.io/badge/LINUX%20DO-Community-1677FF?style=flat-square)](https://linux.do/)
+
 ## 📄 License
 
 This project is open-sourced under the **Apache License 2.0**; see [`LICENSE`](LICENSE) for the full text, and [`NOTICE`](NOTICE) for third-party components and upstream attributions.

@@ -129,6 +129,8 @@ SnowAir 是本地工具，默认不上传任何截图或文本；联网仅用于
 
 感谢 [xland](https://github.com/xland) 及 [ScreenCapture](https://github.com/xland/ScreenCapture) 的开源与分享。
 
+[![LINUX DO](https://img.shields.io/badge/LINUX%20DO-Community-1677FF?style=flat-square)](https://linux.do/)
+
 ## 📄 许可证
 
 本项目以 **Apache License 2.0** 协议开源，全文见 [`LICENSE`](LICENSE)；第三方组件与上游署名见 [`NOTICE`](NOTICE)。
