@@ -84,7 +84,7 @@ namespace TranslateLangs {
 	}
 
 	// 自动换向：源为空/auto 时用检测结果补上；之后若源与目标同语种，把目标换到对侧（中↔英）。
-	// 默认配置是 auto→en，选中英文文本时正好会撞上"en→en"，这里换成 en→zh-CN。
+	// 默认配置是 auto→en，选中英文文本时正好会命中"en→en"，这里换成 en→zh-CN。
 	inline void resolveDirection(std::wstring& src, std::wstring& tgt, const std::wstring& text)
 	{
 		if (src.empty() || _wcsicmp(src.c_str(), L"auto") == 0) {

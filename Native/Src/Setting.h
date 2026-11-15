@@ -37,6 +37,8 @@ public:
 	void setRunAsAdmin(bool on);
 	std::wstring getLang();
 	void setLang(const std::wstring& lang);
+	bool getLangAuto();
+	void setLangAuto(bool on);
 	void initShortcutKeys();
 	// 录制热键期间挂起/恢复全局热键：挂起后系统热键与低级键盘钩子都不再拦截按键，
 	// 否则用户在设置页录入热键时，按键会先被全局热键消费而无法录入。

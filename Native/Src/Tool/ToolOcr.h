@@ -15,7 +15,7 @@ public:
 	~ToolOcr();
 	void syncToMask(const D2D1_RECT_F& maskRect, int hostX, int hostY);
 	// 宿主是贴图时置 true（须在建窗之前设）：不显示右上角复制按钮；
-	// 且只有识别文本框吃鼠标（可选中/复制文本），其余区域穿透 —— 贴图仍能右键弹菜单 / 滚轮缩放。
+	// 且只有识别文本框接收鼠标事件（可选中/复制文本），其余区域穿透 —— 贴图仍能右键弹菜单 / 滚轮缩放。
 	void setPinOverlay(bool on) { pinOverlay_ = on; }
 	// 贴图宿主用：复制当前选中（无选区则整段）文字，不关闭任何窗口
 	void copyText() { copyAll(); }
@@ -68,7 +68,7 @@ public:
 	void setAnnotPainter(std::function<void(ID2D1DeviceContext*)> fn) { annotPainter_ = std::move(fn); }
 	// 标注变化时由宿主调用，重画镜像层。
 	void repaintOverlay() { if (hwnd) refresh(); }
-	// 主动重绘本面板（提示条/文字改动后调用，别指望宿主那次 refresh 会带上本窗口）
+	// 主动重绘本面板（提示条或文字改动后调用，不要依赖宿主那次 refresh 会包含本窗口）
 	void repaint() { if (hwnd) refresh(); }
 protected:
 	// 覆盖矩形就是选区的精确物理尺寸：DPI 变了由本类按选区重贴，不套系统的建议矩形

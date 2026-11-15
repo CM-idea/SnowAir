@@ -249,7 +249,7 @@ void ToolCap::applyStoredLayout(int kind)
 			if (s.id == rid) { ordered.push_back(s); break; }
 		}
 	}
-	// 收一遍多余分隔符（visibleSlots 运行时还会再折一次）；空布局则原样保留，别把工具栏弄空
+	// 清理一次多余分隔符（visibleSlots 运行时会再次折行）；空布局原样保留，避免工具栏为空
 	std::vector<Slot> merged;
 	for (auto& s : ordered) {
 		if (s.id == L"|" && (merged.empty() || merged.back().id == L"|")) continue;
@@ -567,7 +567,7 @@ void ToolCap::syncOcrTranslateButtons()
 void ToolCap::selectAnnotTool(const std::wstring& id)
 {
 	// 标注与「识别 / 翻译」浮层可以并存：切标注工具时**不**收掉识别面板，
-	// 用户不必先取消识别再标注（浮层里只有文字块吃鼠标，其余区域穿透，仍可正常画）。
+	// 用户不必先取消识别再标注（浮层里只有文字区域接收鼠标事件，其余区域穿透，仍可正常画）。
 	// 切换工具前先结束“展示选中标注属性”模式：快照按上一个工具记录，不能套用到新工具。
 	if (auto* host = annotHost(); host && host->toolSub) host->toolSub->endShapeStylePreview();
 	// 打开工具时属性栏恢复初始属性（关闭后重新打开不沿用上次的选择）。

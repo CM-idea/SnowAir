@@ -12,7 +12,7 @@ public:
 	ToolVideo(WinCap* win);
 	~ToolVideo();
 	bool onSaveKey(bool toClipboard);
-	// —— 「系统按键」用：与点这颗按钮**同一段实现**（按钮的 onClick 也调这里，别写第二份）——
+	// —— 「系统按键」用：与点击该按钮**共用同一段实现**（按钮的 onClick 也调用此处，不要重复实现）——
 	void cmdTogglePierce() { togglePierce(); }
 	void cmdToggleRecord() { togglePlayPause(); }
 	void cmdToggleGif() { onGifClick(); }

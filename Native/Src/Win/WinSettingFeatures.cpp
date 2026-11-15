@@ -479,7 +479,7 @@ void WinSettingFeatures::buildBasic(Ling::Node* p)
 						if (!ok) return;                           // 取消：状态没变，视觉本就不用动
 						Setting::get()->setRunAsAdmin(true);
 						SettingUi::styleToggle(btn, Setting::get()->getRunAsAdmin());
-						// 丢到调度队列再重启：别在弹窗自身的点击回调里同步退出进程
+						// 先投递到调度队列再重启：不要在弹窗自身的点击回调中同步退出进程
 						if (auto* a = Ling::App::get()) a->dq.TryEnqueue([] { ::App::restartAsAdmin(); });
 						else ::App::restartAsAdmin();
 					});
@@ -576,7 +576,7 @@ void WinSettingFeatures::buildRecord(Ling::Node* p)
 		{ Lang::get(L"setting.fnRecMicDefault"), Lang::get(L"setting.fnRecMicOff") }, s->getRecordMic(),
 		[](int i, const std::wstring&) { Setting::get()->setRecordMic(i); }, true);
 	{
-		// 本机拿不到 H.265 编码器时把这个选项标出来：选了它录制必然失败，别让用户自己去撞
+		// 本机缺少 H.265 编码器时标记该选项：选中后录制必然失败，避免用户自行试错
 		std::vector<std::wstring> encOpts{
 			Lang::get(L"setting.fnRecEncoderAuto"), L"H.264", L"H.265" };
 		if (!CapVideo::hasHevcEncoder()) encOpts[2] += Lang::get(L"setting.fnRecHevcUnavailable");

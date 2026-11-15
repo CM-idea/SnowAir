@@ -153,7 +153,7 @@ public:
 	void startGif();
 	std::wstring stopRecord(bool userAbort = false);
 	// 录屏收工（点 ✓ / 保存）时先隐藏屏幕上的那层：编码收尾要 join 采集线程，
-	// 别让用户看着选框和遮罩多停留几百毫秒
+	// 避免用户在选框与遮罩上多停留数百毫秒
 	void hideRecordOverlay();
 	void layoutLongTool();
 	void longToggle();
@@ -386,7 +386,7 @@ private:
 	static constexpr UINT codeScanTimerId{ 0x5701 };
 	static constexpr UINT codeScanDelayMs{ 140 };
 	uint64_t codeScanGen_{ 0 };   // 选区每变一次 +1；后台结果回来时对不上就丢弃
-	// 上一次"安排过扫码/扫过"的选区：选区没动就不必重扫（点一下也算一次 onUp，别让它把角标刷没）
+	// 上一次"安排过扫码/已扫过"的选区：选区未变则无需重扫（点击也会触发一次 onUp，避免角标被刷掉）
 	D2D1_RECT_F codeScanRect_{};
 	// 码卡片是按哪个选区开的：选区真变了才收卡（同一个 rect 上的普通点击不该收掉它）
 	D2D1_RECT_F codeCardRect_{};

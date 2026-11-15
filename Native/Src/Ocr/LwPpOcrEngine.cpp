@@ -80,7 +80,7 @@ OcrPackVariant resolveVariant()
 	auto* s = Setting::get();
 	const OcrPackVariant want = OcrPack::clampVariant(s ? s->getOcrPackVariant() : 0);
 	if (modelsReady(want)) return want;
-	// 用户把选中的那档删了：退到另一档，别让整个 OCR 直接不可用
+	// 用户删除了所选档位：回退到另一档，避免整个 OCR 直接不可用
 	const OcrPackVariant other = want == OcrPackVariant::Small ? OcrPackVariant::Tiny : OcrPackVariant::Small;
 	if (modelsReady(other)) return other;
 	return want;

@@ -706,7 +706,7 @@ void WinSettingQuickTranslate::showLangBox(Ling::Button* btn, bool target)
 			}
 			if (ok) keep.push_back(code);
 		}
-		// 一个语言包都没装：保持完整清单，别让下拉空着（实际请求会由服务链回退到在线）
+		// 未安装任何语言包：保持完整清单，避免下拉框为空（实际请求会由服务链回退到在线）
 		if (!keep.empty()) codes.swap(keep);
 	}
 

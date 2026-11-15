@@ -15,7 +15,7 @@ namespace
 	const std::wstring kAbsent{ L"\x01" };
 
 	// —— 分组语言键（设置页显示时套 Lang；唯一来源是本表）——
-	// ⚠ Lang::get 只按 "段1.段2" 两段取值，所以键名必须是两段 —— 别再写成 cmdkey.grp.xxx
+	// Lang::get 只按 "段1.段2" 两段解析，因此键名必须是两段，不可写成 cmdkey.grp.xxx
 	constexpr const wchar_t* kGrpCommon{ L"cmdkey.grpCommon" };
 	constexpr const wchar_t* kGrpCapture{ L"cmdkey.grpCapture" };
 	constexpr const wchar_t* kGrpRecord{ L"cmdkey.grpRecord" };
@@ -48,13 +48,13 @@ namespace
 		bool reserveChord{ true };
 	};
 
-	// ⚠ 顺序 = 设置页的分组块顺序与组内行顺序（唯一来源，别在设置页另抄一份）
+	// 顺序即设置页的分组块顺序与组内行顺序（唯一来源，设置页不应另行维护一份）
 	const Entry kEntries[] = {
 		// ——— 常规：会话里的通用命令（窗口内）———
 		// 整组只读：均为既有行为的固定键，设置页只作提示、不提供改绑；键位按钮置灰，行名称保持正常色。
 		// 只读仅限制改绑，不影响派发（见 scan 与头文件说明）。
 		//
-		// ⚠ 关闭 / 完成 / 复制 / 存为文件 的掩码是 **SurfaceAll**（含全屏画布），不是 kSession：
+		// 关闭 / 完成 / 复制 / 存为文件 的掩码为 **SurfaceAll**（含全屏画布），不是 kSession：
 		//   它们原为 onKey 里不分界面的分支 —— 画布中 Esc 需能退出（穿透中先退穿透）、
 		//   Ctrl+C / Ctrl+S 需能复制保存且不关画布。
 		{ L"cmd_close",       kGrpCommon, L"cmdkey.close",       Scope::Session, Scene::Capture, SurfaceAll, true, true, L"Esc" },
@@ -100,7 +100,7 @@ namespace
 		{ L"cmd_video_record",    kGrpCapture, L"cmdkey.videoRecord",    Scope::Session, Scene::Capture, kCapture, true, false, L"" },
 		{ L"cmd_pin",             kGrpCapture, L"cmdkey.pin",            Scope::Session, Scene::Capture, kCapture, true, false, L"" },
 		{ L"cmd_ocr",             kGrpCapture, L"cmdkey.ocr",            Scope::Session, Scene::Capture, kCapture, true, false, L"W" },
-		// Native 用 ZXing（真实解码），所以这条是实装的（QT6 那边仍是纯桩）
+		// Native 使用 ZXing 实际解码，因此该命令已实装。
 		{ L"cmd_scan_qrcode",     kGrpCapture, L"cmdkey.scanQrcode",     Scope::Session, Scene::Capture, kCapture, true, false, L"Q" },
 		{ L"cmd_translate",       kGrpCapture, L"cmdkey.translate",      Scope::Session, Scene::Capture, kCapture, true, false, L"F" },
 		{ L"cmd_scroll_capture",  kGrpCapture, L"cmdkey.scrollCapture",  Scope::Session, Scene::Capture, kCapture, true, false, L"" },
@@ -245,12 +245,12 @@ namespace
 	}
 
 	// 表内顺序查找：命中一条"掩码与 surface 有交集、已实装"的命令。
-	// ⚠ readOnly 的**不跳过**：只读 = 只挡"改绑"，键位仍按默认值**照旧派发**
+	// readOnly 项**不跳过**：只读仅限制"改绑"，键位仍按默认值**照常派发**
 	//   （「常规」整组、层级退出、删除标注都是这一类）。
 	//
 	// 匹配优先级：**修饰键完全一致 > 子集命中**。
 	//   子集命中（(mods & m) == m）是为了照顾"按住 Shift 打个 1"这类边角（键码仍是 VK_1），
-	//   但如果只按子集算，`Ctrl+Shift+Z`（重做）会先撞上排在更前面的 `Ctrl+Z`（撤销）——
+	//   但如果只按子集算，`Ctrl+Shift+Z`（重做）会先匹配到排在更前面的 `Ctrl+Z`（撤销）——
 	//   所以先把精确匹配的那条挑出来，挑不到才回退到第一个子集命中。
 	std::wstring scan(unsigned mods, unsigned key, unsigned surface)
 	{
@@ -389,7 +389,7 @@ bool keyHits(const std::wstring& id, unsigned vk)
 	if (k != 0) return k == vk && liveMods() == m;
 	// 纯修饰键绑定：按下的必须就是这个修饰键本身（Alt / Ctrl / Shift 各占一个位）。
 	// 这里不能要求 liveMods() 完全等于 m —— 修饰键的 keydown 到达时，键盘状态有时还没把它算进去，
-	// 严格要求会出现"按了没反应、下一次按才生效"的抽风；只要求"没有多按别的修饰键"即可
+	// 若严格匹配，会出现"按下无响应、下一次才生效"的异常；改为只要求"未额外按下修饰键"即可
 	const unsigned bit = modBitOf(vk);
 	return bit != 0 && (m & bit) != 0 && (liveMods() & ~m) == 0;
 }

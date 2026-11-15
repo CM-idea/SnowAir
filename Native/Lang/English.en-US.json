@@ -564,11 +564,6 @@
   "util": {
     "file": "File"
   },
-  "update": {
-    "found": "New version available",
-    "tip": "The new version has been downloaded. Click OK to restart and finish the upgrade",
-    "noPermission": "The program folder is not writable, so it can not update itself. Click OK to open the download page."
-  },
   "ocr": {
     "fail": "Recognition failed",
     "compare": "Compare original"

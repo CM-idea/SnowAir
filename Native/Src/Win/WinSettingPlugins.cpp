@@ -475,7 +475,7 @@ void WinSettingPlugins::setBadges(Ling::Node* row, const std::vector<std::wstrin
 void WinSettingPlugins::refreshStatus()
 {
 	// —— 离线文字识别：徽章列出**所有已安装档位**（与下拉当前选择无关）——
-	// 用户口径同离线翻译：切到还没下载的档位时，已装好的另一档提示不能消失。
+	// 交互定义同离线翻译：切换到尚未下载的档位时，已安装的另一档位提示不能消失。
 	const OcrPackVariant ocrVariant = OcrPack::clampVariant(ocrVariantIdx);
 	std::vector<std::wstring> ocrBadges;
 	for (int i = 0; i < OcrPack::kCount; ++i) {
@@ -489,7 +489,7 @@ void WinSettingPlugins::refreshStatus()
 		&& OcrRuntimeManager::instance().isInstalled(ocrVariant);
 
 	// —— 离线翻译：徽章列出**所有已安装语言包**（与下拉当前选择无关）——
-	// 用户口径：换到别的（未安装）语言时，已装好的语言包提示不能消失。
+	// 交互定义：切换到其他（未安装）语言时，已安装语言包的提示不能消失。
 	auto& trMgr = TranslateModelManager::instance();
 	std::vector<std::wstring> trBadges;
 	for (const auto& id : trMgr.installedPacks()) {
@@ -788,7 +788,7 @@ void WinSettingPlugins::choosePluginDir()
 	migrating = true;
 	startDots(summary, Lang::get(L"setting.pluginsDirMoving"), L" 0%");
 	auto setMovingPct = [this](unsigned pct) {
-		if (!dotsRunning) return;   // 已收工（或页面已关），别再覆盖计数行
+		if (!dotsRunning) return;   // 已结束（或页面已关闭），不再覆盖计数行
 		dotsSuffix = L" " + std::to_wstring(pct) + L"%";
 		applyDots();
 	};
@@ -798,7 +798,7 @@ void WinSettingPlugins::choosePluginDir()
 		const std::wstring failed = copyPluginComponents(oldRoot, newRoot,
 			[this, weak, setMovingPct](unsigned pct, uint64_t, uint64_t) {
 				onUi([this, weak, setMovingPct, pct]() {
-					if (!weak.lock()) return;   // 页面已关：别再碰界面
+					if (!weak.lock()) return;   // 页面已关闭：不再操作界面
 					setMovingPct(pct);
 				});
 			});
@@ -1096,7 +1096,7 @@ void WinSettingPlugins::deleteCard(int idx)
 		if (idx == CardOcr) {
 			const OcrPackVariant v = OcrPack::clampVariant(ocrVariantIdx);
 			OcrModelManager::instance().uninstall(v);
-			// 运行时是各档共用的：另一档还在就保留，别把还能用的删掉
+			// 运行时为各档共用：另一档仍在则保留，不要删除仍可用的文件
 			const OcrPackVariant other = v == OcrPackVariant::Small ? OcrPackVariant::Tiny : OcrPackVariant::Small;
 			if (!OcrModelManager::instance().isInstalled(other))
 				OcrRuntimeManager::instance().uninstall(v);

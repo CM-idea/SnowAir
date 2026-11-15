@@ -49,6 +49,14 @@ void Lang::dispose()
 	lang.reset();
 }
 
+std::wstring Lang::systemLangCode()
+{
+	wchar_t buf[LOCALE_NAME_MAX_LENGTH]{};
+	if (GetLocaleInfoEx(LOCALE_NAME_USER_DEFAULT, LOCALE_SNAME, buf, LOCALE_NAME_MAX_LENGTH) <= 0)
+		return L"zh-CN";
+	return _wcsnicmp(buf, L"zh", 2) == 0 ? L"zh-CN" : L"en-US";
+}
+
 Lang* Lang::get()
 {
 	return lang.get();

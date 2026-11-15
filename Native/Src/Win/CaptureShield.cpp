@@ -7,7 +7,7 @@ namespace
 	constexpr const wchar_t* kShieldClass{ L"SnowAirCaptureShield" };
 	constexpr UINT_PTR kTimeoutTimerId{ 0x5A17 };
 	constexpr UINT kMsgDrain{ WM_APP + 0x421 };
-	// 兜底：万一覆盖窗没建起来（抓屏失败、窗口创建失败），别让一层看不见的窗口一直吃鼠标
+	// 兜底：若覆盖窗未能创建（抓屏失败或窗口创建失败），避免一层不可见窗口持续拦截鼠标输入
 	constexpr UINT kTimeoutMs{ 2000 };
 
 	HWND g_shield{ nullptr };

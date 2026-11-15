@@ -866,7 +866,7 @@ void WinPin::onDown(POINT pos, BOOL isRight)
 
 void WinPin::onMove(POINT pos)
 {
-	// 兜底：鼠标已松开却没收到 up（系统对话框 / 捕获丢失）时，别让贴图继续跟着鼠标跑
+	// 兜底：鼠标已松开却未收到 up（系统对话框 / 捕获丢失）时，避免贴图继续跟随鼠标
 	const bool lbtnDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
 	if ((annotMouseDown || edgeResize) && pos.x != INT_MAX && !lbtnDown) {
 		annotMouseDown = false;
@@ -1333,7 +1333,7 @@ void WinPin::applyImageTransform(int quarterTurns, bool flipH)
 void WinPin::refreshOcrPanel()
 {
 	// 缩放中 / 缩略图态：先不动叠加层。缩放是逐帧的，每帧重建一遍叠加层既慢，
-	// 重建又会撞上"窗口改尺寸（SWP_NOREDRAW）还没重绘"的空档，看起来就是"一缩放结果就没了"。
+	// 重建又会遇到"窗口改尺寸（SWP_NOREDRAW）还没重绘"的空档，看起来就是"一缩放结果就没了"。
 	// 这两种情况下统一等停手（定时器 102）或退出缩略图后再重建一次。
 	if (ocrHiddenByZoom || thumbnail) return;
 	if (toolOcr && toolOcr->hwnd) {
@@ -1360,7 +1360,7 @@ void WinPin::toggleOcrPanel(bool copyText)
 	if (!getAnnotPixels(px, sz)) return;
 	auto result = OcrService::instance().recognize((int)sz.width, (int)sz.height, px.data());
 	toolOcr = std::make_unique<ToolOcr>(this, result, false, std::move(px), (int)sz.width, (int)sz.height);
-	// 贴图叠加：不显示右上角复制按钮；只有识别文本框吃鼠标（可选中/复制），其余穿透。
+	// 贴图叠加：不显示右上角复制按钮；只有识别文本框接收鼠标事件（可选中/复制），其余穿透。
 	// 必须在建窗之前设置。
 	toolOcr->setPinOverlay(true);
 	// 浮层压在贴图之上：锁定/编辑/关闭改由浮层镜像绘制并转发点击，
@@ -1381,7 +1381,7 @@ void WinPin::toggleOcrPanel(bool copyText)
 	// 自动识别（钉图即识别）不抢剪贴板，避免把用户剪贴板里的东西冲掉
 	if (copyText && result.ok && !result.text.empty()) Ling::Util::setTextToClipboard(result.text);
 	// 贴图识别的是同一张图，结果出来之后就不会再需要引擎了 —— 立刻还回去（常驻约 100MB），
-	// 换一张贴图或重新识别时再重建，别让它陪着贴图一直挂着。
+	// 仅在更换贴图或重新识别时重建，避免其随贴图长期驻留。
 	LwPpOcrEngine::release();
 	refresh();
 }

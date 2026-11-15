@@ -77,7 +77,7 @@ void AnnotHost::onHistoryChanged()
 void AnnotHost::refreshFiltersAbove(ShapeBase* changed)
 {
 	if (!history) return;
-	// changed 已不在列表里（被删/被撤销）→ 找不到"它上面"是谁，干脆全部重算
+	// changed 已不在列表里（被删/被撤销）→ 找不到"它上面"是谁，直接全部重算
 	if (changed) {
 		bool found = false;
 		for (auto& s : history->shapes) {

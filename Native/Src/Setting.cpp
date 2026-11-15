@@ -34,7 +34,7 @@
 namespace {
     std::unique_ptr<Setting> setting;
     // 全局热键表：id（配置键 = 设置页那一行）→ msgId（RegisterHotKey 的 id，也是 onHotKey 收到的值）。
-    // ⚠ 只有**真正接了动作**的行才在这里；设置页里其余几行（show_cursor / translate_selection /
+    // 只有**真正绑定了动作**的行才在此处；设置页里其余几行（show_cursor / translate_selection /
     //   toggle_pins）目前没有对应实现，不注册 —— 否则会出现"按键被消费但没有任何效果"。
     struct HotkeyEntry { const wchar_t* id; UINT msgId; };
     const HotkeyEntry kHotkeys[] = {
@@ -67,15 +67,15 @@ namespace {
         return L"";
     }
     constexpr UINT_PTR kHotkeyRetryTimerId{ 0x5A18 };
-    // 兜底模式下的自愈周期：只要还有热键落在钩子上，就按这个间隔重走一遍
-    // 「注册 + 重装钩子」。为什么不试几次就停：钩子会被系统静默摘掉（回调超时）、
-    // 会被别的程序后装的钩子抢在前面，一旦放弃重试，那几条热键就一直哑着，
-    // 只能靠重启或开关一次截图会话救回来。
+    // 兜底模式下的自动恢复周期：只要仍有热键落在钩子上，就按该间隔重新执行一遍
+    // 「注册 + 重装钩子」流程。该流程不设重试次数上限，原因是：钩子会被系统静默摘除（回调超时），
+    // 也可能被其他程序后安装的热键抢占；一旦放弃重试，这些热键将长期失效，
+    // 只能通过重启程序或开关一次截图会话来恢复。
     constexpr UINT kHotkeyRetryMs{ 30000 };
     // 配置文件的默认内容。空文件、坏 JSON、缺键都拿它兜底，所以这里列出的每一项
     // 都是代码里会直接按名字取的（见 getLang / getAutoStart）。
     // 全局热键**不在这里**给默认值 —— 键位统一由 getShortcutKey 的内置默认表决定（defaultShortcutOf）
-    constexpr std::wstring_view defaultConfig{ LR"""({"common":{"autoStart":true,"runAsAdmin":false,"language":"zh-CN","updateCheckFreq":0}})""" };
+    constexpr std::wstring_view defaultConfig{ LR"""({"common":{"autoStart":true,"runAsAdmin":false,"language":"zh-CN","languageAuto":true,"updateCheckFreq":0}})""" };
 
     // System32 下的系统工具全路径（schtasks 等）。取不到时只给文件名，让系统按 PATH 找。
     std::wstring systemTool(const wchar_t* name)
@@ -107,7 +107,7 @@ namespace {
             CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
             return -1;
         }
-        // schtasks 正常是秒级返回；真卡住也别把 UI 线程一直吊着
+        // schtasks 正常在秒级返回；若确实卡住，也不要长时间阻塞 UI 线程
         const DWORD wait = WaitForSingleObject(pi.hProcess, 15000);
         DWORD code = 0;
         if (wait == WAIT_OBJECT_0) GetExitCodeProcess(pi.hProcess, &code);
@@ -156,7 +156,7 @@ namespace {
 
     // 注册「登录时以最高权限启动」的计划任务（同名任务会先被 /F 覆盖）。成功返回 true。
     //
-    // 用 XML 注册，而不是拼 schtasks 的 /TR 命令行 —— 后者有两个坑：
+    // 使用 XML 注册，而不是拼接 schtasks 的 /TR 命令行 —— 后者有两个已知问题：
     //   1) /TR 里要放的是一条「将来要执行的命令行」，路径带空格就得加引号；这层引号还要穿过
     //      cmd / CreateProcess / schtasks 三层解析，少转义一层就静默登记失败（"C:\Program Files"、
     //      带空格的中文目录全中招，开关看着是开的，重启后什么也没发生）。
@@ -954,7 +954,7 @@ void Setting::setShortcutKey(const std::wstring& type, const std::vector<std::ws
 
 std::wstring Setting::getShortcutKey(const std::wstring& type)
 {
-    // 一路用带默认值的重载：启动时 ensureDefaults 已经补齐过，这里只是别让运行期
+    // 一律使用带默认值的重载：启动时 ensureDefaults 已补齐，此处只是避免运行期
     // 意外（配置被外部改动、问了个没配过的 type）变成一次崩溃
     auto obj = configObj.GetNamedObject(L"shortcutKey", nullptr);
     // 配置里"有这一行"就以它为准 —— 包括用户按 Backspace/Delete 清空后写进去的空串，
@@ -1110,7 +1110,7 @@ void Setting::setAutoStart(bool autoStart)
 
         if (getRunAsAdmin() && !Util::isBuiltinAdminAccount()) {
             // 需要静默提权（普通管理员账户 + UAC 过滤）：用计划任务（最高权限）在登录时启动。
-            // 计划任务不会出现在「启动项」里，这是系统的取舍。
+            // 计划任务由登录触发器启动，可在「任务计划程序」中查看或删除。
             registerLogonTask(selfPath, schtasks);
         }
         else {
@@ -1279,8 +1279,28 @@ void Setting::save()
     }
 }
 
+bool Setting::getLangAuto()
+{
+    auto common = configObj.GetNamedObject(L"common", nullptr);
+    if (!common) return false;
+    auto v = common.GetNamedValue(L"languageAuto", nullptr);
+    return v && v.ValueType() == JsonValueType::Boolean && v.GetBoolean();
+}
+
+void Setting::setLangAuto(bool on)
+{
+    auto common = configObj.GetNamedObject(L"common", nullptr);
+    if (!common) {
+        common = JsonObject();
+        configObj.SetNamedValue(L"common", common);
+    }
+    common.SetNamedValue(L"languageAuto", JsonValue::CreateBooleanValue(on));
+    save();
+}
+
 std::wstring Setting::getLang()
 {
+    if (getLangAuto()) return Lang::systemLangCode();
     auto common = configObj.GetNamedObject(L"common", nullptr);
     if (!common) return L"zh-CN";
     return std::wstring{ common.GetNamedString(L"language", L"zh-CN") };
@@ -2132,7 +2152,7 @@ namespace {
         Microsoft::WRL::ComPtr<IUIAutomation> automation;
         if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
             IID_PPV_ARGS(automation.GetAddressOf()))) || !automation) return {};
-        // 个别程序的 UIA 提供者很慢：给跨进程调用设上限，别把热键回调卡住
+        // 个别程序的 UIA 提供者响应很慢：为跨进程调用设置上限，避免阻塞热键回调
         Microsoft::WRL::ComPtr<IUIAutomation2> automation2;
         if (SUCCEEDED(automation.As(&automation2)) && automation2) {
             automation2->put_ConnectionTimeout(200);
@@ -2288,7 +2308,7 @@ void Setting::runHotkeyAction(const std::wstring& id)
     if (auto* cap = WinCap::get()) {
         const std::wstring chord = getShortcutKey(id);
         if (cap->commandFromChord(chord)) return;
-        // ⚠ 「屏幕录制」这条全局热键只负责**打开录屏功能**（进录屏会话），不兼职
+        // 「屏幕录制」这条全局热键只负责**打开录屏功能**（进入录屏会话），不兼任
         // 「开始/暂停录制」。后者是「系统按键」里的 cmd_record_toggle，默认也是 F2，
         // 但用户改过键位后必须按新的生效 —— 两者语义不同，不能在这里按 id 兜底转派。
     }
@@ -2349,14 +2369,14 @@ void CALLBACK Setting::onHotkeyRetry(HWND, UINT, UINT_PTR id, DWORD)
     auto* self = get();
     if (!self) return;
     ++self->hotkeyRetryTick;
-    // ⚠ **不设次数上限**。以前试满 1 分钟就停，于是：开机时某条键被别人占了一下 →
-    // 掉到钩子上 → 对方放开了也没人再抢 → 钩子再被系统摘掉 / 被别的程序抢在前面 →
-    // 这条热键就永久哑了（实测现象就是"按了几次没反应，托盘点一次截图之后又好了"）。
-    // 现在只要还有键落在钩子上就每 30 秒重来一遍，这一遍同时干三件事：
+    // **不设重试次数上限**。此前重试满 1 分钟即停止，导致：开机时某条键被其他程序短暂占用 →
+    // 落到钩子上 → 对方释放后无线程重新抢占 → 钩子再被系统摘除或被其他程序抢占 →
+    // 该热键即永久失效（实测表现为"按下数次无响应，托盘点击一次截图后恢复"）。
+    // 现在只要仍有键落在钩子上，就每 30 秒重试一次，每次同时完成三件事：
     //   ① 再抢一次 RegisterHotKey —— 对方放开了就立刻回到干净路径，并把钩子摘掉；
-    //   ② 重建钩子 —— 被系统摘掉 / 上次没装成功的钩子在这里被重新拉起来（自愈）；
+    //   ② 重建钩子 —— 被系统摘除或上次安装失败的钩子在此重新安装（自动恢复）；
     //   ③ 清掉过期钩子线程 —— 换代后没退干净的旧线程会自己卸钩退出（见 HotkeyHook）。
-    // 全都回到 RegisterHotKey 时，applyHotkeys 里会顺手 stopHotkeyRetry()，定时器自己停。
+    // 全都回到 RegisterHotKey 时，applyHotkeys 中会同时调用 stopHotkeyRetry()，定时器随之停止。
     self->applyHotkeys();
 }
 
@@ -3254,7 +3274,7 @@ void Setting::clearOtherFiles()
 // ================= 剪切板历史 =================
 // 剪贴板历史保存在 local.json 的 clipboard 节，不写入 config.json：
 //  - 每次复制都会重写配置，在同步盘上会持续产生冲突；
-//  - 剪贴板内容（可能包含密码、验证码）不应随配置上传云端；
+//  - 剪贴板内容属敏感数据，不应随配置同步至云端；
 //  - 本机剪贴板历史对其他电脑没有意义。
 // 不限条数：文本直接进索引，图片落盘到 dataPath\Clipboard（历史页用缩略图展示）。
 namespace {

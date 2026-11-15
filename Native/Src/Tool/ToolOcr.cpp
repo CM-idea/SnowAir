@@ -1376,7 +1376,7 @@ void ToolOcr::rebuildEditors()
 		//    按**真实排版尺寸**缩放并居中到识别框（字形与框上下齐平、左右拉满）。
 		//    墨迹比按脚本分：方块字占 em 的比例比西文大，用同一个比会把中文算大、与上下行叠在一起。
 		std::wstring text = reg.displayText.empty() ? reg.text : reg.displayText;
-		// 圆点统一成「• 」：引擎有时给 ·（小中点）、有时给 •、有时干脆不认，
+		// 圆点统一成「• 」：引擎有时给 ·（小中点）、有时给 •、有时完全不识别，
 		// 直接画出来大小不一，看着就像"没带圆点"。这里统一成一个字形。
 		if (reg.bullet && !text.empty()) {
 			stripLeadingBullet(text);
@@ -1890,7 +1890,7 @@ void ToolOcr::setTranslatedResult(OcrResult result, const std::vector<std::wstri
 	}
 	result_ = std::move(result);
 	applyTranslateLines(lines);
-	// 翻译面板是先用**空结果**建的（识别在后台跑），那一步采样不到区域，底色只能是默认白。
+	// 翻译面板先以**空结果**创建（识别在后台运行），此时采样不到区域，底色只能取默认白。
 	// 结果一到就按真实区域重采一次底色/文字色 —— 否则深色、彩色底图上会糊一块白板，
 	// 和 OCR 识别模式的观感完全对不上。
 	if (!srcImage_.empty())
@@ -2280,15 +2280,15 @@ BOOL ToolOcr::setCursor()
 
 LRESULT ToolOcr::onHitTest(const POINT screenPos)
 {
-	// 只有识别文本框附近吃鼠标：可选中/复制文字；其余区域一律穿透。
+	// 只有识别文本框附近接收鼠标事件：可选中/复制文字；其余区域一律穿透。
 	//  - 贴图模式：穿透后贴图仍能右键弹菜单 / 滚轮缩放；
 	//  - 截图模式：穿透后主画布照常收到鼠标 —— 识别面板开着也能继续画标注，不必先取消识别。
 	POINT client = screenPos;
 	ScreenToClient(hwnd, &client);
 	if (nearText(client)) return HTCLIENT;
-	// 贴图宿主控件在浮层最上层：命中就吃鼠标（点击由 chromeDown_ 转给宿主）
+	// 贴图宿主控件在浮层最上层：命中即接收鼠标事件（点击由 chromeDown_ 转发给宿主）
 	if (pinOverlay_ && chromeHit_ && chromeHit_(client)) return HTCLIENT;
-	// 右上角按钮平时隐藏，只有悬停在选区内才吃鼠标（隐藏时点击继续落到宿主画布上）
+	// 右上角按钮平时隐藏，只有悬停在选区内才接收鼠标事件（隐藏时点击继续落到宿主画布上）
 	if (buttonsShown_) {
 		if (copyBtn && copyBtn->isPosIn(client)) return HTCLIENT;
 		if (compareBtn && compareBtn->isPosIn(client)) return HTCLIENT;

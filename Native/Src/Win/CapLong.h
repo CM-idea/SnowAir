@@ -34,7 +34,7 @@ public:
 	void startCapture();
 	void setPaused(bool on);
 	// 是否处于滚动截图会话中（含暂停与编辑态，它们属同一次滚动）。
-	// 选区锁定判定用；⚠ 不可命名为 isCapturing（成员变量已占用该名字）
+	// 选区锁定判定用；不可命名为 isCapturing（该名字已被成员变量占用）
 	bool capturing() const { return isCapturing; }
 	void onPreviewPanChanged();
 	bool hitPreview(POINT clientPos) const;

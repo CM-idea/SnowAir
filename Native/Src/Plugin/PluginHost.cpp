@@ -187,7 +187,7 @@ std::wstring fileNameOf(const std::wstring& path)
     return std::filesystem::path(path).filename().wstring();
 }
 
-// 截图完成时会顺手复制到剪贴板：同一张图在「截图历史」和「剪贴板历史」各有一条
+// 截图完成时会同时复制到剪贴板：同一张图在「截图历史」和「剪贴板历史」各有一条
 // （历史是真正的截图文件，剪贴板是缓存目录里的同名内容 PNG）。
 // 信封按内容把它们合并成一张卡，所以删除也要两条一起删；这里用字节比对确认是同一张图。
 bool sameFileBytes(const std::wstring& a, const std::wstring& b)
@@ -333,7 +333,7 @@ int entryGet(void*, int index, SnowAirEntry* out)
         index < static_cast<int>(g_entryTags.size()) &&
         g_entryTags[static_cast<size_t>(index)].find(L"便签") != std::wstring::npos;
     std::wstring label = entryLabelOf(it);
-    /* SVG 代码在轻雪里是一张图：卡片标题用 SVG，别把代码铺出来。
+    /* SVG 代码在轻雪里是一张图：卡片标题使用 SVG，不要将源码铺开。
        带「便签」标签的记录仍按便签处理，哪怕正文刚好是 SVG。 */
     if (!noteTagged && out->kind == SNOWAIR_ENTRY_TEXT &&
         it.source == L"clipboard" && Util::isSvgText(it.text)) {

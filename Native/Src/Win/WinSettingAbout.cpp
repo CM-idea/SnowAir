@@ -64,7 +64,7 @@ std::wstring writeArtToTemp()
 	return file.wstring();
 }
 
-// 旧版本会把图留在配置目录里，这里顺手清掉
+// 旧版本会把图留在配置目录里，此处一并清理
 void removeLegacyArtFile()
 {
 	const auto legacy = Setting::get()->getDataPath() / L"about-art.png";

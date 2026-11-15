@@ -417,7 +417,7 @@ void History::removeHoverShape()
 }
 
 // 「整体删除」：箭头/线段 ↔ 线上文字是一个整体，删一个同组的另一个一起走。
-// 注意别把它做成 removeShape 的默认行为 —— finishEdit 里异步删"空文字"用的还是
+// 注意不要把它做成 removeShape 的默认行为 —— finishEdit 里异步删除"空文字"用的仍是
 // removeShape（单删），否则删一个空标签会把整条线也带走
 void History::removeShapeGroup(ShapeBase* target)
 {

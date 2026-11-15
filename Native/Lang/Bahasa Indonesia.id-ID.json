@@ -359,10 +359,5 @@
     },
     "util": {
         "file": "File"
-    },
-    "update": {
-        "found": "Versi baru tersedia",
-        "tip": "Versi baru sudah selesai diunduh, klik \"OK\" untuk memulai ulang sekarang dan menyelesaikan pembaruan",
-        "noPermission": "Folder program tidak dapat ditulisi, pembaruan otomatis tidak dapat dilakukan. Klik \"OK\" untuk membuka halaman unduhan"
     }
 }

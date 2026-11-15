@@ -357,7 +357,7 @@ void ClipPin::onCreated()
 			return;
 		}
 		if (hoverShown_) {
-			// 停悬控件自己处理点击；按下时不要顺手把窗口拖走/缩放
+			// 停悬控件自己处理点击；按下时不要同时拖动或缩放窗口
 			if (btnLock_ && btnLock_->isPosIn(pos)) return;
 			if (!locked_ && canSave_ && btnSave_ && btnSave_->isPosIn(pos)) return;
 			if (!locked_ && btnClose_ && btnClose_->isPosIn(pos)) return;
@@ -407,7 +407,7 @@ void ClipPin::onCreated()
 		SetCapture(hwnd);
 		});
 	onMouseMove.add([this](POINT pos) {
-		// 兜底：鼠标已松开却没收到 up（系统对话框 / 捕获丢失）时，别让贴屏继续跟着鼠标跑
+		// 兜底：鼠标已松开却未收到 up（系统对话框 / 捕获丢失）时，避免贴屏继续跟随鼠标
 		const bool lbtnDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
 		if ((dragging_ || resizing_) && pos.x != INT_MAX && !lbtnDown) {
 			dragging_ = false;

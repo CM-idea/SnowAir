@@ -3,24 +3,24 @@
 #include <vector>
 
 // 「系统按键」：本软件**命令**的可配置按键（默认值 + 冲突判定 + 查表派发）。
-// 移植自 QT6 的 src/app/CommandKeys.h/.cpp；按用户口径**砍掉了「贴图/镜像」组**，
+// 由桌面端同源模块移植而来；按产品定义**不包含「贴图/镜像」组**，
 // 因此界面掩码也从 6 位收敛为 3 位（截图 / 录屏 / 全屏画布）。
 //
-// ⚠ 为什么不能并进「全局热键」（Setting 的 kHotkeys）——这是设计约束，别再走回头路：
+// 设计约束：不能并入「全局热键」（Setting 的 kHotkeys）。原因如下：
 //   全局热键走 RegisterHotKey / 低级键盘钩子，**命中后会消费按键**。
 //   撤销/复制/完成/关闭 这类命令键一旦进全局钩子，用户在**任何进程**里按
 //   Ctrl+Z / Ctrl+C / Enter / Esc 都会被本软件消费 —— 这不符合命令键的作用域。
 //   所以命令键一律走**窗口内**：只在本软件的会话窗口有焦点时生效，
 //   由会话窗口把按键交给 actionForKey() 查这张表。
 //
-//   ⚠ 只有三条是 Scope::Global（临时全局键），而且都只在**对应会话期间**生效：
+//   只有三条是 Scope::Global（临时全局键），且都只在**对应会话期间**生效：
 //       · 「开始/暂停录制」—— 录屏时焦点在被录的程序上，窗口内根本收不到；
 //       · 「鼠标穿透」「隐藏/显示工具栏」—— 它们本身就把焦点交出去（或把工具栏收起来），
 //         没有一条全局的路就切不回来。
 //     其余命令键一律只在窗口内生效（GIF / 系统音量 / 麦克风也是：它们只在工具栏有焦点时
 //     用得到），以免在其他进程中无谓地消费用户的按键。
 //
-// ⚠ 键位可以**跨界面重复**：同一个键在不同工具栏上可以是两条不同命令 ——
+// 键位允许**跨界面重复**：同一个键在不同工具栏上可对应两条不同命令 ——
 //   冲突判定按**界面掩码有无交集**做，无交集就不算冲突（见 boundToOther）。
 namespace CommandKeys
 {
@@ -63,7 +63,7 @@ namespace CommandKeys
 	// 写入并落盘；chord 为空 = 清除。未登记的 id / 只读行一律不写
 	void setBinding(const std::wstring& id, const std::wstring& chord);
 	// 「恢复默认」：删掉全部用户覆盖项，binding() 于是逐条回落命令表里的默认键位。
-	// ⚠ 不能写成 setBinding(id, "")：那是"用户显式清空"，会保持不绑而不是回落默认。
+	// 不能写成 setBinding(id, "")：这属于"用户显式清空"，会保持不绑定而不是回落默认值。
 	void resetBindings();
 	// 是否存在用户改绑（存过值就算改过，包括"覆盖时把旧主解绑成空"）→ 供「恢复默认」按钮置灰
 	bool anyCustomBinding();
@@ -108,7 +108,7 @@ namespace CommandKeys
 	std::wstring actionForChord(const std::wstring& chord, unsigned surface);
 
 	// 命令 id → 工具栏**动作 id**（ToolCap 的槽位/动作口径）；空串 = 不是工具栏动作。
-	// ⚠ 设置页的行 id 是"命令"的稳定标识，工具栏槽 id 是**布局持久化的键**，两者不能混用。
+	// 设置页的行 id 是命令的稳定标识，工具栏槽 id 是**布局持久化的键**，两者不可混用。
 	std::wstring toolbarActionForId(const std::wstring& id);
 	// 需要先选中子工具的（包浆/水印/高亮）；空串 = 不需要
 	std::wstring subToolForId(const std::wstring& id);

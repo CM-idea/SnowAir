@@ -197,7 +197,7 @@ void ShapePen::resetShiftStraight()
 // 按住 Shift 画标准线：只约束"按下 Shift 之后"画出来的那一段，不碰已经手绘出来的轨迹。
 // 按下 Shift 那一刻记下"当时画到哪"（锚点）与"已经有多少个采样点"（基线），之后每帧把点截回
 // 基线、再补一个约束到 8 方向的端点 —— 提交出来就是"一段手绘 + 一段标准直线"。
-// 松手只清会话状态，点全都留着继续手绘（与 QT6 版 applyDrawConstraint 的分段语义一致）。
+// 松手只清会话状态，采样点全部保留以继续手绘（分段语义与既有 applyDrawConstraint 实现一致）。
 void ShapePen::applyShiftStraight(float x, float y)
 {
 	const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;

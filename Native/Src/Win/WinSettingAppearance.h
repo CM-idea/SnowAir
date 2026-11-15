@@ -203,5 +203,5 @@ private:
 	std::array<Ling::Node*, 4> trayDots{};       // 单选中心点（选中态绿色实心圆）
 	Ling::Button* trayColorGlyph{ nullptr };     // 「自定义颜色」格：可点字形（点开系统取色器）
 	Ling::ImageBox* trayCustomImg{ nullptr };    // 「自定义图标」格的图片预览
-	Ling::Button* trayUploadBtn{ nullptr };      // 「自定义图标」格的「上传」按钮
+	Ling::Button* trayUploadBtn{ nullptr };      // 「自定义图标」格的点击层（无图时显示「上传」）
 };

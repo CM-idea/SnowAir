@@ -13,6 +13,8 @@ public:
 	static void dispose();
 	static Lang* get();
 	static std::wstring get(const std::wstring& keyPath);
+	// 系统语言：中文（简/繁）→ zh-CN，其余 → en-US
+	static std::wstring systemLangCode();
 	std::vector<std::pair<std::wstring, std::wstring>> getSupportedLang();
 	void initLang(const std::wstring& langCode);
 public:

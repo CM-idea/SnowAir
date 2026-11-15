@@ -635,7 +635,7 @@ void WinSettingAppearance::buildRackTab(Ling::Node* host)
             const int mode = std::clamp(i, 0, 2);
             auto* st = Setting::get();
             st->setRackInt(L"rack.display_mode", mode);
-            // 旧版插件只认这个布尔值，顺手同步，升级/回退都不至于失效。
+            // 旧版插件只认这个布尔值，一并同步，升级/回退都不至于失效。
             st->setRackFlag(L"rack.auto_retract", mode == 0);
             PluginHost::instance().onSettingChanged(L"rack.display_mode");
         }, true);
@@ -700,20 +700,25 @@ void WinSettingAppearance::buildAppTab(Ling::Node* host)
 void WinSettingAppearance::initLangCtrls(Ling::Node* p)
 {
     auto langs = Lang::get()->getSupportedLang();
-    std::vector<std::wstring> names;
-    names.reserve(langs.size());
-    for (auto& pair : langs) names.push_back(pair.first);
-    auto langCode = Setting::get()->getLang();
-    int cur = 0;
-    for (int i = 0; i < (int)langs.size(); i++)
-        if (langs[i].second == langCode) { cur = i; break; }
+    std::vector<std::wstring> names{ Lang::get(L"setting.langFollowSystem") };
+    std::vector<std::wstring> codes{ L"auto" };
+    for (auto& pair : langs) {
+        names.push_back(pair.first);
+        codes.push_back(pair.second);
+    }
+    const bool autoOn = Setting::get()->getLangAuto();
+    int cur = autoOn ? 0 : 1;
+    if (!autoOn) {
+        for (int i = 1; i < (int)codes.size(); i++)
+            if (codes[i] == Setting::get()->getLang()) { cur = i; break; }
+    }
     SettingUi::selectRow(p, Lang::get(L"setting.softwareLang"), names, cur,
-        [this, langs](int i, const std::wstring&) {
-            if (i < 0 || i >= (int)langs.size()) return;
-            std::wstring langCode = langs[i].second;
-            // 语言切换需刷新整窗；延迟到浮层关闭后再执行，避免与 destroyPopup 的 body 访问冲突。
-            Ling::App::get()->dq.TryEnqueue([this, langCode]() {
-                Setting::get()->setLang(langCode);
+        [this, codes](int i, const std::wstring&) {
+            if (i < 0 || i >= (int)codes.size()) return;
+            std::wstring code = codes[i];
+            Ling::App::get()->dq.TryEnqueue([this, code]() {
+                Setting::get()->setLangAuto(code == L"auto");
+                Setting::get()->setLang(code == L"auto" ? Lang::systemLangCode() : code);
                 win->close();
                 Ling::App::get()->dq.TryEnqueue([]() { WinSetting::init(); });
             });
@@ -1055,8 +1060,6 @@ void WinSettingAppearance::initTrayCtrls(Ling::Node* p)
                 img->setFlexShrink(0.f);
                 img->hide();
                 this->trayCustomImg = img;
-                // 「上传」按钮同时充当图标预览的点击层：有图时透明覆盖在 32px 预览上，
-                // 点图标就能重新选图；没图时才显示成「上传」字样。
                 auto* up = iconBox->makeChild<Ling::Button>();
                 up->setSize(34.f, 34.f);
                 up->setPositionType(Ling::Position::Absolute);
@@ -1130,15 +1133,25 @@ void WinSettingAppearance::refreshTrayPreviews()
     if (has) {
         trayCustomImg->loadImg(path);
         trayCustomImg->show();
-        // 透明点击层：去掉「上传」字样、底色和描边，图片本身不再套边框
-        trayUploadBtn->setText(L"");
+        trayUploadBtn->setSize(32.f, 32.f);
+        trayUploadBtn->setPosition(Ling::Edge::Left, 1.f);
+        trayUploadBtn->setPosition(Ling::Edge::Top, 1.f);
+        trayUploadBtn->setText(Icon::Add);
+        trayUploadBtn->setFontFamily(Icon::Family);
+        trayUploadBtn->setFontSize(18.f);
+        trayUploadBtn->setColor(0);
+        trayUploadBtn->setHoverColor(0xFFFFFFFFu);
         trayUploadBtn->setBg(0);
-        trayUploadBtn->setHoverBg(0);
+        trayUploadBtn->setHoverBg(0x00000099u);
         trayUploadBtn->setBorder(0.f, 0);
     }
     else {
         trayCustomImg->hide();
+        trayUploadBtn->setSize(34.f, 34.f);
+        trayUploadBtn->setPosition(Ling::Edge::Left, 0.f);
+        trayUploadBtn->setPosition(Ling::Edge::Top, 0.f);
         trayUploadBtn->setText(Lang::get(L"setting.trayUpload"));
+        trayUploadBtn->setFontFamily(L"");
         trayUploadBtn->setFontSize(10.f);
         trayUploadBtn->setColor(SettingTheme::textMuted);
         trayUploadBtn->setHoverColor(SettingTheme::textMuted);
@@ -1325,7 +1338,8 @@ bool WinSettingAppearance::appearanceAtDefaults() const
             && s->getPinBorderColor() == 0x34C759FFu
             && s->getPinBorderWidth() == 2 && s->getPinBorderRadius() == 6
             && s->getTrayEnabled()
-            && s->getTrayIconStyle() == (int)TrayIcon::Style::Theme;
+            && s->getTrayIconStyle() == (int)TrayIcon::Style::Theme
+            && s->getTrayCustomIconPath().empty();
     }
     if (tabIndex == 2) {
         // 「轻雪晾衣架」页
@@ -1374,8 +1388,8 @@ void WinSettingAppearance::tbRestoreDefaults()
         s->setPinBorderWidth(2);
         s->setPinBorderRadius(6);
         s->setTrayEnabled(true);
-        // 托盘图标默认是「主题」，不是「跟随系统」；恢复默认后单选项也要回到主题
         s->setTrayIconStyle((int)TrayIcon::Style::Theme);
+        s->setTrayCustomIconPath(L"");
         if (pinBorderSw) SettingUi::styleToggle(pinBorderSw, true);
         if (pinColorSwatch) { pinColorSwatch->setBg(defColor); pinColorSwatch->setHoverBg(defColor); }
         if (pinColorHex) {

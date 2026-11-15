@@ -171,10 +171,10 @@ namespace
 			TranslateMessage(&msg);
 			DispatchMessageW(&msg);
 		}
-		// 只卸**自己那把**。以前这里写的是 UnhookWindowsHookEx(g_hook)：
+		// 只卸载**自身安装的钩子**。此前这里写的是 UnhookWindowsHookEx(g_hook)：
 		// 万一本线程退出慢了（WaitForSingleObject 超时后 UI 线程已经重建了新钩子），
-		// 它会把新一轮的钩子顺手拆掉 —— 表现就是热键突然全哑，而且 g_thread 还在，
-		// 再也不会重装。现在它只会拆自己，拆不到别人。
+		// 它会把新一轮的钩子一并拆除 —— 表现为热键突然全部失效，且 g_thread 仍然存在，
+		// 再也不会重装。现在只卸载自身安装的钩子，不会影响其他钩子。
 		UnhookWindowsHookEx(hook);
 		if (g_hook == hook) g_hook = nullptr;
 		return 0;
@@ -206,7 +206,7 @@ namespace
 			// 换代前的旧消息直接丢；否则按索引回调（索引在 setBindings 时与回调表一起换）
 			if ((unsigned)lp == g_generation.load(std::memory_order_relaxed)) {
 				const size_t idx = (size_t)wp;
-				// ⚠ 必须先把闭包**拷贝**出来再调用：回调内部可能触发钩子重装（例如「开始/暂停录制」
+				// 必须先把闭包**拷贝**出来再调用：回调内部可能触发钩子重装（例如「开始/暂停录制」
 				// 经 startRecord → syncGlobalCommandKeys → setSessionBindings），那一步会整体替换
 				// g_callbacks —— 若直接写 g_callbacks[idx]()，等于在执行期间析构该闭包自身
 				//（其捕获的 wstring 随之释放），构成 use-after-free。

@@ -90,7 +90,7 @@ namespace {
 		}
 	};
 
-	// thread_local 的 UIA 实例故意不释放：线程退到进程尾巴上，释放反而容易踩 COM 关闭顺序
+	// thread_local 的 UIA 实例故意不释放：线程退到进程尾部时释放，反而容易与 COM 关闭顺序冲突
 	UiaCtx& uiaCtx()
 	{
 		thread_local UiaCtx* ctx = []() { auto* c = new UiaCtx(); c->init(); return c; }();
@@ -448,7 +448,7 @@ namespace {
 	/** 展开一层子节点。
 	 *  Pending = 预算用尽或提供者暂时超时，集合留在节点里，下一次查询接着解码；
 	 *  Failed  = 提供者明确拒绝，这一支不再尝试。
-	 *  ⚠ 全程按**下标**访问 nodes：push_back 会搬移存储，任何引用都不能跨过它。 */
+	  *  全程按**下标**访问 nodes：push_back 会搬移存储，任何引用都不能跨过它。 */
 	ExpandState expandNode(DrillTree& tree, int index, DWORD deadline, DWORD callLimit, uint64_t seq)
 	{
 		if (index < 0 || index >= (int)tree.nodes.size()) return ExpandState::Failed;
@@ -1158,7 +1158,7 @@ namespace {
 				if (!PostMessageW(ui, kMsgResult, 0, reinterpret_cast<LPARAM>(payload))) delete payload;
 			}
 			lk.unlock();
-			// thread_local 的 UIA 实例故意不释放：线程退到进程尾巴上，释放反而容易踩 COM 关闭顺序
+			// thread_local 的 UIA 实例故意不释放：线程退到进程尾部时释放，反而容易与 COM 关闭顺序冲突
 			CoUninitialize();
 		}
 
@@ -2166,7 +2166,7 @@ void CutMask::paintSelShadow(ID2D1DeviceContext* ctx) const
 {
 	// 拖边/平移中不画；抬手后 endAdjust 清掉 adjustHit
 	if (selShadowW_ <= 0 || adjustHit != MaskHit::None) return;
-	// maskRect 已是物理像素；用描边环 + 二次衰减，避免实心叠层发脏、发硬
+	// maskRect 已是物理像素；使用描边环 + 二次衰减，避免实心叠层发灰、边缘生硬
 	const float sw = (float)selShadowW_;
 	const float w = maskRect.right - maskRect.left;
 	const float h = maskRect.bottom - maskRect.top;

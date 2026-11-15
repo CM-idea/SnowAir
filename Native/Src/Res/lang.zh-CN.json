@@ -358,6 +358,7 @@
     "themeDark": "深色",
     "lang": "语言",
     "softwareLang": "软件语言",
+    "langFollowSystem": "跟随系统",
     "langFollow": "跟随系统",
     "langZh": "简体中文",
     "langEn": "English",
@@ -787,11 +788,6 @@
   },
   "util": {
     "file": "文件"
-  },
-  "update": {
-    "found": "发现新版本",
-    "tip": "新版本已发布，建议更新以获得更好体验",
-    "noPermission": "当前没有写入权限，请以管理员身份运行后重试。"
   },
   "ocr": {
     "fail": "识别失败",

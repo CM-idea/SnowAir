@@ -156,7 +156,7 @@ namespace
 	}
 
 	// 「显示光标」：会话开始那一刻鼠标下面那个**真实窗口**正在用的光标。
-	// 这里有三个坑（都在真机上踩过）：
+	// 这里有三个已知问题（均在真机上验证过）：
 	//   1) GetCursor() 返回的是**本线程**的光标，不是屏幕上那个。上一次截图里我们给覆盖窗设过
 	//      IDC_CROSS / IDC_SIZEALL，鼠标不动就不会被刷掉，于是这次抓到的还是"我们自己的
 	//      框选 / 移动光标" —— 用户报的「工字型变成了十字移动光标」就是它；
@@ -495,7 +495,7 @@ void WinCap::initNow(StartMode mode, std::shared_ptr<std::vector<BYTE>> grab,
         const int tool = Setting::get()->getDemoDefaultTool();
         if (tool != 2) ptr->startPenSlot(tool == 0);
         // 画布起来后把「鼠标穿透」「隐藏/显示工具栏」挂到全局钩子上（穿透之后焦点就不在本软件了）。
-        // ⚠ 必须在这里（会话真的建起来之后）同步：beginDemoCanvas() 里 init() 撞上"会话已开"
+        // 必须在这里（会话真正建立之后）同步：beginDemoCanvas() 中的 init() 会命中"会话已开"
         //   会直接 return，同步却照做，会把手上那个会话的临时全局键换成演示画布这一组。
         syncGlobalCommandKeys(CommandKeys::SurfaceFullscreen);
     }
@@ -1632,7 +1632,7 @@ void WinCap::onCreated()
     canvas->enableSwapChain();
     canvas->setSizePercent(100.f, 100.f);
     // Tip 改为懒创建（见 updateInfoBarTip）：首次截图不再为 comctl32/tooltip 首次初始化付 150ms。
-    // 启动后的 SNOWAIR_WARMUP 预热仍会提前把 Tip 拉起来，工具栏自己的 Tip 不受影响。
+    // 启动后的 SNOWAIR_WARMUP 预热仍会提前创建 Tip，工具栏自己的 Tip 不受影响。
     d2d->deviceContext->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), brushText.GetAddressOf());
     d2d->deviceContext->CreateSolidColorBrush(D2D1::ColorF(1.f, 1.f, 1.f, 0.75f), brushMuted.GetAddressOf());
     d2d->deviceContext->CreateSolidColorBrush(D2D1::ColorF(1.f, 1.f, 1.f, 0.45f), brushHint.GetAddressOf());
@@ -2374,7 +2374,7 @@ bool WinCap::runCommand(const std::wstring& id)
 	// 「删除标注」为只读行，scan 不会返回它，此处再兜一层
 	if (id == L"cmd_delete_sel") return false;
 	// 「切换色值」只在查找元素阶段有意义（见 onKey 里按阶段判的那一段）；
-	// 从命令表兜底命中时什么都不做，别把键吞掉
+	// 从命令表兜底命中时不做任何处理，不要吞掉按键
 	if (id == L"cmd_toggle_pix_color") return false;
 
 	// —— 「常规」组中带阶段差别的四条 ——
@@ -2514,7 +2514,7 @@ void WinCap::syncGlobalCommandKeys(unsigned surface)
 		for (const auto& gkey : CommandKeys::groupOrder()) {
 			for (const auto& id : CommandKeys::idsInGroup(gkey)) {
 				if (CommandKeys::scopeOf(id) != CommandKeys::Scope::Global) continue;
-				// ⚠ 只挡「未实装」：只读 ≠ 不生效（见 CommandKeys::scan 的说明）
+				// 仅拦截「未实装」：只读 ≠ 不生效（见 CommandKeys::scan 的说明）
 				if (!CommandKeys::implemented(id)) continue;
 				if ((CommandKeys::surfaceMaskForId(id) & surface) == 0) continue;
 				const std::wstring chord = CommandKeys::binding(id);
@@ -3080,7 +3080,7 @@ void WinCap::onMove(POINT pos)
         cutMask->onInfoMove(pos);
         return;
     }
-    // 演示画布不画信息栏（也不该能命中它），别再弹那圈的悬停提示
+    // 演示画布不绘制信息栏（也不应命中它），不再弹出该区域的悬停提示
     if (!demoMode) updateInfoBarTip(pos);
     // 码角标停悬：纯矩形命中，不再解码（解码早在框选定格时做完了）
     if (!demoMode && !isPress && !annotLive && cutMask && stage == CapStage::Adjust) {
@@ -4449,7 +4449,7 @@ namespace {
 			for (auto& ln : lines) {
 				// 横排与竖排绝不合并：两条管线的"同一行"判据完全不同
 				if (ln.vertical != r.vertical) continue;
-				if (ln.rotated) continue;   // 斜排行逐行独立，别再往里并横排碎片
+				if (ln.rotated) continue;   // 斜排行逐行独立处理，不再并入横排碎片
 				if (r.vertical) {
 					// 竖排只在**同一列**内合并（横向高度重合 + 纵向缝隙很小）。
 					// 不同列绝不并：竖排各列的 y 区间完全重叠，按横排规则会把整页
@@ -4929,7 +4929,7 @@ void WinCap::startOcrInternal(bool translateMode)
 		OcrResult pending;
 		pending.ok = true;   // ok=true 才不会由 rebuildEditors 判成「识别失败」
 		makePanel(std::move(pending), std::move(pixels));
-		// 识别在后台跑：先给一条扫描线，结果一到就换成逐行识别框再淡入文字
+		// 识别在后台运行：先给出一条扫描线，结果到达后替换为逐行识别框并淡入文字
 		if (toolOcr) toolOcr->startScanPending();
 		refresh();
 	}
@@ -5000,7 +5000,7 @@ void WinCap::finishOcrTranslate(const OcrResult& merged, const TranslateResult& 
 	Ling::Util::setTextToClipboard(tr.text);
 	// 装译文（重建编辑框）与"收条"在同一次调用里完成，中间不留空档
 	toolOcr->setTranslatedResult(merged, lines);
-	// 部分行失败：结果照出（失败行已保留原文），单给一条提示，别让用户以为全翻好了
+	// 部分行失败：结果照常输出（失败行保留原文），单独给出一条提示，避免用户误以为全部翻译成功
 	if (tr.partial) toolOcr->showBanner(Lang::get(L"ocr.partial"), false);
 	else toolOcr->clearBanner();
 	toolOcr->repaint();   // 译文与"收提示条"一次刷出来

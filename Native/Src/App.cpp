@@ -299,7 +299,7 @@ App::App()
     Lang::init();
     PluginHost::instance().init();
 
-    // 用 find 读，别用 operator[]：后者会把没传的键以空值插进 args，
+    // 使用 find 读取，不要使用 operator[]：后者会把未传入的键以空值插入 args，
     // 后面重建命令行时会混进 --elevated= / --auto-quit= 这类空值噪声。
     auto elevIt = app->args.find(L"--elevated");
     const bool launchedElevated = elevIt != app->args.end() && elevIt->second == L"true";
@@ -334,7 +334,7 @@ App::App()
         // 截图的触发交给：托盘图标单击（按设置 → 截图 / 打开设置 / 无操作，见 Tray.cpp）、
         // 全局热键，或再次运行 exe（等同"打开设置"）。
         // 只有显式命令行入口 --enter=pin/long/video/ocr/qr 才直接进入对应模式；
-        // --enter=tray（升级重启走的也是它）和 --auto-start（开机自启）同样是纯托盘待命。
+        // --enter=tray 与 --auto-start（开机自启）同样是纯托盘待命。
         const auto enterIt = app->args.find(L"--enter");
         const bool enterDirect = enterIt != app->args.end()
             && enterIt->second != L"tray" && enterIt->second != L"true";

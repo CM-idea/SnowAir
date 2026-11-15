@@ -892,7 +892,7 @@ bool CapLong::tryAppendFrame()
 		? ScreenCapture::capture(capStartPos.x, capStartPos.y, imgW, imgH)
 		: Util::captureScreen(capStartPos.x, capStartPos.y, imgW, imgH);
 	if (data.empty()) {
-		// 中途 DXGI 失败（例如被别的采集程序抢占）：这一帧退回 GDI，别让滚动拼接断掉
+		// 中途 DXGI 失败（例如被其他采集程序抢占）：该帧退回 GDI，避免滚动拼接中断
 		data = Util::captureScreen(capStartPos.x, capStartPos.y, imgW, imgH);
 		useDxgiCapture = false;
 	}

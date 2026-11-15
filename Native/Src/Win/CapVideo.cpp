@@ -287,7 +287,7 @@ void CapVideo::startMp4(bool useSpeaker, bool useMic)
     // 左上角往里取整，宽高往下取整，两头都不会超出上面夹好的范围
     rcLeft = (rcLeft + 3) & ~3l;
     rcTop = (rcTop + 1) & ~1l;
-    // 框选不可能真的小到 4x2，这里只是别让宽高变成 0：rx 全 0 会被当成"录整屏"
+    // 框选不会小到 4x2，此处只是避免宽高为 0：rx 全 0 会被判定为"录制整屏"
     const long rcW = std::max(4l, (rcRight - rcLeft) & ~3l);
     const long rcH = std::max(2l, (rcBottom - rcTop) & ~1l);
     mp4Param->rx = { rcLeft, rcTop, rcLeft + rcW, rcTop + rcH };
@@ -354,7 +354,7 @@ void CapVideo::startMp4(bool useSpeaker, bool useMic)
     auto fileText = Lang::get(L"video.recordFailedFile");
     auto encText = Lang::get(L"video.recordFailedEncoder");
     auto otherText = Lang::get(L"video.recordFailedOther");
-    // 用户点名只要 H.265：失败时值得单独解释一句（本机没有这个编码器），别让他对着
+    // 用户明确只选 H.265：失败时值得单独说明（本机缺少该编码器），避免其面对
     // 笼统的「录屏失败」去猜。自动模式退到 H.264 属于设计行为，不打扰。
     const bool hevcOnly = codecs.size() == 1 && codecs[0] == MFVideoFormat_HEVC;
     captureThread = std::jthread([this, errTitle, hevcText, hevcOnly, codecs,
@@ -395,7 +395,7 @@ void CapVideo::startMp4(bool useSpeaker, bool useMic)
                     code = VideoMp4::DesktopCapture(*(mp4Param.get())); //一个都没匹配上，走库原来的默认行为
                 }
                 for (auto& t : targets) {
-                    if (mp4Param->MustEnd) break; //已经点了停止，别再起新的
+                    if (mp4Param->MustEnd) break; // 已请求停止，不再启动新的录制
                     if (code == 0) break;         //录完了
                     if (code != -1 && code != -2) break; //失败跟适配器/显示器无关，换候选也没用
                     mp4Param->ad = t.ad;

@@ -57,7 +57,7 @@ namespace OcrPackFetch {
 		return code == 0;
 	}
 
-	// 解压 zip 到 dir。注意：Expand-Archive 只认 .zip 扩展名，调用方落盘时别改名
+	// 解压 zip 到 dir。注意：Expand-Archive 只识别 .zip 扩展名，调用方落盘时不要改名
 	inline bool extractZip(const std::filesystem::path& zip, const std::filesystem::path& dir)
 	{
 		std::error_code ec;

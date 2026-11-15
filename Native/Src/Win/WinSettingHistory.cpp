@@ -1015,7 +1015,7 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 	if (filterBtn) tip->bind(filterBtn, Lang::get(L"setting.filter"));
 
 	// 滚轮 / 拖滑块 / 拉窗口 → 重判要不要续补下一批
-	// ⚠ 必须在本页的 gridScroll 建好之后再订阅：ScrollerBox 自己的滚轮处理先注册、
+	// 必须在本页的 gridScroll 创建之后再订阅：ScrollerBox 自身的滚轮处理先注册、
 	//   先执行，这里读到的 getScrollY() 才是滚动后的新值。
 	auto weak = getWeakThis();
 	wheelTok = win->onMouseWheel.add([this, weak](POINT, float) {
