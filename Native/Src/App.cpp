@@ -16,6 +16,32 @@
 
 std::unique_ptr<App> app;
 
+namespace {
+    // 前台窗口是否占满整个显示器：其他程序的无边框全屏 / 独占全屏都算。
+    // 本进程自己的窗口（截图、演示画布、贴图等全屏）不算，避免自己全屏时把热键关掉。
+    bool foregroundFullscreen()
+    {
+        HWND fg = GetForegroundWindow();
+        if (!fg || !IsWindowVisible(fg) || IsIconic(fg)) return false;
+        DWORD pid{ 0 };
+        GetWindowThreadProcessId(fg, &pid);
+        if (pid == GetCurrentProcessId()) return false;
+        wchar_t cls[64]{};
+        GetClassNameW(fg, cls, _countof(cls));
+        // 桌面 / 任务栏这类壳窗口本身就是"满屏"的，不算全屏应用
+        if (wcscmp(cls, L"Progman") == 0 || wcscmp(cls, L"WorkerW") == 0
+            || wcscmp(cls, L"Shell_TrayWnd") == 0) return false;
+        RECT rc{};
+        if (!GetWindowRect(fg, &rc)) return false;
+        MONITORINFO mi{ sizeof(MONITORINFO) };
+        if (!GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mi)) return false;
+        const RECT& m = mi.rcMonitor;
+        // 留 1px 容差：部分全屏窗口带不可见的 1px 边框
+        return rc.left <= m.left + 1 && rc.top <= m.top + 1
+            && rc.right >= m.right - 1 && rc.bottom >= m.bottom - 1;
+    }
+}
+
 
 App::~App()
 {
@@ -44,6 +70,14 @@ void App::init()
         auto* lapp = Ling::App::get();
         if (lapp && lapp->windows.empty())
             WinCap::warmupOnce();
+    });
+    // 全屏窗口监听：设置里开了「全屏窗口时关闭全局热键」后，其他程序全屏时暂停全部热键，
+    // 退出全屏自动恢复。1 秒轮询足够（切全屏/退出全屏本来就有过渡帧）。
+    SetTimer(nullptr, 0x5A1B, 1000, +[](HWND, UINT, UINT_PTR id, DWORD) {
+        if (id != 0x5A1B) return;
+        auto* st = Setting::get();
+        if (!st) return;
+        st->setHotkeysSuppressed(st->getPauseHotkeysFullscreen() && foregroundFullscreen());
     });
 }
 

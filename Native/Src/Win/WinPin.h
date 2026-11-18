@@ -62,6 +62,9 @@ private:
 	// 悬停图标与缩放提示的字号/布局都乘了 dpi，是「建时定格」的资源：换屏后必须重建
 	void refreshDpiResources();
 	void refreshScaleTip();
+	void refreshTip();                             // 按 tipKind 重建左下角胶囊文字（缩放 / 透明度共用）
+	void showOpacityTip();
+	void adjustOpacityByWheel(float space);        // 滚轮调透明度（5%/格，夹在 10%~100%）
 	void paintHoverBtn(ID2D1DeviceContext* ctx, const D2D1_RECT_F& r, IDWriteTextLayout* icon, uint32_t iconColor, bool hovered);
 	D2D1_RECT_F lockBtnRect() const;
 	D2D1_RECT_F closeBtnRect() const;
@@ -139,6 +142,9 @@ private:
 	bool ocrHiddenByZoom{ false };
 	// —— 外观/状态 ——
 	int opacityPercent{ 100 };
+	int tipKind{ 0 };                 // 左下角胶囊内容：0 缩放百分比 / 1 透明度
+	// 本次悬停期间用滚轮调过透明度：期间按设定值绘制（不被"悬停显示原图"盖掉），鼠标移出即复位
+	bool opacityWheelShown{ false };
 	bool topMost{ true };
 	bool focusMode{ false };
 	bool hiddenByFocus{ false };

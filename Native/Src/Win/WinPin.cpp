@@ -115,10 +115,16 @@ WinPin::WinPin(int x, int y, int w, int h, const std::vector<BYTE>* data, const 
 			shapeHover->mouseWheel((float)imgPos.x, (float)imgPos.y, space > 0 ? (short)WHEEL_DELTA : (short)-WHEEL_DELTA);
 			return;
 		}
-		// 非编辑态：悬停滚轮直接缩放。
-		// 开启「光标中心缩放」（默认）时锚点就是光标点：光标下的像素保持不动。
-		// 关闭时锚点取**离鼠标最近的那条边**上的点：那条边固定、对面那条边伸缩
-		// （鼠标靠左 ⇒ 像在拖右边；靠下 ⇒ 像在拖上边），适合"贴着某条边对齐"的用法。
+		// 非编辑态：悬停滚轮按「功能设置 > 基本功能 > 滚动后执行」执行。
+		//   0 光标中心缩放（默认）：锚点就是光标点，光标下的像素保持不动。
+		//   1 对向边缘缩放：锚点取**离鼠标最近的那条边**上的点，那条边固定、对面那条边伸缩
+		//     （鼠标靠左 ⇒ 像在拖右边；靠下 ⇒ 像在拖上边），适合"贴着某条边对齐"的用法。
+		//   2 调整透明度：滚一格 ±5%，并在左下角胶囊里给出当前百分比。
+		const int wheelAction = Setting::get()->getPinWheelAction();
+		if (wheelAction == 2) {
+			adjustOpacityByWheel(space);
+			return;
+		}
 		const float steps = space / 60.f;   // space = 格数 * 60 * dpi
 		const float factor = std::pow(1.1f, steps);
 		if (zoomMode == ZoomMode::Crop) {
@@ -126,7 +132,7 @@ WinPin::WinPin(int x, int y, int w, int h, const std::vector<BYTE>* data, const 
 			refresh();
 			return;
 		}
-		if (Setting::get()->getPinZoomAtCursor()) {
+		if (wheelAction == 0) {
 			applyScale(scale * factor, pos);
 			return;
 		}
@@ -514,13 +520,47 @@ void WinPin::refreshDpiResources()
 	iconUnlock = makeHoverIcon(Icon::Unlock);
 	iconEdit = makeHoverIcon(Icon::Pen);
 	iconClose = makeHoverIcon(Icon::Cancel);
-	if (scaleTip) refreshScaleTip();   // 没显示过缩放提示就不必建
+	if (scaleTip) refreshTip();   // 没显示过提示就不必建
 }
 
 void WinPin::refreshScaleTip()
 {
+	// 缩放提示优先：Ctrl+滚轮缩放期间就算上一秒还在调透明度，这里也要切回缩放百分比。
+	tipKind = 0;
+	refreshTip();
+}
+
+// 左下角胶囊（见 paintScaleTip）缩放百分比 / 透明度共用：由 tipKind 决定文字。
+void WinPin::refreshTip()
+{
 	scaleTip = Ling::D2D::get()->makeTextLayout(
-		wfmt(L"%d%%", static_cast<int>(std::lround(scale * 100.f))), 12.f * dpi);
+		tipKind == 1
+			? Lang::get(L"pin.menuOpacity") + L" " + std::to_wstring(opacityPercent) + L"%"
+			: wfmt(L"%d%%", static_cast<int>(std::lround(scale * 100.f))),
+		12.f * dpi);
+}
+
+void WinPin::showOpacityTip()
+{
+	tipKind = 1;
+	refreshTip();
+}
+
+void WinPin::adjustOpacityByWheel(float space)
+{
+	// 一格滚轮 = 5%：space 一格为 60*dpi（见 WinBase::mouseWheel），即 delta/WHEEL_DELTA * 5。
+	// 用"在现值上叠加"而不是"按方向 ±5"：高精度滚轮 / 触摸板的 delta 不一定是 120 的整数倍，
+	// 按比例叠加后取整，连续小步也能顺滑变化。
+	const int next = std::clamp(
+		opacityPercent + (int)std::lround(space / (60.f * dpi) * 5.f), 10, 100);
+	// 改的就是贴图自己的不透明度（与编辑工具栏里的「透明度」同一个值、同一份落盘设置）。
+	// 悬停时画面本会抬到 100%（见 effectiveOpacity）：这次悬停期间要按设定值绘制，
+	// 否则滚轮在转、画面却一直是实的，看不出调了多少；鼠标移出后恢复常规悬停显示。
+	opacityWheelShown = true;
+	setOpacityPercent(next);   // 值没变时内部会提前返回，这里统一再刷一次（提示文字也要更新）
+	showOpacityTip();
+	setTimer(800, 101);
+	refresh();
 }
 
 void WinPin::onCreated()
@@ -781,7 +821,11 @@ float WinPin::effectiveOpacity() const
 	// 悬停显示原图（未编辑时按 100%），移开恢复设定值。
 	// 拖动过程中不恢复原图（否则一拖就变实，手感和观感都很跳）。
 	// 编辑态同样按设定值绘制 —— 否则编辑工具栏里的「透明度」滑条拖了没反应。
-	if (!editing && isMouseIn && !annotMouseDown) return 1.f;
+	// 锁定态没有可交互的悬停控件（只剩解锁按钮），不需要"悬停看原图"这层临时提亮，
+	// 否则锁成半透明当描摹底图时，鼠标一放上去就变实，反而没法用。
+	// 滚轮调过透明度后（opacityWheelShown，鼠标移出即失效）同样按设定值绘制，
+	// 否则刚调好的透明度会被"悬停显示原图"立刻盖掉，看不见调了多少。
+	if (!locked && !editing && isMouseIn && !annotMouseDown && !opacityWheelShown) return 1.f;
 	return std::clamp(opacityPercent, 10, 100) / 100.f;
 }
 
@@ -866,6 +910,9 @@ void WinPin::onDown(POINT pos, BOOL isRight)
 
 void WinPin::onMove(POINT pos)
 {
+	// 鼠标移出贴图（mouseLeave 以 INT_MAX 回调进来）：结束这次的"滚轮调透明度"会话，
+	// 下次重新悬停仍按常规显示原图（见 effectiveOpacity）。
+	if (!isMouseIn) opacityWheelShown = false;
 	// 兜底：鼠标已松开却未收到 up（系统对话框 / 捕获丢失）时，避免贴图继续跟随鼠标
 	const bool lbtnDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
 	if ((annotMouseDown || edgeResize) && pos.x != INT_MAX && !lbtnDown) {

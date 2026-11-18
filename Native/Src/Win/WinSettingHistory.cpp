@@ -20,8 +20,9 @@
 
 // 停悬预览：独立置顶小窗（不抢焦点）。
 //   · 图片：只显示图片本身（无底色 / 边框 / 内边距），按宽高比定尺寸贴在卡片旁边；
-//   · 文字：用设置页「文字气泡」的底色，按内容长度长高，最低 350×100、最高 350×650，
-//     且不超过工作区；不显示贴屏卡片的锁 / 另存为 / 关闭三个停悬控件。
+//   · 文字：用设置页「文字气泡」的底色；宽度贴着正文自适应（最短 120，常规在 500 折行，
+//     字数特别多、一屏放不下时可放宽到 800），高度按整段文字长高（最高不超过工作区）；
+//     不显示贴屏卡片的锁 / 另存为 / 关闭三个停悬控件。
 class ShotPreviewWindow : public Ling::WinBase
 {
 public:
@@ -56,38 +57,88 @@ public:
 		refresh();
 	}
 
+	// 文字卡：宽度贴着正文自适应（短句不留大空白、长文统一在 kWrapWidth 折行；字数特别多、
+	// 一屏放不下时可以再放宽到 kMaxWidth），高度按整段文字长高，只受工作区限制。
 	void showText(const std::wstring& text, const RECT& cellScreen)
 	{
 		if (text.empty()) return;
 		MONITORINFO mi{};
 		if (!workAreaAt(cellScreen, mi)) return;
-		constexpr float kWidth = 350.f;    // 文字卡宽度
-		constexpr float kPadX = 12.f;      // 与设置页文字气泡一致的内边距
+		constexpr float kMinWidth = 120.f;   // 极短文本的气泡下限，避免细长条
+		constexpr float kWrapWidth = 500.f;  // 常规折行宽度：正文超过它就换行
+		constexpr float kMaxWidth = 800.f;   // 字数特别多、一屏放不下时可以放宽到这里
+		constexpr float kPadX = 12.f;        // 与设置页文字气泡一致的内边距
 		constexpr float kPadY = 8.f;
-		// 先按内容量算高度（与卡片同一套字体 / 宽度）
-		float contentH = 0.f;
-		if (auto* d2d = Ling::D2D::get()) {
-			Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
-			if (SUCCEEDED(d2d->dwriteFactory->CreateTextLayout(text.c_str(), (UINT32)text.size(),
-				d2d->getTextFormat(L""), (kWidth - kPadX * 2.f) * dpi, 20000.f * dpi,
-				layout.GetAddressOf())) && layout) {
-				layout->SetFontSize(SettingTheme::fontBase * dpi, { 0, UINT32_MAX });
-				layout->SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
-				DWRITE_TEXT_METRICS m{};
-				if (SUCCEEDED(layout->GetMetrics(&m))) contentH = m.height;
+		auto* d2d = Ling::D2D::get();
+		// 量正文：maxW 传极大值得到「完全不折行」的自然宽度；传 TextBox 的真实宽度得到
+		// 该宽度下的排版高度。字体 / 字号 × dpi / 折行方式都和预览里的 TextBox 一致。
+		auto measure = [&](float maxW) {
+			DWRITE_TEXT_METRICS m{};
+			if (d2d) {
+				Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
+				if (SUCCEEDED(d2d->dwriteFactory->CreateTextLayout(text.c_str(), (UINT32)text.size(),
+					d2d->getTextFormat(L""), (std::max)(1.f, maxW), 20000.f * dpi,
+					layout.GetAddressOf())) && layout) {
+					layout->SetFontSize(SettingTheme::fontBase * dpi, { 0, UINT32_MAX });
+					layout->SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
+					layout->GetMetrics(&m);
+				}
 			}
-		}
+			return m;
+		};
+		const float areaWLogical = (float)(mi.rcWork.right - mi.rcWork.left) / dpi;
 		const float areaHLogical = (float)(mi.rcWork.bottom - mi.rcWork.top) / dpi;
-		const float maxHLogical = (std::min)(650.f, areaHLogical - 16.f);
-		float hLogical = contentH / dpi + kPadY * 2.f;
-		hLogical = std::clamp(hLogical, 100.f, (std::max)(100.f, maxHLogical));
-		const int pxW = (int)std::lround(kWidth * dpi);
-		const int pxH = (int)std::lround(hLogical * dpi);
-		if (!ensureWindow(pxW, pxH)) return;
+		// 常规折行宽 / 放宽后的绝对上限，两者都不能超出工作区
+		const float wrapW = (std::max)(kMinWidth, (std::min)(kWrapWidth, areaWLogical - 32.f));
+		const float hardW = (std::max)(wrapW, (std::min)(kMaxWidth, areaWLogical - 32.f));
+		// 高度上限只有工作区：以前固定 650，长文被截断又滚不到（预览窗对鼠标透明，滚轮落在
+		// 下面的网格上），等于后面几行永远看不见。
+		const float maxHLogical = (std::max)(100.f, areaHLogical - 16.f);
+		const int maxPxH = (int)std::lround(maxHLogical * dpi);
+		const int minPxH = (int)std::lround(100.f * dpi);
+		// 1) 宽度：按正文的自然宽度定（多行取最长那行），夹进 [kMinWidth, 常规折行宽]。
+		//    多给 2px：DWrite 量的是字形宽度，Yoga 会把折行宽度吸附到整像素，差 1px 就会多折一行。
+		const float naturalW = measure(100000.f * dpi).widthIncludingTrailingWhitespace;
+		float wLogical = std::clamp(naturalW / dpi + kPadX * 2.f + 2.f, kMinWidth, wrapW);
+		int pxW = (int)std::lround(wLogical * dpi);
+		if (!ensureWindow(pxW, minPxH)) return;
 		applyTextChrome();
-		setSize(kWidth, hLogical);
 		if (img_ && text_ && filesBox_) { img_->hide(); filesBox_->hide(); text_->show(); }
-		if (text_) text_->setText(text);
+		if (!text_) return;
+		// 先按最终宽度排一次版：卡片内边距与 TextBox 的折行宽度必须立刻生效。
+		// 不能等 WM_PAINT 里的异步 layout —— 那时文字已经按旧宽度建好 layout 了，会少一行/多折行。
+		setSize(wLogical, 100.f);
+		layout();
+		text_->setText(text);
+		// 2) 按当前宽度同步排版并算出需要的高度：用 TextBox 自己的真实折行宽度（物理像素），
+		//    口径和它内部排版用的完全一致，量出来就是它真正需要的高度。
+		auto evalH = [&]() {
+			setSize(wLogical, 100.f);
+			layout();
+			const float innerW = (std::max)(1.f, text_->w);
+			return (int)std::ceil(measure(innerW).height + kPadY * 2.f * dpi) + 1;
+		};
+		int pxH = evalH();
+		// 3) 一屏放不下（字数特别多）：逐步加宽让折行变少、高度降下来，最多放宽到 kMaxWidth。
+		//    只有当「正文自然宽度仍比当前气泡宽」（即还在被迫折行）时加宽才有意义；
+		//    正文本身就比气泡窄（高度来自硬换行）时加宽只会变宽、不会变矮，直接停下。
+		while (pxH > maxPxH && wLogical < hardW
+			&& naturalW / dpi + kPadX * 2.f > wLogical) {
+			wLogical = (std::min)(hardW, wLogical + 60.f);
+			pxH = evalH();
+		}
+		pxH = std::clamp(pxH, minPxH, maxPxH);
+		setSize(wLogical, (float)pxH / dpi);
+		layout();
+		// 4) 兜底：控件自己还认为有内容被盖住（折行 / 取整的边界情况）就一行一行补高
+		const float lineStep = (std::max)(6.f, std::ceil(SettingTheme::fontBase * 1.6f * dpi));
+		for (int guard = 0; guard < 4 && text_->canScroll(); ++guard) {
+			if (pxH >= maxPxH) break;
+			pxH = (int)(std::min)((float)maxPxH, (float)pxH + lineStep);
+			setSize(wLogical, (float)pxH / dpi);
+			layout();
+		}
+		pxW = (int)std::lround(wLogical * dpi);
 		place(pxW, pxH, cellScreen, mi);
 		showNoActivate();
 		refresh();
@@ -102,12 +153,13 @@ public:
 		constexpr float kWidth = 350.f;
 		constexpr float kPadY = 8.f;
 		const bool single = files.size() == 1;
-		// 单条：图标 + 名字 / 来源两行（约 46 高）；多条：每行 26 + 4 间距
-		const float rowsH = single ? 46.f : (float)files.size() * 30.f - 4.f;
+		// 单条：图标 + 名字 / 来源两行（约 46 高）；多条：每行 26 + 4 间距（最后一行也有 4 间距）
+		const float rowsH = single ? 46.f : (float)files.size() * 30.f;
 		const float areaHLogical = (float)(mi.rcWork.bottom - mi.rcWork.top) / dpi;
-		const float maxHLogical = (std::min)(650.f, areaHLogical - 16.f);
+		// 与文字卡一致：高度跟着内容走，只受工作区限制（以前固定 650，文件一多后面几行看不到）
+		const float maxHLogical = (std::max)(100.f, areaHLogical - 16.f);
 		float hLogical = rowsH + kPadY * 2.f;
-		hLogical = std::clamp(hLogical, 100.f, (std::max)(100.f, maxHLogical));
+		hLogical = std::clamp(hLogical, 100.f, maxHLogical);
 		const int pxW = (int)std::lround(kWidth * dpi);
 		const int pxH = (int)std::lround(hLogical * dpi);
 		if (!ensureWindow(pxW, pxH)) return;
@@ -145,11 +197,15 @@ protected:
 		text_->setHeightPercent(100.f);
 		text_->setBg(0);
 		text_->setBorder(0.f, 0);
+		// TextBox 构造函数自带 6px 内边距（给输入框用的）。这里必须清掉：
+		// 气泡的内边距由外层 card_ 提供，否则文字实际折行宽度 / 可视高度都会比外层少 12px，
+		// 按外层尺寸算出来的高度就会偏矮 —— 末尾那一行被裁掉正是这个原因。
+		text_->setPadding(0.f);
 		text_->setFontSize(SettingTheme::fontBase);
 		text_->setReadOnly(true);
 		text_->setMouseSelectionEnabled(false);
 		text_->setTextHoverCursor(false);
-		text_->setScrollBarVisible(false);   // 超出 650 上限时用滚轮看剩余内容
+		text_->setScrollBarVisible(false);   // 内容超出可视高度时用滚轮看剩余内容
 		text_->hide();
 
 		// 文件列表：图标 + 名字（+ 来源），和贴屏的文件卡片同款
@@ -348,6 +404,10 @@ namespace {
 	// 复制后延迟置顶：先让提示亮一会儿，再挪到最前面
 	constexpr UINT kReorderTimerId = 0x5A1B;
 	constexpr UINT kReorderDelayMs = 700;
+	// 滚轮停稳后重新判定停悬：滚动过程中不追着换预览（会一格一格地跳），
+	// 停一下再按当前指针把预览/图标按钮弹回来，不用再抖一下鼠标
+	constexpr UINT kPreviewTimerId = 0x5A1C;
+	constexpr UINT kPreviewRefreshMs = 250;
 
 	std::wstring replaceOnce(std::wstring s, const std::wstring& from, const std::wstring& to)
 	{
@@ -1021,6 +1081,8 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 	wheelTok = win->onMouseWheel.add([this, weak](POINT, float) {
 		if (!weak.lock()) return;
 		this->hidePreview();        // 滚动后卡片位置变了，先收起大图
+		// 停滚 250ms 后按当前指针重新判定一次停悬：滚完不用再动鼠标，预览/图标按钮会自己回来
+		win->setTimer(kPreviewRefreshMs, kPreviewTimerId);
 		this->maybeScrollGrew();
 		});
 	moveTok = win->onMouseMove.add([this, weak](POINT pos) {
@@ -1036,6 +1098,13 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 		if (!weak.lock()) return;
 		if (id == kToastTimerId) this->hideCopyToast();
 		else if (id == kReorderTimerId) this->applyReorderToTop();
+		else if (id == kPreviewTimerId) {
+			win->killTimer(kPreviewTimerId);
+			POINT pt{};
+			GetCursorPos(&pt);
+			ScreenToClient(win->hwnd, &pt);
+			this->updateHover(pt);      // 滚完停稳：按此刻指针补上停悬态（含停悬预览）
+		}
 		});
 	// 窗口重新获得焦点：重扫目录。用户可能刚在资源管理器里从回收站还原了截图，
 	// 回到设置窗就应该能在历史里看到（历史以目录里的真实文件为准）。
@@ -1073,9 +1142,11 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 			}
 		}
 		});
-	// 窗口失焦（切到别的程序）：大图跟着收起，别一直悬在桌面上
+	// 窗口失焦（切到别的程序）：大图跟着收起，别一直悬在桌面上；顺带撤掉等停滚的定时器，
+	// 否则它 250ms 后会把预览重新弹到别的程序上面
 	blurTok = win->onBlur.add([this, weak]() {
 		if (!weak.lock()) return;
+		win->killTimer(kPreviewTimerId);
 		this->hidePreview();
 		});
 
@@ -1099,6 +1170,7 @@ WinSettingHistory::~WinSettingHistory()
 	win->onBlur.remove(blurTok);
 	win->killTimer(kToastTimerId);
 	win->killTimer(kReorderTimerId);
+	win->killTimer(kPreviewTimerId);
 }
 
 // 分类归属（不看标签筛选）。
@@ -2601,6 +2673,9 @@ void WinSettingHistory::refreshGrid(bool forceRescan)
 		gridHost->hide();
 		builtIds.clear();
 		cells.clear();
+		// 格子连同预览对着的那张卡一起没了：先把预览收掉并清掉下标，
+		// 否则预览会挂在旧内容上，且下标撞上同一格时 updateHover 会误判「没变化」不再重弹
+		hidePreview();
 		copyToast = nullptr;
 		if (tip) tip->hide();       // 提示挂在将被拆掉的按钮上，一并收掉
 		lastRow = nullptr; lastRowCells = 0; lastRowFillers.clear();
@@ -2627,6 +2702,8 @@ void WinSettingHistory::refreshGrid(bool forceRescan)
 		gridHost->removeAllChildren();
 		builtIds.clear();
 		cells.clear();
+		// 同空态：预览对着的格子被拆了，先收起并复位下标
+		hidePreview();
 		// 提示挂在将被拆掉的格子上，随格子一起销毁，这里一并作废
 		copyToast = nullptr;
 		if (tip) tip->hide();       // 提示挂在将被拆掉的按钮上，一并收掉
@@ -3251,7 +3328,15 @@ void WinSettingHistory::updateHover(POINT pos)
 void WinSettingHistory::showPreview(const CellSlot& slot)
 {
 	if (!slot.thumb || !win) { hidePreview(); return; }
-	POINT tl{ (LONG)slot.thumb->x, (LONG)slot.thumb->y };
+	// thumb->x/y 是「滚到顶部时」的窗口客户区坐标：ScrollerBox 只平移 content 的 visual，
+	// 不改子节点的布局坐标（命中测试因此要自己把 scrollY 补回去，见 Node::isPosIn）。
+	// 这里同样要扣掉祖先滚动区的偏移，否则滚动后预览整体下移 scrollY，最后被 place()
+	// 夹到工作区角落 —— 看起来就是"没在鼠标对应的那张卡旁边"。
+	float scrolledY = 0.f;
+	for (Ling::Node* p = slot.thumb->parent; p; p = p->parent) {
+		if (auto* sb = dynamic_cast<Ling::ScrollerBox*>(p)) scrolledY += sb->getScrollY();
+	}
+	POINT tl{ (LONG)slot.thumb->x, (LONG)std::lround(slot.thumb->y - scrolledY) };
 	ClientToScreen(win->hwnd, &tl);
 	const RECT cellRect{ tl.x, tl.y, tl.x + (LONG)slot.thumb->w, tl.y + (LONG)slot.thumb->h };
 	if (!preview_) preview_ = std::make_unique<ShotPreviewWindow>(win->dpi);

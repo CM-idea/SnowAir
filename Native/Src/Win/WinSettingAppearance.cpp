@@ -1827,20 +1827,33 @@ void WinSettingAppearance::tbRefreshInitialEditor()
 }
 
 namespace {
-	// 节点当前可见区域命中（ScrollerBox 滚动只平移视觉，节点 x/y 仍是未滚动坐标）
+	// 节点当前可见区域命中（ScrollerBox 滚动只平移视觉，节点 x/y 仍是未滚动坐标）。
+	// 直接复用 Node::isPosIn：它会自己沿 parent 链补回祖先滚动偏移，
+	// 入参必须是窗口客户区物理坐标（鼠标事件给的正是这个坐标系）。
 	bool tbHitVisible(Ling::Node* n, POINT p)
 	{
-		if (!n) return false;
-		auto [lx, ly] = SettingUi::visiblePos(n);
-		return p.x >= lx && p.x <= lx + n->w && p.y >= ly && p.y <= ly + n->h;
+		return n && n->isPosIn(p);
+	}
+	// 页级绝对定位节点（拖拽幽灵 / 悬停红叉）挂在 page 自身下、不在滚动内容里，
+	// 因此相对 page 的坐标 = 光标窗口坐标 − page 原点，再加回 page 自己祖先滚动区的偏移。
+	float pageAncestorScrollY(const Ling::Node* node)
+	{
+		float sy = 0.f;
+		for (auto* p = node->parent; p; p = p->parent)
+			if (auto* sb = dynamic_cast<Ling::ScrollerBox*>(p)) sy += sb->getScrollY();
+		return sy;
 	}
 }
 
 void WinSettingAppearance::tbInitDragGhostMove(POINT pos)
 {
 	if (!tbDragGhost) return;
-	tbDragGhost->setPosition(Ling::Edge::Left, (float)pos.x - this->x - 18.f);
-	tbDragGhost->setPosition(Ling::Edge::Top, (float)pos.y - this->y - 18.f);
+	// 幽灵是 36×36 逻辑像素，居中对准光标：半边 18 也要按 dpi 换算成物理像素
+	const float d = (win->dpi > 0.f) ? win->dpi : 1.f;
+	const float half = 18.f * d;
+	tbDragGhost->setPosition(Ling::Edge::Left, (float)pos.x - this->x - half);
+	tbDragGhost->setPosition(Ling::Edge::Top,
+		(float)pos.y - this->y + pageAncestorScrollY(this) - half);
 }
 
 void WinSettingAppearance::tbInitDragDown(POINT pos)
@@ -2069,12 +2082,14 @@ void WinSettingAppearance::tbShowChipClose(Ling::Button* chip, const std::wstrin
 {
     if (!tbChipClose || !chip) return;
     tbChipCloseId = id;
-    const float scrollY = tbScroller ? tbScroller->getScrollY() : 0.f;
-    // chip->x/y 是"未滚动"的窗口绝对坐标；本页内坐标系要减去页原点（并补回滚动偏移）
+    const float d = (win->dpi > 0.f) ? win->dpi : 1.f;
+    const float scrollY = pageAncestorScrollY(this);
+    // chip->x/y 是"未滚动"的窗口绝对坐标；红叉挂在本页下，坐标只需换成页内坐标
+    // （本页自身不随栏内滚动平移，补页祖先滚动即可）。
     // 贴紧右上角：只外伸 4px（14px 圆点 → 10px 压在图标上、4px 探出去），别悬得太远
     const float chipRight = chip->x + chip->w;
-    tbChipClose->setPosition(Ling::Edge::Left, chipRight - this->x - 10.f);
-    tbChipClose->setPosition(Ling::Edge::Top, chip->y - this->y + scrollY - 4.f);
+    tbChipClose->setPosition(Ling::Edge::Left, chipRight - this->x - 10.f * d);
+    tbChipClose->setPosition(Ling::Edge::Top, chip->y - this->y + scrollY - 4.f * d);
     // 提到最前：chip 是在叉之后创建的，不提升会被 chip 盖住
     for (auto it = children.begin(); it != children.end(); ++it) {
         if (it->get() == tbChipClose) {
@@ -2156,9 +2171,12 @@ void WinSettingAppearance::tbShowGhost(const std::wstring& id, POINT pos)
         tbGhostIcon->setFontFamily(Icon::Family);
         tbGhostIcon->setFontSize(Icon::SizeSm);
     }
-    const float scrollY = tbScroller ? tbScroller->getScrollY() : 0.f;
-    tbGhost->setPosition(Ling::Edge::Left, (float)pos.x - this->x - 18.f);
-    tbGhost->setPosition(Ling::Edge::Top, (float)pos.y - this->y + scrollY - 18.f);
+    const float d = (win->dpi > 0.f) ? win->dpi : 1.f;
+    const float half = 18.f * d;
+    // 幽灵挂在本页下（不在滚动内容里）：不能用栏内滚动量补偿，只补页自身祖先滚动
+    const float scrollY = pageAncestorScrollY(this);
+    tbGhost->setPosition(Ling::Edge::Left, (float)pos.x - this->x - half);
+    tbGhost->setPosition(Ling::Edge::Top, (float)pos.y - this->y + scrollY - half);
     tbGhost->show();
     win->refresh();
 }
@@ -2234,7 +2252,9 @@ void WinSettingAppearance::tbOnDown(POINT pos, bool right)
     if (tbInitialOpen) return;
     // 其它弹层打开时（如类型下拉）不响应 chip
     if (SettingUi::hasPopup()) return;
-    POINT c = tbToContent(pos);
+    // 命中检测直接吃窗口客户区坐标：chip 在滚动内容里，isPosIn 会自己补滚动偏移
+    //（之前先 +scrollY 再交给 isPosIn，滚动后等于补了两遍，按下的位置和看到的对不上）
+    POINT c = pos;
     tbDragChip = nullptr;
     for (size_t i = 0; i < tbChips.size(); i++) {
         if (tbChips[i] && tbChips[i]->isPosIn(c)) {
@@ -2292,7 +2312,8 @@ void WinSettingAppearance::tbOnMove(POINT pos)
     if (!tbDragging) return;
     // 实时计算落点（区 + 插入位），并高亮目标插槽
     POINT c = tbToContent(pos);
-    tbLiveDropTo = tbHitZone(c, tbDragFrom);
+    // 区判定用窗口坐标（isPosIn 内部补滚动）；插入位与 chip->y 比较，需要内容坐标
+    tbLiveDropTo = tbHitZone(pos, tbDragFrom);
     tbLiveDropIndex = tbComputeDropIndex(c, tbLiveDropTo);
     tbUpdateDropHint();
     // 跟手的拖拽幽灵（图标随光标走）
@@ -2389,7 +2410,8 @@ void WinSettingAppearance::tbOnUp(POINT pos, bool right)
     if (right) { tbDragId.clear(); tbDragging = false; tbDragFrom = -1; return; }
     if (wasDrag) {
         POINT c = tbToContent(pos);
-        int toZone = tbHitZone(c, fromZone);
+        // 与 tbOnMove 一致：区判定用窗口坐标，插入位用内容坐标
+        int toZone = tbHitZone(pos, fromZone);
         tbDragTo = toZone;
         tbDropIndex = tbComputeDropIndex(c, toZone);
         tbDrop();

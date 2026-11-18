@@ -3130,7 +3130,7 @@ void WinCap::onMove(POINT pos)
             // 超过单击抖动阈值才算拖动 → 才出放大镜
             if (!selectDragging_) {
                 const int moved = std::abs(cur.x - lastDownPos.x) + std::abs(cur.y - lastDownPos.y);
-                if (moved > 5) selectDragging_ = true;
+                if (moved > 3) selectDragging_ = true;
             }
             // 只有真正拖动后才改写选区：单击时保留「查找元素」悬停到的那个框。
             // 否则一点点手抖就会 makeRect 出一个极小的框（常是 0 宽或 0 高），hasRect() 判空后

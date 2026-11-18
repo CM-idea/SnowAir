@@ -527,10 +527,15 @@ void WinSettingFeatures::buildBasic(Ling::Node* p)
 	SettingUi::groupLabel(p, Lang::get(L"setting.fnGrpPin"));
 	{
 		auto* g = SettingUi::grid2(p);
-		SettingUi::toggleRow(g, Lang::get(L"setting.pinZoomAtCursor"), s->getPinZoomAtCursor(),
-			[](bool on) { Setting::get()->setPinZoomAtCursor(on); }, true);
+		// 顺序：自动文本识别在前，「滚动后执行」紧随其后（用户要求）。
 		SettingUi::toggleRow(g, Lang::get(L"setting.pinAutoOcr"), s->getPinAutoOcr(),
 			[](bool on) { Setting::get()->setPinAutoOcr(on); }, true);
+		SettingUi::selectRow(g, Lang::get(L"setting.pinWheelAction"),
+			{ Lang::get(L"setting.pinWheelZoomAtCursor"),
+			  Lang::get(L"setting.pinWheelZoomEdge"),
+			  Lang::get(L"setting.pinWheelOpacity") },
+			std::clamp(s->getPinWheelAction(), 0, 2),
+			[](int i, const std::wstring&) { Setting::get()->setPinWheelAction(i); }, true);
 		SettingUi::toggleRow(g, Lang::get(L"setting.pinAutoFit"), s->getPinAutoFit(),
 			[](bool on) { Setting::get()->setPinAutoFit(on); }, true);
 		SettingUi::selectRow(g, Lang::get(L"setting.pinDoubleClick"),
@@ -957,17 +962,25 @@ void WinSettingFeatures::buildOther(Ling::Node* p)
 		[](bool on) { Setting::get()->setRememberToolStyle(on); }, {});
 	SettingUi::grid2Cells(grid);
 
-	// 第三行双栏：左「静默截图」开关，右「工具栏对齐」下拉
+	// 第三行双栏：左「静默截图」开关，右「全屏时暂停热键」开关
 	auto* row = halfRow(p);
 	row->setMarginTop(SettingTheme::optionGap);
 	mkStateToggle(halfCol(row, false), L"setting.silentCapture",
 		[] { return Setting::get()->getSilentCapture(); },
 		[](bool on) { Setting::get()->setSilentCapture(on); }, {},
 		L"setting.silentCaptureTip");
+	mkStateToggle(halfCol(row, true), L"setting.pauseHotkeysFullscreen",
+		[] { return Setting::get()->getPauseHotkeysFullscreen(); },
+		[](bool on) { Setting::get()->setPauseHotkeysFullscreen(on); }, {},
+		L"setting.pauseHotkeysFullscreenTip");
+
+	// 第四行：左「工具栏对齐」下拉（右列留空，保持半栏）
+	auto* row2 = halfRow(p);
+	row2->setMarginTop(SettingTheme::optionGap);
 	{
 		const std::vector<std::wstring> labels{
 			Lang::get(L"setting.alignLeft"), Lang::get(L"setting.alignRight"), Lang::get(L"setting.alignCenter") };
-		auto r = SettingUi::optionRow(halfCol(row, true), Lang::get(L"setting.toolbarAlign"), L"", true,
+		auto r = SettingUi::optionRow(halfCol(row2, false), Lang::get(L"setting.toolbarAlign"), L"", true,
 			SettingTheme::ctrlH, Lang::get(L"setting.toolbarAlignTip"));
 		r.row->setMarginBottom(0.f);
 		auto* ddl = SettingUi::selectDdl(r.ctrlBox, labels,

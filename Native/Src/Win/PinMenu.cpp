@@ -138,7 +138,9 @@ void PinMenu::openSubmenu(int rowIndex, Ling::Button* ownerBtn)
 	const int parentLeft = x;
 	const int parentRight = (int)std::lround(x + w);
 	int mx = parentRight;
-	int my = (int)std::lround(y + ownerBtn->y * dpi);
+	// ownerBtn->y 已是 Node 累加后的物理像素坐标，不能再乘 dpi
+	// （否则高缩放屏上子菜单会被多推一段距离，越靠下的行偏移越大）。
+	int my = (int)std::lround(y + ownerBtn->y);
 
 	MONITORINFO mi{ sizeof(MONITORINFO) };
 	GetMonitorInfoW(MonitorFromPoint(POINT{ mx, my }, MONITOR_DEFAULTTONEAREST), &mi);

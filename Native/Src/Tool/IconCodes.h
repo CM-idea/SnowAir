@@ -23,6 +23,9 @@ namespace Icon
 	inline constexpr const wchar_t* Lock = L"\ue641";           // 锁定
 	inline constexpr const wchar_t* Unlock = L"\ue643";         // 解锁
 	inline constexpr const wchar_t* UnlockAlt = L"\ue642";      // 解锁2
+	inline constexpr const wchar_t* Top = L"\ue695";            // 置顶（图层移到最上层）
+	inline constexpr const wchar_t* Artboard = L"\ue696";       // 画板
+	inline constexpr const wchar_t* Layer = L"\ue697";          // 图层
 	inline constexpr const wchar_t* Play = L"\ue646";           // 开始 / 播放
 	inline constexpr const wchar_t* Pause = L"\ue645";          // 暂停
 	inline constexpr const wchar_t* ScrollStart = L"\ue678";    // 开始滚动（长截图）

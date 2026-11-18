@@ -21,7 +21,10 @@ public:
 	// 同时写入 CF_DIBV5（Office / 微信 / WPS 这类原生程序认）和 "PNG" 注册格式
 	//（浏览器 / Electron 程序认），两份都带 alpha
 	static void saveToClipboard(const int w, const int h, BYTE* data);
-	static bool saveToFile(const std::wstring& path, const int w, const int h, BYTE* data);
+	// qualityPercent：1..100 覆盖该格式的默认编码质量（JPEG / WebP 生效，PNG 忽略）；
+	// 0 = 用默认质量（其它调用方不用关心）
+	static bool saveToFile(const std::wstring& path, const int w, const int h, BYTE* data,
+		int qualityPercent = 0);
 	// 弹系统另存为对话框，返回空串表示用户取消。defaultName 非空时作为默认文件名（不含扩展名），
 	// defaultDir 非空时作为对话框的初始目录（每次都强制从这里开始，不留用"上次保存过的目录"）
 	static std::wstring getSaveFilePath(HWND hwnd, const std::wstring& ext = L"png",

@@ -96,8 +96,9 @@ public:
 	void setFindWindowElements(bool on);
 	int getTrayClickAction();
 	void setTrayClickAction(int v);
-	bool getPinZoomAtCursor();
-	void setPinZoomAtCursor(bool on);
+	// 贴图上滚动中键（滚轮）执行的动作：0 光标中心缩放 / 1 对向边缘缩放 / 2 调整透明度（默认 0）
+	int getPinWheelAction();
+	void setPinWheelAction(int v);
 	// 截图工具栏相对选区的横向对齐：0 左 / 1 右 / 2 居中（默认左）
 	int getCaptureToolbarAlign();
 	void setCaptureToolbarAlign(int v);
@@ -106,6 +107,12 @@ public:
 	// 静默截图：开启时全屏/重复/焦点窗口截图直接完成；关闭后跳过框选、显示工具栏，需手动完成
 	bool getSilentCapture();
 	void setSilentCapture(bool on);
+	// 全屏窗口时关闭全局热键：检测到其他程序全屏（游戏/视频/演示）时暂停热键，退出后恢复
+	bool getPauseHotkeysFullscreen();
+	void setPauseHotkeysFullscreen(bool on);
+	// 由全屏检测驱动：暂时摘掉 / 重新装回全部全局热键（幂等）
+	void setHotkeysSuppressed(bool on);
+	bool hotkeysSuppressed() const { return hotkeysSuppressed_; }
 	bool getPinAutoOcr();
 	void setPinAutoOcr(bool on);
 	bool getPinAutoFit();
@@ -424,4 +431,6 @@ private:
 	bool configReadOnly{ false };
 	UINT_PTR hotkeyRetryTimer{ 0 };
 	int hotkeyRetryTick{ 0 };
+	// 全屏窗口检测把全局热键临时摘掉了（退出全屏后自动恢复）
+	bool hotkeysSuppressed_{ false };
 };

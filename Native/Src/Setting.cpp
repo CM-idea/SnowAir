@@ -1548,8 +1548,24 @@ bool Setting::getFindWindowElements() { return featBool(L"findWindowElements", t
 void Setting::setFindWindowElements(bool on) { setFeatBool(L"findWindowElements", on); }
 int Setting::getTrayClickAction() { return featInt(L"trayClickAction", 0); }
 void Setting::setTrayClickAction(int v) { setFeatInt(L"trayClickAction", v); }
-bool Setting::getPinZoomAtCursor() { return featBool(L"pinZoomAtCursor", true); }
-void Setting::setPinZoomAtCursor(bool on) { setFeatBool(L"pinZoomAtCursor", on); }
+int Setting::getPinWheelAction()
+{
+	// 老配置只有布尔 pinZoomAtCursor（true = 光标中心缩放，false = 对向边缘缩放）。
+	// 改成三档后以 pinWheelAction 为准；读不到时才按老布尔映射，保留老用户原来的手感。
+	const int v = featInt(L"pinWheelAction", -1);
+	if (v >= 0 && v <= 2) return v;
+	return featBool(L"pinZoomAtCursor", true) ? 0 : 1;
+}
+void Setting::setPinWheelAction(int v)
+{
+	v = std::clamp(v, 0, 2);
+	auto f = featuresObj();
+	f.SetNamedValue(L"pinWheelAction", JsonValue::CreateNumberValue(v));
+	// 老版本只认这个布尔：顺手同步一份，降级回去时至少不会整档丢失
+	//（透明度档在老版本里没有对应行为，按「光标中心缩放」处理）。
+	f.SetNamedValue(L"pinZoomAtCursor", JsonValue::CreateBooleanValue(v != 1));
+	save();
+}
 int Setting::getCaptureToolbarAlign() { return featInt(L"captureToolbarAlign", 0); }
 void Setting::setCaptureToolbarAlign(int v) { setFeatInt(L"captureToolbarAlign", v < 0 ? 0 : (v > 2 ? 2 : v)); }
 int Setting::getToolbarSize() { return featInt(L"toolbarSize", 1); }
@@ -1567,6 +1583,15 @@ void Setting::addToolbarSizeListener(std::function<void()> listener)
 }
 bool Setting::getSilentCapture() { return featBool(L"silentCapture", true); }
 void Setting::setSilentCapture(bool on) { setFeatBool(L"silentCapture", on); }
+bool Setting::getPauseHotkeysFullscreen() { return featBool(L"pauseHotkeysFullscreen", false); }
+void Setting::setPauseHotkeysFullscreen(bool on) { setFeatBool(L"pauseHotkeysFullscreen", on); }
+void Setting::setHotkeysSuppressed(bool on)
+{
+    if (hotkeysSuppressed_ == on) return;
+    hotkeysSuppressed_ = on;
+    if (on) suspendShortcutKeys();    // 摘掉 RegisterHotKey 与兜底钩子
+    else resumeShortcutKeys();        // 按当前配置重新注册
+}
 bool Setting::getPinAutoOcr() { return featBool(L"pinAutoOcr", false); }
 void Setting::setPinAutoOcr(bool on) { setFeatBool(L"pinAutoOcr", on); }
 bool Setting::getPinAutoFit() { return featBool(L"pinAutoFit", true); }
@@ -1746,7 +1771,7 @@ void Setting::restoreFunctionScreenshotDefaults()
 	setTrayClickAction(0);
 	setDemoDefaultTool(0);
 	setDemoEdgeBehavior(0);
-	setPinZoomAtCursor(true);
+	setPinWheelAction(0);
 	setPinAutoOcr(false);
 	setPinAutoFit(true);
 	setPinDoubleClickAction(0);
@@ -1811,6 +1836,7 @@ void Setting::restoreFunctionOtherDefaults()
 	setHoverPreview(false);
 	setSilentCapture(true);
 	setCaptureToolbarAlign(0);
+	setPauseHotkeysFullscreen(false);
 }
 
 // —— 与上面的 restore* 成对：判断该子页是否**仍是出厂值**（供「恢复默认」按钮置灰）——
@@ -1826,7 +1852,7 @@ bool Setting::functionScreenshotAtDefaults()
 		&& getManualSaveFormat().empty() && getAutoSaveFormat().empty()
 		&& getVideoRecordFormat().empty() && getTrayClickAction() == 0
 		&& getDemoDefaultTool() == 0 && getDemoEdgeBehavior() == 0
-		&& getPinZoomAtCursor() && !getPinAutoOcr() && getPinAutoFit()
+		&& getPinWheelAction() == 0 && !getPinAutoOcr() && getPinAutoFit()
 		&& getPinDoubleClickAction() == 0 && getPinOpacity() == 100;
 }
 
@@ -1862,7 +1888,8 @@ bool Setting::functionOtherAtDefaults()
 {
 	return getFeatureTips() && !getHotkeyTip()
 		&& !getRememberToolStyle() && !getHoverPreview()
-		&& getSilentCapture() && getCaptureToolbarAlign() == 0;
+		&& getSilentCapture() && getCaptureToolbarAlign() == 0
+		&& !getPauseHotkeysFullscreen();
 }
 
 int Setting::getVideoQuality() { return featInt(L"videoQuality", 4); }

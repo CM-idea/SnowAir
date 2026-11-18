@@ -375,7 +375,7 @@ void Util::saveToClipboard(const int w, const int h, BYTE* data)
 	if (auto* s = Setting::get()) s->markOwnClipboardWrite();
 }
 
-bool Util::saveToFile(const std::wstring& path, const int w, const int h, BYTE* data)
+bool Util::saveToFile(const std::wstring& path, const int w, const int h, BYTE* data, int qualityPercent)
 {
 	if (path.empty() || w <= 0 || h <= 0 || !data) return false;
 	std::wstring ext = std::filesystem::path(path).extension().wstring();
@@ -384,17 +384,41 @@ bool Util::saveToFile(const std::wstring& path, const int w, const int h, BYTE* 
 	// data 是 top-down BGRA，stride = w * 4。
 	if (ext == L".webp") {
 		std::vector<uint8_t> encoded;
-		if (!WebpCodec::EncodeBGRA(data, w, h, w * 4, 90.f, false, encoded))
+		const float webpQuality = (qualityPercent > 0) ? (float)qualityPercent : 90.f;
+		if (!WebpCodec::EncodeBGRA(data, w, h, w * 4, webpQuality, false, encoded))
 			return false;
 		std::ofstream file(path, std::ios::binary | std::ios::trunc);
 		if (!file) return false;
 		file.write(reinterpret_cast<const char*>(encoded.data()), (std::streamsize)encoded.size());
 		return file.good();
 	}
+	// PNG「输出质量」= 色深量化：按质量把 RGB 低位清零（有损，颜色数变少、体积更小），
+	// 100 或默认时原样输出；透明通道不动，保留画板透明背景。
+	std::vector<BYTE> quantized;
+	if (ext == L".png" && qualityPercent > 0 && qualityPercent < 100) {
+		const int bits = std::clamp((int)std::lround((double)qualityPercent * 8.0 / 100.0), 1, 8);
+		const int shift = 8 - bits;
+		if (shift > 0) {
+			const int step = 1 << shift;
+			const int half = step >> 1;
+			const size_t bytes = (size_t)w * (size_t)h * 4;
+			quantized.assign(data, data + bytes);
+			for (size_t i = 0; i < bytes; i += 4) {
+				for (size_t c = 0; c < 3; ++c) {
+					const int v = ((quantized[i + c] + half) / step) * step;   // 就近取整到 2^shift 的倍数
+					quantized[i + c] = (BYTE)std::min(255, v);
+				}
+			}
+			data = quantized.data();
+		}
+	}
 	// 按扩展名选编码容器（PNG/JPEG/BMP）。临时文件与历史缩略图固定走 .png，
 	// 所以这里的格式切换只影响用户可见的落盘文件。
 	GUID container{}; float quality = -1.f;
 	containerForExt(ext, container, quality);
+	// 调用方指定了输出质量：覆盖该格式的默认值（PNG/BMP 不吃这个参数）
+	if (qualityPercent > 0 && quality >= 0.f)
+		quality = std::clamp((float)qualityPercent / 100.f, 0.01f, 1.f);
 	ComPtr<IWICImagingFactory> factory;
 	auto hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.GetAddressOf()));
 	if (FAILED(hr)) return false;

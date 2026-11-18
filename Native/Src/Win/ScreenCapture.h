@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include <Windows.h>
+#include <dxgi1_2.h>
 
 // 屏幕抓取（HDR 感知）。
 // 优先走 DXGI 桌面复制：HDR 屏向系统要原始 FP16(scRGB)，在软件里做 HDR→SDR 色调映射；
@@ -14,4 +15,46 @@ namespace ScreenCapture
 
 	// 截图入口用：先尝试 DXGI（HDR 友好），失败再退回原来的 GDI 抓屏。
 	std::vector<BYTE> captureOrGdi(int x, int y, int w, int h);
+}
+
+// —— 桌面复制的旋转（截图与录屏共用同一份实现） ——
+// 经验事实（MS 文档「Desktop Duplication API · Rotating the desktop image」）：
+//   AcquireNextFrame 给的表面永远是**未旋转**的，桌面图被"转"在表面里 ——
+//   桌面 768x1024 / 90° 时，表面是 1024x768，桌面方向 = 表面顺时针转 90°。
+// 所以拿像素时要反过来算：桌面坐标 (dx,dy) → 表面坐标 (sx,sy)。
+// 90°/270° 下桌面宽高与表面宽高互换；180°/无旋转时相同。
+inline void ScreenCaptureSurfacePoint(DXGI_MODE_ROTATION rotation,
+	int dx, int dy, int surfW, int surfH, int& sx, int& sy)
+{
+	switch (rotation) {
+	case DXGI_MODE_ROTATION_ROTATE90:
+		sx = dy;             sy = surfH - 1 - dx; break;
+	case DXGI_MODE_ROTATION_ROTATE180:
+		sx = surfW - 1 - dx; sy = surfH - 1 - dy; break;
+	case DXGI_MODE_ROTATION_ROTATE270:
+		sx = surfW - 1 - dy; sy = dx;             break;
+	default:
+		sx = dx;             sy = dy;             break;
+	}
+}
+
+// 用"复制表面真实尺寸 + 桌面矩形尺寸"校验 Rotation 能不能用：
+// 90°/270° 必须横竖互换、180°/无旋转必须完全相等；对不上就不旋转（不猜，至少不比不处理更差）。
+// 也兼容个别直接给桌面方向图的驱动：表面尺寸已经等于桌面尺寸时不能再转。
+inline DXGI_MODE_ROTATION ScreenCaptureResolveRotation(DXGI_MODE_ROTATION raw,
+	int surfW, int surfH, int deskW, int deskH)
+{
+	DXGI_MODE_ROTATION rot = (raw == DXGI_MODE_ROTATION_UNSPECIFIED)
+		? DXGI_MODE_ROTATION_IDENTITY : raw;
+	if (surfW <= 0 || surfH <= 0 || deskW <= 0 || deskH <= 0)
+		return DXGI_MODE_ROTATION_IDENTITY;
+
+	const bool quarter = rot == DXGI_MODE_ROTATION_ROTATE90 || rot == DXGI_MODE_ROTATION_ROTATE270;
+	if (quarter) {
+		if (surfW == deskW && surfH == deskH) return DXGI_MODE_ROTATION_IDENTITY;   // 驱动已给桌面方向
+		if (surfW != deskH || surfH != deskW) return DXGI_MODE_ROTATION_IDENTITY;   // 横竖都对不上
+		return rot;
+	}
+	if (surfW != deskW || surfH != deskH) return DXGI_MODE_ROTATION_IDENTITY;
+	return rot;
 }

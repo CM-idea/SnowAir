@@ -36,6 +36,13 @@ namespace ImageEditTheme {
     inline uint32_t gridLine{ 0xFFFFFF0D };    // 工作区十字网格
     inline uint32_t boardHint{ 0x333333FF };   // 无背景时画板位置的示意虚线
     inline uint32_t boardEdge{ 0xBDBDC2FF };   // 画板描边（浅色下无色 / 白色底与工作区同色时）
+    // 画布浮层（左上角小工具栏 / 图层栏 / 图层卡片）
+    inline uint32_t floatBg{ 0x232323F2 };        // 浮层底（带透明度，压在画布上）
+    inline uint32_t floatHover{ 0x3A3A3AFF };     // 浮层按钮悬停底
+    inline uint32_t floatFg{ 0xFAFAFAFF };        // 浮层图标常态色
+    inline uint32_t floatCard{ 0x171717FF };      // 图层单卡 / 分组外框底
+    inline uint32_t floatCardInner{ 0x232323FF }; // 分组内子卡底
+    inline uint32_t floatGhost{ 0x171717C0 };     // 拖动预览底
 
     inline void apply()
     {
@@ -55,6 +62,8 @@ namespace ImageEditTheme {
             boardEdge = 0xFFFFFF1F;
             cellEdge = 0xFFFFFF1A; hintText = 0xFFFFFF99; hintTextSoft = 0xFFFFFF80;
             snapGuide = 0xFFFFFF80;
+            floatBg = 0x232323F2; floatHover = 0x3A3A3AFF; floatFg = 0xFAFAFAFF;
+            floatCard = 0x171717FF; floatCardInner = 0x232323FF; floatGhost = 0x171717C0;
         }
         else {
             windowBg = 0xF3F3F3FF; canvasBg = 0xFFFFFFFF; trackBg = 0xE5E5E5FF;
@@ -71,6 +80,9 @@ namespace ImageEditTheme {
             boardEdge = 0xBDBDC2FF;
             cellEdge = 0x00000014; hintText = 0x00000099; hintTextSoft = 0x00000080;
             snapGuide = 0x00000080;
+            // 浮层：浅色下用浅灰底 + 白卡片，压在白色工作区上仍能分清层次
+            floatBg = 0xE9E9E9F2; floatHover = 0xD4D4D8FF; floatFg = 0x18181BFF;
+            floatCard = 0xFFFFFFFF; floatCardInner = 0xF2F2F2FF; floatGhost = 0xFFFFFFC0;
         }
     }
 }

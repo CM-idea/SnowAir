@@ -4,6 +4,22 @@
 #include "Tip.h"
 #include "Win/WinCap.h"
 
+namespace {
+	// 命中测试用：point（窗口客户区物理像素）是否落在本窗自己的可交互控件上。
+	// Button / Slider / TextBox 是工具条里仅有的会吞鼠标的节点。
+	bool hitOwnControl(Ling::Node* node, POINT pt)
+	{
+		if (!node || !node->visual.IsVisible()) return false;
+		if (dynamic_cast<Ling::Button*>(node) || dynamic_cast<Ling::Slider*>(node)
+			|| dynamic_cast<Ling::TextBox*>(node)) {
+			if (node->isPosIn(pt)) return true;
+		}
+		for (auto& child : node->children)
+			if (hitOwnControl(child.get(), pt)) return true;
+		return false;
+	}
+}
+
 void ToolbarWindow::initChrome(float padLeft, float padRight, float padTop, float padBottom,
 	Ling::FlexDirection direction)
 {
@@ -46,11 +62,17 @@ void ToolbarWindow::onMinMaxInfo(MINMAXINFO* mmi)
 
 LRESULT ToolbarWindow::onHitTest(const POINT pos)
 {
-	// 压住选区边角时把命中穿透给遮罩，保证悬停光标与拖边可用
+	POINT client = pos;
+	ScreenToClient(hwnd, &client);
+	// 光标压在自己的按钮/滑条上时，工具条必须优先命中：
+	// 否则工具条被拖到选区边线上后，按钮所在位置正好落在遮罩的「拖边命中带」里，
+	// HTTRANSPARENT 会把点击全部让给下层选区控件，表现为「工具点不动、却拖动了选框」。
+	if (hitOwnControl(body.get(), client)) return HTCLIENT;
+	// 空白处压住选区边角时仍把命中穿透给遮罩，保证悬停光标与拖边可用
 	if (auto* host = maskHost(); host && host->hwnd && host->cutMask && host->cutMask->hasRect()) {
-		POINT client = pos;
-		ScreenToClient(host->hwnd, &client);
-		const auto hit = host->cutMask->hitTest(client);
+		POINT hostPt = pos;
+		ScreenToClient(host->hwnd, &hostPt);
+		const auto hit = host->cutMask->hitTest(hostPt);
 		if (hit != MaskHit::None && hit != MaskHit::Inside)
 			return HTTRANSPARENT;
 	}

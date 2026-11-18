@@ -31,6 +31,9 @@ using Microsoft::WRL::ComPtr;
 //  4. 色调映射用 64K 查表（half 只有 65536 种位模式），像素循环里没有 pow：
 //     v / (SDR白点 / 80) → clamp → sRGB 编码。SDR 白点取 Windows 的"SDR 内容亮度"。
 //  5. 只转换请求矩形覆盖到的行，选区截图不再为整屏买单。
+//  6. 竖屏 / 翻转屏：AcquireNextFrame 给的表面永远是**未旋转**的（MS 文档「Rotating the desktop
+//     image」），这里按 DXGI_OUTDUPL_DESC.Rotation 在像素拷贝时转回桌面方向 —— 不处理的话
+//     竖屏截出来就是横的（甚至只截到左边一条）。
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -206,6 +209,13 @@ struct DxgiSession
 	RECT monitor{};
 	int width{ 0 };
 	int height{ 0 };
+	// 桌面复制给的永远是**未旋转**的表面，桌面方向由 DXGI_OUTDUPL_DESC.Rotation 描述
+	//（MS 文档「Rotating the desktop image」）。rawRotation 是 GetDesc 的原值；
+	// rotation 是拿到帧、按表面真实尺寸校验过的有效值 —— 桌面图 = 表面按它顺时针转过来。
+	DXGI_MODE_ROTATION rawRotation{ DXGI_MODE_ROTATION_IDENTITY };
+	DXGI_MODE_ROTATION rotation{ DXGI_MODE_ROTATION_IDENTITY };
+	int desktopW{ 0 };                     // 桌面方向下这块屏的宽高（90/270 时与 width/height 互换）
+	int desktopH{ 0 };
 	bool haveFrame{ false };               // staging 里是否已有一张可信画面
 	float whiteNits{ kSdrReferenceNits };
 	bool lutValid{ false };
@@ -230,7 +240,26 @@ void resetSession(DxgiSession& s)
 	s.format = DXGI_FORMAT_UNKNOWN;
 	s.monitor = {};
 	s.width = s.height = 0;
+	s.rawRotation = DXGI_MODE_ROTATION_IDENTITY;
+	s.rotation = DXGI_MODE_ROTATION_IDENTITY;
+	s.desktopW = s.desktopH = 0;
 	s.haveFrame = false;
+}
+
+// 用"表面真实尺寸 vs 监视器桌面矩形"校验 Rotation 能不能用（详见 ScreenCapture.h 里的说明）：
+// 90/270 必须横竖互换，180/无旋转必须完全相等；对不上就保持原样（不猜）。
+// 也顺手兼容个别驱动：它们直接给桌面方向的图（表面尺寸已经等于桌面尺寸），这时不能再转。
+void resolveRotation(DxgiSession& s)
+{
+	const int mw = (int)(s.monitor.right - s.monitor.left);
+	const int mh = (int)(s.monitor.bottom - s.monitor.top);
+	s.rotation = ScreenCaptureResolveRotation(s.rawRotation, s.width, s.height, mw, mh);
+	const bool swapped = s.rotation == DXGI_MODE_ROTATION_ROTATE90 || s.rotation == DXGI_MODE_ROTATION_ROTATE270;
+	s.desktopW = swapped ? s.height : s.width;
+	s.desktopH = swapped ? s.width : s.height;
+	trace(L"rotation=" + std::to_wstring((int)s.rotation) + L" surface=" + std::to_wstring(s.width)
+		+ L"x" + std::to_wstring(s.height) + L" desktop=" + std::to_wstring(s.desktopW)
+		+ L"x" + std::to_wstring(s.desktopH));
 }
 
 void ensureLut(DxgiSession& s)
@@ -298,6 +327,12 @@ bool createSession(DxgiSession& s, IDXGIAdapter1* adapter, IDXGIOutput* output, 
 		return false;
 	}
 
+	// 旋转先原样记下：校验要等拿到帧、知道表面真实尺寸（见 resolveRotation）
+	// 注意 IDXGIOutputDuplication::GetDesc 返回 void，不是 HRESULT
+	DXGI_OUTDUPL_DESC duplDesc{};
+	s.dupl->GetDesc(&duplDesc);
+	s.rawRotation = duplDesc.Rotation;
+
 	// 新会话的第一帧要等 DWM 合成一次才有内容
 	DwmFlush();
 	return true;
@@ -313,6 +348,9 @@ bool ensureStaging(DxgiSession& s, const D3D11_TEXTURE2D_DESC& source)
 	s.width = (int)source.Width;
 	s.height = (int)source.Height;
 	s.format = source.Format;
+	s.desktopW = (int)source.Width;
+	s.desktopH = (int)source.Height;
+	resolveRotation(s);
 
 	D3D11_TEXTURE2D_DESC desc = source;
 	desc.Usage = D3D11_USAGE_STAGING;
@@ -332,7 +370,8 @@ bool ensureStaging(DxgiSession& s, const D3D11_TEXTURE2D_DESC& source)
 	return true;
 }
 
-// 把暂存纹理里与请求矩形相交的行转成 BGRA8。blank 供调用方判断"是不是空帧"。
+// 把暂存纹理里与请求矩形相交的部分转成 BGRA8。blank 供调用方判断"是不是空帧"。
+// 竖屏 / 翻转屏时表面是未旋转的，这里按 session.rotation 把像素转回桌面方向。
 bool readStaging(DxgiSession& s, std::vector<BYTE>& dst, int dstW, int dstH, int dstX, int dstY, bool& blank)
 {
 	blank = false;
@@ -343,11 +382,12 @@ bool readStaging(DxgiSession& s, std::vector<BYTE>& dst, int dstW, int dstH, int
 		return false;
 
 	const bool halfFloat = s.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+	const BYTE* base = reinterpret_cast<const BYTE*>(map.pData);
+	const int sw = s.width, sh = s.height;
 
 	// 抽查整块屏是否全黑（不是只看选区）：选区恰好落在黑色区域时不该误判，
 	// 而整屏突然全黑说明复制表面已经死了（休眠恢复后常见）
 	if (halfFloat) {
-		const BYTE* base = reinterpret_cast<const BYTE*>(map.pData);
 		const int rowStep = (std::max)(1, s.height / 64);
 		const int colStep = (std::max)(1, s.width / 128);
 		bool any = false;
@@ -364,35 +404,72 @@ bool readStaging(DxgiSession& s, std::vector<BYTE>& dst, int dstW, int dstH, int
 		blank = !any;
 	}
 
-	const int sx = (std::max)(0, -dstX);
-	const int sy = (std::max)(0, -dstY);
-	const int ex = (std::min)(s.width, dstW - dstX);
-	const int ey = (std::min)(s.height, dstH - dstY);
+	// 目标图里这块屏占的区域（桌面方向，即 desktopW/desktopH）
+	const int x0 = (std::max)(dstX, 0);
+	const int y0 = (std::max)(dstY, 0);
+	const int x1 = (std::min)(dstX + s.desktopW, dstW);
+	const int y1 = (std::min)(dstY + s.desktopH, dstH);
 
-	if (!blank && ex > sx && ey > sy) {
-		if (halfFloat) {
-			ensureLut(s);
-			const unsigned char* lut = s.lut.data();
-			for (int y = sy; y < ey; ++y) {
-				const unsigned short* src = reinterpret_cast<const unsigned short*>(
-					reinterpret_cast<const BYTE*>(map.pData) + (size_t)y * map.RowPitch) + (size_t)sx * 4;
-				BYTE* dp = dst.data() + ((size_t)(dstY + y) * dstW + (dstX + sx)) * 4;
-				for (int x = sx; x < ex; ++x, src += 4, dp += 4) {
-					dp[0] = lut[src[2]];
-					dp[1] = lut[src[1]];
-					dp[2] = lut[src[0]];
-					dp[3] = 0xFF;
+	if (!blank && x1 > x0 && y1 > y0) {
+		if (s.rotation == DXGI_MODE_ROTATION_IDENTITY) {
+			// 未旋转（绝大多数情况）：整行 memcpy，不必为每个像素算一遍坐标
+			const int sx = (std::max)(x0 - dstX, 0);
+			const int sy = (std::max)(y0 - dstY, 0);
+			const int ex = (std::min)(sw, x1 - dstX);
+			const int ey = (std::min)(sh, y1 - dstY);
+			if (ex > sx && ey > sy) {
+				if (halfFloat) {
+					ensureLut(s);
+					const unsigned char* lut = s.lut.data();
+					for (int y = sy; y < ey; ++y) {
+						const unsigned short* src = reinterpret_cast<const unsigned short*>(
+							base + (size_t)y * map.RowPitch) + (size_t)sx * 4;
+						BYTE* dp = dst.data() + ((size_t)(dstY + y) * dstW + (dstX + sx)) * 4;
+						for (int x = sx; x < ex; ++x, src += 4, dp += 4) {
+							dp[0] = lut[src[2]];
+							dp[1] = lut[src[1]];
+							dp[2] = lut[src[0]];
+							dp[3] = 0xFF;
+						}
+					}
+				}
+				else {
+					const int bytes = (ex - sx) * 4;
+					for (int y = sy; y < ey; ++y) {
+						const BYTE* src = base + (size_t)y * map.RowPitch + (size_t)sx * 4;
+						BYTE* dp = dst.data() + ((size_t)(dstY + y) * dstW + (dstX + sx)) * 4;
+						memcpy(dp, src, (size_t)bytes);
+						// 桌面复制的 alpha 不保证是 255，统一成不透明
+						for (int x = 0; x < ex - sx; ++x) dp[x * 4 + 3] = 0xFF;
+					}
 				}
 			}
 		}
 		else {
-			const int bytes = (ex - sx) * 4;
-			for (int y = sy; y < ey; ++y) {
-				const BYTE* src = reinterpret_cast<const BYTE*>(map.pData) + (size_t)y * map.RowPitch + (size_t)sx * 4;
-				BYTE* dp = dst.data() + ((size_t)(dstY + y) * dstW + (dstX + sx)) * 4;
-				memcpy(dp, src, (size_t)bytes);
-				// 桌面复制的 alpha 不保证是 255，统一成不透明
-				for (int x = 0; x < ex - sx; ++x) dp[x * 4 + 3] = 0xFF;
+			// 旋转过（竖屏 / 翻转屏）：逐像素反查表面坐标。转 90°/270° 时目标图的一行对应表面的一列，
+			// 没法整行 memcpy；只有这类屏幕才走这条路。
+			if (halfFloat) ensureLut(s);
+			const unsigned char* lut = s.lut.data();
+			for (int Y = y0; Y < y1; ++Y) {
+				BYTE* dp = dst.data() + ((size_t)Y * dstW + x0) * 4;
+				for (int X = x0; X < x1; ++X, dp += 4) {
+					int sx = 0, sy = 0;
+					ScreenCaptureSurfacePoint(s.rotation, X - dstX, Y - dstY, sw, sh, sx, sy);
+					if ((unsigned)sx >= (unsigned)sw || (unsigned)sy >= (unsigned)sh) continue;
+					const BYTE* src = base + (size_t)sy * map.RowPitch + (size_t)sx * 4;
+					if (halfFloat) {
+						const unsigned short* sp = reinterpret_cast<const unsigned short*>(src);
+						dp[0] = lut[sp[2]];
+						dp[1] = lut[sp[1]];
+						dp[2] = lut[sp[0]];
+					}
+					else {
+						dp[0] = src[0];
+						dp[1] = src[1];
+						dp[2] = src[2];
+					}
+					dp[3] = 0xFF;
+				}
 			}
 		}
 	}

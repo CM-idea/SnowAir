@@ -199,7 +199,8 @@ private:
 	bool adjustDragging{ false };
 	static constexpr float minSize{ 4.f };
 	// 拖动阈值（物理像素，和框选的抖动阈值同一口径：|dx|+|dy| 超过它才算拖动）
-	static constexpr float adjustDragThreshold{ 5.f };
+	// 3px：与 Windows 默认拖拽盒(±2)及主流截图工具(3~4)手感一致；5 太钝。
+	static constexpr float adjustDragThreshold{ 3.f };
 	static constexpr float handleLogical{ 8.f };
 	static constexpr float hitBandLogical{ 14.f };
 	// 圆角滑条：轨 4 / 钮半径 7

@@ -258,11 +258,15 @@ D2D1_RECT_F ImageEditCollage::artRect() const
         if (bbox.right <= bbox.left || bbox.bottom <= bbox.top) has = false;
     }
 
-    // 每个轴独立：手动尺寸固定原点 0，自动轴由内容包围盒 + 外边距决定
+    // 每个轴独立：只有「用户手输锁定」的轴才固定；其余轴（包括残留的非锁定尺寸值）
+    // 一律由内容包围盒 + 外边距决定，保证「没锁定 = 自适应」。
+    // （外边距 = 画板四周留白，和容器之间的「间距」是两回事，这里只用 border_）
+    const bool lockW = sizeLockedW();
+    const bool lockH = sizeLockedH();
     const float b = border_;
     float left = 0.f, top = 0.f, right = 0.f, bottom = 0.f;
-    if (manualW_ > 0) {
-        // 固定尺寸：输入值原样生效，原点保持锁定时的位置（增长由 syncLockedBoard 处理）
+    if (lockW) {
+        // 固定尺寸：输入值原样生效，原点保持锁定时的位置
         left = (float)manualL_;
         right = (float)manualL_ + (float)manualW_;
     }
@@ -270,7 +274,7 @@ D2D1_RECT_F ImageEditCollage::artRect() const
         left = bbox.left - b;
         right = bbox.right + b;
     }
-    if (manualH_ > 0) {
+    if (lockH) {
         top = (float)manualT_;
         bottom = (float)manualT_ + (float)manualH_;
     }
@@ -815,16 +819,17 @@ void ImageEditCollage::clear()
     cells_.clear();
     splitGroups_.clear();
     layoutGroups_.clear();
+    gapBaseValid_ = false;
     selected_ = -1;
     extraCells_.clear();
     imageAdjust_ = false;
-    contentFloorR_ = contentFloorB_ = -FLT_MAX;
     undoStack_.clear();
     redoStack_.clear();
     nextGroup_ = 1;
     zoomFactor_ = 1.f;
     panDX_ = panDY_ = 0.f;
     dragging_ = panning_ = resizing_ = imageAdjust_ = false;
+    endLockDrag();
     notifyChanged();
     if (win) win->refresh();
 }
@@ -844,6 +849,8 @@ ImageEditCollage::Snapshot ImageEditCollage::snapshot() const
 
 void ImageEditCollage::restore(const Snapshot& s)
 {
+    endLockDrag();
+    gapBaseValid_ = false;
     cells_ = s.cells;
     splitGroups_ = s.groups;
     layoutGroups_ = s.layouts;
@@ -861,7 +868,6 @@ void ImageEditCollage::restore(const Snapshot& s)
     sizeEnteredW_ = s.sizeEnteredW;
     sizeEnteredH_ = s.sizeEnteredH;
     selected_ = s.selected;
-    captureContentExtents();
     if (selected_ >= (int)cells_.size()) selected_ = -1;
     extraCells_.clear();
     // 恢复选中时把同组成员补回（否则拖动只会动其中一格）
@@ -892,60 +898,448 @@ void ImageEditCollage::redo()
     restore(s);
 }
 
-void ImageEditCollage::captureContentExtents()
-{
-    if (cells_.empty()) return;
-    D2D1_RECT_F bbox{ FLT_MAX, FLT_MAX, -FLT_MAX, -FLT_MAX };
-    for (const auto& c : cells_) {
-        if (c.poly.size() < 3) continue;
-        auto b = boundsOf(c.poly);
-        bbox.right = std::max(bbox.right, b.right);
-        bbox.bottom = std::max(bbox.bottom, b.bottom);
-    }
-    if (bbox.right <= -FLT_MAX + 1.f) return;
-    contentFloorR_ = bbox.right + border_;
-    contentFloorB_ = bbox.bottom + border_;
-    // 已经固定的画板边也算进基准：输入尺寸本身不该被内容立刻撑大
-    if (manualW_ > 0) contentFloorR_ = std::max(contentFloorR_, (float)(manualL_ + manualW_));
-    if (manualH_ > 0) contentFloorB_ = std::max(contentFloorB_, (float)(manualT_ + manualH_));
-}
-
-void ImageEditCollage::syncLockedBoard()
-{
-    if ((manualW_ <= 0 && manualH_ <= 0) || cells_.empty()) return;
-    D2D1_RECT_F bbox{ FLT_MAX, FLT_MAX, -FLT_MAX, -FLT_MAX };
-    for (const auto& c : cells_) {
-        if (c.poly.size() < 3) continue;
-        auto b = boundsOf(c.poly);
-        bbox.left = std::min(bbox.left, b.left);
-        bbox.top = std::min(bbox.top, b.top);
-        bbox.right = std::max(bbox.right, b.right);
-        bbox.bottom = std::max(bbox.bottom, b.bottom);
-    }
-    if (bbox.right <= bbox.left) return;
-    const float needR = bbox.right + border_;
-    const float needB = bbox.bottom + border_;
-    if (contentFloorR_ <= -FLT_MAX + 1.f) contentFloorR_ = needR;
-    if (contentFloorB_ <= -FLT_MAX + 1.f) contentFloorB_ = needB;
-    // 只有「输入尺寸之后内容又继续变大」才把画板撑大；输入值本身原样保留
-    if (manualW_ > 0 && needR > contentFloorR_ + 0.01f) {
-        const int need = (int)std::ceil(needR - (float)manualL_);
-        manualW_ = std::max(manualW_, need);
-        contentFloorR_ = needR;
-    }
-    if (manualH_ > 0 && needB > contentFloorB_ + 0.01f) {
-        const int need = (int)std::ceil(needB - (float)manualT_);
-        manualH_ = std::max(manualH_, need);
-        contentFloorB_ = needB;
-    }
-}
-
 void ImageEditCollage::notifyChanged(bool content)
 {
-    // 画板固定后只随内容变大（拖动/缩放容器可能把画板撑大，但不会缩回）
-    syncLockedBoard();
+    // 其它编辑（拖动/缩放/布局/增删）已经改变了几何，间距恢复基准失效
+    gapBaseValid_ = false;
     if (onSelectionChanged) onSelectionChanged();
     if (content && onContentChanged) onContentChanged();
+}
+
+// ---------------- 图层顺序 ----------------
+
+int ImageEditCollage::imageAdjustCell() const
+{
+    if (!imageAdjust_ || selected_ < 0 || selected_ >= (int)cells_.size()) return -1;
+    if (cells_[selected_].image.empty()) return -1;
+    return selected_;
+}
+
+std::vector<ImageEditCollage::LayerUnit> ImageEditCollage::layerUnits() const
+{
+    std::vector<LayerUnit> units;
+    std::vector<bool> used(cells_.size(), false);
+    for (int i = (int)cells_.size() - 1; i >= 0; --i) {   // 顶部 = 最上层
+        if (used[i]) continue;
+        LayerUnit u;
+        u.group = cells_[i].group;
+        if (u.group >= 0) {
+            auto lit = layoutGroups_.find(u.group);
+            auto sit = splitGroups_.find(u.group);
+            if (lit != layoutGroups_.end()) {
+                u.kind = 1;
+                u.layoutType = lit->second.type;
+                // 组内按格位顺序显示
+                for (int m : lit->second.members) {
+                    if (m < 0 || m >= (int)cells_.size()) continue;
+                    u.cells.push_back(m);
+                    used[m] = true;
+                }
+            }
+            else if (sit != splitGroups_.end()) {
+                u.kind = 2;   // 分割按自由布局处理
+                u.layoutType = 0;
+                for (int k = 0; k < (int)cells_.size(); ++k) {
+                    if (cells_[k].group != u.group) continue;
+                    u.cells.push_back(k);
+                    used[k] = true;
+                }
+            }
+            else {
+                u.group = -1;   // 组数据缺失：当作单格
+            }
+        }
+        if (u.cells.empty()) {
+            u.cells.push_back(i);
+            used[i] = true;
+        }
+        for (int c : u.cells) {
+            u.paths.push_back(cells_[c].image);
+            const bool on = isCellSelected(c);
+            u.sel.push_back(on);
+            if (!cells_[c].image.empty()) u.hasImage = true;
+            if (on) u.anySelected = true;
+        }
+        units.push_back(std::move(u));
+    }
+    return units;
+}
+
+// 把 cell 所在的单位（分组则整组）移动到「beforeCell 所在行的上方」；
+// beforeCell < 0 表示移到最底层。只改绘制顺序，不动位置/尺寸/组数据。
+void ImageEditCollage::moveLayerBefore(int cell, int beforeCell)
+{
+    if (cell < 0 || cell >= (int)cells_.size()) return;
+    if (beforeCell >= (int)cells_.size()) beforeCell = -1;
+
+    auto inUnit = [&](int idx) {
+        if (idx == cell) return true;
+        const int g = cells_[cell].group;
+        return g >= 0 && cells_[idx].group == g;
+    };
+    if (beforeCell >= 0 && inUnit(beforeCell)) return;   // 落点在自己组内：不处理
+
+    // 视觉顺序（最上层在前），先摘掉被拖单位
+    std::vector<int> unit;
+    std::vector<int> rest;
+    for (int i = (int)cells_.size() - 1; i >= 0; --i) {
+        if (inUnit(i)) unit.push_back(i);
+        else rest.push_back(i);
+    }
+    if (unit.empty()) return;
+    int at = (int)rest.size();   // 默认放到底部
+    if (beforeCell >= 0) {
+        at = -1;
+        for (int k = 0; k < (int)rest.size(); ++k) {
+            if (rest[k] == beforeCell) { at = k; break; }
+        }
+        if (at < 0) return;
+    }
+    // 位置没变就不记撤销
+    bool same = true;
+    {
+        std::vector<int> probe = rest;
+        probe.insert(probe.begin() + at, unit.begin(), unit.end());
+        std::vector<int> cur;
+        for (int i = (int)cells_.size() - 1; i >= 0; --i) cur.push_back(i);
+        same = (probe == cur);
+    }
+    if (same) return;
+    pushUndo();
+    rest.insert(rest.begin() + at, unit.begin(), unit.end());
+
+    // 回到 cells_ 顺序（底层在前）并重映射索引
+    std::vector<Cell> out;
+    out.reserve(cells_.size());
+    std::vector<int> oldToNew(cells_.size(), -1);
+    for (int k = (int)rest.size() - 1; k >= 0; --k) {
+        const int old = rest[k];
+        oldToNew[old] = (int)out.size();
+        out.push_back(cells_[old]);
+    }
+    cells_ = std::move(out);
+    if (selected_ >= 0 && selected_ < (int)oldToNew.size()) selected_ = oldToNew[selected_];
+    for (auto& e : extraCells_)
+        if (e >= 0 && e < (int)oldToNew.size()) e = oldToNew[e];
+    for (auto& [gid, grp] : layoutGroups_) {
+        for (auto& m : grp.members)
+            if (m >= 0 && m < (int)oldToNew.size()) m = oldToNew[m];
+    }
+    notifyChanged();
+    if (win) win->refresh();
+}
+
+// ---------------- 布局锁：拖动容器按插入位顺移重排 ----------------
+
+// 排列方向跟随尺寸锁轴：只锁高度（宽自适应）时横排，其余竖排
+bool ImageEditCollage::lockFlowHorizontal() const
+{
+    return sizeLockedH() && !sizeLockedW();
+}
+
+void ImageEditCollage::toggleLayoutLock()
+{
+    layoutLocked_ = !layoutLocked_;
+    if (!layoutLocked_) {
+        // 关锁时若还在拖动，按当前位置收尾
+        lockDragging_ = false;
+        lockUnits_.clear();
+        lockMoving_ = -1;
+        lockCaretVisible_ = false;
+    }
+    if (win) win->refresh();
+}
+
+std::vector<ImageEditCollage::LockUnit> ImageEditCollage::buildLockUnits() const
+{
+    std::vector<LockUnit> units;
+    std::vector<bool> used(cells_.size(), false);
+    for (int i = 0; i < (int)cells_.size(); ++i) {
+        if (used[i]) continue;
+        LockUnit u;
+        const int g = cells_[i].group;
+        if (g >= 0) {
+            // 分割组 / 布局组：同组各格算一个整体
+            for (int k = 0; k < (int)cells_.size(); ++k) {
+                if (cells_[k].group != g) continue;
+                u.cells.push_back(k);
+                used[k] = true;
+            }
+        }
+        else {
+            u.cells.push_back(i);
+            used[i] = true;
+        }
+        u.orig = boundsOf(cells_[i].poly);
+        for (int k : u.cells) {
+            auto b = boundsOf(cells_[k].poly);
+            u.orig.left = std::min(u.orig.left, b.left);
+            u.orig.top = std::min(u.orig.top, b.top);
+            u.orig.right = std::max(u.orig.right, b.right);
+            u.orig.bottom = std::max(u.orig.bottom, b.bottom);
+        }
+        units.push_back(std::move(u));
+    }
+    return units;
+}
+
+// 按排列轴上的中心排序：重排顺序即横排/竖排的先后
+void ImageEditCollage::sortLockUnits()
+{
+    const bool horiz = lockFlowHorizontal();
+    std::stable_sort(lockUnits_.begin(), lockUnits_.end(), [horiz](const LockUnit& a, const LockUnit& b) {
+        const float ca = horiz ? (a.orig.left + a.orig.right) * 0.5f
+                               : (a.orig.top + a.orig.bottom) * 0.5f;
+        const float cb = horiz ? (b.orig.left + b.orig.right) * 0.5f
+                               : (b.orig.top + b.orig.bottom) * 0.5f;
+        return ca < cb;
+        });
+}
+
+D2D1_RECT_F ImageEditCollage::lockUnitBounds(int unit) const
+{
+    D2D1_RECT_F rc{ FLT_MAX, FLT_MAX, -FLT_MAX, -FLT_MAX };
+    if (unit < 0 || unit >= (int)lockUnits_.size()) return rc;
+    for (int idx : lockUnits_[unit].cells) {
+        if (idx < 0 || idx >= (int)cells_.size()) continue;
+        auto b = boundsOf(cells_[idx].poly);
+        rc.left = std::min(rc.left, b.left);
+        rc.top = std::min(rc.top, b.top);
+        rc.right = std::max(rc.right, b.right);
+        rc.bottom = std::max(rc.bottom, b.bottom);
+    }
+    return rc;
+}
+
+void ImageEditCollage::transformLockUnit(int unit, const D2D1_RECT_F& target)
+{
+    if (unit < 0 || unit >= (int)lockUnits_.size()) return;
+    const auto cur = lockUnitBounds(unit);
+    const float cw = std::max(0.01f, cur.right - cur.left);
+    const float ch = std::max(0.01f, cur.bottom - cur.top);
+    const float tw = std::max(0.01f, target.right - target.left);
+    const float th = std::max(0.01f, target.bottom - target.top);
+    const float sx = tw / cw;
+    const float sy = th / ch;
+    if (std::fabs(sx - 1.f) < 0.0001f && std::fabs(sy - 1.f) < 0.0001f
+        && std::fabs(target.left - cur.left) < 0.01f && std::fabs(target.top - cur.top) < 0.01f)
+        return;
+    auto mapX = [&](float v) { return target.left + (v - cur.left) * sx; };
+    auto mapY = [&](float v) { return target.top + (v - cur.top) * sy; };
+    std::vector<int> layoutDone, splitDone;
+    for (int idx : lockUnits_[unit].cells) {
+        if (idx < 0 || idx >= (int)cells_.size()) continue;
+        for (auto& q : cells_[idx].poly) { q.x = mapX(q.x); q.y = mapY(q.y); }
+        const int lg = layoutGroupOf(idx);
+        if (lg >= 0) {
+            if (std::find(layoutDone.begin(), layoutDone.end(), lg) == layoutDone.end()) {
+                layoutDone.push_back(lg);
+                auto it = layoutGroups_.find(lg);
+                if (it != layoutGroups_.end()) {
+                    auto& r = it->second.rect;
+                    r = D2D1::RectF(mapX(r.left), mapY(r.top), mapX(r.right), mapY(r.bottom));
+                }
+            }
+            continue;
+        }
+        // 分割组的线与原容器跟着整组一起映射，后续重建分割块仍以当前位置为准
+        const int sg = cells_[idx].group;
+        if (sg >= 0 && std::find(splitDone.begin(), splitDone.end(), sg) == splitDone.end()) {
+            splitDone.push_back(sg);
+            auto it = splitGroups_.find(sg);
+            if (it != splitGroups_.end()) {
+                for (auto& L : it->second.lines) {
+                    L.a.x = mapX(L.a.x); L.a.y = mapY(L.a.y);
+                    L.b.x = mapX(L.b.x); L.b.y = mapY(L.b.y);
+                }
+                for (auto& q : it->second.original) { q.x = mapX(q.x); q.y = mapY(q.y); }
+            }
+        }
+    }
+}
+
+void ImageEditCollage::beginLockDrag(const Pt& p)
+{
+    lockDragging_ = false;
+    lockUnits_.clear();
+    lockMoving_ = -1;
+    lockInsert_ = -1;
+    lockCaretVisible_ = false;
+    if (!layoutLocked_ || cells_.empty()) return;
+    const auto sel = selectedCellIndices();
+    if (sel.empty()) return;
+    lockUnits_ = buildLockUnits();
+    // 多选跨多个单位时合并成一个移动单位，拖起来仍是一个整体
+    std::vector<int> moveUnits;
+    for (int i = 0; i < (int)lockUnits_.size(); ++i) {
+        for (int idx : lockUnits_[i].cells) {
+            if (std::find(sel.begin(), sel.end(), idx) != sel.end()) { moveUnits.push_back(i); break; }
+        }
+    }
+    if (moveUnits.empty()) { lockUnits_.clear(); return; }
+    if (moveUnits.size() > 1) {
+        LockUnit merged;
+        for (int ui : moveUnits) {
+            const auto& u = lockUnits_[ui];
+            merged.cells.insert(merged.cells.end(), u.cells.begin(), u.cells.end());
+            merged.orig.left = std::min(merged.orig.left, u.orig.left);
+            merged.orig.top = std::min(merged.orig.top, u.orig.top);
+            merged.orig.right = std::max(merged.orig.right, u.orig.right);
+            merged.orig.bottom = std::max(merged.orig.bottom, u.orig.bottom);
+        }
+        for (int k = (int)moveUnits.size() - 1; k >= 0; --k)
+            lockUnits_.erase(lockUnits_.begin() + moveUnits[k]);
+        lockUnits_.push_back(std::move(merged));
+    }
+    sortLockUnits();
+    for (int i = 0; i < (int)lockUnits_.size() && lockMoving_ < 0; ++i) {
+        for (int idx : lockUnits_[i].cells) {
+            if (std::find(sel.begin(), sel.end(), idx) != sel.end()) { lockMoving_ = i; break; }
+        }
+    }
+    // 只有一个单位（全部内容都被选中）时没有「插到谁前面」的问题，保持自由拖动
+    if (lockMoving_ < 0 || lockUnits_.size() < 2) {
+        lockUnits_.clear();
+        lockMoving_ = -1;
+        return;
+    }
+    lockArea_ = artRect();
+    lockDragStart_ = p;
+    lockGhost_ = D2D1::Point2F(0.f, 0.f);
+    lockDragging_ = true;
+}
+
+void ImageEditCollage::updateLockDrag(const Pt& p)
+{
+    if (!lockDragging_ || lockUnits_.empty() || lockMoving_ < 0) return;
+    snapGuides_.clear();
+    // 原位保留原图不动（画板尺寸始终不变），只画一个半透明预览跟手
+    lockGhost_ = D2D1::Point2F(p.x - lockDragStart_.x, p.y - lockDragStart_.y);
+
+    // 2) 指针在画板内才显示插入光标（和文件合并一致）：松手才真正插入重排
+    lockCaretVisible_ = false;
+    lockInsert_ = -1;
+    if (p.x < lockArea_.left || p.x > lockArea_.right
+        || p.y < lockArea_.top || p.y > lockArea_.bottom) return;
+
+    const bool horiz = lockFlowHorizontal();
+    const float axis = horiz ? p.x : p.y;
+    // 其他单位保持拖动开始时的先后：插入位 = 第一个中心位于指针之后的单位之前
+    std::vector<int> others;
+    others.reserve(lockUnits_.size());
+    for (int i = 0; i < (int)lockUnits_.size(); ++i)
+        if (i != lockMoving_) others.push_back(i);
+    int at = (int)others.size();
+    for (int k = 0; k < (int)others.size(); ++k) {
+        const auto& o = lockUnits_[others[k]];
+        const float c = horiz ? (o.orig.left + o.orig.right) * 0.5f
+                              : (o.orig.top + o.orig.bottom) * 0.5f;
+        if (axis < c) { at = k; break; }
+    }
+    lockInsert_ = at;
+
+    // 插入光标：贴在目标槽位前缘（插到末尾则贴最后一个单位后缘），横跨内容区
+    const float b = border_;
+    const float left = lockArea_.left + b;
+    const float top = lockArea_.top + b;
+    const float right = std::max(left, lockArea_.right - b);
+    const float bottom = std::max(top, lockArea_.bottom - b);
+    if (horiz) {
+        float x = (at < (int)others.size()) ? lockUnits_[others[at]].orig.left
+                                            : lockUnits_[others.back()].orig.right;
+        x = std::clamp(x, left, right);
+        lockCaretA_ = D2D1::Point2F(x, top);
+        lockCaretB_ = D2D1::Point2F(x, bottom);
+    }
+    else {
+        float y = (at < (int)others.size()) ? lockUnits_[others[at]].orig.top
+                                            : lockUnits_[others.back()].orig.bottom;
+        y = std::clamp(y, top, bottom);
+        lockCaretA_ = D2D1::Point2F(left, y);
+        lockCaretB_ = D2D1::Point2F(right, y);
+    }
+    lockCaretVisible_ = true;
+}
+
+// 从内容区左上角按「间距」依次排齐（松手后真正插入）
+// 外边距只决定画板四周留白；「间距」只作用在容器与容器之间。
+// 锁定的画板轴装不下时等比缩小容器，没锁定的轴交给画板随内容扩大
+void ImageEditCollage::layoutLockUnits(const std::vector<int>& order)
+{
+    if (order.empty()) return;
+    const bool horiz = lockFlowHorizontal();
+    const float inset = border_;
+    const float left = lockArea_.left + inset;
+    const float top = lockArea_.top + inset;
+    const float availW = std::max(0.f, (lockArea_.right - lockArea_.left) - inset * 2.f);
+    const float availH = std::max(0.f, (lockArea_.bottom - lockArea_.top) - inset * 2.f);
+
+    // 锁定轴装不下时等比缩小（未锁定轴不约束，画板会随内容变大）
+    float sumFlow = 0.f, maxCross = 0.f;
+    for (int ui : order) {
+        if (ui < 0 || ui >= (int)lockUnits_.size()) continue;
+        const auto& o = lockUnits_[ui].orig;
+        const float uw = std::max(1.f, o.right - o.left);
+        const float uh = std::max(1.f, o.bottom - o.top);
+        sumFlow += horiz ? uw : uh;
+        maxCross = std::max(maxCross, horiz ? uh : uw);
+    }
+    const float gaps = gap_ * (float)std::max(0, (int)order.size() - 1);
+    const float crossAvail = horiz ? availH : availW;
+    const float flowAvail = horiz ? availW : availH;
+    const bool crossLocked = horiz ? sizeLockedH() : sizeLockedW();
+    const bool flowLocked = horiz ? sizeLockedW() : sizeLockedH();
+    float fit = 1.f;
+    if (crossLocked && maxCross > 0.5f && crossAvail > 0.5f)
+        fit = std::min(fit, crossAvail / maxCross);
+    if (flowLocked && sumFlow > 0.5f && flowAvail > 0.5f)
+        fit = std::min(fit, flowAvail / (sumFlow + gaps));
+    fit = std::clamp(fit, 0.05f, 1.f);
+
+    const bool centerX = !horiz && sizeLockedW();
+    float cursor = horiz ? left : top;
+    for (int ui : order) {
+        if (ui < 0 || ui >= (int)lockUnits_.size()) continue;
+        const auto& u = lockUnits_[ui];
+        const float ow = std::max(1.f, u.orig.right - u.orig.left);
+        const float oh = std::max(1.f, u.orig.bottom - u.orig.top);
+        const float uw = std::max(1.f, ow * fit);
+        const float uh = std::max(1.f, oh * fit);
+        float tx = left, ty = top;
+        if (horiz) {
+            tx = cursor;
+            ty = top + std::max(0.f, (availH - uh) * 0.5f);
+        }
+        else {
+            tx = centerX ? left + std::max(0.f, (availW - uw) * 0.5f) : left;
+            ty = cursor;
+        }
+        transformLockUnit(ui, D2D1::RectF(tx, ty, tx + uw, ty + uh));
+        cursor += (horiz ? uw : uh) + gap_;
+    }
+}
+
+void ImageEditCollage::commitLockDrop()
+{
+    if (!lockDragging_ || !lockCaretVisible_ || lockInsert_ < 0) return;
+    std::vector<int> others;
+    for (int i = 0; i < (int)lockUnits_.size(); ++i)
+        if (i != lockMoving_) others.push_back(i);
+    if (others.empty()) return;
+    const int at = std::clamp(lockInsert_, 0, (int)others.size());
+    std::vector<int> order = others;
+    order.insert(order.begin() + at, lockMoving_);
+    layoutLockUnits(order);
+}
+
+void ImageEditCollage::endLockDrag()
+{
+    lockDragging_ = false;
+    lockUnits_.clear();
+    lockMoving_ = -1;
+    lockInsert_ = -1;
+    lockCaretVisible_ = false;
+    lockGhost_ = D2D1::Point2F(0.f, 0.f);
 }
 
 // ---------------- 参数 ----------------
@@ -1122,12 +1516,18 @@ void ImageEditCollage::applyLayoutToSelection()
 
 void ImageEditCollage::createLayoutInRect(const D2D1_RECT_F& rect)
 {
-    auto pieces = layoutPieceRects(rect);
+    // 拖出的矩形先吸附到整数世界坐标：画板（manualL_/manualW_/manualH_）是取整后的矩形，
+    // 布局若带小数，贴住画板时两者边缘会差零点几像素，画板底色就在旁边漏出一条 1px
+    // 白边（看起来像布局没和背景严丝合缝）。
+    const D2D1_RECT_F rc{
+        std::round(rect.left), std::round(rect.top),
+        std::round(rect.right), std::round(rect.bottom) };
+    auto pieces = layoutPieceRects(rc);
     if (pieces.empty()) return;
     pushUndo();
     int at = (int)cells_.size();
     Cell base;
-    base.poly = rectPoly(rect.left, rect.top, rect.right, rect.bottom);
+    base.poly = rectPoly(rc.left, rc.top, rc.right, rc.bottom);
     std::vector<int> members;
     for (const auto& piece : pieces) {
         cells_.insert(cells_.begin() + at, makeSubCell(base, piece));
@@ -1139,7 +1539,7 @@ void ImageEditCollage::createLayoutInRect(const D2D1_RECT_F& rect)
         grp.type = layoutType_;
         grp.rows = rows_;
         grp.cols = cols_;
-        grp.rect = D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom);
+        grp.rect = D2D1::RectF(rc.left, rc.top, rc.right, rc.bottom);
         grp.members = members;
         const int gid = nextGroup_++;
         for (int idx : members) cells_[idx].group = gid;
@@ -1153,16 +1553,9 @@ void ImageEditCollage::createLayoutInRect(const D2D1_RECT_F& rect)
         selected_ = members.empty() ? -1 : members.front();
         extraCells_.clear();
     }
-    // 拖拽布局和拖入首图一致：没有画板时按这次拖出的区域创建并固定画板
-    if (manualW_ <= 0 && manualH_ <= 0) {
-        const auto fixed = artRect();
-        manualL_ = (int)std::lround(fixed.left);
-        manualT_ = (int)std::lround(fixed.top);
-        manualW_ = (int)std::lround(fixed.right - fixed.left);
-        manualH_ = (int)std::lround(fixed.bottom - fixed.top);
-        captureContentExtents();
-        // 视图映射不随画板尺寸变化：画多大就是多大，也不挪到窗口中间
-    }
+    // 画板不在这里"固定下来"：没锁定的轴就是自适应的，画板始终跟着内容长；
+    // 只有用户在尺寸行手输过的那一轴才是真正固定的（manualW_/manualH_）。
+    // 这样删掉内容后画板回到内容尺寸，再拖入新内容也不会被旧尺寸卡住。
     // 拖完布局取消选中：尺寸行显示画板尺寸
     selected_ = -1;
     extraCells_.clear();
@@ -1175,23 +1568,10 @@ void ImageEditCollage::setBorder(float value)
     const float old = border_;
     border_ = std::max(0.f, std::min(400.f, value));
     const float delta = border_ - old;
-    // 画板不是用户手输尺寸时：外边距变化直接体现为画板四周留白（内容位置不变），
-    // 否则画板在第一次放图后就被固定，外边框会看起来「无效」
-    if (std::fabs(delta) > 0.01f && !cells_.empty()) {
-        bool changed = false;
-        const int d = (int)std::lround(delta);
-        if (manualW_ > 0 && !sizeEnteredW_) {
-            manualL_ -= d;
-            manualW_ = std::max(1, manualW_ + d * 2);
-            changed = true;
-        }
-        if (manualH_ > 0 && !sizeEnteredH_) {
-            manualT_ -= d;
-            manualH_ = std::max(1, manualH_ + d * 2);
-            changed = true;
-        }
-        if (changed) captureContentExtents();
-    }
+    if (std::fabs(delta) < 0.01f) return;
+    // 外边距只改变画板四周留白：未锁定的轴由画板自适应扩大，锁定的轴可用区变小
+    // → 容器等比缩小（调小则恢复原状）
+    if (!cells_.empty()) reflowGap(0.f, delta);
     if (win) win->refresh();
 }
 
@@ -1201,57 +1581,120 @@ void ImageEditCollage::setGap(float value)
     const float delta = next - gap_;
     if (std::fabs(delta) < 0.01f) return;
     gap_ = next;
-    // 分割块之间的缝由分割线两侧各让一半：间距变化时按新间距整体重算
+    // 先按新间距决定容器是否要缩小（锁定轴装不下时等比缩小，组数据随容器一起缩放）
+    reflowGap(delta, 0.f);
+    // 再按新间距重算组内缝隙：分割线两侧各让一半、布局组格位按比例收放
     std::vector<int> groups;
     for (const auto& [gid, grp] : splitGroups_) groups.push_back(gid);
     for (int gid : groups) rebuildSplitGroup(gid);
-    // 布局组的缝按格位比例重算（组外框不变，格子按新缝收放）
     std::vector<int> layoutGids;
     for (const auto& [gid, grp] : layoutGroups_) layoutGids.push_back(gid);
     for (int gid : layoutGids) rebuildLayoutGroup(gid);
-    reflowGap(delta);
     if (win) win->refresh();
 }
 
-// 间距是“容器与容器之间”的缝：改间距时把相邻容器原地推开/收拢，不改容器自身大小
-void ImageEditCollage::reflowGap(float delta)
+// 「间距」只作用于容器与容器之间（上下 / 左右），「外边距」只作用于画板四周留白，两者互不混用：
+// - 用户锁定了画板轴（手输过尺寸）：可用内容区变小，容器等比缩小，画板尺寸保持不变；
+//   参数调回基准值时容器原样恢复（可逆）；
+// - 没有锁定：容器尺寸不变，画板随内容 / 外边距自动扩大，间距只在相邻容器之间推开收拢
+void ImageEditCollage::reflowGap(float gapDelta, float borderDelta)
 {
-    if (cells_.size() < 2 || std::fabs(delta) < 0.01f) return;
-    const float oldGap = std::max(0.f, gap_ - delta);
-    const float tol = oldGap + 2.f;
-    const float eps = 0.5f;
-    const float half = delta * 0.5f;
+    const bool lockW = sizeLockedW();
+    const bool lockH = sizeLockedH();
 
-    // 相邻容器各自让出一半，保证中心位置不变、只改缝
-    for (size_t i = 0; i < cells_.size(); ++i) {
-        if (cells_[i].group >= 0) continue;   // 分割块的缝已由 rebuildSplitGroup 按新间距重算
-        for (size_t j = i + 1; j < cells_.size(); ++j) {
-            if (cells_[j].group >= 0) continue;
-            auto a = boundsOf(cells_[i].poly);
-            auto b = boundsOf(cells_[j].poly);
-            const bool yOverlap = std::min(a.bottom, b.bottom) - std::max(a.top, b.top) > 1.f;
-            const bool xOverlap = std::min(a.right, b.right) - std::max(a.left, b.left) > 1.f;
-
-            float dirX = 0.f, dirY = 0.f;
-            if (yOverlap) {
-                if (b.left >= a.right - eps && b.left - a.right <= tol) dirX = -1.f;       // j 在 i 右
-                else if (a.left >= b.right - eps && a.left - b.right <= tol) dirX = 1.f;  // j 在 i 左
-            }
-            if (xOverlap) {
-                if (b.top >= a.bottom - eps && b.top - a.bottom <= tol) dirY = -1.f;       // j 在 i 下
-                else if (a.top >= b.bottom - eps && a.top - b.bottom <= tol) dirY = 1.f;  // j 在 i 上
-            }
-            if (dirX == 0.f && dirY == 0.f) continue;
-
-            if (dirX != 0.f) {
-                translateCell(cells_[i], dirX * half, 0.f);
-                translateCell(cells_[j], -dirX * half, 0.f);
-            }
-            if (dirY != 0.f) {
-                translateCell(cells_[i], 0.f, dirY * half);
-                translateCell(cells_[j], 0.f, -dirY * half);
+    // 相邻容器按 delta 各自让出一半（中心不动、只改缝）；tol 用基准间距判定相邻
+    auto pushApart = [&](bool alongX, float d, float baseGap) {
+        if (std::fabs(d) < 0.01f) return;
+        const float tol = std::max(0.f, baseGap) + 2.f;
+        const float eps = 0.5f;
+        const float half = d * 0.5f;
+        for (size_t i = 0; i < cells_.size(); ++i) {
+            if (cells_[i].group >= 0) continue;   // 分割/布局组的缝由 rebuild* 按新间距重算
+            for (size_t j = i + 1; j < cells_.size(); ++j) {
+                if (cells_[j].group >= 0) continue;
+                auto a = boundsOf(cells_[i].poly);
+                auto b = boundsOf(cells_[j].poly);
+                if (alongX) {
+                    const bool yOverlap = std::min(a.bottom, b.bottom) - std::max(a.top, b.top) > 1.f;
+                    if (!yOverlap) continue;
+                    if (b.left >= a.right - eps && b.left - a.right <= tol) {          // j 在 i 右
+                        translateCell(cells_[i], -half, 0.f);
+                        translateCell(cells_[j], half, 0.f);
+                    }
+                    else if (a.left >= b.right - eps && a.left - b.right <= tol) {     // j 在 i 左
+                        translateCell(cells_[i], half, 0.f);
+                        translateCell(cells_[j], -half, 0.f);
+                    }
+                }
+                else {
+                    const bool xOverlap = std::min(a.right, b.right) - std::max(a.left, b.left) > 1.f;
+                    if (!xOverlap) continue;
+                    if (b.top >= a.bottom - eps && b.top - a.bottom <= tol) {           // j 在 i 下
+                        translateCell(cells_[i], 0.f, -half);
+                        translateCell(cells_[j], 0.f, half);
+                    }
+                    else if (a.top >= b.bottom - eps && a.top - b.bottom <= tol) {      // j 在 i 上
+                        translateCell(cells_[i], 0.f, half);
+                        translateCell(cells_[j], 0.f, -half);
+                    }
+                }
             }
         }
+    };
+
+    // 没有锁定的画板轴：容器尺寸始终不变，只在容器之间推开/收拢（外边距只扩画板）
+    if (!lockW && !lockH) {
+        gapBaseValid_ = false;
+        pushApart(true, gapDelta, gap_ - gapDelta);
+        pushApart(false, gapDelta, gap_ - gapDelta);
+        return;
+    }
+    if (cells_.empty()) return;
+
+    // 有锁定轴：以首次调整前的几何为基准重算，保证间距/外边距调小时能原样恢复
+    if (!gapBaseValid_) {
+        gapBaseCells_ = cells_;
+        gapBaseSplits_ = splitGroups_;
+        gapBaseLayouts_ = layoutGroups_;
+        gapBaseGap_ = gap_ - gapDelta;
+        gapBaseBorder_ = border_ - borderDelta;
+        gapBaseValid_ = true;
+    }
+    cells_ = gapBaseCells_;
+    splitGroups_ = gapBaseSplits_;
+    layoutGroups_ = gapBaseLayouts_;
+    // 两个参数都回到基准值：几何已还原，不再需要基准
+    if (std::fabs(gap_ - gapBaseGap_) < 0.01f && std::fabs(border_ - gapBaseBorder_) < 0.01f) {
+        gapBaseValid_ = false;
+        return;
+    }
+
+    // 锁定轴存在：按排列方向整队重排（间距只作用在容器之间，未锁定轴随内容自适应增长）
+    // 锁定宽度 → 竖排、高度按内容增加；锁定高度 → 横排、宽度按内容增加
+    D2D1_RECT_F bbox{ FLT_MAX, FLT_MAX, -FLT_MAX, -FLT_MAX };
+    for (const auto& c : cells_) {
+        if (c.poly.size() < 3) continue;
+        auto b = boundsOf(c.poly);
+        bbox.left = std::min(bbox.left, b.left);
+        bbox.top = std::min(bbox.top, b.top);
+        bbox.right = std::max(bbox.right, b.right);
+        bbox.bottom = std::max(bbox.bottom, b.bottom);
+    }
+    if (bbox.right > bbox.left && bbox.bottom > bbox.top) {
+        // 未锁定的轴用当前内容范围当重排区域，重排后画板自动跟着内容长高/变宽
+        lockArea_ = D2D1::RectF(
+            lockW ? (float)manualL_ : bbox.left - border_,
+            lockH ? (float)manualT_ : bbox.top - border_,
+            lockW ? (float)(manualL_ + manualW_) : bbox.right + border_,
+            lockH ? (float)(manualT_ + manualH_) : bbox.bottom + border_);
+        auto savedUnits = std::move(lockUnits_);
+        lockUnits_ = buildLockUnits();
+        sortLockUnits();
+        std::vector<int> order;
+        order.reserve(lockUnits_.size());
+        for (int i = 0; i < (int)lockUnits_.size(); ++i) order.push_back(i);
+        layoutLockUnits(order);   // 间距用 gap_，锁定轴装不下时才等比缩小
+        lockUnits_ = std::move(savedUnits);
     }
 }
 
@@ -1267,20 +1710,22 @@ void ImageEditCollage::setBackgroundColor(uint32_t rgba)
     if (win) win->refresh();
 }
 
-void ImageEditCollage::setCanvasSize(int w, int h)
+// 尺寸行唯一的写入口：只改一个轴，另一轴的锁定状态 / 固定值原样保留。
+// value <= 0 = 该轴恢复自适应（画板回到内容尺寸，输入框文字变回白色）。
+void ImageEditCollage::setCanvasAxis(bool horizontal, int value)
 {
-    // 每个轴独立：<=0 表示该轴自动（由内容 + 外边距决定）
-    const int nextW = (w > 0) ? std::max(1, std::min(10000, w)) : 0;
-    const int nextH = (h > 0) ? std::max(1, std::min(10000, h)) : 0;
-    // 手工输入尺寸 = 该轴以原点为左上角固定；已经固定的轴保持它原来的原点（输入数值不会让画板跳动）
-    if (nextW > 0 && manualW_ == 0) manualL_ = 0;
-    if (nextH > 0 && manualH_ == 0) manualT_ = 0;
-    manualW_ = nextW;
-    manualH_ = nextH;
-    // 绿色只在「用户主动输入」时亮起：清空某轴 = 该轴恢复自适应，标志也关掉
-    sizeEnteredW_ = nextW > 0;
-    sizeEnteredH_ = nextH > 0;
-    captureContentExtents();   // 输入值即基准：与自适应值一致也会被固定住
+    const int next = (value > 0) ? std::max(1, std::min(10000, value)) : 0;
+    const auto art = artRect();   // 锁定前先取当前画板位置：输入尺寸时画板不跳
+    if (horizontal) {
+        if (next > 0 && !sizeLockedW()) manualL_ = (int)std::lround(art.left);
+        manualW_ = next;
+        sizeEnteredW_ = next > 0;
+    }
+    else {
+        if (next > 0 && !sizeLockedH()) manualT_ = (int)std::lround(art.top);
+        manualH_ = next;
+        sizeEnteredH_ = next > 0;
+    }
     notifyChanged(false);
     if (win) win->refresh();
 }
@@ -2125,7 +2570,7 @@ void ImageEditCollage::paintLayoutGroupChrome(ID2D1RenderTarget* rt, const Layou
 // ---------------- 选中对象上方的快捷变换控件 --------------
 
 bool ImageEditCollage::quickActionLayout(float& bgL, float& bgT, float& bgW, float& bgH,
-    D2D1_RECT_F btnRects[4], bool& placeBelow) const
+    D2D1_RECT_F btnRects[5], bool& placeBelow) const
 {
     if (!hasSelection() || exporting_) return false;
     const int gid = selectionGroup();
@@ -2169,7 +2614,7 @@ bool ImageEditCollage::quickActionLayout(float& bgL, float& bgT, float& bgW, flo
 
     const float d = (win && win->dpi > 0.f) ? win->dpi : 1.f;
     const float bs = 28.f * d, gap = 2.f * d, pad = 4.f * d;
-    bgW = bs * 4.f + gap * 3.f + pad * 2.f;
+    bgW = bs * 5.f + gap * 4.f + pad * 2.f;
     bgH = bs + pad * 2.f;
     bgL = (l + r) * 0.5f - bgW * 0.5f;
     bgL = std::max(4.f * d, std::min(bgL, w - bgW - 4.f * d));
@@ -2180,7 +2625,7 @@ bool ImageEditCollage::quickActionLayout(float& bgL, float& bgT, float& bgW, flo
         placeBelow = true;
         if (bgT + bgH > h - 4.f * d) bgT = std::max(4.f * d, t - bgH - 8.f * d);
     }
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         const float bx = bgL + pad + i * (bs + gap);
         btnRects[i] = D2D1::RectF(bx, bgT + pad, bx + bs, bgT + pad + bs);
     }
@@ -2190,12 +2635,12 @@ bool ImageEditCollage::quickActionLayout(float& bgL, float& bgT, float& bgW, flo
 int ImageEditCollage::quickActionHit(POINT clientPos) const
 {
     float bgL = 0, bgT = 0, bgW = 0, bgH = 0;
-    D2D1_RECT_F btns[4]{};
+    D2D1_RECT_F btns[5]{};
     bool below = false;
     if (!quickActionLayout(bgL, bgT, bgW, bgH, btns, below)) return -1;
     const float lx = (float)clientPos.x - x;
     const float ly = (float)clientPos.y - y;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         if (lx >= btns[i].left && lx <= btns[i].right && ly >= btns[i].top && ly <= btns[i].bottom)
             return i;
     }
@@ -2407,6 +2852,12 @@ void ImageEditCollage::applyQuickAction(int action)
     // 图片调整模式下控件贴在图片上：操作对象是这张图片，而不是整个布局/分割组
     const bool adjustImg = imageAdjust_ && !cells_[selected_].image.empty();
     pushUndo();
+    if (action == 4) {                 // 置顶：只调整图层顺序
+        bringSelectionToFront();
+        notifyChanged();
+        if (win) win->refresh();
+        return;
+    }
     if (adjustImg) {
         if (action == 0) rotateSelectedContent(1);
         else if (action == 1) rotateSelectedContent(-1);
@@ -2427,6 +2878,51 @@ void ImageEditCollage::applyQuickAction(int action)
     }
     notifyChanged();
     if (win) win->refresh();
+}
+
+// 置顶：把选中容器（多选 / 整组）移到图层最上层。
+// 只改绘制顺序（cells_ 顺序），不动位置、尺寸与组数据，所以是可以直接撤销的一次操作。
+void ImageEditCollage::bringSelectionToFront()
+{
+    if (!hasSelection() || cells_.empty()) return;
+    std::vector<bool> move(cells_.size(), false);
+    for (int idx : selectedCellIndices()) {
+        if (idx < 0 || idx >= (int)cells_.size()) continue;
+        const int g = cells_[idx].group;
+        if (g >= 0) {   // 布局组 / 分割组：整组一起上移，组内格位先后保持不变
+            for (int k = 0; k < (int)cells_.size(); ++k)
+                if (cells_[k].group == g) move[k] = true;
+        }
+        else {
+            move[idx] = true;
+        }
+    }
+    bool anyMove = false, anyKeep = false;
+    for (size_t i = 0; i < cells_.size(); ++i) (move[i] ? anyMove : anyKeep) = true;
+    if (!anyMove || !anyKeep) return;   // 已在最上层，或全都要移动
+
+    std::vector<Cell> out;
+    out.reserve(cells_.size());
+    std::vector<int> oldToNew(cells_.size(), -1);
+    for (int i = 0; i < (int)cells_.size(); ++i) {
+        if (move[i]) continue;
+        oldToNew[i] = (int)out.size();
+        out.push_back(cells_[i]);
+    }
+    for (int i = 0; i < (int)cells_.size(); ++i) {
+        if (!move[i]) continue;
+        oldToNew[i] = (int)out.size();
+        out.push_back(cells_[i]);
+    }
+    cells_ = std::move(out);
+    // 索引重映射：选中项、多选附加项、布局组格位
+    if (selected_ >= 0 && selected_ < (int)oldToNew.size()) selected_ = oldToNew[selected_];
+    for (auto& e : extraCells_)
+        if (e >= 0 && e < (int)oldToNew.size()) e = oldToNew[e];
+    for (auto& [gid, grp] : layoutGroups_) {
+        for (auto& m : grp.members)
+            if (m >= 0 && m < (int)oldToNew.size()) m = oldToNew[m];
+    }
 }
 
 void ImageEditCollage::transformSplitGroup(int group, int action)
@@ -2491,7 +2987,7 @@ void ImageEditCollage::paintQuickActions(ID2D1RenderTarget* rt)
 {
     if (!rt || !win) return;
     float bgL = 0, bgT = 0, bgW = 0, bgH = 0;
-    D2D1_RECT_F btns[4]{};
+    D2D1_RECT_F btns[5]{};
     bool below = false;
     if (!quickActionLayout(bgL, bgT, bgW, bgH, btns, below)) return;
     rt->SetTransform(D2D1::Matrix3x2F::Identity());
@@ -2499,11 +2995,11 @@ void ImageEditCollage::paintQuickActions(ID2D1RenderTarget* rt)
 
     const D2D1_ROUNDED_RECT bg = D2D1::RoundedRect(
         D2D1::RectF(bgL, bgT, bgL + bgW, bgT + bgH), 10.f * d, 10.f * d);   // 与工具栏外框圆角一致
-    if (auto brush = solidBrush(rt, 0x232323F2)) rt->FillRoundedRectangle(bg, brush.Get());
+    if (auto brush = solidBrush(rt, ImageEditTheme::floatBg)) rt->FillRoundedRectangle(bg, brush.Get());
 
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         if (quickHoverAction_ == i) {
-            if (auto brush = solidBrush(rt, 0x3A3A3AFF)) {
+            if (auto brush = solidBrush(rt, ImageEditTheme::floatHover)) {
                 // 内层按钮与外框同心：圆角 = 外圆角 - 内边距（10 - 4）
                 const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(btns[i], 6.f * d, 6.f * d);
                 rt->FillRoundedRectangle(rr, brush.Get());
@@ -2513,10 +3009,10 @@ void ImageEditCollage::paintQuickActions(ID2D1RenderTarget* rt)
 
     auto* d2d = D2D::get();
     if (!d2d) return;
-    static const wchar_t* glyphs[4]{
-        Icon::RotateRight, Icon::RotateLeft, Icon::MirrorHorizontal, Icon::MirrorVertical
+    static const wchar_t* glyphs[5]{
+        Icon::RotateRight, Icon::RotateLeft, Icon::MirrorHorizontal, Icon::MirrorVertical, Icon::Top
     };
-    static Microsoft::WRL::ComPtr<IDWriteTextLayout> layouts[4];
+    static Microsoft::WRL::ComPtr<IDWriteTextLayout> layouts[5];
     static D2D* layoutOwner = nullptr;
     static float layoutDpi = 0.f;
     if (!layouts[0] || layoutOwner != d2d || layoutDpi != d) {
@@ -2525,7 +3021,7 @@ void ImageEditCollage::paintQuickActions(ID2D1RenderTarget* rt)
         // 必须用自定义字体集合的 TextFormat 建 layout：系统集合里没有 font_family，
         // SetFontFamilyName 换不到族（图标会退化成方块）。见 D2D::getTextFormat 的说明。
         auto* fmt = d2d->getTextFormat(L"font_family");
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 5; ++i) {
             layouts[i].Reset();
             if (!fmt || !d2d->dwriteFactory) continue;
             const std::wstring glyph{ glyphs[i] };
@@ -2538,8 +3034,8 @@ void ImageEditCollage::paintQuickActions(ID2D1RenderTarget* rt)
             }
         }
     }
-    if (auto brush = solidBrush(rt, 0xFAFAFAFF)) {
-        for (int i = 0; i < 4; ++i) {
+    if (auto brush = solidBrush(rt, ImageEditTheme::floatFg)) {
+        for (int i = 0; i < 5; ++i) {
             if (!layouts[i]) continue;
             rt->DrawTextLayout(D2D1::Point2F(btns[i].left, btns[i].top), layouts[i].Get(),
                 brush.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
@@ -2747,33 +3243,66 @@ void ImageEditCollage::handleDrop(const std::vector<std::wstring>& paths, POINT 
 
     if (cells_.empty()) {
         pushUndo();
-        // 第一张图：已有画板（手动尺寸）就铺满画板内容区（等价 1×1 布局）；
-        // 没有画板就按原图尺寸创建画板 + 容器
-        const auto art = artRect();
+        // 空画板拖入首图/多图：放置规则只看「哪些轴被锁定」，未锁定的轴一律交给内容决定 ——
+        // 锁宽：按可用宽缩放后竖排（高度也锁且只有一张时再适配高）；
+        // 只锁高：按可用高缩放后横排；都没锁：按原图尺寸向右下阶梯叠放。
         const float b = border_;
-        const float l = art.left + b, t = art.top + b;
-        const float r = art.right - b, bo = art.bottom - b;
-        if (r - l > 8.f && bo - t > 8.f) {
-            Cell cell;
-            cell.image = imgs.front();
-            cell.poly = rectPoly(l, t, r, bo);
-            normalizeCellImage(cell);
-            cells_.push_back(cell);
-            selected_ = 0;
+        const auto art = artRect();
+        const float availW = sizeLockedW() ? std::max(1.f, (float)manualW_ - b * 2.f) : 0.f;
+        const float availH = sizeLockedH() ? std::max(1.f, (float)manualH_ - b * 2.f) : 0.f;
+        if (!sizeLockedW() && !sizeLockedH()) {
+            float off = 0.f;
+            for (const auto& p : imgs) {
+                addImageBlock(p, { off, off }, true);
+                off += 24.f;
+            }
+        }
+        else if (sizeLockedW()) {
+            // 单张且宽高都锁定：宽高都不超出画板；高度没锁时按自然高度放，画板随内容长高
+            const bool fitHeight = sizeLockedH() && imgs.size() == 1;
+            float y = art.top + b;
+            for (size_t i = 0; i < imgs.size(); ++i) {
+                int iw = 0, ih = 0;
+                if (!imageSizeOf(imgs[i], iw, ih)) { iw = 240; ih = 180; }
+                float scale = 1.f;
+                if ((float)iw > availW) scale = availW / (float)iw;
+                if (fitHeight && (float)ih * scale > availH) scale = availH / (float)ih;
+                const float cw = std::max(1.f, (float)iw * scale);
+                const float ch = std::max(1.f, (float)ih * scale);
+                Cell cell;
+                cell.image = imgs[i];
+                const float x = art.left + ((art.right - art.left) - cw) * 0.5f;
+                // 单张图：可用区内水平垂直居中；多张：从上到下排，只水平居中
+                const float yy = fitHeight ? art.top + b + (availH - ch) * 0.5f : y;
+                cell.poly = rectPoly(x, yy, x + cw, yy + ch);
+                normalizeCellImage(cell);
+                cells_.push_back(cell);
+                // 图与图之间的间距取右侧「间距」值，0 即紧贴
+                y += ch + ((i + 1 < imgs.size()) ? gap_ : 0.f);
+            }
         }
         else {
-            addImageBlock(imgs.front(), { 0.f, 0.f }, true);
+            // 只锁高度：从左到右横排，每张按可用高缩放并垂直居中，宽度随内容自适应
+            float x = art.left + b;
+            for (size_t i = 0; i < imgs.size(); ++i) {
+                int iw = 0, ih = 0;
+                if (!imageSizeOf(imgs[i], iw, ih)) { iw = 240; ih = 180; }
+                const float scale = ((float)ih > availH) ? availH / (float)ih : 1.f;
+                const float cw = std::max(1.f, (float)iw * scale);
+                const float ch = std::max(1.f, (float)ih * scale);
+                Cell cell;
+                cell.image = imgs[i];
+                const float yy = art.top + b + (availH - ch) * 0.5f;
+                cell.poly = rectPoly(x, yy, x + cw, yy + ch);
+                normalizeCellImage(cell);
+                cells_.push_back(cell);
+                x += cw + ((i + 1 < imgs.size()) ? gap_ : 0.f);
+            }
         }
-        // 拖入首图之后固定画板尺寸：之后只有容器变大才会把画板撑大，容器缩小不会缩回
-        const auto fixed = artRect();
-        manualL_ = (int)std::lround(fixed.left);
-        manualT_ = (int)std::lround(fixed.top);
-        manualW_ = (int)std::lround(fixed.right - fixed.left);
-        manualH_ = (int)std::lround(fixed.bottom - fixed.top);
-        captureContentExtents();
         fitToView();
     } else {
-        // 后续图片：按原图尺寸放在落点，但必须落在画板内（画板已固定，不会被图片撑出去）
+        // 后续图片：按原图尺寸放在落点；只有被锁定（手输过）的轴才夹回画板内，
+        // 没锁定的轴允许图片放到现有内容之外 —— 画板会跟着长过去
         if (!toWorldIfInside(clientPos, wp)) {
             // 丢在画布之外（工具栏/素材条等）：忽略，避免凭空在原点复制一个容器
             if (win) win->refresh();
@@ -2781,6 +3310,8 @@ void ImageEditCollage::handleDrop(const std::vector<std::wstring>& paths, POINT 
         }
         pushUndo();
         const int startNew = (int)cells_.size();
+        const bool lockW = sizeLockedW();
+        const bool lockH = sizeLockedH();
         for (const auto& p : imgs) {
             int iw = 0, ih = 0;
             if (!imageSizeOf(p, iw, ih)) { iw = 240; ih = 180; }
@@ -2789,8 +3320,9 @@ void ImageEditCollage::handleDrop(const std::vector<std::wstring>& paths, POINT 
             const float minX = art.left + b, minY = art.top + b;
             const float maxX = std::max(minX, art.right - b - (float)iw);
             const float maxY = std::max(minY, art.bottom - b - (float)ih);
-            const Pt at{ std::min(std::max(wp.x, minX), maxX),
-                         std::min(std::max(wp.y, minY), maxY) };
+            Pt at{ wp };
+            if (lockW) at.x = std::min(std::max(wp.x, minX), maxX);
+            if (lockH) at.y = std::min(std::max(wp.y, minY), maxY);
             addImageBlock(p, at, true);
         }
         for (int i = startNew; i < (int)cells_.size(); ++i)
@@ -2885,6 +3417,11 @@ void ImageEditCollage::onMouseDown(POINT pos, bool right)
 
     // 右键逐层退出：分割工具下先删掉最近的分割线
     if (right) {
+        // 布局锁拖动中按右键：立即结束拖动，避免遗留拖动状态
+        if (lockDragging_) {
+            endLockDrag();
+            dragging_ = false;
+        }
         if (tool_ == Tool::Split) {
             const Pt wp = toWorld(pos);
             int hit = cellAt(wp);
@@ -3009,6 +3546,17 @@ void ImageEditCollage::onMouseDown(POINT pos, bool right)
             return;
         }
 
+        // 标注在视觉上位于容器上层：命中标注必须先于容器，否则画在图片上的标注永远点不到
+        if (annot_ && annot_->hitAnnotAtClient(pos)) {
+            clearCellSelection();
+            annotDragging_ = true;
+            annot_->forwardDown(pos, false);
+            hoverDividerGroup_ = hoverDividerIndex_ = -1;
+            notifyChanged(false);
+            if (win) win->refresh();
+            return;
+        }
+
         int hit = cellAt(p);
         auto now = GetTickCount();
         if (hit >= 0) {
@@ -3114,18 +3662,11 @@ void ImageEditCollage::onMouseDown(POINT pos, bool right)
                     dragOrigSplitLines_[gid] = sg.lines;
                     dragOrigSplitOriginal_[gid] = sg.original;
                 }
+                // 布局锁：记录各单位原始位置，拖动时自由跟手、松手按插入位重排
+                beginLockDrag(p);
             }
             notifyChanged(false);
         } else {
-            // 空工具下也能单击选中标注：命中就交给标注宿主（之后拖动/抬手也转发）
-            if (annot_ && annot_->hitAnnotAtClient(pos)) {
-                annotDragging_ = true;
-                annot_->forwardDown(pos, false);
-                hoverDividerGroup_ = hoverDividerIndex_ = -1;
-                notifyChanged(false);
-                if (win) win->refresh();
-                return;
-            }
             // 空白处拖框：橡皮筋多选（容器 + 标注）
             if (!shift) {
                 clearCellSelection();
@@ -3243,6 +3784,8 @@ void ImageEditCollage::onMouseDown(POINT pos, bool right)
                 dragOrigSplitLines_[gid] = sg.lines;
                 dragOrigSplitOriginal_[gid] = sg.original;
             }
+            // 布局锁：记录各单位原始位置，拖动时自由跟手、松手按插入位重排
+            beginLockDrag(p);
             notifyChanged(false);
             if (win) win->refresh();
             return;
@@ -3502,9 +4045,10 @@ void ImageEditCollage::onMouseMove(POINT pos)
                 if (s) { w.y += d; snapGuides_.push_back({ false, g }); }
             }
         }
-        // 默认自由缩放（拖边/拖角不限制比例）；按住 Shift 才保持原比例
-        const bool keepRatio = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        resizeSelected(resizeHandle_, w, keepRatio);
+        // 图片容器：默认等比缩放（图片跟着容器一起缩放），按住 Shift 自由拉伸；
+        // 纯布局容器 / 布局组：默认自由变形，按住 Shift 才锁定比例
+        const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        resizeSelected(resizeHandle_, w, shift);
         notifyChanged(false);
         if (win) win->refresh();
         return;
@@ -3542,6 +4086,13 @@ void ImageEditCollage::onMouseMove(POINT pos)
             const float lim = 0.5f + (1.f - 1.f / std::max(0.2f, c.imgScale)) * 0.5f;
             c.imgOffX = std::max(-lim, std::min(lim, c.imgOffX));
             c.imgOffY = std::max(-lim, std::min(lim, c.imgOffY));
+            dragStart_ = p;
+            if (win) win->refresh();
+            return;
+        }
+        // 布局锁：容器正常跟手拖动，指到画板内时显示插入光标，松手才插入重排
+        if (lockDragging_) {
+            updateLockDrag(p);
             dragStart_ = p;
             if (win) win->refresh();
             return;
@@ -3686,6 +4237,7 @@ void ImageEditCollage::onMouseUp(POINT pos, bool right)
     if (uiHitTest && uiHitTest(pos)) {
         if (dragging_ || resizing_) {
             dragging_ = resizing_ = false;
+            endLockDrag();
             if (win) win->refresh();
         }
         return;
@@ -3770,6 +4322,17 @@ void ImageEditCollage::onMouseUp(POINT pos, bool right)
         dragGroup_ = -1;
         dragLineIndex_ = -1;
         splitEnd_ = -1;
+        notifyChanged();
+        if (win) win->refresh();
+        return;
+    }
+    // 布局锁拖动结束：用松手点刷新插入位，在画板内就插入并顺移重排；
+    // 拖到画板外则保持自由摆放（允许容器停在画板外）
+    if (lockDragging_) {
+        updateLockDrag(toWorld(pos));
+        commitLockDrop();
+        endLockDrag();
+        dragging_ = false;
         notifyChanged();
         if (win) win->refresh();
         return;
@@ -4105,13 +4668,24 @@ void ImageEditCollage::onCursor(bool* handled)
     if (handled) *handled = true;
 }
 
-void ImageEditCollage::resizeSelected(Handle h, const Pt& world, bool keepRatio)
+void ImageEditCollage::resizeSelected(Handle h, const Pt& world, bool shift)
 {
     if (!hasSelection()) return;
     const int selGroup = selectionGroup();
     const bool layoutResize = isLayoutGroup(selGroup);
     auto splitIt = splitGroups_.find(selGroup);
     const bool splitResize = !layoutResize && selGroup >= 0 && splitIt != splitGroups_.end();
+    // 图片容器：默认等比缩放，Shift 自由拉伸；
+    // 纯布局 / 无图容器（整组都没有图片的分割组也算）：默认自由变形，Shift 锁定比例
+    bool unitHasImage = !cells_[selected_].image.empty();
+    if (splitResize) {
+        unitHasImage = false;
+        for (const auto& c : cells_) {
+            if (c.group == selGroup && !c.image.empty()) { unitHasImage = true; break; }
+        }
+    }
+    const bool imageSel = !layoutResize && unitHasImage;
+    const bool lockRatio = layoutResize ? shift : (imageSel ? !shift : shift);
     auto b = layoutResize
         ? layoutGroups_[selGroup].rect
         : (splitResize ? boundsOf(splitIt->second.original)
@@ -4127,7 +4701,7 @@ void ImageEditCollage::resizeSelected(Handle h, const Pt& world, bool keepRatio)
     if (top) nt = std::min(world.y, nb - 8.f);
     if (bottom) nb = std::max(world.y, nt + 8.f);
 
-    if (keepRatio) {
+    if (lockRatio) {
         const float ratio = (b.right - b.left) / std::max(1.f, b.bottom - b.top);
         if ((left || right) && (top || bottom)) {
             const float ww = nr - nl, hh = nb - nt;
@@ -4208,13 +4782,17 @@ void ImageEditCollage::resizeSelected(Handle h, const Pt& world, bool keepRatio)
         return;
     }
     if (splitResize) {
-        // 分割组整体缩放：原容器、分割线、各块一起按外框映射
+        // 分割组整体缩放：原容器、分割线、各块一起按外框映射。
+        // 默认等比缩放：图片随整组一起缩放，各块保留相对构图，分割图不会撕裂；
+        // Shift 自由拉伸：保持整幅图片的绝对框不变，各块被拉伸后分别裁剪
         auto& grp = splitIt->second;
         std::vector<std::pair<int, ImageSnap>> snaps;
-        for (int idx : selectedCellIndices()) {
-            if (idx < 0 || idx >= (int)cells_.size()) continue;
-            if (cells_[idx].group != selGroup) continue;
-            snaps.emplace_back(idx, snapOf(cells_[idx]));
+        if (!lockRatio) {
+            for (int idx : selectedCellIndices()) {
+                if (idx < 0 || idx >= (int)cells_.size()) continue;
+                if (cells_[idx].group != selGroup) continue;
+                snaps.emplace_back(idx, snapOf(cells_[idx]));
+            }
         }
         auto mapPt = [&](Pt& q) {
             q.x = nl + (q.x - b.left) * sx;
@@ -4222,10 +4800,12 @@ void ImageEditCollage::resizeSelected(Handle h, const Pt& world, bool keepRatio)
             };
         for (auto& q : grp.original) mapPt(q);
         for (auto& L : grp.lines) { mapPt(L.a); mapPt(L.b); }
-        for (auto& [idx, snap] : snaps) {
+        for (int idx : selectedCellIndices()) {
+            if (idx < 0 || idx >= (int)cells_.size()) continue;
+            if (cells_[idx].group != selGroup) continue;
             for (auto& q : cells_[idx].poly) mapPt(q);
-            applySnap(cells_[idx], snap);
         }
+        for (auto& [idx, snap] : snaps) applySnap(cells_[idx], snap);
         return;
     }
     auto& c = cells_[selected_];
@@ -4234,7 +4814,26 @@ void ImageEditCollage::resizeSelected(Handle h, const Pt& world, bool keepRatio)
         p.x = nl + (p.x - b.left) * sx;
         p.y = nt + (p.y - b.top) * sy;
     }
-    applySnap(c, snap);
+    if (c.image.empty()) return;
+    if (lockRatio) {
+        // 图片容器默认等比：归一化的图片尺寸/偏移保持不变，图片随容器一起等比缩放
+        if (c.imgNW <= 0.f || c.imgNH <= 0.f) normalizeCellImage(c);
+        return;
+    }
+    // Shift 自由拉伸：图片保持当前显示比例、居中铺满容器（cover），超出部分裁剪
+    if (!snap.valid || snap.w <= 0.f || snap.h <= 0.f) return;
+    const auto cb = boundsOf(c.poly);
+    const float cw = std::max(1.f, cb.right - cb.left);
+    const float ch = std::max(1.f, cb.bottom - cb.top);
+    const float r = snap.w / std::max(0.01f, snap.h);
+    float dw = cw, dh = ch;
+    if (cw / std::max(1.f, ch) > r) dh = cw / r;   // 容器更宽：宽度铺满，高度溢出裁剪
+    else dw = ch * r;                              // 容器更高：高度铺满，宽度溢出裁剪
+    c.stretch = false;
+    c.imgScale = 1.f;
+    c.imgNW = dw / cw;
+    c.imgNH = dh / ch;
+    c.imgOffX = c.imgOffY = 0.f;
 }
 
 // ---------------- 图片位图 ----------------
@@ -4384,6 +4983,23 @@ void ImageEditCollage::paintWorld(ID2D1RenderTarget* rt, float ox, float oy, flo
             paintCellImage(rt, cells_[i], world, 1.f, &poly);
         }
     }
+    // 布局锁拖动：原位置的原图保留不动，另画一个半透明预览跟手（不带控点）
+    if (chrome && lockDragging_ && lockMoving_ >= 0 && lockMoving_ < (int)lockUnits_.size()) {
+        for (int idx : lockUnits_[lockMoving_].cells) {
+            if (idx < 0 || idx >= (int)cells_.size()) continue;
+            Cell ghost = cells_[idx];
+            for (auto& q : ghost.poly) { q.x += lockGhost_.x; q.y += lockGhost_.y; }
+            if (ghost.image.empty()) {
+                if (auto g = buildRoundedPolyGeometry(d2dFactory(), ghost.poly, radius_)) {
+                    if (auto brush = solidBrush(rt, ImageEditTheme::cellEmpty))
+                        rt->FillGeometry(g.Get(), brush.Get());
+                }
+            }
+            else {
+                paintCellImage(rt, ghost, world, 0.45f, &ghost.poly);
+            }
+        }
+    }
     // 图片调整模式：先半透明露出整张图（容器外也能看到），再把容器内的部分重新画实
     if (chrome && imageAdjust_ && hasSelection() && !cells_[selected_].image.empty()) {
         auto& c = cells_[selected_];
@@ -4399,16 +5015,13 @@ void ImageEditCollage::drawGrid(ID2D1RenderTarget* rt)
     auto brush = solidBrush(rt, ImageEditTheme::gridLine);
     if (!brush) return;
     const float d = (win && win->dpi > 0.f) ? win->dpi : 1.f;
-    float sp = 40.f * viewScale();
-    if (sp < 8.f) sp = 8.f;
-    if (sp > 80.f) sp = 80.f;
-    // 网格对齐世界原点：先找屏幕内第一个交点
+    // 网点间距固定（不随缩放放大缩小），但随画布平移一起移动
+    const float sp = 40.f * d;
     float ox = 0.f, oy = 0.f;
     viewOrigin(ox, oy);
-    auto art = artRect();
-    float startX = std::fmod(ox - art.left * viewScale(), sp);
+    float startX = std::fmod(ox, sp);
     if (startX < 0.f) startX += sp;
-    float startY = std::fmod(oy - art.top * viewScale(), sp);
+    float startY = std::fmod(oy, sp);
     if (startY < 0.f) startY += sp;
     const float arm = 2.f * d;
     for (float gx = startX; gx < w; gx += sp) {
@@ -4422,6 +5035,8 @@ void ImageEditCollage::drawGrid(ID2D1RenderTarget* rt)
 void ImageEditCollage::paintSelection(ID2D1RenderTarget* rt, float ox, float oy, float scale)
 {
     if (!hasSelection() || exporting_) return;
+    // 布局锁拖动时只显示半透明预览，不带控点
+    if (lockDragging_) return;
     rt->SetTransform(D2D1::Matrix3x2F::Identity());
     auto art = artRect();
     auto b = boundsOf(cells_[selected_].poly);
@@ -4683,7 +5298,7 @@ void ImageEditCollage::paintScreen(ID2D1DeviceContext* rt)
         }
     }
 
-    // 内容区左上角：缩放比例胶囊（样式复用贴图左下角的缩放提示）
+    // 工作区右上角：缩放比例胶囊（样式复用贴图左下角的缩放提示）
     if (!exporting_) {
         const float d = (win && win->dpi > 0.f) ? win->dpi : 1.f;
         auto* d2d = D2D::get();
@@ -4699,11 +5314,25 @@ void ImageEditCollage::paintScreen(ID2D1DeviceContext* rt)
                 const float margin = 12.f * d;
                 const float tipW = tm.width + padX * 2.f;
                 const float tipH = tm.height + padY * 2.f;
-                const D2D1_RECT_F bgRc{ margin, margin, margin + tipW, margin + tipH };
+                const float left = std::max(margin, w - margin - tipW);
+                const D2D1_RECT_F bgRc{ left, margin, left + tipW, margin + tipH };
                 rt->FillRoundedRectangle(D2D1::RoundedRect(bgRc, tipH * 0.5f, tipH * 0.5f), bg.Get());
                 rt->DrawTextLayout(D2D1::Point2F(bgRc.left + padX, bgRc.top + padY),
                     layout.Get(), fg.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
             }
+        }
+    }
+
+    // 布局锁拖动：插入光标（竖排画横线、横排画竖线）
+    if (!exporting_ && lockDragging_ && lockCaretVisible_) {
+        const float d = (win && win->dpi > 0.f) ? win->dpi : 1.f;
+        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+        if (auto brush = solidBrush(rt, ImageEditTheme::accent)) {
+            const auto a = screenPointOf(Pt{ lockCaretA_.x, lockCaretA_.y });
+            const auto b = screenPointOf(Pt{ lockCaretB_.x, lockCaretB_.y });
+            rt->DrawLine(a, b, brush.Get(), 3.f * d);
+            paintHandleDot(rt, a.x, a.y, d);
+            paintHandleDot(rt, b.x, b.y, d);
         }
     }
 }

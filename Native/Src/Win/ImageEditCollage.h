@@ -44,15 +44,16 @@ public:
     // 布局
     void applyLayoutPreset(int index);
 
-    // 尺寸：w/h <= 0 表示该轴自动（由画板内容 + 外边距决定）
-    void setCanvasSize(int w, int h);
+    // 尺寸：唯一的「锁定」概念 —— 用户在尺寸行手输过的轴才是固定尺寸，其余轴一律自适应
+    // （画板 = 内容包围盒 + 外边距）。<=0 表示该轴恢复自适应。
+    void setCanvasAxis(bool horizontal, int value);
+    // 画板轴是否被固定（绿字的那一轴）
+    bool sizeLockedW() const { return sizeEnteredW_ && manualW_ > 0; }
+    bool sizeLockedH() const { return sizeEnteredH_ && manualH_ > 0; }
     int canvasWidth() const;                     // 自动时为当前画板宽，空画布为 0
     int canvasHeight() const;
     int manualWidth() const { return manualW_; }  // >0 = 固定尺寸
     int manualHeight() const { return manualH_; }
-    // 该轴是否是用户主动输入固定的（拖入内容自动建板不算；绿色只提示主动固定）
-    bool manualSizeEnteredW() const { return sizeEnteredW_; }
-    bool manualSizeEnteredH() const { return sizeEnteredH_; }
     std::wstring zoomText() const;
 
     // 选择与内容
@@ -77,6 +78,27 @@ public:
     void pickImageForSelected();
     // 底部素材条：替换指定容器的图片（弹文件选择）
     void replaceCellImage(int index);
+
+    // —— 图层面板 ——
+    // 图层单位：单个容器 / 布局组 / 分割组（分割按自由布局处理）
+    // 顺序：顶部 = 最上层
+    struct LayerUnit {
+        int group{ -1 };         // -1 = 单个容器
+        int kind{ 0 };           // 0 单格 / 1 布局组 / 2 分割组
+        int layoutType{ 0 };     // 布局组类型：0 自由 / 1 上下 / 2 左右
+        std::vector<int> cells;  // 组内格位顺序（单格只有一个）
+        std::vector<std::wstring> paths;   // 与 cells 一一对应的图片路径（空 = 空格）
+        std::vector<bool> sel;             // 与 cells 一一对应的选中态
+        bool hasImage{ false };
+        bool anySelected{ false };
+    };
+    std::vector<LayerUnit> layerUnits() const;
+    // 图片调整模式下的当前单张图片所在格（-1 = 没有）；图层面板据此只高亮这一张
+    int imageAdjustCell() const;
+    // 把 cell 所在的单位（分组则整组）移到 beforeCell 所在行的上方；beforeCell < 0 表示移到最底层
+    void moveLayerBefore(int cell, int beforeCell);
+    bool layoutLocked() const { return layoutLocked_; }
+    void toggleLayoutLock();                     // 画板按钮：切换布局锁
 
     // 导出（只输出画板区域）
     bool exportPixels(std::vector<BYTE>& pixels, int& width, int& height);
@@ -192,12 +214,28 @@ private:
 
     // 容器操作
     void translateCell(Cell& c, float dx, float dy);
-    // 间距变化：相邻容器原地按增量推开（正）/收拢（负），位置和大小本身不变
-    void reflowGap(float delta);
-    // 固定画板只涨不缩：内容超出锁定时把锁定尺寸同步扩到实际大小（尺寸行显示真实值）
-    void syncLockedBoard();
-    void resizeSelected(Handle h, const Pt& world, bool keepRatio);
+    // 间距 / 外边距变化后的重排：锁定轴装不下就等比缩小容器，未锁定轴随内容扩大画板
+    void reflowGap(float gapDelta, float borderDelta);
+    void resizeSelected(Handle h, const Pt& world, bool shift);
     float snapCoord(float value, bool horizontal, int ignoreCell, float tol) const;
+
+    // —— 布局锁：拖动时容器自由跟手，指到画板内显示插入光标，松手插入并顺移重排 ——
+    bool lockFlowHorizontal() const;             // 排列方向跟随尺寸锁轴：只锁高度时横排
+    // 拖动开始时按组把容器聚合成单位（布局组/分割组各一个整体），并按排列轴排序
+    struct LockUnit {
+        std::vector<int> cells;
+        D2D1_RECT_F orig{ 0.f, 0.f, 0.f, 0.f };
+    };
+    std::vector<LockUnit> buildLockUnits() const;
+    void sortLockUnits();
+    D2D1_RECT_F lockUnitBounds(int unit) const;
+    // 把整个单位（格子 + 组数据）按当前包围盒映射到目标矩形（拖动/缩小用）
+    void transformLockUnit(int unit, const D2D1_RECT_F& target);
+    void beginLockDrag(const Pt& p);
+    void updateLockDrag(const Pt& p);
+    void endLockDrag();
+    void commitLockDrop();                        // 松手：按插入位把单位依次排齐
+    void layoutLockUnits(const std::vector<int>& order);
     void snapCellToNeighbors(int index);
     // 自由吸附：容器/图片边缘吸附到其它容器与画板边缘
     struct SnapGuide { bool vertical{ false }; float pos{ 0.f }; };
@@ -245,11 +283,12 @@ private:
     bool layoutDividerHit(POINT clientPos, int& group, int& dividerIndex) const;
     void paintLayoutGroupChrome(ID2D1RenderTarget* rt, const LayoutGroupState& grp,
         float ox, float oy, float scale, bool withHandles);
-    // —— 选中对象上方的快捷控件：左旋 / 垂直镜像 / 水平镜像 / 右旋 ——
+    // —— 选中对象上方的快捷控件：左旋 / 垂直镜像 / 水平镜像 / 右旋 / 置顶 ——
     bool quickActionLayout(float& bgL, float& bgT, float& bgW, float& bgH,
-        D2D1_RECT_F btnRects[4], bool& placeBelow) const;
-    int quickActionHit(POINT clientPos) const;      // 0..3，未命中 -1
+        D2D1_RECT_F btnRects[5], bool& placeBelow) const;
+    int quickActionHit(POINT clientPos) const;      // 0..4，未命中 -1
     void applyQuickAction(int action);
+    void bringSelectionToFront();                   // 把选中容器（或整组）移到最上层
     void rotateSelectedContent(int dir);            // 单容器：图片旋转 ±90（无图则容器换向）
     void mirrorSelectedContent(bool horizontal);
     void rotateSelectedContainer(int dir);          // 容器旋转 ±90（图片保持朝向）
@@ -326,14 +365,18 @@ private:
     std::vector<int> extraCells_;   // 框选时选中的其余容器（selected_ 为主选中）
     int nextGroup_{ 1 };
 
-    // 画板：固定尺寸（0 = 自动：内容包围盒 + 外边距）。
-    // 固定后只随内容变大而变大，不会随容器缩小而缩回（manualL_/manualT_ 是锁定时画板原点）。
+    // 画板：只有「尺寸行手输锁定」的轴才是固定尺寸；没锁定的轴永远由内容包围盒 + 外边距决定。
+    // 固定轴保持锁定时的原点（manualL_/manualT_），内容超出画板时允许溢出。
     int manualW_{ 0 }, manualH_{ 0 };
     int manualL_{ 0 }, manualT_{ 0 };
     bool sizeEnteredW_{ false }, sizeEnteredH_{ false };   // 用户主动输入过该轴尺寸（显示绿色）
-    // 手工输入的尺寸原样生效；这里记录「输入当时的内容范围」，之后只有容器继续变大才把画板撑大
-    float contentFloorR_{ -FLT_MAX }, contentFloorB_{ -FLT_MAX };
-    void captureContentExtents();   // 记录当前内容范围（含已固定画板右/下边），供「只涨不缩」判断
+    // 间距把容器缩小时记下基准几何：间距调回基准值时容器原样恢复（可逆）
+    bool gapBaseValid_{ false };
+    float gapBaseGap_{ 0.f };
+    float gapBaseBorder_{ 0.f };
+    std::vector<Cell> gapBaseCells_;
+    std::map<int, SplitGroup> gapBaseSplits_;
+    std::map<int, LayoutGroupState> gapBaseLayouts_;
     // 上一次绘制时的画板原点（用于标注坐标换算）
     D2D1_RECT_F lastArt_{};
     bool lastArtValid_{ false };
@@ -381,6 +424,18 @@ private:
     bool dragShift_{ false };
     POINT panStart_{};
     float panStartDX_{ 0.f }, panStartDY_{ 0.f };
+
+    // 布局锁状态
+    bool layoutLocked_{ false };
+    std::vector<LockUnit> lockUnits_;   // 拖动开始时的全部单位（含被拖单位）
+    int lockMoving_{ -1 };              // 被拖单位在 lockUnits_ 中的下标
+    bool lockDragging_{ false };
+    D2D1_RECT_F lockArea_{ 0.f, 0.f, 0.f, 0.f };   // 拖动开始时的画板矩形（重排基准）
+    Pt lockDragStart_{};                            // 拖动起点的世界坐标
+    D2D1_POINT_2F lockGhost_{ 0.f, 0.f };           // 半透明预览相对原位的偏移（世界坐标）
+    int lockInsert_{ -1 };                          // 目标插入位（其他单位序列中的下标）
+    D2D1_POINT_2F lockCaretA_{ 0.f, 0.f }, lockCaretB_{ 0.f, 0.f };
+    bool lockCaretVisible_{ false };
 
     // 双击检测
     DWORD lastClickTick_{ 0 };

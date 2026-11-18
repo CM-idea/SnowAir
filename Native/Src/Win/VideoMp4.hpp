@@ -13,6 +13,7 @@
 #include <memory>
 #include <functional>
 #include "../compat/CComPtr.h"
+#include "ScreenCapture.h"   // 竖屏旋转映射（与截图共用同一份实现）
 #include <codecapi.h>
 #include <mfidl.h>
 #include <mfapi.h>
@@ -687,6 +688,15 @@ public:
     DXGI_OUTDUPL_DESC lOutputDuplDesc = {};
     // 当前采集目标那块屏在虚拟桌面里的矩形（Prepare 时记下）：换屏跟随要拿它判断"是否换屏"
     RECT monRect{};
+    // —— 竖屏 / 翻转屏 ——
+    // 桌面复制给的表面是未旋转的：90°/270° 时表面宽高与 ModeDesc（桌面尺寸）互换，
+    // 拷贝时按 rotation 把像素转回桌面方向（MS 文档「Rotating the desktop image」，与截图共用
+    // ScreenCapture.h 里的同一份映射）。
+    DXGI_MODE_ROTATION rawRotation = DXGI_MODE_ROTATION_IDENTITY;   // GetDesc 原值
+    DXGI_MODE_ROTATION rotation = DXGI_MODE_ROTATION_IDENTITY;      // 按表面真实尺寸校验后的有效值
+    int surfaceW = 0, surfaceH = 0;   // 复制表面真实尺寸（纹理按它建）
+    int deskW = 0, deskH = 0;         // 桌面方向下这块屏的宽高（ModeDesc）
+    bool IsRotated() const noexcept { return rotation != DXGI_MODE_ROTATION_IDENTITY; }
 
     // 换屏跟随：在本设备所属适配器下找目标显示器的输出索引。
     // 只有这个范围内可行 —— 挂在别的适配器上的屏，DuplicateOutput 用本设备的纹理接不住
@@ -744,11 +754,31 @@ public:
             return 0;
         lDesktopResource = 0;
 
+        // 首帧校正：驱动实际给的表面尺寸/格式才作数（个别驱动直接给桌面方向的图）。
+        // 尺寸对不上 CopyResource 就拷不出画面，所以发现不一致就按真实尺寸重建纹理。
+        {
+            D3D11_TEXTURE2D_DESC td{};
+            lAcquiredDesktopImage->GetDesc(&td);
+            if ((int)td.Width != surfaceW || (int)td.Height != surfaceH
+                || td.Format != lOutputDuplDesc.ModeDesc.Format)
+            {
+                if (!CreateTextures((int)td.Width, (int)td.Height, td.Format))
+                    return 0;
+                lOutputDuplDesc.ModeDesc.Format = td.Format;
+                // 表面尺寸变了，旋转关系重算（尺寸已经等于桌面尺寸时 helper 会自动退回不旋转）
+                rotation = ScreenCaptureResolveRotation(rawRotation, surfaceW, surfaceH, deskW, deskH);
+            }
+        }
 
-        if (InHDR != DXGI_FORMAT_UNKNOWN || Curs == 0)
+        // 旋转屏的光标不能再让 GDI 画在未旋转的表面上（位置和方向都会错），
+        // 改由采集出口的 blendCursor 按桌面坐标叠加（与 HDR 同一条 CPU 混合路径）。
+        const bool gdiCursor = (InHDR == DXGI_FORMAT_UNKNOWN && Curs != 0 && !IsRotated());
+
+
+        if (!gdiCursor)
         {
             // HDR 帧没有 GDI 兼容位，光标改在色调映射后由 blendCursor 叠加；
-            // 不录光标时更省一步，直接拷进暂存纹理
+            // 不录光标 / 旋转屏更省一步，直接拷进暂存纹理
             context->CopyResource(lDestImage, lAcquiredDesktopImage);
         }
         else
@@ -816,35 +846,60 @@ public:
         if (InHDR == DXGI_FORMAT_R16G16B16A16_FLOAT)
             multi = 8; // FP16 每像素 8 字节
 
-        auto sz = lOutputDuplDesc.ModeDesc.Width
-            * lOutputDuplDesc.ModeDesc.Height * multi;
-        if (rcx)
-            sz = (rcx->right - rcx->left) * (rcx->bottom - rcx->top) * multi;
+        // 输出的是"桌面方向"的裁剪块（宽高与 ModeDesc 一致，与表面宽高无关）
+        const int outW = rcx ? (rcx->right - rcx->left) : deskW;
+        const int outH = rcx ? (rcx->bottom - rcx->top) : deskH;
+        const size_t sz = (size_t)outW * (size_t)outH * (size_t)multi;
         // 直接按目标尺寸 resize：先按整屏再缩到选区的话，capacity 会一直停在整屏大小，
         // 录一小块区域也要占一整屏内存。
-        if (buf.size() != (size_t)sz) buf.resize(sz);
+        if (buf.size() != sz) buf.resize(sz);
 
-        UINT lBmpRowPitch = lOutputDuplDesc.ModeDesc.Width * multi;
-        if (rcx)
-            lBmpRowPitch = (rcx->right - rcx->left) * multi;
-        UINT lRowPitch = std::min<UINT>(lBmpRowPitch, resource.RowPitch);
-
-        BYTE* sptr = reinterpret_cast<BYTE*>(resource.pData);
-        BYTE* dptr = buf.data() + sz - lBmpRowPitch;
-        if (rcx)
-            sptr += rcx->left * multi;
-        for (size_t h = 0; h < lOutputDuplDesc.ModeDesc.Height; ++h)
+        if (IsRotated())
         {
-            if (rcx && h < (size_t)rcx->top)
+            // 竖屏 / 翻转屏：表面是未旋转的，逐像素反查表面坐标，仍按自下而上的顺序填 buf
+            const BYTE* base = reinterpret_cast<const BYTE*>(resource.pData);
+            const int left = rcx ? (int)rcx->left : 0;
+            const int top = rcx ? (int)rcx->top : 0;
+            for (int y = 0; y < outH; ++y)
             {
-                sptr += resource.RowPitch;
-                continue;
+                BYTE* drow = buf.data() + (size_t)(outH - 1 - y) * (size_t)outW * multi;
+                const int dy = top + y;
+                for (int x = 0; x < outW; ++x)
+                {
+                    int sx = 0, sy = 0;
+                    ScreenCaptureSurfacePoint(rotation, left + x, dy, surfaceW, surfaceH, sx, sy);
+                    if ((unsigned)sx >= (unsigned)surfaceW || (unsigned)sy >= (unsigned)surfaceH)
+                        continue;
+                    memcpy(drow + (size_t)x * multi,
+                        base + (size_t)sy * resource.RowPitch + (size_t)sx * multi, multi);
+                }
             }
-            if (rcx && h >= (size_t)rcx->bottom)
-                break;
-            memcpy_s(dptr, lBmpRowPitch, sptr, lRowPitch);
-            sptr += resource.RowPitch;
-            dptr -= lBmpRowPitch;
+        }
+        else
+        {
+            // 未旋转（绝大多数情况）：整行拷贝最省事
+            UINT lBmpRowPitch = (UINT)deskW * multi;
+            if (rcx)
+                lBmpRowPitch = (UINT)outW * multi;
+            UINT lRowPitch = std::min<UINT>(lBmpRowPitch, resource.RowPitch);
+
+            BYTE* sptr = reinterpret_cast<BYTE*>(resource.pData);
+            BYTE* dptr = buf.data() + sz - lBmpRowPitch;
+            if (rcx)
+                sptr += rcx->left * multi;
+            for (size_t h = 0; h < (size_t)deskH; ++h)
+            {
+                if (rcx && h < (size_t)rcx->top)
+                {
+                    sptr += resource.RowPitch;
+                    continue;
+                }
+                if (rcx && h >= (size_t)rcx->bottom)
+                    break;
+                memcpy_s(dptr, lBmpRowPitch, sptr, lRowPitch);
+                sptr += resource.RowPitch;
+                dptr -= lBmpRowPitch;
+            }
         }
         context->Unmap(lDestImage, subresource);
         return 1;
@@ -934,17 +989,38 @@ public:
         // 那个在 HDR 屏上仍是 FP16，照它建纹理会让下面的 CopyResource 拿不到画面
         if (SDRForced)
             lOutputDuplDesc.ModeDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+
+        // 竖屏 / 翻转屏：复制给的表面是**未旋转**的，90°/270° 时宽高与 ModeDesc（桌面尺寸）互换
+        //（MS 文档「Rotating the desktop image」）。纹理按表面尺寸建，拷贝时再转回桌面方向（见 Get）。
+        deskW = (int)lOutputDuplDesc.ModeDesc.Width;
+        deskH = (int)lOutputDuplDesc.ModeDesc.Height;
+        rawRotation = lOutputDuplDesc.Rotation;
+        const bool quarterRaw = rawRotation == DXGI_MODE_ROTATION_ROTATE90
+            || rawRotation == DXGI_MODE_ROTATION_ROTATE270;
+        const int surfW = quarterRaw ? deskH : deskW;
+        const int surfH = quarterRaw ? deskW : deskH;
+        rotation = ScreenCaptureResolveRotation(rawRotation, surfW, surfH, deskW, deskH);
+        return CreateTextures(surfW, surfH, lOutputDuplDesc.ModeDesc.Format) ? 1 : 0;
+    }
+
+    // 按"复制表面"的尺寸建两张纹理：GDI 兼容位（画光标用）与 CPU 可读暂存位。
+    // 竖屏时表面尺寸与桌面尺寸不同，所以不能在别处写死 ModeDesc。
+    bool CreateTextures(int w, int h, DXGI_FORMAT fmt)
+    {
+        if (!device || w <= 0 || h <= 0)
+            return false;
+
         D3D11_TEXTURE2D_DESC desc = {};
-        desc.Width = lOutputDuplDesc.ModeDesc.Width;
-        desc.Height = lOutputDuplDesc.ModeDesc.Height;
-        desc.Format = lOutputDuplDesc.ModeDesc.Format;
+        desc.Width = (UINT)w;
+        desc.Height = (UINT)h;
+        desc.Format = fmt;
         desc.ArraySize = 1;
         desc.BindFlags = D3D11_BIND_FLAG::D3D11_BIND_RENDER_TARGET;
         InHDR = DXGI_FORMAT_UNKNOWN;
-        if (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT)
+        if (fmt == DXGI_FORMAT_R16G16B16A16_FLOAT)
         {
             // FP16 表面没有 GDI 兼容位，光标只能另走 CPU 混合（见 blendCursor）
-            InHDR = desc.Format;
+            InHDR = fmt;
         }
         else
             desc.MiscFlags = D3D11_RESOURCE_MISC_GDI_COMPATIBLE;
@@ -954,28 +1030,21 @@ public:
         desc.CPUAccessFlags = 0;
         desc.Usage = D3D11_USAGE_DEFAULT;
         lGDIImage = 0;
-        hr = device->CreateTexture2D(&desc, NULL, &lGDIImage);
-        if (FAILED(hr))
-            return 0;
+        if (FAILED(device->CreateTexture2D(&desc, NULL, &lGDIImage)))
+            return false;
 
         // 再建一张 CPU 可读的暂存纹理，映射后就是内存里的紧凑位图
-        desc.Width = lOutputDuplDesc.ModeDesc.Width;
-        desc.Height = lOutputDuplDesc.ModeDesc.Height;
-        desc.Format = lOutputDuplDesc.ModeDesc.Format;
-        desc.ArraySize = 1;
         desc.BindFlags = 0;
         desc.MiscFlags = 0;
-        desc.SampleDesc.Count = 1;
-        desc.SampleDesc.Quality = 0;
-        desc.MipLevels = 1;
         desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE;
         desc.Usage = D3D11_USAGE_STAGING;
         lDestImage = 0;
-        hr = device->CreateTexture2D(&desc, NULL, &lDestImage);
-        if (FAILED(hr))
-            return 0;
+        if (FAILED(device->CreateTexture2D(&desc, NULL, &lDestImage)))
+            return false;
 
-        return 1;
+        surfaceW = w;
+        surfaceH = h;
+        return true;
     }
 
 };
@@ -2185,14 +2254,25 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
                 else
                     memcpy(pData, cap.sdrBuf.data(), (size_t)VideoBufferSize);
             }
-            else if (encW != wi || encH != he)
-            {
-                // 「视频质量」缩到目标分辨率后再交给编码器
-                scaleBGRABox(cap.buf.data(), wi, he, (BYTE*)pData, encW, encH);
-            }
             else
             {
-                memcpy(pData, cap.buf.data(), (size_t)VideoBufferSize);
+                // 旋转屏的 SDR 帧：光标没被画进位图（表面是未旋转的，画进去位置/方向都会错），
+                // 在这里按桌面坐标叠上去 —— 与 HDR 同一条 CPU 混合路径
+                if (dp.Cursor && cap.IsRotated())
+                {
+                    const int ox = cap.monRect.left + ((dp.rx.right && dp.rx.bottom) ? dp.rx.left : 0);
+                    const int oy = cap.monRect.top + ((dp.rx.right && dp.rx.bottom) ? dp.rx.top : 0);
+                    cap.blendCursor(cap.buf, wi, he, ox, oy);
+                }
+                if (encW != wi || encH != he)
+                {
+                    // 「视频质量」缩到目标分辨率后再交给编码器
+                    scaleBGRABox(cap.buf.data(), wi, he, (BYTE*)pData, encW, encH);
+                }
+                else
+                {
+                    memcpy(pData, cap.buf.data(), (size_t)VideoBufferSize);
+                }
             }
             if (dp.Framer)
                 hrf = dp.Framer(DXGI_FORMAT_B8G8R8A8_UNORM, wi, he, pData, (size_t)VideoBufferSize, dp.cb);

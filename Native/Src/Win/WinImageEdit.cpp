@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <commdlg.h>
+#include <shobjidl.h>
 #include <cstdlib>
 #include <string>
 
@@ -26,6 +27,23 @@
 void PaintCustomColorSwatch(Ling::Canvas* canvas, float dpi);
 
 namespace {
+    // 展开态箭头：复用设置页同一个「下拉」字形，只是垂直镜像（不换图标，避免字重/尺寸对不上）
+    class LayerArrowLabel : public Ling::Label
+    {
+    public:
+        explicit LayerArrowLabel(Ling::WinBase* w) : Ling::Label(w) {}
+        bool flipped{ false };
+    protected:
+        void layout() override
+        {
+            Ling::Label::layout();
+            if (flipped) {
+                visual.CenterPoint({ w * 0.5f, h * 0.5f, 0.f });
+                visual.Scale({ 1.f, -1.f, 1.f });
+            }
+        }
+    };
+
     // 自定义颜色色块：直接复用截图颜色面板那颗“圆环彩虹”图标（Canvas 每次布局时重绘）
     class ColorWheelCanvas : public Ling::Canvas
     {
@@ -90,6 +108,51 @@ namespace {
         }
     }
 
+    // 拼图输出固定 PNG（不支持透明以外的格式选择）
+
+    // 合并文档输出格式文案（与 WinImageEdit::DocOut 的顺序一致）
+    const wchar_t* docOutText(int ordinal)
+    {
+        switch (ordinal) {
+        case 0: return L".PDF";
+        case 1: return L".PPTX";
+        case 3: return L".WEBP";
+        case 4: return L".JPG";
+        default: return L".PNG";
+        }
+    }
+
+    // 取路径的文件名（不含扩展名）：图片导出沿用原文件名
+    std::wstring fileStem(const std::wstring& path)
+    {
+        const auto slash = path.find_last_of(L"\\/");
+        std::wstring name = (slash == std::wstring::npos) ? path : path.substr(slash + 1);
+        const auto dot = name.find_last_of(L'.');
+        if (dot != std::wstring::npos) name = name.substr(0, dot);
+        return name.empty() ? std::wstring(L"image") : name;
+    }
+
+    // 选择输出文件夹（取消返回空）
+    std::wstring pickOutputFolder(HWND owner)
+    {
+        Microsoft::WRL::ComPtr<IFileOpenDialog> dlg;
+        if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(dlg.GetAddressOf()))) || !dlg)
+            return {};
+        DWORD opts{};
+        dlg->GetOptions(&opts);
+        dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+        const std::wstring title = Lang::get(L"imageEdit.chooseFolder");
+        dlg->SetTitle(title.c_str());
+        if (FAILED(dlg->Show(owner))) return {};   // 用户取消
+        Microsoft::WRL::ComPtr<IShellItem> item;
+        if (FAILED(dlg->GetResult(item.GetAddressOf())) || !item) return {};
+        PWSTR raw{ nullptr };
+        if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &raw)) || !raw) return {};
+        std::wstring out{ raw };
+        CoTaskMemFree(raw);
+        return out;
+    }
 }
 
 
@@ -114,9 +177,10 @@ WinImageEdit::WinImageEdit() : Ling::WinBase()
             });
         });
     setTitle(Lang::get(L"imageEdit.title"));
-    setSize(1159, 807);
+    // 窗口最小宽 = 边距 19 + 最小工作区 980 + 18 + 右栏 206 + 16（外加边框）；工作区本身随窗口自适应
+    setSize(1260, 807);
     setCenter();
-    setMinSize(1000, 700);
+    setMinSize(1260, 700);
     // 保留系统原生标题栏（拖动 / 最小化 / 最大化 / 关闭都由系统提供）
     createNativeWindow(NULL, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN);
     s_instance = this;
@@ -199,11 +263,29 @@ void WinImageEdit::onCreated()
         }
         });
     onIME.add([this] { if (annot_) annot_->forwardIme(); });
-    // 窗口尺寸/位置变了：属性栏跟着底部工具栏走
-    onSizeChanged.add([this] { if (annot_) annot_->layoutTools(); });
+    // 窗口尺寸/位置变了：属性栏跟着底部工具栏走，图层面板高度跟着工作区重算
+    onSizeChanged.add([this] {
+        if (annot_) annot_->layoutTools();
+        updateLayerPanelBounds();
+        });
     onMoved.add([this] { if (annot_) annot_->layoutTools(); });
     // 滚轮微调：鼠标停在尺寸/行列输入框或属性输入框上时，滚轮直接加减数字
     onMouseWheel.add([this](POINT pos, float space) { onWheelAdjust(pos, space); });
+    // 图层栏：单击选中 / 双击换图 / 按住拖动调整图层顺序（面板内滚轮纵向滚动）
+    onMouseDown.add([this](POINT pos, bool right) { onLayerMouseDown(pos, right); });
+    onMouseMove.add([this](POINT pos) { onLayerMouseMove(pos); });
+    onMouseUp.add([this](POINT pos, bool right) { onLayerMouseUp(pos, right); });
+    // 图层栏空格子上的「+」：悬停手型
+    onCursor.add([this](bool* handled) {
+        if (handled && *handled) return;
+        if (!layerPanelOpen_ || !hwnd) return;
+        POINT p{};
+        GetCursorPos(&p);
+        ScreenToClient(hwnd, &p);
+        if (layerPlusIndexAt(p) < 0) return;
+        SetCursor(LoadCursor(nullptr, IDC_HAND));
+        if (handled) *handled = true;
+        });
 
     buildUi();
 
@@ -233,7 +315,7 @@ void WinImageEdit::buildLeftColumn()
     leftCol_->setMarginRight(18.f);
     leftCol_->setFlexDirection(Ling::FlexDirection::Column);
 
-    // 画布宿主：也是拼图/合并页面的绝对定位父级
+    // 画布宿主：也是拼图/合并页面的绝对定位父级；宽度自适应，最小工作区宽由窗口最小尺寸保证
     canvasHost_ = leftCol_->makeChild<Ling::Node>();
     canvasHost_->setBg(ImageEditTheme::canvasBg);
     canvasHost_->setBorderRadius(20.f);
@@ -274,15 +356,99 @@ void WinImageEdit::buildLeftColumn()
     buildToolbar();
     buildTopCapsule();
 
-    // 底部素材条：横向缩略图（M2 由 rebuildStrip 填充）
-    strip_ = leftCol_->makeChild<Ling::Node>();
-    strip_->setHeight(80.f);
-    strip_->setMarginTop(20.f);
-    strip_->setWidthPercent(100.f);
-    strip_->setFlexDirection(Ling::FlexDirection::Row);
-    strip_->setAlignItems(Ling::Align::Center);
-    strip_->setPaddingLeft(0.f);
-    strip_->setPaddingRight(0.f);
+    // 画布左上角小工具栏（图层 / 画板）与左侧浮层图层栏
+    buildCanvasBar();
+    buildLayerPanel();
+}
+
+void WinImageEdit::buildCanvasBar()
+{
+    // 与容器气泡同规格：深色底、圆角 10、内边距 4、按钮 28×28、间距 2
+    canvasBar_ = canvasHost_->makeChild<Ling::Node>();
+    canvasBar_->setPositionType(Ling::Position::Absolute);
+    canvasBar_->setPosition(Ling::Edge::Left, 9.f);
+    canvasBar_->setPosition(Ling::Edge::Top, 9.f);
+    canvasBar_->setSize(66.f, 36.f);
+    canvasBar_->setBg(ImageEditTheme::floatBg);
+    canvasBar_->setBorderRadius(10.f);
+    canvasBar_->setFlexDirection(Ling::FlexDirection::Row);
+    canvasBar_->setAlignItems(Ling::Align::Center);
+    canvasBar_->setPadding(4.f, 4.f, 4.f, 4.f);
+
+    auto makeBtn = [this](const wchar_t* glyph) {
+        auto* btn = canvasBar_->makeChild<Ling::Button>();
+        btn->setSize(28.f, 28.f);
+        btn->setBg(0);
+        btn->setHoverBg(ImageEditTheme::floatHover);
+        btn->setBorderRadius(6.f);
+        btn->setText(glyph);
+        btn->setFontFamily(Icon::Family);
+        btn->setFontSize(16.f);
+        btn->setColor(ImageEditTheme::floatFg);
+        btn->setHoverColor(ImageEditTheme::floatFg);
+        return btn;
+    };
+    btnLayer_ = makeBtn(Icon::Layer);
+    btnLayer_->setMarginRight(2.f);
+    btnLayer_->onClick.add([this](Ling::Button*) { setLayerPanelOpen(!layerPanelOpen_); });
+    btnBoard_ = makeBtn(Icon::Artboard);
+    btnBoard_->onClick.add([this](Ling::Button*) {
+        if (!collage_) return;
+        collage_->toggleLayoutLock();
+        updateBoardButton();
+        });
+}
+
+void WinImageEdit::buildLayerPanel()
+{
+    // 浮层：宽 102，从工具栏下方（9 + 36 + 9 = 54）一直铺到工作区底部（留 19）
+    layerPanel_ = canvasHost_->makeChild<Ling::Node>();
+    layerPanel_->setPositionType(Ling::Position::Absolute);
+    layerPanel_->setPosition(Ling::Edge::Left, 9.f);
+    layerPanel_->setPosition(Ling::Edge::Top, 54.f);
+    layerPanel_->setSize(102.f, 400.f);
+    layerPanel_->setBg(ImageEditTheme::floatBg);
+    layerPanel_->setBorderRadius(10.f);
+    layerPanel_->hide();
+
+    // 视口：只在圆角 > 0 时裁剪，用极小圆角做直角裁剪（内容自己留 9 边距）
+    layerView_ = layerPanel_->makeChild<Ling::Node>();
+    layerView_->setPositionType(Ling::Position::Absolute);
+    layerView_->setPosition(Ling::Edge::Left, 0.f);
+    layerView_->setPosition(Ling::Edge::Top, 0.f);
+    layerView_->setSize(102.f, 400.f);
+    layerView_->setBorderRadius(0.01f);
+
+    // 纵向内容轨道：靠上偏移表达滚动
+    layerTrack_ = layerView_->makeChild<Ling::Node>();
+    layerTrack_->setPositionType(Ling::Position::Absolute);
+    layerTrack_->setPosition(Ling::Edge::Left, 0.f);
+    layerTrack_->setPosition(Ling::Edge::Top, 0.f);
+    layerTrack_->setWidth(102.f);
+    layerTrack_->setHeight(1.f);
+
+    // 拖动排序的插入光标（贴在落点边界上的细线）
+    layerCaret_ = layerPanel_->makeChild<Ling::Node>();
+    layerCaret_->setPositionType(Ling::Position::Absolute);
+    layerCaret_->setPosition(Ling::Edge::Left, 9.f);
+    layerCaret_->setSize(84.f, 2.f);
+    layerCaret_->setBg(ImageEditTheme::accent);
+    layerCaret_->hide();
+
+    // 拖动排序的跟手预览：挂在工作区上（不受图层栏裁剪，可以拖到整个工作区任意位置）
+    layerGhost_ = canvasHost_->makeChild<Ling::Node>();
+    layerGhost_->setPositionType(Ling::Position::Absolute);
+    layerGhost_->setSize(84.f, 55.f);
+    layerGhost_->setBg(ImageEditTheme::floatGhost);
+    layerGhost_->setBorderRadius(5.f);
+    layerGhost_->setBorder(1.f, ImageEditTheme::accent);
+    layerGhost_->hide();
+    layerGhostImg_ = layerGhost_->makeChild<Ling::ImageBox>();
+    layerGhostImg_->setSize(80.f, 51.f);
+    layerGhostImg_->setBorderRadius(5.f);
+    layerGhostImg_->hide();
+
+    updateLayerPanelBounds();
 }
 
 void WinImageEdit::buildToolbar()
@@ -442,6 +608,13 @@ void WinImageEdit::bumpCountBox(Ling::TextBox* box, int dir)
 void WinImageEdit::onWheelAdjust(POINT pos, float space)
 {
     if (space == 0.f) return;
+    // 鼠标悬停在图层栏上：滚轮纵向滚动，不进入数值微调
+    if (layerPanelOpen_ && layerPanel_ && layerPanel_->visual.IsVisible() && layerPanel_->isPosIn(pos)
+        && layerMaxScroll() > 0.01f) {
+        const float d = (dpi > 0.f) ? dpi : 1.f;
+        setLayerScroll(layerScrollY_ - space / d);
+        return;
+    }
     const int dir = space > 0.f ? 1 : -1;
     // 鼠标停在属性栏的序号输入框上（未在编辑）：滚轮直接加减序号
     if (annot_ && annot_->toolSub && annot_->toolSub->wheelNumberAt(dir)) return;
@@ -738,9 +911,9 @@ void WinImageEdit::buildRightColumn()
     btnSwap_->setColor(ImageEditTheme::fgMuted);
     btnSwap_->setHoverColor(ImageEditTheme::fg);
 
-    auto onSizeEdited = [this](Ling::TextBox*, const std::wstring&) {
+    auto onSizeEdited = [this](Ling::TextBox* box, const std::wstring&) {
         if (syncingSize_) return;   // updateSizeRow / 互换回填期间不解析
-        syncCanvasSizeFromEditors();
+        syncCanvasSizeFromEditors(box);   // 只应用被编辑的那一轴
         };
     editH_->onTextChanged.add(onSizeEdited);
     editW_->onTextChanged.add(onSizeEdited);
@@ -863,7 +1036,7 @@ void WinImageEdit::buildCollageProps()
     collageProps_->setPosition(Ling::Edge::Top, 0.f);
     collageProps_->setSize(206.f, 734.f);
 
-    // 外边框 / 间距 / 圆角：截图是「左标签 + 右数值 + PX」一行 + 细滑条
+    // 外边框 / 间距 / 圆角：截图是「左标签 + 右数值 + 单位」一行 + 细滑条
     addDivider(collageProps_, 116.f);
     buildPropRow(collageProps_, Lang::get(L"imageEdit.border"), 131.f, 0.f, 100.f, collageBorder_,
         [this](float v) { if (collage_) collage_->setBorder(v); });
@@ -930,7 +1103,7 @@ void WinImageEdit::buildCollageProps()
 }
 
 Ling::Node* WinImageEdit::buildPropRow(Ling::Node* parent, const std::wstring& label, float top,
-    float minV, float maxV, NumProp& out, std::function<void(float)> apply)
+    float minV, float maxV, NumProp& out, std::function<void(float)> apply, const wchar_t* unitText)
 {
     auto* block = parent->makeChild<Ling::Node>();
     block->setPositionType(Ling::Position::Absolute);
@@ -970,12 +1143,13 @@ Ling::Node* WinImageEdit::buildPropRow(Ling::Node* parent, const std::wstring& l
     out.box->setPlaceholder(L"0");
     out.box->setPlaceholderColor(ImageEditTheme::placeholder);
 
+    // 单位：尺寸类为 PX，输出质量为 %
     auto* unit = valueBox->makeChild<Ling::Label>();
     unit->setPositionType(Ling::Position::Absolute);
     unit->setPosition(Ling::Edge::Right, 4.f);
     unit->setPosition(Ling::Edge::Top, 7.f);
     unit->setSize(14.f, 14.f);
-    unit->setText(L"PX");
+    unit->setText(unitText);
     unit->setFontSize(10.f);
     unit->setColor(ImageEditTheme::unitDim);
 
@@ -1269,115 +1443,569 @@ void WinImageEdit::updateBgSwatches()
         refs.custom->setBorder((!noBg && !isPreset) ? 1.f : 0.f, Ling::Color((!noBg && !isPreset) ? ImageEditTheme::accent : (uint32_t)0));
 }
 
-void WinImageEdit::rebuildStrip()
+void WinImageEdit::updateLayerPanelBounds()
 {
-    if (!strip_ || !collage_) return;
-    const auto thumbs = collage_->thumbnails();
+    if (!layerPanel_ || !layerView_) return;
+    const float d = (dpi > 0.f) ? dpi : 1.f;
+    const float hostH = canvasHost_ ? canvasHost_->h / d : 0.f;
+    // 面板从工具栏下方（9+36+9=54）铺到工作区底部（留 19）
+    const float panelH = std::max(60.f, hostH - 54.f - 19.f);
+    layerPanel_->setSize(102.f, panelH);
+    layerView_->setSize(102.f, panelH);
+    setLayerScroll(layerScrollY_);
+}
 
-    // 图片集合没变（拖动分割线等高频刷新）就不重建节点，只更新选中描边、
-    // 并刷新索引缓存。否则底部图片格子会每帧销毁重建，表现为一直闪烁。
-    bool same = (thumbs.size() == stripItems_.size());
-    if (same) {
-        for (size_t i = 0; i < thumbs.size(); ++i) {
-            if (thumbs[i].path != stripPaths_[i]) { same = false; break; }
+void WinImageEdit::setLayerPanelOpen(bool open)
+{
+    layerPanelOpen_ = open && collage_ != nullptr;
+    layerLastScrollCell_ = -1;
+    if (!layerPanel_) return;
+    // 只有图标颜色表示状态；悬停背景始终一致
+    if (btnLayer_) {
+        const uint32_t iconColor = layerPanelOpen_ ? ImageEditTheme::accent : ImageEditTheme::floatFg;
+        btnLayer_->setBg(0);
+        btnLayer_->setColor(iconColor);
+        btnLayer_->setHoverColor(iconColor);   // 悬停也不冲掉选中态的绿色
+        btnLayer_->setHoverBg(ImageEditTheme::floatHover);
+    }
+    if (layerPanelOpen_) {
+        updateLayerPanelBounds();   // 打开时按当前工作区高度重算面板高度
+        rebuildLayers();
+        layerPanel_->show();
+        if (canvasHost_) canvasHost_->bringToFront(layerPanel_);   // 浮层压在画布上
+    }
+    else {
+        layerPanel_->hide();
+        // 收起时顺带清掉拖动预览
+        layerPressed_ = false;
+        layerDragMoved_ = false;
+        layerDropSlot_ = -1;
+        if (layerGhost_) layerGhost_->hide();
+        if (layerCaret_) layerCaret_->hide();
+    }
+    refresh();
+}
+
+void WinImageEdit::updateBoardButton()
+{
+    if (!btnBoard_) return;
+    // 只让图标变绿表示锁定，按钮底色与悬停底色都不随状态变化
+    const bool locked = collage_ && collage_->layoutLocked();
+    const uint32_t iconColor = locked ? ImageEditTheme::accent : ImageEditTheme::floatFg;
+    btnBoard_->setBg(0);
+    btnBoard_->setHoverBg(ImageEditTheme::floatHover);
+    btnBoard_->setColor(iconColor);
+    btnBoard_->setHoverColor(iconColor);
+}
+
+void WinImageEdit::rebuildLayers()
+{
+    if (!layerTrack_ || !collage_) return;
+    auto units = collage_->layerUnits();
+    // 双击进入某张图片的调整模式时，只高亮这一张（否则组内整格都会被当成选中）
+    const int focus = collage_->imageAdjustCell();
+    if (focus >= 0) {
+        for (auto& u : units) {
+            bool any = false;
+            for (size_t k = 0; k < u.cells.size() && k < u.sel.size(); ++k) {
+                u.sel[k] = (u.cells[k] == focus);
+                any = any || u.sel[k];
+            }
+            u.anySelected = any;
         }
     }
-    if (same) {
-        stripCells_.clear();
-        for (size_t i = 0; i < thumbs.size(); ++i) {
-            stripCells_.push_back(thumbs[i].cell);
-            if (stripItems_[i]) stripItems_[i]->setBorder(2.f, thumbs[i].selected ? ImageEditTheme::accent : ImageEditTheme::cardLine);
+
+    // 先按「单位 + 展开状态」算出要显示的行
+    std::vector<LayerRow> rows;
+    // 每个单位对应的行范围（整组选中时画一个外框用）
+    std::vector<std::pair<int, int>> unitRange(units.size(), { -1, -1 });
+    std::vector<bool> unitAll(units.size(), false);
+    float y = 0.f;
+    for (size_t ui = 0; ui < units.size(); ++ui) {
+        const auto& u = units[ui];
+        // 组内全部格都被选中 → 整块描一个外框，而不是逐格描边
+        bool allSel = !u.cells.empty();
+        for (bool s : u.sel) if (!s) { allSel = false; break; }
+        unitAll[ui] = allSel;
+        // 多格布局组 / 分割组聚成一组；单格（含 1×1 布局）仍按普通容器显示
+        const bool grouped = (u.cells.size() > 1 && (u.kind == 1 || u.kind == 2));
+        if (!grouped) {
+            // 单个容器：84×55，上下间距 9
+            y += 9.f;
+            LayerRow r;
+            r.cell = u.cells.empty() ? -1 : u.cells.front();
+            r.unit = (int)ui;
+            r.empty = !u.hasImage;
+            r.selected = u.anySelected;
+            if (!u.paths.empty()) r.path = u.paths.front();
+            r.y = y;
+            r.h = 55.f;
+            unitRange[ui] = { (int)rows.size(), (int)rows.size() };
+            rows.push_back(std::move(r));
+            y += 55.f;
+            continue;
         }
+        // 布局组 / 分割组：标题行 84×24（卡片比标题行上移 2）
+        // 只要是多格（被布局/分割切割过）就可以展开，和有没有图片无关
+        const bool expanded =
+            std::find(layerExpanded_.begin(), layerExpanded_.end(), u.group) != layerExpanded_.end();
+        // 卡片顶 = 标题行 − 2，这里补到 11 让卡片之间（含列表顶部）都是 9
+        y += 11.f;
+        LayerRow h;
+        h.cell = u.cells.front();
+        h.group = u.group;
+        h.unit = (int)ui;
+        h.kind = u.kind;
+        h.layoutType = u.layoutType;
+        h.header = true;
+        h.empty = !u.hasImage;
+        h.selected = u.anySelected;
+        h.unitAll = allSel;
+        h.chevron = true;
+        h.expanded = expanded;
+        h.y = y;
+        h.h = 24.f;
+        unitRange[ui].first = (int)rows.size();
+        unitRange[ui].second = (int)rows.size();
+        rows.push_back(std::move(h));
+        y += 24.f;
+        if (expanded) {
+            for (size_t k = 0; k < u.cells.size(); ++k) {
+                // 标题行盒比文字高 4：首张子图前只留 4，让「文字 → 子图」视觉上也是 8
+                y += (k == 0) ? 4.f : 8.f;
+                LayerRow r;
+                r.cell = u.cells[k];
+                r.group = u.group;
+                r.unit = (int)ui;
+                r.selected = k < u.sel.size() ? u.sel[k] : false;
+                r.unitAll = allSel;
+                r.path = k < u.paths.size() ? u.paths[k] : std::wstring{};
+                r.empty = r.path.empty();
+                r.y = y;
+                r.h = 50.f;
+                unitRange[ui].second = (int)rows.size();
+                rows.push_back(std::move(r));
+                y += 50.f;
+            }
+        }
+        // 组内底部留 8，和标题/子图之间的间距保持一致
+        y += 8.f;
+    }
+    // 结构签名：行数/位置/图片/展开状态一样时只更新选中描边，不重建节点
+    // （拖动/缩放容器时面板会每帧刷新，重建节点会表现为一直闪烁）
+    std::vector<std::wstring> sig;
+    sig.reserve(rows.size());
+    for (const auto& r : rows) {
+        sig.push_back(std::to_wstring(r.cell) + L"|" + std::to_wstring(r.group) + L"|"
+            + std::to_wstring((int)r.header) + L"|" + std::to_wstring((int)r.expanded) + L"|"
+            + std::to_wstring((int)std::lround(r.y * 10.f)) + L"|" + r.path);
+    }
+    const bool sameStruct = (sig == layerSig_) && (layerRowNodes_.size() == rows.size());
+    layerRows_ = std::move(rows);
+    layerUnitAll_ = unitAll;
+    layerContentH_ = layerRows_.empty() ? 0.f : (y + 9.f);
+    layerTrack_->setHeight(std::max(1.f, layerContentH_));
+    if (sameStruct) {
+        applyLayerStyles();
         return;
     }
+    layerSig_ = std::move(sig);
 
-    strip_->removeAllChildren();
-    stripItems_.clear();
-    stripCells_.clear();
-    stripPaths_.clear();
-
-    const float d = (dpi > 0.f) ? dpi : 1.f;
-    for (const auto& thumb : thumbs) {
-        auto* item = strip_->makeChild<Ling::Button>();
-        item->setSize(80.f, 80.f);   // 1:1 方形格子
-        item->setBg(ImageEditTheme::canvasBg);
-        item->setHoverBg(ImageEditTheme::hoverSubtle);
-        item->setBorderRadius(20.f);
-        item->setBorder(2.f, thumb.selected ? ImageEditTheme::accent : ImageEditTheme::cardLine);
-        item->setMarginRight(14.f);
-
-        auto* img = item->makeChild<Ling::ImageBox>();
-        img->setPositionType(Ling::Position::Absolute);
-        img->setPosition(Ling::Edge::Left, 2.f);
-        img->setPosition(Ling::Edge::Top, 2.f);
-        img->setSize(76.f, 76.f);
-        img->loadImg(thumb.path, 76.f * d, 76.f * d);
-
-        const std::wstring path = thumb.path;
-        // 悬停出现的「+」：单击直接替换这张图片
-        auto* plus = item->makeChild<Ling::Button>();
-        plus->setPositionType(Ling::Position::Absolute);
-        plus->setPosition(Ling::Edge::Left, 26.f);
-        plus->setPosition(Ling::Edge::Top, 26.f);
-        plus->setSize(28.f, 28.f);
-        plus->setBorderRadius(14.f);
-        plus->setBg(0x000000CCu);
-        plus->setHoverBg(ImageEditTheme::accent);
-        plus->setText(L"+");
-        plus->setFontSize(16.f);
-        plus->setColor(0xFFFFFFFF);   // 浮在缩略图上的黑色圆底，两套主题都用白字
-        plus->setHoverColor(0x171717FF);
-        plus->hide();
-        item->onEnter.add([plus](Ling::Button*) { plus->show(); });
-        item->onLeave.add([plus](Ling::Button*) { plus->hide(); });
-
-        item->onClick.add([this, path, plus](Ling::Button*) {
-            if (!collage_) return;
-            // 分割/重排后容器索引会变：按图片路径找回当前索引
-            int cell = -1;
-            for (const auto& t : collage_->thumbnails()) {
-                if (t.path == path) { cell = t.cell; break; }
+    // 重建节点
+    layerTrack_->removeAllChildren();
+    layerRowNodes_.clear();
+    layerPlusNodes_.clear();
+    layerHoverPlus_ = -1;
+    layerUnitBoxes_.assign(units.size(), nullptr);
+    layerPressed_ = false;
+    layerDragMoved_ = false;
+    layerDropSlot_ = -1;
+    // 分组（自由布局/分割）：一个小卡片（标题 + 子图）包在一个大卡片里，子图不单独成卡
+    Ling::Node* groupBox = nullptr;
+    int curUnit = -1;
+    float groupTop = 0.f;
+    for (const auto& r : layerRows_) {
+        layerPlusNodes_.push_back(nullptr);   // 与行一一对应（空的「+」热区稍后填）
+        Ling::Node* parent = layerTrack_;
+        float topOff = 0.f;
+        if (r.group >= 0 && r.unit >= 0 && r.unit < (int)unitRange.size()) {
+            if (r.unit != curUnit || !groupBox) {
+                curUnit = r.unit;
+                const auto rng = unitRange[r.unit];
+                const auto& first = layerRows_[rng.first];
+                const auto& last = layerRows_[rng.second];
+                // 标题统一上移 2：文字距卡片顶约 6（2 + 行内居中留白 4）
+                const bool collapsed = (rng.first == rng.second);
+                groupTop = first.y - 2.f;
+                const float hgt = collapsed ? 30.f
+                    : std::max(30.f, (last.y + last.h + 8.f) - groupTop);
+                groupBox = layerTrack_->makeChild<Ling::Node>();
+                groupBox->setPositionType(Ling::Position::Absolute);
+                groupBox->setPosition(Ling::Edge::Left, 9.f);
+                groupBox->setPosition(Ling::Edge::Top, groupTop);
+                groupBox->setSize(84.f, hgt);
+                groupBox->setBg(ImageEditTheme::floatCard);
+                groupBox->setBorderRadius(5.f);
+                // 整组全部选中：大卡片描边变绿；只选中其中一张图时保持常态
+                const bool allSel = unitAll[r.unit];
+                groupBox->setBorder(allSel ? 2.f : 1.f,
+                    allSel ? ImageEditTheme::accent : ImageEditTheme::cardLine);
+                if (r.unit < (int)layerUnitBoxes_.size()) layerUnitBoxes_[r.unit] = groupBox;
             }
-            if (cell < 0) return;
-            // 点在「+」上 = 直接替换；双击整块也替换；单击 = 选中
-            POINT cp{};
-            GetCursorPos(&cp);
-            if (hwnd) ScreenToClient(hwnd, &cp);
-            if (plus->isPosIn(cp)) {
-                collage_->replaceCellImage(cell);
-                return;
-            }
-            const DWORD now = GetTickCount();
-            const bool dbl = lastStripClickCell_ == cell
-                && (now - lastStripClickTick_) < GetDoubleClickTime();
-            lastStripClickCell_ = cell;
-            lastStripClickTick_ = now;
-            if (dbl) {
-                lastStripClickCell_ = -1;
-                collage_->replaceCellImage(cell);
-                return;
-            }
-            collage_->selectCell(cell);
-            });
+            parent = groupBox;
+            topOff = groupTop;
+        }
+        auto* node = parent->makeChild<Ling::Node>();
+        node->setPositionType(Ling::Position::Absolute);
+        node->setPosition(Ling::Edge::Top, r.y - topOff);
+        node->setPosition(Ling::Edge::Left, r.header ? 0.f : (r.group >= 0 ? 8.f : 9.f));
+        node->setSize(r.header ? 84.f : (r.group >= 0 ? 68.f : 84.f), r.h);
+        node->setFlexDirection(Ling::FlexDirection::Row);
+        node->setAlignItems(Ling::Align::Center);
 
-        stripItems_.push_back(item);
-        stripCells_.push_back(thumb.cell);
-        stripPaths_.push_back(path);
+        if (r.header) {
+            // 标题：文字 + 下拉，不单独铺底色（底色在外层大卡片上）
+            node->setBg(0);
+            node->setJustifyContent(Ling::Justify::SpaceBetween);
+            node->setPadding(8.f, 0.f, 8.f, 0.f);
+            auto* title = node->makeChild<Ling::Label>();
+            const wchar_t* key = (r.kind == 1 && r.layoutType == 1) ? L"imageEdit.layoutTopBottom"
+                : (r.kind == 1 && r.layoutType == 2) ? L"imageEdit.layoutLeftRight"
+                : L"imageEdit.layoutFree";
+            title->setText(Lang::get(key));
+            title->setFontSize(12.f);
+            title->setColor(ImageEditTheme::fgMuted);
+            if (r.chevron) {
+                auto* arrow = node->makeChild<LayerArrowLabel>();
+                arrow->flipped = r.expanded;   // 与设置页一致：同一个下拉字形，展开时垂直镜像
+                arrow->setText(Icon::Dropdown);
+                arrow->setFontFamily(Icon::Family);
+                arrow->setFontSize(12.f);
+                arrow->setColor(ImageEditTheme::fgMuted);
+            }
+        }
+        else {
+            // 卡片：与改版前一致，用画布同色的暗底 + 一圈描边；圆角与图层栏同心
+            node->setBg(r.group >= 0 ? ImageEditTheme::floatCardInner : ImageEditTheme::floatCard);
+            node->setBorderRadius(5.f);
+            // 单张图片被选中时只描这一张；组内卡片常态不描边（描边只在外层大卡片上）
+            const bool mark = r.selected && !r.unitAll;
+            const bool inner = (r.group >= 0);
+            node->setBorder(mark ? 2.f : (inner ? 0.f : 1.f),
+                mark ? ImageEditTheme::accent : ImageEditTheme::cardLine);
+            node->setJustifyContent(Ling::Justify::Center);
+            if (!r.empty) {
+                auto* img = node->makeChild<Ling::ImageBox>();
+                img->setSize(r.group >= 0 ? 64.f : 80.f, r.group >= 0 ? 46.f : 51.f);
+                img->setBorderRadius(5.f);
+                img->loadImg(r.path, img->w, img->h);
+            }
+            else {
+                // 空容器：图标字库的「加号」，28×28 圆形热区（悬停出现圆形底色）
+                const float cardW = r.group >= 0 ? 68.f : 84.f;
+                auto* box = node->makeChild<Ling::Node>();
+                box->setPositionType(Ling::Position::Absolute);
+                box->setPosition(Ling::Edge::Left, (cardW - 28.f) * 0.5f);
+                box->setPosition(Ling::Edge::Top, (r.h - 28.f) * 0.5f);
+                box->setSize(28.f, 28.f);
+                box->setBg(0);
+                box->setBorderRadius(14.f);   // 圆形
+                box->setFlexDirection(Ling::FlexDirection::Row);
+                box->setJustifyContent(Ling::Justify::Center);
+                box->setAlignItems(Ling::Align::Center);
+                auto* plus = box->makeChild<Ling::Label>();
+                plus->setText(Icon::Add);
+                plus->setFontFamily(Icon::Family);
+                plus->setFontSize(16.f);
+                plus->setColor(ImageEditTheme::fgMuted);
+                layerPlusNodes_.back() = box;
+            }
+        }
+        layerRowNodes_.push_back(node);
+    }
+    setLayerScroll(layerScrollY_);
+}
+
+void WinImageEdit::applyLayerStyles()
+{
+    // 只改描边：卡片选中 / 整组选中（大卡片描边）
+    for (size_t i = 0; i < layerRows_.size() && i < layerRowNodes_.size(); ++i) {
+        if (layerRows_[i].header) continue;
+        auto* node = layerRowNodes_[i];
+        if (!node) continue;
+        const bool mark = layerRows_[i].selected && !layerRows_[i].unitAll;
+        const bool inner = (layerRows_[i].group >= 0);
+        node->setBorder(mark ? 2.f : (inner ? 0.f : 1.f),
+            mark ? ImageEditTheme::accent : ImageEditTheme::cardLine);
+    }
+    for (size_t ui = 0; ui < layerUnitBoxes_.size() && ui < layerUnitAll_.size(); ++ui) {
+        auto* box = layerUnitBoxes_[ui];
+        if (!box) continue;
+        const bool all = layerUnitAll_[ui];
+        box->setBorder(all ? 2.f : 1.f,
+            all ? ImageEditTheme::accent : ImageEditTheme::cardLine);
     }
 }
 
-void WinImageEdit::updateStripSelection()
+void WinImageEdit::updateLayerSelection()
 {
-    if (!collage_) return;
-    auto thumbs = collage_->thumbnails();
-    if (thumbs.size() != stripItems_.size()) {
-        rebuildStrip();
+    if (!collage_ || !layerPanelOpen_) return;
+    // 选中工作区里的容器/图片时：展开所属组并滚动定位到对应行
+    // 图片调整模式下定位到当前那张图，而不是组内第一格
+    const auto sel = collage_->selectedCellIndices();
+    const int focus = collage_->imageAdjustCell();
+    const int target = (focus >= 0) ? focus : (sel.empty() ? -1 : sel.front());
+    if (target >= 0) {
+        // 图片调整模式（双击某张图）才展开所属组并定位；
+        // 单击选中容器/分割组时不默认展开
+        if (focus >= 0) {
+            const auto units = collage_->layerUnits();
+            for (const auto& u : units) {
+                if (u.group < 0) continue;
+                if (std::find(u.cells.begin(), u.cells.end(), target) == u.cells.end()) continue;
+                if (std::find(layerExpanded_.begin(), layerExpanded_.end(), u.group)
+                    == layerExpanded_.end()) {
+                    layerExpanded_.push_back(u.group);
+                }
+                break;
+            }
+        }
+    }
+    rebuildLayers();
+    // 同一个格子只在首次选中时滚动定位，避免拖动时每帧滚动造成抖动
+    if (target >= 0 && target != layerLastScrollCell_) {
+        layerLastScrollCell_ = target;
+        ensureLayerVisible(target);
+    }
+}
+
+void WinImageEdit::toggleLayerGroup(int group)
+{
+    auto it = std::find(layerExpanded_.begin(), layerExpanded_.end(), group);
+    if (it != layerExpanded_.end()) layerExpanded_.erase(it);
+    else layerExpanded_.push_back(group);
+    rebuildLayers();
+    refresh();
+}
+
+void WinImageEdit::ensureLayerVisible(int cell)
+{
+    if (!layerView_) return;
+    const float d = (dpi > 0.f) ? dpi : 1.f;
+    const float viewH = layerView_->h / d;
+    for (const auto& r : layerRows_) {
+        if (r.cell != cell) continue;
+        if (r.y < layerScrollY_ + 9.f) setLayerScroll(r.y - 9.f);
+        else if (r.y + r.h > layerScrollY_ + viewH - 9.f) setLayerScroll(r.y + r.h - viewH + 9.f);
+        break;
+    }
+}
+
+float WinImageEdit::layerMaxScroll() const
+{
+    if (!layerView_) return 0.f;
+    const float d = (dpi > 0.f) ? dpi : 1.f;
+    return std::max(0.f, layerContentH_ - layerView_->h / d);
+}
+
+void WinImageEdit::setLayerScroll(float y)
+{
+    if (!layerTrack_) return;
+    const float clamped = std::clamp(y, 0.f, layerMaxScroll());
+    if (std::fabs(clamped - layerScrollY_) < 0.01f) return;
+    layerScrollY_ = clamped;
+    layerTrack_->setPosition(Ling::Edge::Top, -layerScrollY_);
+    refresh();
+}
+
+int WinImageEdit::layerIndexAt(POINT pos) const
+{
+    if (!layerPanelOpen_ || !layerView_ || !layerView_->visual.IsVisible()) return -1;
+    if (!layerView_->isPosIn(pos)) return -1;
+    const float d = (dpi > 0.f) ? dpi : 1.f;
+    const float ly = ((float)pos.y - layerView_->y) / d + layerScrollY_;
+    for (int i = 0; i < (int)layerRows_.size(); ++i) {
+        const auto& r = layerRows_[i];
+        if (ly >= r.y && ly <= r.y + r.h) return i;
+    }
+    return -1;
+}
+
+int WinImageEdit::layerPlusIndexAt(POINT pos) const
+{
+    const int idx = layerIndexAt(pos);
+    if (idx < 0 || idx >= (int)layerPlusNodes_.size()) return -1;
+    if (!layerRows_[idx].empty || layerRows_[idx].header) return -1;
+    auto* node = layerPlusNodes_[idx];
+    if (!node || !node->visual.IsVisible()) return -1;
+    return node->isPosIn(pos) ? idx : -1;
+}
+
+void WinImageEdit::setLayerPlusHover(int index)
+{
+    if (index == layerHoverPlus_) return;
+    auto setHover = [this](int idx, bool on) {
+        if (idx < 0 || idx >= (int)layerPlusNodes_.size()) return;
+        auto* box = layerPlusNodes_[idx];
+        if (!box) return;
+        box->setBg(on ? ImageEditTheme::floatHover : 0u);   // 圆形悬停底色
+        };
+    setHover(layerHoverPlus_, false);
+    layerHoverPlus_ = index;
+    setHover(layerHoverPlus_, true);
+    refresh();
+}
+
+void WinImageEdit::onLayerMouseDown(POINT pos, bool right)
+{
+    layerPressed_ = false;
+    layerDragMoved_ = false;
+    layerDropSlot_ = -1;
+    setLayerPlusHover(-1);
+    if (layerGhost_) layerGhost_->hide();
+    if (layerCaret_) layerCaret_->hide();
+    if (right || !layerPanelOpen_ || !collage_) return;
+    const int idx = layerIndexAt(pos);
+    if (idx < 0) return;
+    layerPressed_ = true;
+    layerPressIndex_ = idx;
+    layerPressPos_ = pos;
+}
+
+void WinImageEdit::onLayerMouseMove(POINT pos)
+{
+    if (!layerPressed_) {
+        // 没在拖动：只处理「+」的悬停背景
+        setLayerPlusHover(layerPlusIndexAt(pos));
         return;
     }
-    for (size_t i = 0; i < thumbs.size(); ++i) {
-        if (!stripItems_[i]) continue;
-        stripItems_[i]->setBorder(2.f, thumbs[i].selected ? ImageEditTheme::accent : ImageEditTheme::cardLine);
+    setLayerPlusHover(-1);
+    const float d = (dpi > 0.f) ? dpi : 1.f;
+    const int dx = std::abs(pos.x - layerPressPos_.x);
+    const int dy = std::abs(pos.y - layerPressPos_.y);
+    if (!layerDragMoved_ && std::max(dx, dy) < (int)(4.f * d)) return;   // 未超过阈值按点击处理
+    const bool firstMove = !layerDragMoved_;
+    layerDragMoved_ = true;
+    if (!layerPanel_ || !layerView_ || !layerGhost_ || !layerCaret_) return;
+    if (layerPressIndex_ < 0 || layerPressIndex_ >= (int)layerRows_.size()) return;
+
+    // 跟手预览：半透明卡片贴在鼠标上（与合并文档的拖拽手感一致）
+    if (firstMove) {
+        const auto& pressedRow = layerRows_[layerPressIndex_];
+        layerGhost_->setSize(pressedRow.header ? 84.f : (pressedRow.group >= 0 ? 68.f : 84.f), pressedRow.h);
+        if (layerGhostImg_) {
+            if (!pressedRow.empty && !pressedRow.header) {
+                layerGhostImg_->setSize(pressedRow.group >= 0 ? 64.f : 80.f,
+                    pressedRow.group >= 0 ? 46.f : 51.f);
+                layerGhostImg_->loadImg(pressedRow.path, layerGhostImg_->w, layerGhostImg_->h);
+                layerGhostImg_->show();
+            }
+            else {
+                layerGhostImg_->hide();
+            }
+        }
+        layerGhost_->show();
+        if (canvasHost_) canvasHost_->bringToFront(layerPanel_);
+        if (canvasHost_) canvasHost_->bringToFront(layerGhost_);
+        layerPanel_->bringToFront(layerCaret_);
     }
+    // 预览跟着鼠标走：坐标都在画布父节点里算，物理像素统一除 dpi 转逻辑像素
+    if (canvasHost_) {
+        const float gx = ((float)pos.x - canvasHost_->x) / d - layerGhost_->w / d * 0.5f;
+        const float gy = ((float)pos.y - canvasHost_->y) / d - layerGhost_->h / d * 0.5f;
+        layerGhost_->setPosition(Ling::Edge::Left, gx);
+        layerGhost_->setPosition(Ling::Edge::Top, gy);
+    }
+
+    // 插入位置：按指针落在哪一行的一半来算（行数 = 放到最后）
+    const float contentY = ((float)pos.y - layerView_->y) / d + layerScrollY_;
+    int slot = (int)layerRows_.size();
+    for (int i = 0; i < (int)layerRows_.size(); ++i) {
+        const auto& r = layerRows_[i];
+        if (contentY < r.y + r.h * 0.5f) { slot = i; break; }
+    }
+    if (slot != layerDropSlot_ || firstMove) {
+        layerDropSlot_ = slot;
+        float caretY = 4.f;
+        if (slot < (int)layerRows_.size()) caretY = layerRows_[slot].y - 4.f;
+        else if (!layerRows_.empty())
+            caretY = layerRows_.back().y + layerRows_.back().h + 4.f;
+        layerCaret_->setPosition(Ling::Edge::Top, std::max(0.f, caretY - layerScrollY_));
+        layerCaret_->show();
+    }
+    refresh();   // 每帧刷新，保证预览跟手不卡顿
+}
+
+void WinImageEdit::onLayerMouseUp(POINT pos, bool right)
+{
+    if (!layerPressed_) {
+        layerDragMoved_ = false;
+        layerDropSlot_ = -1;
+        if (layerGhost_) layerGhost_->hide();
+        if (layerCaret_) layerCaret_->hide();
+        return;
+    }
+    layerPressed_ = false;
+    const int pressIdx = layerPressIndex_;
+    const bool dragged = layerDragMoved_;
+    const int slot = layerDropSlot_;
+    layerDragMoved_ = false;
+    layerDropSlot_ = -1;
+    if (layerGhost_) layerGhost_->hide();
+    if (layerCaret_) layerCaret_->hide();
+    if (right || !collage_) return;
+    if (pressIdx < 0 || pressIdx >= (int)layerRows_.size()) return;
+    const LayerRow pressed = layerRows_[pressIdx];
+    const int dropIdx = layerIndexAt(pos);
+
+    if (dragged) {
+        // 拖动：按插入光标位置把整组/单格插到对应行的上方（slot 到最后 = 放最底层）
+        auto sameUnit = [&](const LayerRow& r) {
+            if (pressed.group < 0) return r.cell == pressed.cell;
+            return r.group == pressed.group;
+        };
+        int beforeCell = -1;
+        for (int i = (slot < 0 ? 0 : slot); i < (int)layerRows_.size(); ++i) {
+            if (!sameUnit(layerRows_[i])) { beforeCell = layerRows_[i].cell; break; }
+        }
+        collage_->moveLayerBefore(pressed.cell, beforeCell);
+        rebuildLayers();
+        refresh();
+        return;
+    }
+    // 未拖动 = 单击：必须仍落在同一行上
+    if (dropIdx != pressIdx) return;
+    // 组标题：展开/收起（没有图片时没有下拉，点击只选中该组）
+    if (pressed.header) {
+        if (pressed.chevron) {
+            toggleLayerGroup(pressed.group);
+            return;
+        }
+        collage_->selectCell(pressed.cell);
+        return;
+    }
+    const int cell = pressed.cell;
+    // 空容器：点在中间的「+」上才选图片，点其它地方是选中
+    if (pressed.empty) {
+        if (layerPlusIndexAt(pos) == pressIdx) {
+            collage_->replaceCellImage(cell);
+            return;
+        }
+        collage_->selectCell(cell);
+        return;
+    }
+    // 双击 = 替换图片；单击 = 选中
+    const DWORD now = GetTickCount();
+    const bool dbl = lastLayerClickCell_ == cell
+        && (now - lastLayerClickTick_) < GetDoubleClickTime();
+    lastLayerClickCell_ = cell;
+    lastLayerClickTick_ = now;
+    if (dbl) {
+        lastLayerClickCell_ = -1;
+        collage_->replaceCellImage(cell);
+        return;
+    }
+    collage_->selectCell(cell);
 }
 
 void WinImageEdit::updateCapsule()
@@ -1432,28 +2060,58 @@ void WinImageEdit::buildDocProps()
         });
     addDivider(docProps_, 286.f);
 
-    // 「文件格式」标题 + 下拉
+    // 输出质量（1..100，默认 100）：导出页面图片的编码质量，放在文件格式上方
+    buildPropRow(docProps_, Lang::get(L"imageEdit.outputQuality"), 296.f, 1.f, 100.f, docQuality_,
+        [this](float v) { outputQuality_ = (int)std::lround(v); }, L"%");
+    addDivider(docProps_, 370.f);
+
+    // 「文件格式」标题 + 下拉（PDF / PPTX）
     auto* formatLabel = docProps_->makeChild<Ling::Label>();
     formatLabel->setPositionType(Ling::Position::Absolute);
     formatLabel->setPosition(Ling::Edge::Left, 1.f);
-    formatLabel->setPosition(Ling::Edge::Top, 300.f);
+    formatLabel->setPosition(Ling::Edge::Top, 378.f);
     formatLabel->setSize(202.f, 16.f);
     formatLabel->setText(Lang::get(L"imageEdit.fileFormat"));
     formatLabel->setFontSize(12.f);
     formatLabel->setColor(ImageEditTheme::sideLabel);
 
-    formatDdl_ = docProps_->makeChild<Ling::Button>();
-    formatDdl_->setPositionType(Ling::Position::Absolute);
-    formatDdl_->setPosition(Ling::Edge::Left, 1.f);
-    formatDdl_->setPosition(Ling::Edge::Top, 330.f);
-    formatDdl_->setSize(202.f, 28.f);
-    formatDdl_->setBg(ImageEditTheme::inputBg);
-    formatDdl_->setBorder(0.f, ImageEditTheme::inputBg);
-    formatDdl_->setBorderRadius(5.f);
-    formatDdl_->setHoverBg(ImageEditTheme::hoverSubtle);
+    formatDdl_ = buildFormatDdl(docProps_, 404.f, formatValue_);
+    formatDdl_->onClick.add([this](Ling::Button*) {
+        auto opts = docOutOptions();
+        std::vector<std::wstring> texts;
+        int cur = 0;
+        for (int i = 0; i < (int)opts.size(); ++i) {
+            texts.push_back(docOutText(static_cast<int>(opts[i])));
+            if (opts[i] == docOut_) cur = i;
+        }
+        openFormatPopup(formatDdl_, std::move(texts), cur, [this, opts](int idx) {
+            if (idx < 0 || idx >= (int)opts.size()) return;
+            docOut_ = opts[idx];
+            if (merge_ && (docOut_ == DocOut::Pdf || docOut_ == DocOut::Pptx))
+                merge_->setFormat(docOut_ == DocOut::Pptx ? 1 : 0);
+            updateDocFormatText();
+            });
+        });
+
+    if (merge_) merge_->setFormat(0);
+    syncDocProps();
+}
+
+// 文件格式下拉（合并文档 / 拼图共用的外观）：返回下拉按钮，值文字回写到 outValue
+Ling::Button* WinImageEdit::buildFormatDdl(Ling::Node* parent, float top, Ling::Label*& outValue)
+{
+    auto* ddl = parent->makeChild<Ling::Button>();
+    ddl->setPositionType(Ling::Position::Absolute);
+    ddl->setPosition(Ling::Edge::Left, 1.f);
+    ddl->setPosition(Ling::Edge::Top, top);
+    ddl->setSize(202.f, 28.f);
+    ddl->setBg(ImageEditTheme::inputBg);
+    ddl->setBorder(0.f, ImageEditTheme::inputBg);
+    ddl->setBorderRadius(5.f);
+    ddl->setHoverBg(ImageEditTheme::hoverSubtle);
 
     // 值用「行容器 + 自适应高度文字」竖向居中（直接给 Label 设高会按行高偏上）
-    auto* valueRow = formatDdl_->makeChild<Ling::Node>();
+    auto* valueRow = ddl->makeChild<Ling::Node>();
     valueRow->setPositionType(Ling::Position::Absolute);
     valueRow->setPosition(Ling::Edge::Left, 9.f);
     valueRow->setPosition(Ling::Edge::Top, 0.f);
@@ -1461,12 +2119,11 @@ void WinImageEdit::buildDocProps()
     valueRow->setFlexDirection(Ling::FlexDirection::Row);
     valueRow->setAlignItems(Ling::Align::Center);
 
-    formatValue_ = valueRow->makeChild<Ling::Label>();
-    formatValue_->setText(L".PDF");
-    formatValue_->setFontSize(12.f);
-    formatValue_->setColor(ImageEditTheme::fg);
+    outValue = valueRow->makeChild<Ling::Label>();
+    outValue->setFontSize(12.f);
+    outValue->setColor(ImageEditTheme::fg);
 
-    auto* arrow = formatDdl_->makeChild<Ling::Label>();
+    auto* arrow = ddl->makeChild<Ling::Label>();
     arrow->setText(Icon::Dropdown);
     arrow->setFontFamily(Icon::Family);
     arrow->setFontSize(14.f);
@@ -1477,12 +2134,21 @@ void WinImageEdit::buildDocProps()
     arrow->setSize(20.f, 28.f);
     arrow->setAlignItems(Ling::Align::Center);
     arrow->setJustifyContent(Ling::Justify::Center);
+    return ddl;
+}
 
-    formatDdl_->onClick.add([this](Ling::Button*) { openFormatPopup(); });
+// 当前可选的输出格式：不区分文件数量，默认都给（单文件也能导出成单页 PDF）；
+// JPG 不支持透明，背景为「无色」时不给
+std::vector<WinImageEdit::DocOut> WinImageEdit::docOutOptions() const
+{
+    std::vector<DocOut> opts{ DocOut::Pdf, DocOut::Pptx, DocOut::Png, DocOut::Webp };
+    if (merge_ && merge_->backgroundColor() != 0) opts.push_back(DocOut::Jpg);
+    return opts;
+}
 
-    docFormat_ = 0;
-    if (merge_) merge_->setFormat(0);
-    syncDocProps();
+void WinImageEdit::updateDocFormatText()
+{
+    if (formatValue_) formatValue_->setText(docOutText(static_cast<int>(docOut_)));
 }
 
 void WinImageEdit::syncDocProps()
@@ -1492,20 +2158,27 @@ void WinImageEdit::syncDocProps()
     docBorder_.value = (float)std::lround(merge_->border());
     if (docBorder_.box) docBorder_.box->setText(std::to_wstring((int)docBorder_.value));
     if (docBorder_.slider) docBorder_.slider->setValue(docBorder_.value);
+    docQuality_.value = (float)outputQuality_;
+    if (docQuality_.box) docQuality_.box->setText(std::to_wstring(outputQuality_));
+    if (docQuality_.slider) docQuality_.slider->setValue(docQuality_.value);
     syncingProps_ = false;
-    docFormat_ = merge_->format();
-    if (formatValue_) formatValue_->setText(docFormat_ == 0 ? L".PDF" : L".PPTX");
+    // 输出格式跟着背景色收敛（JPG 需要不透明背景 → 无背景时回到 PNG）
+    const auto opts = docOutOptions();
+    if (std::find(opts.begin(), opts.end(), docOut_) == opts.end()) docOut_ = DocOut::Png;
+    updateDocFormatText();
     updateBgSwatches();
 }
 
-void WinImageEdit::openFormatPopup()
+void WinImageEdit::openFormatPopup(Ling::Button* anchor, std::vector<std::wstring> items, int current,
+    std::function<void(int)> pick)
 {
     if (formatPopup_) {
         closeFormatPopup();
         return;
     }
-    // 高度 = 上下内边距 4×2 + 两个 24 的选项，避免底部多出一截空白
-    auto pop = std::make_unique<SettingUi::Popup>(this, 202.f, 56.f);
+    if (!anchor || items.empty()) return;
+    // 高度 = 上下内边距 4×2 + 每个选项 24，避免底部多出一截空白
+    auto pop = std::make_unique<SettingUi::Popup>(this, 202.f, 8.f + 24.f * (float)items.size());
     SettingUi::Popup* raw = pop.get();
     formatPopup_ = std::move(pop);
 
@@ -1518,14 +2191,14 @@ void WinImageEdit::openFormatPopup()
     panel->setWidthPercent(100.f);
     panel->setFlexDirection(Ling::FlexDirection::Column);
 
-    auto addItem = [this, panel](int idx, const std::wstring& text) {
+    auto addItem = [this, panel, pick](int idx, const std::wstring& text, bool active) {
         auto* item = panel->makeChild<Ling::Button>();
         item->setHeight(24.f);
         item->setWidthPercent(100.f);
         item->setText(text);
         item->setFontSize(12.f);
-        item->setColor(ImageEditTheme::fg);
-        item->setHoverColor(ImageEditTheme::fg);
+        item->setColor(active ? ImageEditTheme::accent : ImageEditTheme::fg);
+        item->setHoverColor(active ? ImageEditTheme::accent : ImageEditTheme::fg);
         item->setBg(0);
         item->setHoverBg(ImageEditTheme::hoverSubtle);
         item->setBorderRadius(6.f);
@@ -1533,17 +2206,15 @@ void WinImageEdit::openFormatPopup()
         // Button 默认居中，这里改成与触发框一致的左对齐
         item->setJustifyContent(Ling::Justify::Start);
         item->setPaddingLeft(9.f);
-        item->onClick.add([this, idx](Ling::Button*) {
-            docFormat_ = idx;
-            if (merge_) merge_->setFormat(idx);
-            if (formatValue_) formatValue_->setText(idx == 0 ? L".PDF" : L".PPTX");
+        item->onClick.add([this, idx, pick](Ling::Button*) {
             closeFormatPopup();
+            if (pick) pick(idx);
             });
     };
-    addItem(0, L".PDF");
-    addItem(1, L".PPTX");
+    for (int i = 0; i < (int)items.size(); ++i)
+        addItem(i, items[i], i == current);
 
-    raw->setAnchor(formatDdl_);
+    raw->setAnchor(anchor);
     raw->onDismiss = [this]() { deferPopupReset(formatPopup_); };
 
     // 延迟 open：本回调运行在宿主 onClick 派发循环内，推迟到调度队列避免增删订阅崩溃
@@ -1626,7 +2297,7 @@ void WinImageEdit::rebuildForMode()
         updateEmptyState();
         updateSizeRow();
         updateCapsule();
-        updateStripSelection();
+        updateLayerSelection();
         updateHistoryButtons();
         updateToolAvailability();   // 多选/布局组时分割工具置灰
         // 选中布局组时属性区回填该组的类型/行列（只在组信息变化时同步，避免拖动时每帧重排）
@@ -1652,7 +2323,7 @@ void WinImageEdit::rebuildForMode()
         updateEmptyState();
         updateSizeRow();
         updateCapsule();
-        rebuildStrip();
+        rebuildLayers();
         syncCollageProps();
         syncDocProps();
         updateHistoryButtons();
@@ -1683,11 +2354,14 @@ void WinImageEdit::rebuildForMode()
         collage_->setAnnotHost(annot_.get());
         // 恢复当前选中的布局类型与默认数量（无选中时只作为拖拽初始属性）
         collage_->applyLayoutPreset(layoutIndex_);
-        // 点击落在浮动工具栏/胶囊上时，画布应忽略同一次广播
+        // 点击落在浮动工具栏 / 图层面板 / 胶囊上时，画布应忽略同一次广播
         collage_->uiHitTest = [this](POINT p) {
             const bool onToolbar = toolbar_ && toolbar_->visual.IsVisible() && toolbar_->isPosIn(p);
             const bool onCapsule = topCapsule_ && topCapsule_->visual.IsVisible() && topCapsule_->isPosIn(p);
-            return onToolbar || onCapsule;
+            const bool onBar = canvasBar_ && canvasBar_->visual.IsVisible() && canvasBar_->isPosIn(p);
+            const bool onLayers = layerPanelOpen_ && layerPanel_ && layerPanel_->visual.IsVisible()
+                && layerPanel_->isPosIn(p);
+            return onToolbar || onCapsule || onBar || onLayers;
             };
     }
     else {
@@ -1704,14 +2378,17 @@ void WinImageEdit::rebuildForMode()
     if (emptyRow_) canvasHost_->bringToFront(emptyRow_);
     if (toolbarRail_) canvasHost_->bringToFront(toolbarRail_);
     if (topCapsule_) canvasHost_->bringToFront(topCapsule_);
+    if (canvasBar_) canvasHost_->bringToFront(canvasBar_);
+    if (layerPanelOpen_ && layerPanel_) canvasHost_->bringToFront(layerPanel_);
 
     // 新页面没有选中工具：图标恢复常态色（分割可用性按当前选中重新判断）
     activeTool_ = -1;
     splitAvailable_ = (mode_ == Mode::Collage && collage_) ? collage_->canSplitSelection() : true;
     applyToolColors();
 
-    // 新页面的状态回填到素材条 / 属性区 / 历史按钮
-    rebuildStrip();
+    // 新页面的状态回填到图层栏 / 属性区 / 历史按钮
+    rebuildLayers();
+    updateBoardButton();
     syncCollageProps();
     syncDocProps();
     updateHistoryButtons();
@@ -1727,9 +2404,14 @@ void WinImageEdit::applyModeUi()
 {
     const bool collageMode = (mode_ == Mode::Collage);
 
-    if (strip_) {
-        if (collageMode) strip_->show();
-        else strip_->hide();
+    if (canvasBar_) {
+        if (collageMode) canvasBar_->show();
+        else canvasBar_->hide();
+    }
+    // 图层面板只在拼图模式可用；切到合并模式时收起
+    if (layerPanel_) {
+        if (collageMode && layerPanelOpen_) layerPanel_->show();
+        else layerPanel_->hide();
     }
     if (toolbar_) {
         if (collageMode) toolbar_->show();
@@ -1847,16 +2529,22 @@ void WinImageEdit::updateSizeRow()
             syncingSize_ = false;
             return;
         }
-        const int mw = collage_->manualWidth();
-        const int mh = collage_->manualHeight();
-        // 绿色只表示「用户主动输入固定尺寸」；拖入内容自动建板仍是白色
-        editH_->setColor(collage_->manualSizeEnteredH() ? ImageEditTheme::accent : ImageEditTheme::fg);
-        editW_->setColor(collage_->manualSizeEnteredW() ? ImageEditTheme::accent : ImageEditTheme::fg);
+        // 只有手输锁定过的轴才用固定值；未锁定的轴（哪怕还残留着旧数值）一律显示自适应尺寸
+        const bool lockW = collage_->sizeLockedW();
+        const bool lockH = collage_->sizeLockedH();
+        const int mw = lockW ? collage_->manualWidth() : 0;
+        const int mh = lockH ? collage_->manualHeight() : 0;
+        // 绿色只表示「用户主动输入固定尺寸」；未锁定的轴显示实际自适应尺寸，但保持普通颜色
+        editH_->setColor(lockH ? ImageEditTheme::accent : ImageEditTheme::fg);
+        editW_->setColor(lockW ? ImageEditTheme::accent : ImageEditTheme::fg);
         // 用户正在输入尺寸：不要用画板状态把输入框的文本改回去
         if (focused) return;
+        // 没锁定的轴显示画板当前实际尺寸（没内容时才留空），不能显示成「-」
+        const int aw = (mw > 0) ? mw : collage_->canvasWidth();
+        const int ah = (mh > 0) ? mh : collage_->canvasHeight();
         syncingSize_ = true;
-        editH_->setText(mh > 0 ? std::to_wstring(mh) : L"");
-        editW_->setText(mw > 0 ? std::to_wstring(mw) : L"");
+        editH_->setText(ah > 0 ? std::to_wstring(ah) : L"");
+        editW_->setText(aw > 0 ? std::to_wstring(aw) : L"");
         syncingSize_ = false;
         return;
     }
@@ -1898,7 +2586,7 @@ bool WinImageEdit::hasContent() const
 
 // ---------------------------------------------------------------- 尺寸
 
-void WinImageEdit::syncCanvasSizeFromEditors()
+void WinImageEdit::syncCanvasSizeFromEditors(Ling::TextBox* source)
 {
     if (!editH_ || !editW_) return;
     // 选中容器且单位为 % 时，输入值按画板宽高的百分比解释
@@ -1925,7 +2613,11 @@ void WinImageEdit::syncCanvasSizeFromEditors()
             refresh();
             return;
         }
-        collage_->setCanvasSize((int)std::lround(wRaw), (int)std::lround(hRaw));
+        // 画板尺寸：只应用用户刚编辑的那一轴。另一轴的输入框里显示的是「自适应实际尺寸」，
+        // 若一起提交就会被当成手输固定（只锁了宽却把高也锁上、一起变绿）。
+        // source 为空 = 互换按钮：两轴一起应用。
+        if (source != editH_) collage_->setCanvasAxis(true, (int)std::lround(wRaw));
+        if (source != editW_) collage_->setCanvasAxis(false, (int)std::lround(hRaw));
         refresh();
     }
     else {
@@ -1959,8 +2651,8 @@ void WinImageEdit::onSaveClicked()
             std::vector<BYTE> merged;
             if (annot_->composeAnnotOnImage(pixels.data(), w, h, merged)) pixels.swap(merged);
         }
-        const std::wstring ext = Util::extensionFromSaveFormat(Setting::get()->getSaveFormat());
-        const std::wstring path = Util::getSaveFilePath(hwnd, ext, saveDefaultName(), Util::desktopDir().wstring());
+        // 拼图固定导出 PNG（无损）
+        const std::wstring path = Util::getSaveFilePath(hwnd, L"png", saveDefaultName(), Util::desktopDir().wstring());
         if (path.empty()) return;   // 用户取消
         if (!Util::saveToFile(path, w, h, pixels.data()))
             SettingUi::ConfirmDialog::ask(this, Lang::get(L"imageEdit.saveFail"), nullptr, L"", L"", true);
@@ -1974,7 +2666,45 @@ void WinImageEdit::onSaveClicked()
         SettingUi::ConfirmDialog::ask(this, Lang::get(L"imageEdit.saveEmpty"), nullptr, L"", L"", true);
         return;
     }
-    const int fmt = merge_->format();          // 0 = PDF，1 = PPTX
+    // 图片格式：单个文件直接存一张；多个文件选文件夹，按页批量导出
+    if (docOut_ == DocOut::Png || docOut_ == DocOut::Webp || docOut_ == DocOut::Jpg) {
+        DocOut fmt = docOut_;
+        if (fmt == DocOut::Jpg && merge_->backgroundColor() == 0) fmt = DocOut::Png;   // JPG 需要不透明背景
+        const wchar_t* ext = (fmt == DocOut::Png) ? L"png" : (fmt == DocOut::Webp ? L"webp" : L"jpg");
+        if (count == 1) {
+            // 单文件：默认文件名沿用原图名
+            const std::wstring path = Util::getSaveFilePath(hwnd, ext,
+                fileStem(merge_->item(0).path), Util::desktopDir().wstring());
+            if (path.empty()) return;
+            std::vector<BYTE> pixels;
+            int w = 0, h = 0;
+            if (!merge_->renderPage(0, pixels, w, h) || w <= 0 || h <= 0
+                || !Util::saveToFile(path, w, h, pixels.data(), outputQuality_)) {
+                SettingUi::ConfirmDialog::ask(this, Lang::get(L"imageEdit.saveFail"), nullptr, L"", L"", true);
+            }
+            return;
+        }
+        const std::wstring dir = pickOutputFolder(hwnd);
+        if (dir.empty()) return;   // 用户取消
+        int saved = 0;
+        std::vector<std::wstring> used;   // 原图重名时自动加 -2 / -3
+        for (int i = 0; i < count; ++i) {
+            std::vector<BYTE> pixels;
+            int w = 0, h = 0;
+            if (!merge_->renderPage(i, pixels, w, h) || w <= 0 || h <= 0) continue;
+            const std::wstring stem = fileStem(merge_->item(i).path);
+            std::wstring name = stem;
+            for (int n = 2; std::find(used.begin(), used.end(), name) != used.end(); ++n)
+                name = stem + L"-" + std::to_wstring(n);
+            used.push_back(name);
+            const std::wstring path = dir + L"\\" + name + L"." + ext;
+            if (Util::saveToFile(path, w, h, pixels.data(), outputQuality_)) ++saved;
+        }
+        if (saved != count)
+            SettingUi::ConfirmDialog::ask(this, Lang::get(L"imageEdit.saveFail"), nullptr, L"", L"", true);
+        return;
+    }
+    const int fmt = (docOut_ == DocOut::Pptx) ? 1 : 0;   // 0 = PDF，1 = PPTX
     const std::wstring ext = (fmt == 0) ? L"pdf" : L"pptx";
     const std::wstring path = Util::getSaveFilePath(hwnd, ext, saveDefaultName(), Util::desktopDir().wstring());
     if (path.empty()) return;
@@ -1989,7 +2719,7 @@ void WinImageEdit::onSaveClicked()
             return;
         }
         std::vector<BYTE> jpeg;
-        if (!ImageExport::encodeJpeg(pixels, w, h, 90, jpeg)) {
+        if (!ImageExport::encodeJpeg(pixels, w, h, outputQuality_, jpeg)) {
             SettingUi::ConfirmDialog::ask(this, Lang::get(L"imageEdit.saveFail"), nullptr, L"", L"", true);
             return;
         }
