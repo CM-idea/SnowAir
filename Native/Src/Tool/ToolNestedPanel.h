@@ -10,16 +10,20 @@ class ToolSub;
 class ToolNestedPanel : public Ling::WinBase
 {
 public:
-	enum class Kind { None, Corner, WmAngle, PatinaWm, Emoji, BoardOpacity, PenOpacity, ShapeSides, TextStroke };
+	enum class Kind { None, Corner, WmAngle, WmOpacity, PatinaWm, Emoji, BoardOpacity, PenOpacity, RectOpacity, ShapeSides, TextStroke };
 	explicit ToolNestedPanel(ToolSub* owner);
 	~ToolNestedPanel();
 	void openCorner(const RECT& workArea, Ling::Button* anchor);
 	void openWmAngle(const RECT& workArea, Ling::Button* anchor);
+	// 水印不透明度：与角度同款单滑条气泡
+	void openWmOpacity(const RECT& workArea, Ling::Button* anchor);
 	void openPatinaWm(const RECT& workArea, Ling::Button* anchor);
 	void openEmoji(const RECT& workArea, Ling::Button* anchor);
 	void openBoardOpacity(const RECT& workArea, Ling::Button* anchor, float value);
 	// 荧光笔透明度：与水印角度同款单滑条气泡
 	void openPenOpacity(const RECT& workArea, Ling::Button* anchor);
+	// 矩形/椭圆/多边形/星形整体不透明度：同款单滑条气泡
+	void openRectOpacity(const RECT& workArea, Ling::Button* anchor);
 	// 多边形边数 / 星形角数（3–20）：与水印角度同款单滑条气泡
 	void openShapeSides(const RECT& workArea, Ling::Button* anchor, bool star);
 	// 文字描边：色块选择 + 粗细滑条

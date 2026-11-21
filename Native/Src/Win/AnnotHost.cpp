@@ -617,7 +617,9 @@ void AnnotHost::updateMarquee(const POINT& imgPos)
 	marqueeRect_ = D2D1::RectF(
 		(std::min)(marqueeStart_.x, x), (std::min)(marqueeStart_.y, y),
 		(std::max)(marqueeStart_.x, x), (std::max)(marqueeStart_.y, y));
-	if (std::abs(x - marqueeStart_.x) > 2.f || std::abs(y - marqueeStart_.y) > 2.f) hasDragged = true;
+	// 拖动阈值按 DPI 缩放：点击时的手抖（1~2 物理像素）不算拖选，也就不会画出框/绿点
+	if (std::abs(x - marqueeStart_.x) > 3.f * dpi || std::abs(y - marqueeStart_.y) > 3.f * dpi)
+		hasDragged = true;
 }
 
 void AnnotHost::finishMarquee()
@@ -1144,7 +1146,9 @@ void AnnotHost::paintSelectionChrome(ID2D1DeviceContext* ctx)
 
 void AnnotHost::paintMarquee(ID2D1DeviceContext* ctx)
 {
-	if (!ctx || !marqueeActive_ || ShapeBase::rectEmpty(marqueeRect_)) return;
+	// 只有真的拖起来了才画框：按下瞬间（以及点击时那 1~2px 的手抖）框是 0×0，
+	// 画出来就是一个绿点，看起来像“单击空白也画了个点”。
+	if (!ctx || !marqueeActive_ || !hasDragged || ShapeBase::rectEmpty(marqueeRect_)) return;
 	if (!brushGroupStroke) {
 		ctx->CreateSolidColorBrush(D2D1::ColorF(0x34C759u), brushGroupStroke.GetAddressOf());
 	}
@@ -2266,6 +2270,11 @@ bool AnnotHost::annotDown(POINT pos, BOOL isRight)
 		newShape = nullptr;
 		annotMouseDown = false;
 		ReleaseCapture();
+		// 水印：输入文字后点空白处只收起属性栏、水印保留；没输入文字则单击直接关掉水印
+		if (tool == L"watermark" && toolCap && !toolCap->curId.empty()) {
+			const bool hasText = toolSub && !toolSub->watermarkText.empty();
+			toolCap->cancelSelect(!hasText);
+		}
 		return true;
 	}
 
@@ -2660,7 +2669,7 @@ void AnnotHost::annotKey(UINT key)
 		else history->undo();
 	}
 	else if (key == VK_DELETE || key == VK_BACK) {
-		// 序号尾巴被拖出控制圈：先把尾巴收回圈上，这一次按键不当"删除"
+		// 序号尾巴被动过：先把尾巴复位到初始位置与长度，这一次按键不当"删除"
 		if (!hasMultiSelection() && shapeHover && shapeHover->retractTail()) return;
 		if (!hasMultiSelection()) {
 			history->removeHoverShape();

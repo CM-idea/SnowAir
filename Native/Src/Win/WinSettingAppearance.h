@@ -2,6 +2,7 @@
 #include <include/Ling.h>
 #include <array>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include "SettingWidgets.h"
 #include "../Tool/ToolbarStore.h"
@@ -134,6 +135,7 @@ private:
 	// 形态拖拽替换的状态
 	Ling::Node* tbDragGhost{ nullptr };
 	Ling::Label* tbDragGhostIcon{ nullptr };
+	Ling::Label* tbDragGhostOverlay{ nullptr };   // 复合图标（马赛克→模糊）的叠字形
 	bool tbInitDragging{ false };
 	int tbInitDragIdx{ -1 };                    // 被拖 chip 在行内的下标
 	int tbInitDropIdx{ -1 };                    // 实时插入位（0..n）
@@ -141,6 +143,8 @@ private:
 	Ling::Node* tbInitCursor{ nullptr };        // 绿色插入提示竖条
 	std::wstring tbInitDesignId, tbInitFormKey;
 	std::vector<std::pair<Ling::Button*, int>> tbInitChips;   // 行内形态 chip（顺序 = 展示顺序）
+	// chip → (底字形, 叠字形)：拖拽预览要照抄 chip 的图标（复合图标没有文本）
+	std::unordered_map<Ling::Button*, std::pair<std::wstring, std::wstring>> tbChipGlyphs;
 	winrt::event_token tbInitDownTok, tbInitMoveTok, tbInitUpTok;
 	bool tbInitialOpen{ false };
 	bool tbInitialBuilt{ false };

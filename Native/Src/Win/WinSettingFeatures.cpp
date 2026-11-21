@@ -646,11 +646,20 @@ void WinSettingFeatures::buildRecord(Ling::Node* p)
 		mouseHlArea = r.labelBox;   // 中部空白（标题右侧到控件之间）才算触发区
 		mouseHlLabel = r.label;     // 标题文本本身不算
 
-		// 色块（点击弹系统调色板）与色号输入框各自独立：色号可直接键入
+		// 色块（点击弹系统调色板）与色号输入框各自独立：色号可直接键入。
+		// 不画描边：圆角描边和 20px 色块的圆角裁剪对不齐，外圈会有一圈灰锯齿；
+		// 只有浅色/白色才补一圈，免得在浅色卡片上看不见。
 		auto* swatch = r.ctrlBox->makeChild<Ling::Button>();
 		swatch->setSize(20.f, 20.f);
 		swatch->setBorderRadius(4.f);
-		swatch->setBorder(1.f, SettingTheme::input);
+		// 浅色（含白色）在深色卡片上要有边界，其余颜色不描边，避免圆角处的灰锯齿
+		auto applySwatchBorder = [swatch](UINT32 v) {
+			const float lum = (0.299f * ((v >> 24) & 0xFF) + 0.587f * ((v >> 16) & 0xFF)
+				+ 0.114f * ((v >> 8) & 0xFF)) / 255.f;
+			if (lum > 0.82f) swatch->setBorder(1.f, SettingTheme::input);
+			else swatch->setBorder(0.f, 0);
+		};
+		applySwatchBorder(s->getMouseHighlightColor());
 		swatch->setBg(s->getMouseHighlightColor());
 		swatch->setHoverBg(s->getMouseHighlightColor());   // 悬停不改底色（否则会盖掉颜色本身）
 		swatch->setText(L"");
@@ -685,9 +694,10 @@ void WinSettingFeatures::buildRecord(Ling::Node* p)
 		});
 
 		// 两处入口共用同一段落值逻辑：色块选色、色号键入（回车或失焦提交）
-		auto applyColor = [this, swatch, code](UINT32 v) {
+		auto applyColor = [this, swatch, code, applySwatchBorder](UINT32 v) {
 			Setting::get()->setMouseHighlightColor(v);
 			swatch->setBg(v);
+			applySwatchBorder(v);
 			code->setText(colorCode(v));
 			if (mouseHlPreview) mouseHlPreview->setBg((v & 0xFFFFFF00u) | 0x59u);
 		};

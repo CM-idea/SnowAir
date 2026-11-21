@@ -280,6 +280,7 @@
     <ClCompile Include="Update.cpp" />
     <ClCompile Include="Image\WebpCodec.cpp" />
     <ClCompile Include="Util.cpp" />
+    <ClCompile Include="SingleInstance.cpp" />
     <ClCompile Include="Win\AnnotHost.cpp" />
     <ClCompile Include="Win\CapLong.cpp" />
     <ClCompile Include="Win\CaptureEsc.cpp" />
@@ -327,6 +328,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="App.h" />
+    <ClInclude Include="SingleInstance.h" />
     <ClInclude Include="SelfTest.h" />
     <ClInclude Include="CommandKeys.h" />
     <ClInclude Include="Export\ImageExport.h" />
@@ -404,6 +406,7 @@
     <ClInclude Include="Util.h" />
     <ClInclude Include="Win\AnnotHost.h" />
     <ClInclude Include="Win\CapLong.h" />
+    <ClInclude Include="Win\LongMatch.h" />
     <ClInclude Include="Win\CaptureEsc.h" />
     <ClInclude Include="Win\CaptureShield.h" />
     <ClInclude Include="Win\CapVideo.h" />

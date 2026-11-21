@@ -32,8 +32,11 @@ public:
 	void applyStoredLayout(int kind);
 	// 演示模式：穿透开关按钮的选中态
 	void setDemoThroughState(bool on);
+	// 演示模式：快照编辑期间穿透按钮置灰（临时不可用）
+	void setDemoThroughDisabled(bool on);
 	void setDemoBoardState(bool on);
 	void setDemoRecordState(bool on);
+	void setDemoSnapshotState(bool on);
 	float getBtnCenterX() const;
 	// 属性栏跟随的按钮（默认跟随 curId）；白板这类"不是工具"的栏需要单独指定
 	void setAnchorId(const std::wstring& id) { anchorId = id; }

@@ -79,10 +79,28 @@ public:
 	bool demoRecAudioOn() const { return demoRecAudio_; }
 	bool demoRecMicOn() const { return demoRecMic_; }
 	int demoRecElapsed() const { return demoRecElapsed_; }
+	// —— 演示画布：快照 ——
+	// 点工具栏「快照」：展开/收起快照属性栏
+	void toggleDemoSnapshotBar();
+	void closeDemoSnapBar();
+	bool demoSnapBarOpen() const { return demoSnapBarOpen_; }
+	void createDemoSnapshot();       // 把当前画面 + 标注固化为一个新快照
+	void deleteDemoSnapshot();       // 删除当前选中的快照
+	void saveDemoSnapshots();        // 按顺序批量导出为 base-1、base-2…
+	void selectDemoSnapshot(int index);   // 选中；再点同一个 = 回到实时
+	void moveDemoSnapshot(int from, int to);
+	int demoSnapshotCount() const { return (int)demoSnaps_.size(); }
+	int demoSnapshotSelected() const { return demoSelSnap_; }
+	bool demoSnapshotActive() const { return demoSelSnap_ >= 0; }
+	Microsoft::WRL::ComPtr<ID2D1Bitmap1> demoSnapshotBitmap(int index) const;
+	// 取样源：快照选中时返回冻结画面（马赛克/油画取样用），否则走基类（screenImg）
+	ID2D1Bitmap* annotSampleBitmap() const override;
 	// 演示模式：重置画布（清掉所有标注）
 	void resetDemoCanvas();
 	// 演示模式：退出演示（清掉标注并关掉窗口）
 	void exitDemoCanvas();
+	// 退出演示的统一入口：有未保存快照时先弹确认，避免 ✕ / Esc 误触把快照一起清掉
+	void requestExitDemoCanvas();
 	Microsoft::WRL::ComPtr<ID2D1Bitmap1> getCutImg();
 	void layoutTool(Ling::WinBase* tool);
 	void layoutTools() override;
@@ -108,7 +126,8 @@ public:
 	// 会话期间把「系统按键」里的临时全局键挂到钩子上；surface=0 表示撤掉。
 	// static：调用方 beginDemoCanvas() 本身就是静态的；钩子回调也靠 get() 现取会话实例，
 	// 不捕获 this（免得会话销毁后回调撞到悬空指针）。
-	static void syncGlobalCommandKeys(unsigned surface);
+	// includeLongScroll：长截图会话期间额外把「开始/暂停滚动」挂到全局钩子
+	static void syncGlobalCommandKeys(unsigned surface, bool includeLongScroll = false);
 	bool showCursorEnabled() const { return showCursor; }
 	void hollowWin();
 	void restoreWin();
@@ -157,7 +176,6 @@ public:
 	void hideRecordOverlay();
 	void layoutLongTool();
 	void longToggle();
-	void longPreviewPanChanged();
 	bool longSaveToFile();
 	void longCopyToClipboard();
 	// 真正开录：藏信息栏、洞穿选区、鼠标穿透
@@ -338,6 +356,37 @@ private:
 	// 录屏入历史：历史只记视频路径，封面取收工这一刻的选区画面
 	void addRecordHistory(const std::wstring& path, int durationSec);
 	void closeDemoRecBar();
+	// —— 演示画布：快照 ——
+	struct DemoSnapshot {
+		std::vector<std::unique_ptr<ShapeBase>> shapes;   // 该快照的标注（选中后就地编辑）
+		Microsoft::WRL::ComPtr<ID2D1Bitmap1> bg;          // 冻结的整屏画面（含白板）
+	};
+	std::vector<std::unique_ptr<DemoSnapshot>> demoSnaps_;
+	std::vector<std::unique_ptr<ShapeBase>> demoLiveShapes_;  // 进入快照时暂存的实时标注
+	int demoSelSnap_{ -1 };          // 当前选中快照，-1 = 实时画布
+	bool demoSnapBarOpen_{ false };  // 快照属性栏是否展开过
+	// 快照按钮的绿色选中态：快照栏开着，或选中了某个快照（栏收起也不取消）
+	void refreshDemoSnapshotButton();
+	// 把键盘焦点拉回演示画布：工具栏/属性栏都是 WS_EX_NOACTIVATE 悬浮窗，
+	// 点完它们之后 Delete / Backspace / Ctrl+S 这些窗口内按键可能送不到画布
+	void focusDemoCanvas();
+	// 快照编辑期间穿透不可用：进入快照时临时关掉穿透并置灰按钮，回到实时再恢复原状态
+	void suspendDemoThroughForSnapshot();
+	void restoreDemoThroughAfterSnapshot();
+	bool demoThroughBeforeSnap_{ false };
+	// 抢前台 + 键盘焦点（SetForegroundWindow 被前台锁拒绝时用置顶/AttachThreadInput 兜底）
+	void takeForegroundFocus();
+	// 有没有"未保存"的快照改动：创建/删除/换序/编辑快照都置 true，全部导出成功后清掉。
+	// 退出演示时只有它为 true 才弹确认（保存过且没改就直接退）。
+	bool demoSnapsDirty_{ false };
+	bool snapshotCapturing_{ false }; // 抓冻结画面时跳过标注/光标/高亮/按键层
+	Microsoft::WRL::ComPtr<ID2D1Bitmap1> grabDemoSnapshotBg();
+	std::vector<std::unique_ptr<ShapeBase>> cloneVisibleShapes(
+		const std::vector<std::unique_ptr<ShapeBase>>& src);
+	void demoSnapshotReturnToLive();   // 选中快照 → 实时（标注各回各家）
+	void demoSnapshotDetachSelection(); // 切换前断开裸指针
+	void endDemoSnapshotSession();     // 退出演示时清空快照
+	bool renderDemoSnapshot(int index, std::vector<BYTE>& out, int& w, int& h);
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushBoard_;
 	void paintDemoBoard(ID2D1DeviceContext* ctx);
 	D2D1_RECT_F demoBoardCurrentRect() const;

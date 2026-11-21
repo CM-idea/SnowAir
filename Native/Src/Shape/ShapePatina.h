@@ -5,6 +5,13 @@ class ShapePatina : public ShapeArea
 {
 public:
 	ShapePatina(AnnotHost* win);
+	std::unique_ptr<ShapeBase> clone(AnnotHost* host) const override
+	{
+		auto p = std::make_unique<ShapePatina>(*this);
+		p->win = host;
+		p->isUndo = false;
+		return p;
+	}
 	void paint(ID2D1DeviceContext* ctx) override;
 	bool isViewportFilter() override { return true; };
 	bool hitErase(const float x, const float y) override { (void)x; (void)y; return false; };

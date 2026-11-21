@@ -33,6 +33,8 @@ ShapeEllipse::ShapeEllipse(AnnotHost* win) :ShapeBase(win), draggers{
 	auto toolSub = win->toolSub.get();
 	auto d2d = Ling::D2D::get();
 	d2d->deviceContext->CreateSolidColorBrush(toolSub->getSelectedColor(), brush.GetAddressOf());
+	d2d->deviceContext->CreateSolidColorBrush(toolSub->getSelectedColor(), brushPaint.GetAddressOf());
+	opacity = std::clamp(toolSub->rectOpacity, 10, 100) / 100.f;
 	strokeWidth = toolSub->getSliderVal();
 	isFill = toolSub->isRectFill;
 	isDash = toolSub->isRectDash && !isFill;
@@ -53,6 +55,7 @@ void ShapeEllipse::applyStyle()
 	isDash = ts->isRectDash && !isFill;
 	strokeStyle = isDash ? makeDashStroke(strokeWidth) : nullptr;
 	brush->SetColor(ts->getSelectedColor());
+	opacity = std::clamp(ts->rectOpacity, 10, 100) / 100.f;
 	win->refresh();
 }
 
@@ -64,6 +67,7 @@ void ShapeEllipse::syncToolFromShape() const
 	ts->isEllipse = true;
 	ts->isRectFill = isFill;
 	ts->isRectDash = isDash;
+	ts->rectOpacity = (int)std::lround(opacity * 100.f);
 	ts->setShapeSliderVal(L"rect", strokeWidth);
 }
 
@@ -126,8 +130,11 @@ void ShapeEllipse::paint(ID2D1DeviceContext* ctx)
 {
 	withRotation(ctx, [&] {
 		D2D1_ELLIPSE ellipse = D2D1::Ellipse({ cx, cy }, rx, ry);
-		if (isFill) ctx->FillEllipse(ellipse, brush.Get());
-		else ctx->DrawEllipse(ellipse, brush.Get(), strokeWidth, strokeStyle.Get());
+		auto c = brush->GetColor();
+		c.a *= opacity;
+		brushPaint->SetColor(c);
+		if (isFill) ctx->FillEllipse(ellipse, brushPaint.Get());
+		else ctx->DrawEllipse(ellipse, brushPaint.Get(), strokeWidth, strokeStyle.Get());
 	});
 }
 

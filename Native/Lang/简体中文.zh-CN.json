@@ -24,6 +24,7 @@
   },
   "tool": {
     "rect": "矩形",
+    "opacity": "透明度",
     "ellipse": "椭圆",
     "polygon": "多边形",
     "star": "星形",
@@ -34,6 +35,7 @@
     "numberLetter": "字母序号",
     "numberEmoji": "Emoji",
     "numberEmojiPick": "选择表情",
+    "numberNoTail": "停用尾巴",
     "emojiSize": "表情大小",
     "line": "标注",
     "pen": "画笔",
@@ -563,12 +565,14 @@
     "reserved": "快捷键 [ %1 ] 是「%2」的固定键，不能改绑给其他命令。"
   },
   "long": {
-    "start": "开始",
+    "start": "开始滚动",
+    "hintStart": "点按「开始滚动」或滚动鼠标滚轮开始",
+    "tooFast": "滚得太快啦，慢一点",
     "pause": "暂停",
     "resume": "继续",
-    "edit": "编辑标注",
+    "edit": "编辑",
     "reachedBottom": "已到底部",
-    "tooLong": "图片过长，已停止",
+    "tooLong": "已到最大长度，截图已停止",
     "toLong": "去长截图"
   },
   "util": {

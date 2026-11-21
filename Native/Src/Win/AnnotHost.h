@@ -102,6 +102,9 @@ public:
 	virtual D2D1_POINT_2F clientToAnnotPt(float cx, float cy) const;
 	// 标注坐标下的底图范围（视口滤镜铺满用）。空矩形表示由 History 按窗口/底图尺寸推断。
 	virtual D2D1_RECT_F annotContentRect() const { return D2D1::RectF(0.f, 0.f, -1.f, -1.f); }
+	// 滤镜（马赛克/油画）取样用的底图：默认是会话底图 screenImg。
+	// 演示画布选中快照时覆盖为快照的冻结画面（见 WinCap）。
+	virtual ID2D1Bitmap* annotSampleBitmap() const { return screenImg.Get(); }
 	// 按当前工具/选中态设置光标（WinCap/WinPin::setCursor 调用）
 	void applyAnnotCursor();
 	void applyToolDrawCursor();

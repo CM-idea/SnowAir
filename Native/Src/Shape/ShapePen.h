@@ -12,6 +12,13 @@ class ShapePen : public ShapeBase
 public:
 	ShapePen(AnnotHost* win);
 	~ShapePen();
+	std::unique_ptr<ShapeBase> clone(AnnotHost* host) const override
+	{
+		auto p = std::make_unique<ShapePen>(*this);
+		p->win = host;
+		p->isUndo = false;
+		return p;
+	}
 	void paint(ID2D1DeviceContext* ctx) override;
 	void paintDragger(ID2D1DeviceContext* ctx) override;
 	void applyStyle() override;

@@ -98,9 +98,12 @@ When launched without arguments, it **only sits in the system tray on standby** 
 ```text
 SnowAir.exe                     # Tray standby, default
 SnowAir.exe --auto-quit=true    # Quit right after capturing
-SnowAir.exe --enter=pin         # Enter pin after selecting a region
+SnowAir.exe --enter=pin         # Pin
 SnowAir.exe --enter=long        # Scrolling capture
 SnowAir.exe --enter=video       # Screen recording
+SnowAir.exe --enter=ocr         # Text recognition
+SnowAir.exe --enter=demo        # Presentation canvas
+SnowAir.exe --enter=edit        # Image editor
 SnowAir.exe --enter=tray        # Tray only, same as default behavior
 ```
 

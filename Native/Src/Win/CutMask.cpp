@@ -1290,10 +1290,13 @@ CutMask::CutMask(Ling::WinBase* win) :win{ win }
 	paddingTop *= win->dpi;
 	paddingMargin *= win->dpi;
 	auto d2d = Ling::D2D::get();
+	// 遮罩可能先于工具栏创建：先把已保存的主题色刷进运行时色板，避免第一张截图用默认绿
+	ToolbarTheme::refresh();
 	d2d->deviceContext->CreateSolidColorBrush(Ling::Color(ToolbarTheme::infoText).getD2DColor(), brushText.GetAddressOf());
 	d2d->deviceContext->CreateSolidColorBrush(D2D1::ColorF(0x000000, 0.46f), brushBg.GetAddressOf());
 	d2d->deviceContext->CreateSolidColorBrush(Ling::Color(ToolbarTheme::infoBg).getD2DColor(), brushInfoBg.GetAddressOf());
-	d2d->deviceContext->CreateSolidColorBrush(D2D1::ColorF(0x34C759), brushBorder.GetAddressOf());
+	// 选区边框用主题里的「框选」色槽，跟着自定义主题走
+	d2d->deviceContext->CreateSolidColorBrush(Ling::Color(ToolbarTheme::selection).getD2DColor(), brushBorder.GetAddressOf());
 	d2d->deviceContext->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), brushHandleFill.GetAddressOf());
 	d2d->deviceContext->CreateSolidColorBrush(Ling::Color(ToolbarTheme::infoIconMuted).getD2DColor(), brushIcon.GetAddressOf());
 	d2d->deviceContext->CreateSolidColorBrush(Ling::Color(ToolbarTheme::sliderTrack).getD2DColor(), brushSliderTrack.GetAddressOf());
@@ -2410,7 +2413,13 @@ void CutMask::paintChrome(ID2D1DeviceContext* ctx, bool borderOutside)
 
 void CutMask::paintBorderOverlay(ID2D1DeviceContext* ctx)
 {
-	paintBorder(ctx);
+	if (!hasRect()) return;
+	// 与 paint() 保持同样的绘制顺序：先线、再控点。
+	// 长图阶段内容会盖住它们；只补线不补控点会让绿线从白色控点中间穿过去，
+	// 从截图页切到长图时控点样式看起来就不对。
+	// 标签不在这里重画：它在 paint() 里已经画过一次，长图空闲态再画一次会加深底色。
+	if (showBorder) paintBorder(ctx);
+	if (showHandles) paintHandles(ctx);
 }
 
 void CutMask::paintBorder(ID2D1DeviceContext* ctx, bool outside)
@@ -2445,12 +2454,18 @@ void CutMask::paintHandles(ID2D1DeviceContext* ctx)
 {
 	if (!hasRect()) return;
 	const float hs = handleLogical * win->dpi * 0.5f;
-	const float cx = (maskRect.left + maskRect.right) * 0.5f;
-	const float cy = (maskRect.top + maskRect.bottom) * 0.5f;
+	// 控点必须压在描边线的中心上：paintBorder 是贴内沿画的（线中心在边界内半个线宽），
+	// 直接拿 maskRect 边界放控点会整体偏出半个线宽，看起来“差一点点”。
+	const float half = strokeWidth * 0.5f;
+	D2D1_RECT_F box = D2D1::RectF(maskRect.left + half, maskRect.top + half,
+		maskRect.right - half, maskRect.bottom - half);
+	if (box.right - box.left < 1.f || box.bottom - box.top < 1.f) box = maskRect;
+	const float cx = (box.left + box.right) * 0.5f;
+	const float cy = (box.top + box.bottom) * 0.5f;
 	const D2D1_POINT_2F pts[8] = {
-		{ maskRect.left, maskRect.top }, { cx, maskRect.top }, { maskRect.right, maskRect.top },
-		{ maskRect.right, cy }, { maskRect.right, maskRect.bottom }, { cx, maskRect.bottom },
-		{ maskRect.left, maskRect.bottom }, { maskRect.left, cy },
+		{ box.left, box.top }, { cx, box.top }, { box.right, box.top },
+		{ box.right, cy }, { box.right, box.bottom }, { cx, box.bottom },
+		{ box.left, box.bottom }, { box.left, cy },
 	};
 	for (auto& p : pts) {
 		auto hr = D2D1::RectF(p.x - hs, p.y - hs, p.x + hs, p.y + hs);

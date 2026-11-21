@@ -11,7 +11,8 @@ class ToolLong : public ToolbarWindow
 public:
 	ToolLong(WinCap* win);
 	~ToolLong();
-	void syncCaptureState(bool capturing, bool paused, bool finished);
+	// 采集状态：进行中 / 暂停 / 结束。autoActive 表示当前是自动滚动（手动滚动时按钮保持“未开始”的样子）。
+	void syncCaptureState(bool capturing, bool paused, bool finished, bool autoActive);
 	bool isEditMode() const { return editMode_; }
 	void setEditMode(bool on);
 	void cancelAnnotSelect();
@@ -49,13 +50,13 @@ private:
 	int dragWinX{ 0 }, dragWinY{ 0 };
 	Ling::Button* dragHandle{ nullptr };
 	Ling::Button* btnLong{ nullptr };
-	Ling::Button* btnEdit{ nullptr };
 	Ling::Button* btnUndo{ nullptr };
 	std::vector<Ling::Button*> annotBtns;
 	std::wstring curAnnotId_;
 	bool capturing{ false };
 	bool paused{ false };
 	bool finished{ false };
+	bool autoActive{ false };
 	static constexpr float btnSize{ 42.f };
 	static constexpr float toolbarRadius{ ToolbarTheme::borderRadius };
 	static constexpr float hoverRadius{ ToolbarTheme::hoverRadius };

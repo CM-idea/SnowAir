@@ -49,7 +49,9 @@ void ShapePatina::rebuild()
 	const int top = (int)std::floor(rect.top);
 	const int right = (int)std::ceil(rect.right);
 	const int bottom = (int)std::ceil(rect.bottom);
-	if (right - left < 2 || bottom - top < 2 || !win->screenImg) return;
+	// 取样源：会话底图；演示画布选中快照时是快照的冻结画面
+	ID2D1Bitmap* src = win->annotSampleBitmap();
+	if (right - left < 2 || bottom - top < 2 || !src) return;
 
 	const UINT32 bw = (UINT32)(right - left);
 	const UINT32 bh = (UINT32)(bottom - top);
@@ -71,10 +73,10 @@ void ShapePatina::rebuild()
 	// 底图按自身像素尺寸铺进离屏位图：贴图缩放时客户区尺寸 ≠ 图像尺寸，
 	// 用 w/h 会把原图拉伸，取样出来的压暗内容就错位了。
 	// 只在底图尺寸与视口一致时采用，避免白板/演示这类"底图与窗口不同源"的场景被改坏
-	const D2D1_SIZE_U srcPx = win->screenImg->GetPixelSize();
+	const D2D1_SIZE_U srcPx = src->GetPixelSize();
 	const bool sameSpace = std::fabs((float)srcPx.width - (right - left)) <= 2.f
 		&& std::fabs((float)srcPx.height - (bottom - top)) <= 2.f;
-	ctx->DrawBitmap(win->screenImg.Get(), sameSpace
+	ctx->DrawBitmap(src, sameSpace
 		? D2D1::RectF(0.f, 0.f, (float)srcPx.width, (float)srcPx.height)
 		: D2D1::RectF(0.f, 0.f, (float)win->w, (float)win->h));
 	for (auto& shape : win->history->shapes) {

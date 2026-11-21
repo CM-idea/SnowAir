@@ -2,6 +2,7 @@
 #include "Win/AnnotHost.h"
 #include "Tool/ToolSub.h"
 #include "ShapeWatermark.h"
+#include <algorithm>
 
 ShapeWatermark::ShapeWatermark(AnnotHost* win) : ShapeArea(win)
 {
@@ -22,10 +23,12 @@ void ShapeWatermark::applyStyle()
 	fontSize = std::max(12.f, win->toolSub->getSliderVal() / std::max(0.01f, win->dpi));
 	angleDeg = win->toolSub->watermarkAngle;
 	text = win->toolSub->watermarkText;
+	// 输入过文字的水印视为"已确认"：切到其它绘图工具也保留
+	sticky_ = !text.empty();
 	if (text.empty()) text = L"请输入文字...";
 	if (brush) {
 		auto c = win->toolSub->getSelectedColor();
-		c.a = 0.2f;
+		c.a = std::clamp(win->toolSub->watermarkOpacity, 5, 50) / 100.f;
 		brush->SetColor(c);
 	}
 	format.Reset();

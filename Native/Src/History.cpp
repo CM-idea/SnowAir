@@ -277,10 +277,13 @@ void History::syncViewportFilters(const std::wstring& toolId)
 	// 切换工具时丢掉其它视口滤镜（高亮洞可保留当 keep==highlight）
 	for (auto& s : shapes) {
 		if (s->isUndo) continue;
-		const bool isWm = dynamic_cast<ShapeWatermark*>(s.get()) != nullptr;
+		auto* wm = dynamic_cast<ShapeWatermark*>(s.get());
+		const bool isWm = wm != nullptr;
 		const bool isPa = dynamic_cast<ShapePatina*>(s.get()) != nullptr;
 		const bool isHl = dynamic_cast<ShapeHighlight*>(s.get()) != nullptr;
 		if (!isWm && !isPa && !isHl) continue;
+		// 已输入文字的水印是"确认过"的：切到其它工具也一直保留
+		if (isWm && wm->sticky()) continue;
 		std::wstring kind = isWm ? L"watermark" : (isPa ? L"patina" : L"highlight");
 		if (keep.empty() || kind != keep) {
 			SetShapeUndo(s.get(), true);

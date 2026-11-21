@@ -29,6 +29,16 @@ using namespace Microsoft::WRL;
 
 namespace {
 	std::vector<ToolSub*> g_toolSubs;
+	// —— 演示画布：快照缩略图网格 ——
+	// 快照缩略图：60×45，间距 12，圆角 5；一行最多 5 个，最多显示 3 行
+	constexpr float kSnapCellW{ 60.f };
+	constexpr float kSnapCellH{ 45.f };
+	constexpr float kSnapGap{ 12.f };
+	constexpr float kSnapRadius{ 5.f };
+	constexpr int kSnapCols{ 5 };
+	constexpr int kSnapRows{ 3 };   // 可见 3 行，超出滚动
+	// 卡片下边距：卡片到属性栏底边 12
+	constexpr float kSnapPadBottom{ 12.f };
 	struct SliderCfg {
 		const wchar_t* key;
 		float min, max, def;
@@ -233,6 +243,73 @@ void ToolSub::onCreated()
 		if (space == 0.f) return;
 		wheelNumberAt(space > 0.f ? 1 : -1);
 	});
+	// —— 快照缩略图：点击选中 / 拖拽换序（与图片编辑器图层拖拽同一套交互）——
+	onMouseDown.add([this](POINT pos, bool isRight) {
+		if (isRight || !demoSnapToolsBuilt()) return;
+		snapDragFrom = snapIndexAt(pos);
+		if (snapDragFrom < 0) return;
+		// 点在缩略图上：先收悬停提示，别让「创建快照」之类的气泡跟着冒出来
+		if (tip) tip->hide();
+		snapDragging = true;
+		snapDragMoved = false;
+		snapDropSlot = -1;
+		snapPressPos = pos;
+		// 捕获鼠标：拖出属性栏时仍能收到 move/up，不会卡在拖拽态
+		SetCapture(hwnd);
+	});
+	onMouseMove.add([this](POINT pos) {
+		if (!snapDragging || !snapScroll) return;
+		auto* cap = dynamic_cast<WinCap*>(win);
+		if (!cap) return;
+		// 超过 4px 才算拖动，否则仍按点击处理
+		const int dx = std::abs(pos.x - snapPressPos.x);
+		const int dy = std::abs(pos.y - snapPressPos.y);
+		if (!snapDragMoved && (std::max)(dx, dy) < (int)toPx(4.f)) return;
+		const bool firstMove = !snapDragMoved;
+		snapDragMoved = true;
+		// 拖到网格上下边缘时自动滚一格，方便把缩略图挪到当前看不到的位置
+		const float edge = toPx(8.f);
+		const float top = snapScroll->y;
+		const float bottom = snapScroll->y + snapScroll->h;
+		if (pos.y < top + edge) snapScroll->scrollBy(-toPx(kSnapCellH));
+		else if (pos.y > bottom - edge) snapScroll->scrollBy(toPx(kSnapCellH));
+
+		snapDropSlot = snapSlotAt(pos);
+
+		// 跟手预览：半透明卡片贴在鼠标上（body 坐标 = 窗口物理像素 / dpi）
+		if (snapGhost) {
+			if (firstMove) snapGhost->show();
+			snapGhost->setPosition(Ling::Edge::Left, ((float)pos.x - toPx(kSnapCellW) * 0.5f) / dpi);
+			snapGhost->setPosition(Ling::Edge::Top, ((float)pos.y - toPx(kSnapCellH) * 0.5f) / dpi);
+		}
+		refresh();   // 每帧刷新，保证预览跟手、插入光标位置实时更新
+	});
+	onMouseUp.add([this](POINT pos, bool isRight) {
+		if (!snapDragging) return;
+		const int idx = snapDragFrom;
+		const bool moved = snapDragMoved;
+		const int slot = snapDropSlot;
+		snapDragging = false;
+		snapDragFrom = -1;
+		snapDragMoved = false;
+		snapDropSlot = -1;
+		if (snapGhost) snapGhost->hide();
+		ReleaseCapture();
+		auto* cap = dynamic_cast<WinCap*>(win);
+		if (isRight || idx < 0 || !cap) { refresh(); return; }
+		if (moved && slot >= 0) {
+			// 插入位置 → 目标下标：从前往后拖要减去自身占位
+			const int n = cap->demoSnapshotCount();
+			int to = slot > idx ? slot - 1 : slot;
+			to = std::clamp(to, 0, (std::max)(0, n - 1));
+			if (to != idx) cap->moveDemoSnapshot(idx, to);
+			refresh();
+			return;
+		}
+		// 未拖动 = 单击：必须仍落在同一张上
+		if (snapIndexAt(pos) == idx) cap->selectDemoSnapshot(idx);
+		refresh();
+	});
 }
 
 void ToolSub::beginTool(const std::wstring& id)
@@ -252,6 +329,7 @@ void ToolSub::beginTool(const std::wstring& id)
 	sliderValue = nullptr;
 	wmTextBox = nullptr;
 	numberInput = nullptr;
+	noTailBtn = nullptr;
 	numberShowsSelected_ = false;
 	selectedNumberLabel_.clear();
 	fillBtn = nullptr;
@@ -270,7 +348,9 @@ void ToolSub::beginTool(const std::wstring& id)
 	ellipseBtn = nullptr;
 	polyBtn = nullptr;
 	starBtn = nullptr;
+	rectOpacityBtn = nullptr;
 	angleBtn = nullptr;
+	wmOpacityBtn = nullptr;
 	patinaWmBtn = nullptr;
 	emojiTrigger = nullptr;
 	boardSwatches.clear();
@@ -294,6 +374,21 @@ void ToolSub::beginTool(const std::wstring& id)
 	overlayFlag = nullptr;
 	styleToggles.clear();
 	sizeExtraW = 0.f;
+	sizeExtraH = 0.f;
+	// 快照属性栏：切到别的工具时整套指针作废
+	snapRow = nullptr;
+	snapCreateBtn = nullptr;
+	snapDeleteBtn = nullptr;
+	snapSaveBtn = nullptr;
+	snapScroll = nullptr;
+	snapCanvas = nullptr;
+	snapBadges.clear();
+	snapDragFrom = -1;
+	snapDragging = false;
+	snapDragMoved = false;
+	snapDropSlot = -1;
+	if (snapGhost) snapGhost->hide();
+	contentNode->setFlexDirection(Ling::FlexDirection::Row);
 	numberStyleBtns.clear();
 	arrowHeadBtns.clear();
 	arrowHeadStyles.clear();
@@ -307,6 +402,7 @@ void ToolSub::beginTool(const std::wstring& id)
 	rectBtn = nullptr;
 	polyBtn = nullptr;
 	starBtn = nullptr;
+	rectOpacityBtn = nullptr;
 	bubbleKindBtn = nullptr;
 	angleKindBtn = nullptr;
 	waveKindBtn = nullptr;
@@ -374,7 +470,7 @@ void ToolSub::showRectTools()
 		if (pts >= 0) starPoints = std::clamp(pts, 3, 20);
 	}
 	if (isRectFill && isRectDash) isRectDash = false;
-	initSize(6, true);   // 三个形态 + 填充 | 虚线 | 圆角
+	initSize(7, true);   // 三个形态 + 透明度 | 填充 | 虚线 | 圆角
 	// 多边形 / 星形：点开 = 选中并弹出"边数/角数"滑条；再点同一个 = 回矩形
 	auto mkShapeKindBtn = [this](const wchar_t* icon, const wchar_t* tipKey, int kind) {
 		auto b = contentNode->makeChild<Ling::Button>();
@@ -474,6 +570,18 @@ void ToolSub::showRectTools()
 			});
 		}
 	}
+	// 星形右侧：整体不透明度（与贴图/水印同一套滑条气泡）
+	rectOpacityBtn = contentNode->makeChild<Ling::Button>();
+	rectOpacityBtn->setText(Icon::Opacity);
+	styleToolbarBtn(rectOpacityBtn);
+	rectOpacityBtn->setFontFamily(Icon::Family);
+	rectOpacityBtn->setFontSize(ToolbarTheme::iconSize);
+	applyToggleStyle(rectOpacityBtn, false);
+	tip->bind(rectOpacityBtn, Lang::get(L"tool.opacity"));
+	rectOpacityBtn->onClick.add([this](Ling::Button*) {
+		closeColorPanel();
+		nestedPanel->openRectOpacity(workAreaRect(), rectOpacityBtn);
+	});
 	makeRectStyleBtns();
 	initColorTrigger();
 	initSlider();
@@ -876,13 +984,13 @@ void ToolSub::showNumberTools()
 		float designVal = 0.f;
 		if (rememberedToolValue(ToolKey::Number, L"emojiSize", L"radius", sliderMin, sliderMax, designVal))
 			sliderVal = designVal;
-		initSize(3, false); // 字母 / Emoji开关 / 当前表情
+		initSize(4, false); // 字母 / Emoji开关 / 当前表情 / 停用尾巴
 	}
 	else {
 		loadStrokeSlider(L"number");
-		// 字母序号右边带「当前序号」输入框：把它的宽度一起算进属性栏
+		// 字母序号右边带「当前序号」输入框 + 「停用尾巴」开关：都要算进属性栏宽度
 		const float inputW = measureNumberInputW(numberInputDisplay());
-		initSize(2, true, false, inputW + 8.f);
+		initSize(3, true, false, inputW + 8.f);
 	}
 	makeNumberStyleBtns();
 	if (!emojiMode) initColorTrigger();
@@ -1073,24 +1181,29 @@ void ToolSub::showWatermarkTools()
 		nestedPanel->openWmAngle(workAreaRect(), angleBtn);
 	});
 
+	// 角度右侧：水印不透明度（复用二级滑条气泡，与角度同一套样式）
+	wmOpacityBtn = contentNode->makeChild<Ling::Button>();
+	wmOpacityBtn->setText(Icon::Opacity);
+	styleToolbarBtn(wmOpacityBtn);
+	wmOpacityBtn->setFontFamily(Icon::Family);
+	wmOpacityBtn->setFontSize(ToolbarTheme::iconSize);
+	applyToggleStyle(wmOpacityBtn, false);
+	tip->bind(wmOpacityBtn, Lang::get(L"tool.opacity"));
+	wmOpacityBtn->onClick.add([this](Ling::Button*) {
+		closeColorPanel();
+		nestedPanel->openWmOpacity(workAreaRect(), wmOpacityBtn);
+	});
+
 	// autoSize：单行不折行 → 无滚动条；宽度再钳到 min/max
 	wmTextBox = contentNode->makeChild<Ling::TextBox>();
 	wmTextBox->setMargin(marginH, 0.f, marginH, 0.f);
 	wmTextBox->setFlexGrow(0.f);
 	wmTextBox->setFlexShrink(0.f);
-	wmTextBox->setBg(Ling::Color(ToolbarTheme::hoverBg));
-	wmTextBox->setBorder(0.f, 0);
-	wmTextBox->setBorderRadius(6.f);
-	wmTextBox->setPadding(8.f, 4.f, 8.f, 4.f);
-	wmTextBox->setFontSize(12.f);
-	wmTextBox->setColor(Ling::Color(0x333333FFu));
-	wmTextBox->setCaretColor(Ling::Color(0x333333FFu));
-	wmTextBox->setSelectionBgColor(Ling::Color(0x34C75966u));
+	stylePropInput(wmTextBox);
 	wmTextBox->setPlaceholder(L"请输入文字...");
 	wmTextBox->setPlaceholderColor(Ling::Color(0x999999FFu));
-	wmTextBox->setAutoSize(true);
 	wmTextBox->setText(watermarkText);
-	wmTextBox->setWidth(wmInputW); // 空文本时保住占位宽；autoSize 后仍可钳制
+	wmTextBox->setWidth(wmInputW); // 空文本时保住占位宽，之后按内容调整
 	wmTextBox->onTextChanged.add([this, syncWmWidth, wmMaxChars](Ling::TextBox*, const std::wstring& val) {
 		auto t = val.size() > wmMaxChars ? val.substr(0, wmMaxChars) : val;
 		if (t.size() != val.size() && wmTextBox) {
@@ -1402,6 +1515,357 @@ void ToolSub::setBoardOpacity(int percent)
 	refreshBoardState();
 }
 
+// ---------------- 演示画布：快照属性栏 ----------------
+void ToolSub::showDemoSnapshotTools()
+{
+	auto* cap = dynamic_cast<WinCap*>(win);
+	if (!cap) return;
+	beginTool(L"demo-snapshot");
+	curToolId = L"demo-snapshot";
+	win->setMainBarAnchorId(L"snapshot");   // 贴着工具栏上的快照按钮
+	contentNode->setFlexDirection(Ling::FlexDirection::Column);
+	contentNode->setAlignItems(Ling::Align::Center);
+	contentNode->setJustifyContent(Ling::Justify::Start);
+	initSize(3, false);
+	// 宽高按缩略图数量自适应，统一在 refreshDemoSnapshot() 里重算
+
+	auto* row = contentNode->makeChild<Ling::Node>();
+	snapRow = row;
+	row->setHeight(btnSize);
+	row->setFlexDirection(Ling::FlexDirection::Row);
+	row->setAlignItems(Ling::Align::Center);
+	row->setJustifyContent(Ling::Justify::Start);
+
+	auto mk = [this, row](const wchar_t* icon, const wchar_t* tipKey) {
+		auto b = row->makeChild<Ling::Button>();
+		b->setText(icon);
+		styleToolbarBtn(b);
+		b->setFontFamily(Icon::Family);
+		b->setFontSize(ToolbarTheme::iconSize);
+		applyToggleStyle(b, false);
+		tip->bind(b, Lang::get(tipKey));
+		return b;
+	};
+	snapCreateBtn = mk(Icon::CreateSnapshot, L"snapshot.create");
+	snapCreateBtn->onClick.add([this](Ling::Button*) {
+		if (auto* c = dynamic_cast<WinCap*>(win)) c->createDemoSnapshot();
+	});
+	auto* spacer = row->makeChild<Ling::Node>();
+	spacer->setFlexGrow(1.f);
+	spacer->setHeight(btnSize);
+	snapDeleteBtn = mk(Icon::Remove, L"snapshot.delete");
+	snapDeleteBtn->onClick.add([this](Ling::Button*) {
+		auto* c = dynamic_cast<WinCap*>(win);
+		if (c && c->demoSnapshotSelected() >= 0) c->deleteDemoSnapshot();
+	});
+	snapSaveBtn = mk(Icon::Save, L"snapshot.saveAs");
+	snapSaveBtn->onClick.add([this](Ling::Button*) {
+		auto* c = dynamic_cast<WinCap*>(win);
+		if (c && c->demoSnapshotCount() > 0) c->saveDemoSnapshots();
+	});
+
+	snapScroll = contentNode->makeChild<Ling::ScrollerBox>();
+	// 按钮行与卡片之间不再额外留 12：卡片紧跟在行下方（行内按钮自带 4px 内缩）
+	snapScroll->setMarginTop(0.f);
+	snapScroll->content->setFlexDirection(Ling::FlexDirection::Column);
+	snapScroll->setScrollBarVisible(false);
+	// 没有快照时默认只有三个按钮：网格整体不占位
+	snapScroll->hide();
+
+	// 拖拽跟手预览：挂在窗口 body 上，拖出网格也不会被滚动区裁掉
+	if (!snapGhost) {
+		snapGhost = body->makeChild<Ling::Canvas>();
+		snapGhost->setPositionType(Ling::Position::Absolute);
+		snapGhost->setSize(kSnapCellW, kSnapCellH);
+		snapGhost->hide();
+	}
+
+	refreshDemoSnapshot();
+	// 显示与定位交给宿主 layoutTools()（与白板/录屏属性栏一致），这里只保证内容重画
+	refresh();
+	layout();
+}
+
+void ToolSub::refreshDemoSnapshot()
+{
+	if (!demoSnapToolsBuilt() || !snapScroll || !snapRow) return;
+	// refreshSize() → refreshDemoSnapshot() 的回环：重排尺寸过程中再次进入直接返回
+	if (snapRefreshing_) return;
+	snapRefreshing_ = true;
+	struct Guard { bool& f; ~Guard() { f = false; } } guard{ snapRefreshing_ };
+	auto* cap = dynamic_cast<WinCap*>(win);
+	if (!cap) return;
+	// 重建网格等于换掉鼠标下的控件：先收掉悬停提示，否则点缩略图时会冒出「创建快照」
+	if (tip) tip->hide();
+
+	const int n = cap->demoSnapshotCount();
+	// 数量变多 = 刚创建了一张：等布局完成后滚到底部（见 layout()），
+	// 超过一屏（15 张）时新卡片不会藏在可视区外
+	if (n > snapLastCount_) snapScrollToEnd_ = true;
+	snapLastCount_ = n;
+	// 一行最多 5 个，宽度随数量增长；高度最多显示 3 行，超出滚动
+	const int cols = std::min(n, kSnapCols);
+	const float gridW = cols > 0 ? cols * kSnapCellW + (cols - 1) * kSnapGap : 0.f;
+	const int rows = (n + kSnapCols - 1) / kSnapCols;
+	const int visRows = std::min(rows, kSnapRows);
+	const float gridH = visRows > 0 ? visRows * kSnapCellH + (visRows - 1) * kSnapGap : 0.f;
+	// 第一行三个动作按钮的最小宽度；快照多于此宽度时属性栏按网格加宽
+	const float btnRowW = 3.f * (ToolbarTheme::iconSize + ToolbarTheme::propGap);
+	const float contentW = std::max(btnRowW, gridW);
+	snapRow->setWidth(contentW);
+
+	if (n > 0) {
+		const float allH = rows * kSnapCellH + (rows - 1) * kSnapGap;
+		snapScroll->show();
+		snapScroll->setSize(contentW, gridH);
+		// 画布与徽章都是复用：只改尺寸/文字/位置，不重建子节点（重建会让属性栏闪一帧）
+		if (!snapCanvas) {
+			snapCanvas = snapScroll->content->makeChild<Ling::Canvas>();
+			snapCanvas->setPositionType(Ling::Position::Absolute);
+			snapCanvas->setPosition(Ling::Edge::Left, 0.f);
+			snapCanvas->setPosition(Ling::Edge::Top, 0.f);
+		}
+		snapCanvas->show();
+		snapCanvas->setSize(contentW, allH);
+		// 画布/徽章都是绝对定位，不参与 content 的高度计算 —— 必须显式告诉滚动区
+		// 内容总高，否则 content->h 恒为 0，滚轮会被当成"没溢出"直接忽略
+		snapScroll->content->setHeight(allH);
+		while ((int)snapBadges.size() < n) {
+			auto* badge = snapScroll->content->makeChild<Ling::Label>();
+			badge->setFontSize(9.f);
+			badge->setColor(Ling::Color(0xFFFFFFFFu));
+			// 固定尺寸 + 居中：不设尺寸时 Label 只包住文字，数字会贴着左上角
+			badge->setSize(18.f, 13.f);
+			badge->setAlignItems(Ling::Align::Center);
+			badge->setJustifyContent(Ling::Justify::Center);
+			// 绝对定位叠在缩略图左上角；不脱离布局的话会排到画布下方把内容撑高
+			badge->setPositionType(Ling::Position::Absolute);
+			snapBadges.push_back(badge);
+		}
+		for (size_t i = 0; i < snapBadges.size(); ++i) {
+			auto* badge = snapBadges[i];
+			if ((int)i >= n) { badge->hide(); continue; }
+			const int col = (int)i % kSnapCols;
+			const int rowIdx = (int)i / kSnapCols;
+			badge->setText(std::to_wstring(i + 1));
+			badge->setPosition(Ling::Edge::Left, col * (kSnapCellW + kSnapGap) + 3.f);
+			badge->setPosition(Ling::Edge::Top, rowIdx * (kSnapCellH + kSnapGap) + 3.f);
+			badge->show();
+		}
+		snapScroll->setScrollBarVisible(false);   // 网格不显示滚动条，滚轮/拖拽到边缘仍可滚动
+		sizeExtraH = gridH + kSnapPadBottom;
+	}
+	else {
+		// 没有快照：不显示提示文案，也不留网格高度，属性栏只剩三个按钮
+		for (auto* badge : snapBadges) badge->hide();
+		if (snapCanvas) snapCanvas->hide();
+		snapScroll->hide();
+		sizeExtraH = 0.f;
+	}
+
+	const float needW = ToolbarTheme::propPad * 2.f + contentW + ToolbarTheme::shadowPad * 2.f;
+	setSize(needW, getDesiredHeight() / dpi);
+	updateSnapshotButtons();
+	// 宽度随数量变化，重新贴回快照按钮下方
+	if (isVisible) updatePosition(workAreaRect());
+	refresh();
+	layout();
+}
+
+void ToolSub::updateSnapshotButtons()
+{
+	auto* cap = dynamic_cast<WinCap*>(win);
+	if (!cap) return;
+	const bool hasSel = cap->demoSnapshotSelected() >= 0;
+	const bool hasAny = cap->demoSnapshotCount() > 0;
+	if (snapDeleteBtn) {
+		snapDeleteBtn->setColor(hasSel ? Icon::ColorNormal : Icon::ColorDisabled);
+		snapDeleteBtn->setHoverColor(hasSel ? Icon::ColorActive : Icon::ColorDisabled);
+	}
+	if (snapSaveBtn) {
+		snapSaveBtn->setColor(hasAny ? Icon::ColorNormal : Icon::ColorDisabled);
+		snapSaveBtn->setHoverColor(hasAny ? Icon::ColorActive : Icon::ColorDisabled);
+	}
+}
+
+void ToolSub::paintSnapshotThumbs()
+{
+	auto* cap = dynamic_cast<WinCap*>(win);
+	if (!cap || !snapCanvas || !snapCanvas->visual.IsVisible()) return;
+	auto ctx = snapCanvas->startPaint();
+	if (!ctx) return;
+	ctx->Clear(D2D1::ColorF(0, 0.f));
+	auto* d2d = Ling::D2D::get();
+	ComPtr<ID2D1SolidColorBrush> border;
+	ctx->CreateSolidColorBrush(D2D1::ColorF(0.204f, 0.780f, 0.349f, 1.f), border.GetAddressOf());
+	ComPtr<ID2D1SolidColorBrush> badgeBg;
+	ctx->CreateSolidColorBrush(D2D1::ColorF(0.f, 0.f, 0.f, 0.55f), badgeBg.GetAddressOf());
+	// 卡片底：深色主题 #333333、浅色主题 #E5E5E5（与属性栏背景拉开一档，能看出卡片边界）
+	ComPtr<ID2D1SolidColorBrush> cardBg;
+	const uint32_t themeBg = ToolbarTheme::background;
+	const float lum = (0.299f * ((themeBg >> 24) & 0xFF)
+		+ 0.587f * ((themeBg >> 16) & 0xFF)
+		+ 0.114f * ((themeBg >> 8) & 0xFF)) / 255.f;
+	const uint32_t cardColor = lum < 0.5f ? 0x333333FFu : 0xE5E5E5FFu;
+	ctx->CreateSolidColorBrush(Ling::Color(cardColor).getD2DColor(), cardBg.GetAddressOf());
+	// 缩略图圆角裁剪：图层几何遮罩（圆角几何没有 Set 接口，每格按需重建）
+	ComPtr<ID2D1RoundedRectangleGeometry> clipGeo;
+	const float rad = toPx(kSnapRadius);
+	const int n = cap->demoSnapshotCount();
+	const int sel = cap->demoSnapshotSelected();
+	for (int i = 0; i < n; ++i) {
+		const int col = i % kSnapCols;
+		const int row = i / kSnapCols;
+		const float l = toPx(col * (kSnapCellW + kSnapGap));
+		const float t = toPx(row * (kSnapCellH + kSnapGap));
+		const float r = l + toPx(kSnapCellW);
+		const float b = t + toPx(kSnapCellH);
+		const D2D1_RECT_F rc = D2D1::RectF(l, t, r, b);
+		// 卡片本体：不管画面内容多黑，都是同一个圆角卡片
+		const auto card = D2D1::RoundedRect(rc, rad, rad);
+		if (cardBg) ctx->FillRoundedRectangle(card, cardBg.Get());
+		auto bmp = cap->demoSnapshotBitmap(i);
+		if (bmp) {
+			// 等比缩放居中（contain），像图层缩略图那样留边，不拉伸填充
+			const auto sz = bmp->GetSize();
+			if (sz.width > 0.f && sz.height > 0.f) {
+				const float cardW = r - l, cardH = b - t;
+				const float s = std::min(cardW / sz.width, cardH / sz.height);
+				const float dw = sz.width * s, dh = sz.height * s;
+				const D2D1_RECT_F dst = D2D1::RectF(
+					l + (cardW - dw) * 0.5f, t + (cardH - dh) * 0.5f,
+					l + (cardW + dw) * 0.5f, t + (cardH + dh) * 0.5f);
+				clipGeo.Reset();
+				const bool masked = d2d && d2d->d2dFactory
+					&& SUCCEEDED(d2d->d2dFactory->CreateRoundedRectangleGeometry(card, clipGeo.GetAddressOf()));
+				if (masked)
+					ctx->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), clipGeo.Get()), nullptr);
+				ctx->DrawBitmap(bmp.Get(), dst, 1.f, D2D1_INTERPOLATION_MODE_LINEAR);
+				if (masked) ctx->PopLayer();
+			}
+		}
+		if (badgeBg)
+			ctx->FillRoundedRectangle(D2D1::RoundedRect(
+				D2D1::RectF(l + toPx(3.f), t + toPx(3.f), l + toPx(21.f), t + toPx(16.f)),
+				toPx(3.f), toPx(3.f)), badgeBg.Get());
+		if (i == sel && border) {
+			// 选中：贴着卡片内沿的绿色描边（不再往外扩）
+			const float inset = toPx(1.f);
+			ctx->DrawRoundedRectangle(
+				D2D1::RoundedRect(D2D1::RectF(l + inset, t + inset, r - inset, b - inset),
+					rad - inset, rad - inset),
+				border.Get(), toPx(2.f));
+		}
+	}
+	// 拖拽排序的插入光标：落点前的竖线（行首贴左边，末尾贴最后一张右侧）
+	if (snapDragging && snapDragMoved && snapDropSlot >= 0 && border) {
+		const int slot = std::clamp(snapDropSlot, 0, n);
+		float cx = 1.f, top = 0.f;
+		if (slot < n) {
+			const int col = slot % kSnapCols;
+			const int row = slot / kSnapCols;
+			cx = toPx(col * (kSnapCellW + kSnapGap)) - toPx(6.f);
+			top = toPx(row * (kSnapCellH + kSnapGap));
+		}
+		else if (n > 0) {
+			const int col = (n - 1) % kSnapCols;
+			const int row = (n - 1) / kSnapCols;
+			cx = toPx(col * (kSnapCellW + kSnapGap) + kSnapCellW) + toPx(3.f);
+			top = toPx(row * (kSnapCellH + kSnapGap));
+		}
+		if (cx < 1.f) cx = 1.f;
+		ctx->FillRoundedRectangle(
+			D2D1::RoundedRect(D2D1::RectF(cx, top, cx + toPx(2.f), top + toPx(kSnapCellH)), 1.f, 1.f),
+			border.Get());
+	}
+	snapCanvas->finishPaint();
+}
+
+void ToolSub::paintSnapshotGhost()
+{
+	auto* cap = dynamic_cast<WinCap*>(win);
+	if (!cap || !snapGhost || !snapGhost->visual.IsVisible()) return;
+	auto ctx = snapGhost->startPaint();
+	if (!ctx) return;
+	ctx->Clear(D2D1::ColorF(0, 0.f));
+	const float rad = toPx(kSnapRadius);
+	const float gw = snapGhost->w, gh = snapGhost->h;
+	const auto card = D2D1::RoundedRect(D2D1::RectF(0.f, 0.f, gw, gh), rad, rad);
+	ComPtr<ID2D1SolidColorBrush> bg;
+	ctx->CreateSolidColorBrush(D2D1::ColorF(0.f, 0.f, 0.f, 0.35f), bg.GetAddressOf());
+	ComPtr<ID2D1SolidColorBrush> accent;
+	ctx->CreateSolidColorBrush(D2D1::ColorF(0.204f, 0.780f, 0.349f, 1.f), accent.GetAddressOf());
+	if (bg) ctx->FillRoundedRectangle(card, bg.Get());
+	auto bmp = cap->demoSnapshotBitmap(snapDragFrom);
+	if (bmp) {
+		const auto sz = bmp->GetSize();
+		if (sz.width > 0.f && sz.height > 0.f) {
+			const float s = std::min(gw / sz.width, gh / sz.height);
+			const float dw = sz.width * s, dh = sz.height * s;
+			const D2D1_RECT_F dst = D2D1::RectF(
+				(gw - dw) * 0.5f, (gh - dh) * 0.5f, (gw + dw) * 0.5f, (gh + dh) * 0.5f);
+			ComPtr<ID2D1RoundedRectangleGeometry> geo;
+			auto* d2d = Ling::D2D::get();
+			const bool masked = d2d && d2d->d2dFactory
+				&& SUCCEEDED(d2d->d2dFactory->CreateRoundedRectangleGeometry(card, geo.GetAddressOf()));
+			if (masked)
+				ctx->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), geo.Get()), nullptr);
+			ctx->DrawBitmap(bmp.Get(), dst, 0.85f, D2D1_INTERPOLATION_MODE_LINEAR);
+			if (masked) ctx->PopLayer();
+		}
+	}
+	if (accent)
+		ctx->DrawRoundedRectangle(
+			D2D1::RoundedRect(D2D1::RectF(0.5f, 0.5f, gw - 0.5f, gh - 0.5f), rad, rad),
+			accent.Get(), toPx(1.f));
+	snapGhost->finishPaint();
+}
+
+int ToolSub::snapSlotAt(POINT pos) const
+{
+	auto* cap = dynamic_cast<WinCap*>(win);
+	if (!cap || !snapCanvas || !snapScroll) return -1;
+	const int n = cap->demoSnapshotCount();
+	if (n <= 0) return 0;
+	const float d = dpi > 0.f ? dpi : 1.f;
+	const float lx = ((float)pos.x - snapCanvas->x) / d;
+	const float ly = ((float)pos.y - snapCanvas->y + snapScroll->getScrollY()) / d;
+	const int totalRows = (n + kSnapCols - 1) / kSnapCols;
+	int row = (int)std::floor(ly / (kSnapCellH + kSnapGap));
+	row = std::clamp(row, 0, totalRows - 1);
+	const int rowStart = row * kSnapCols;
+	const int rowEnd = std::min(n, rowStart + kSnapCols);
+	int slot = rowEnd;
+	for (int i = rowStart; i < rowEnd; ++i) {
+		const float left = (i % kSnapCols) * (kSnapCellW + kSnapGap);
+		if (lx < left + kSnapCellW * 0.5f) { slot = i; break; }
+	}
+	return slot;
+}
+
+int ToolSub::snapIndexAt(POINT pos) const
+{
+	auto* cap = dynamic_cast<WinCap*>(win);
+	if (!cap || !snapScroll || !snapCanvas) return -1;
+	if (!snapScroll->isPosIn(pos)) return -1;
+	// 节点坐标是窗口绝对物理像素（Node::layout 逐层累加），滚动只平移视觉、不改布局，
+	// 所以从画布坐标补回 scrollY；格子尺寸则要把逻辑值换成物理像素再比。
+	const float lx = (float)pos.x - snapCanvas->x;
+	const float ly = (float)pos.y - snapCanvas->y + snapScroll->getScrollY();
+	if (lx < 0.f || ly < 0.f) return -1;
+	const float cellW = toPx(kSnapCellW), cellH = toPx(kSnapCellH), gap = toPx(kSnapGap);
+	const int col = (int)std::floor(lx / (cellW + gap));
+	const int row = (int)std::floor(ly / (cellH + gap));
+	if (col < 0 || col >= kSnapCols || row < 0) return -1;
+	// 格子之间的间隙不算命中
+	const float cx = lx - col * (cellW + gap);
+	const float cy = ly - row * (cellH + gap);
+	if (cx > cellW || cy > cellH) return -1;
+	const int idx = row * kSnapCols + col;
+	if (idx >= cap->demoSnapshotCount()) return -1;
+	return idx;
+}
+
 void ToolSub::refreshBoardState()
 {
 	auto* cap = dynamic_cast<WinCap*>(win);
@@ -1492,6 +1956,16 @@ void ToolSub::layout()
 	ToolbarWindow::layout();
 	// 自定义色块的七彩渐变：与颜色面板共用同一份绘制，尺寸按当前布局重画
 	PaintCustomColorSwatch(boardCustomCanvas, dpi);
+	// 快照缩略图（直接画在网格 Canvas 上，位图由演示画布提供）
+	paintSnapshotThumbs();
+	// 刚创建了新快照：布局完成后滚到底部（不超过一屏时 maxScroll=0，等于不滚），
+	// 让用户马上看到新增的那张，确认创建成功
+	if (snapScrollToEnd_ && snapScroll && snapScroll->visual.IsVisible()) {
+		snapScrollToEnd_ = false;
+		snapScroll->scrollTo(snapScroll->getMaxScrollY());
+	}
+	// 拖拽跟手预览（挂在 body 上，单独一块画布）
+	paintSnapshotGhost();
 }
 
 void ToolSub::applyTipDirection(bool tipDown)
@@ -1674,6 +2148,7 @@ void ToolSub::resetStyleToDefaults()
 	isRectDash = false;
 	cornerRadius = 0.f;
 	lastCornerRadius = 0.f;
+	rectOpacity = 100;
 	isArrowDash = false;
 	isArrowRound = false;
 	arrowHead = rememberInt(ToolKey::Arrow, DesignKey::Head, ArrowDefault);
@@ -1692,6 +2167,7 @@ void ToolSub::resetStyleToDefaults()
 	isHighlightEllipse = designInt(ToolKey::Highlight, DesignKey::Form, 0) == 1;
 	isMosaicBlur = designInt(ToolKey::Mosaic, DesignKey::Form, 0) == 1;
 	numberStyle = rememberInt(ToolKey::Number, DesignKey::Form, NumberDigit);
+	isNumberNoTail = false;
 	// 颜色/粗细的会话记忆也清掉：重新打开按初始属性来（记忆开关开启时改从 Setting 读）
 	selectColorIndex = 0;
 	sliderMem.clear();
@@ -1704,6 +2180,7 @@ void ToolSub::beginShapeStylePreview()
 	if (stylePreviewActive_) return;
 	auto& s = stylePreview_;
 	s.isEllipse = isEllipse; s.isRectFill = isRectFill; s.isRectDash = isRectDash;
+	s.isNumberNoTail = isNumberNoTail;
 	s.isArrowDash = isArrowDash; s.isArrowRound = isArrowRound; s.isLine = isLine;
 	s.isPenDash = isPenDash; s.isPenSoft = isPenSoft; s.isPenMarker = isPenMarker;
 	s.isTextBold = isTextBold; s.isTextItalic = isTextItalic; s.isTextStroke = isTextStroke;
@@ -1730,6 +2207,7 @@ void ToolSub::endShapeStylePreview()
 	endMultiStyle();
 	auto& s = stylePreview_;
 	isEllipse = s.isEllipse; isRectFill = s.isRectFill; isRectDash = s.isRectDash;
+	isNumberNoTail = s.isNumberNoTail;
 	isArrowDash = s.isArrowDash; isArrowRound = s.isArrowRound; isLine = s.isLine;
 	isPenDash = s.isPenDash; isPenSoft = s.isPenSoft; isPenMarker = s.isPenMarker;
 	isTextBold = s.isTextBold; isTextItalic = s.isTextItalic; isTextStroke = s.isTextStroke;
@@ -1786,6 +2264,7 @@ ToolSub::StyleState ToolSub::captureStyleState() const
 	s.isMosaicBlur = isMosaicBlur;
 	s.isArrowFill = isArrowFill;
 	s.isNumberFill = isNumberFill;
+	s.isNumberNoTail = isNumberNoTail;
 	s.rectKind = rectKind;
 	s.polygonSides = polygonSides;
 	s.starPoints = starPoints;
@@ -1794,6 +2273,7 @@ ToolSub::StyleState ToolSub::captureStyleState() const
 	s.numberStyle = numberStyle;
 	s.cornerRadius = cornerRadius;
 	s.lastCornerRadius = lastCornerRadius;
+	s.rectOpacity = rectOpacity;
 	s.sliderVal = sliderVal;
 	s.sliderMin = sliderMin;
 	s.sliderMax = sliderMax;
@@ -1828,6 +2308,7 @@ void ToolSub::restoreStyleState(const StyleState& s)
 	isMosaicBlur = s.isMosaicBlur;
 	isArrowFill = s.isArrowFill;
 	isNumberFill = s.isNumberFill;
+	isNumberNoTail = s.isNumberNoTail;
 	rectKind = s.rectKind;
 	polygonSides = s.polygonSides;
 	starPoints = s.starPoints;
@@ -1836,6 +2317,7 @@ void ToolSub::restoreStyleState(const StyleState& s)
 	numberStyle = s.numberStyle;
 	cornerRadius = s.cornerRadius;
 	lastCornerRadius = s.lastCornerRadius;
+	rectOpacity = s.rectOpacity;
 	sliderVal = s.sliderVal;
 	sliderMin = s.sliderMin;
 	sliderMax = s.sliderMax;
@@ -1944,6 +2426,7 @@ void ToolSub::beginMultiStyle(const std::vector<ShapeBase*>& targets)
 		else if (curToolId == L"number") {
 			if (s.isNumberFill != c.isNumberFill) multiMixed_.fill = true;
 			if (s.numberStyle != c.numberStyle) multiMixed_.numberStyle = true;
+			if (s.isNumberNoTail != c.isNumberNoTail) multiMixed_.numberNoTail = true;
 		}
 		else if (curToolId == L"mosaic") {
 			if (s.isMosaicBlur != c.isMosaicBlur) multiMixed_.blur = true;
@@ -2017,7 +2500,9 @@ void ToolSub::applyUniformStyle(const StyleState& d)
 		isPenFade = d.isPenFade;
 	}
 	if (!multiMixed_.numberStyle) numberStyle = d.numberStyle;
+	if (!multiMixed_.numberNoTail) isNumberNoTail = d.isNumberNoTail;
 	if (!multiMixed_.corner) cornerRadius = d.cornerRadius;
+	rectOpacity = d.rectOpacity;
 	if (!multiMixed_.sides) {
 		polygonSides = d.polygonSides;
 		starPoints = d.starPoints;
@@ -2092,6 +2577,7 @@ void ToolSub::applyMultiStyleUi()
 	if (multiMixed_.numberStyle) {
 		for (auto* b : numberStyleBtns) gray(b);
 	}
+	if (multiMixed_.numberNoTail) gray(noTailBtn);
 	if (multiMixed_.color) {
 		if (colorTriggerSwatch) {
 			colorTriggerSwatch->setBg(0x9A9A9AFFu);
@@ -2180,6 +2666,16 @@ void ToolSub::refreshNestedTrigger()
 		const bool on = nestedPanel && nestedPanel->isOpen()
 			&& nestedPanel->kind() == ToolNestedPanel::Kind::WmAngle;
 		applyToggleStyle(angleBtn, on);
+	}
+	if (wmOpacityBtn) {
+		const bool on = nestedPanel && nestedPanel->isOpen()
+			&& nestedPanel->kind() == ToolNestedPanel::Kind::WmOpacity;
+		applyToggleStyle(wmOpacityBtn, on);
+	}
+	if (rectOpacityBtn) {
+		const bool on = nestedPanel && nestedPanel->isOpen()
+			&& nestedPanel->kind() == ToolNestedPanel::Kind::RectOpacity;
+		applyToggleStyle(rectOpacityBtn, on);
 	}
 	if (patinaWmBtn) applyToggleStyle(patinaWmBtn, isPatinaWatermark);
 	if (markerBtn) applyToggleStyle(markerBtn, isPenMarker);
@@ -2472,9 +2968,36 @@ void ToolSub::makeNumberStyleBtns()
 			closeColorPanel();
 			nestedPanel->openEmoji(workAreaRect(), emojiTrigger);
 		});
+		// 「停用尾巴」放在选择表情右边；Emoji 形态下置灰不可用
+		makeNumberNoTailBtn();
 	}
-	else buildNumberInput();
+	else {
+		buildNumberInput();
+		makeNumberNoTailBtn();
+	}
 	refreshNumberStyleBtns();
+}
+
+void ToolSub::makeNumberNoTailBtn()
+{
+	noTailBtn = contentNode->makeChild<Ling::Button>();
+	noTailBtn->setText(Icon::NoTail);
+	styleToolbarBtn(noTailBtn);
+	noTailBtn->setFontFamily(Icon::Family);
+	noTailBtn->setFontSize(ToolbarTheme::iconSize);
+	applyToggleStyle(noTailBtn, isNumberNoTail);
+	auto tipText = Lang::get(L"tool.numberNoTail");
+	if (tipText.empty() || tipText == L"tool.numberNoTail") tipText = L"停用尾巴";
+	tip->bind(noTailBtn, tipText);
+	noTailBtn->onClick.add([this](Ling::Button*) {
+		// 尾巴是属性、表情是工具：Emoji 形态下尾巴属性不可用
+		if (numberStyle == NumberEmoji) return;
+		isNumberNoTail = !isNumberNoTail;
+		applyToggleStyle(noTailBtn, isNumberNoTail);
+		win->onToolStyleChanged();
+	});
+	registerStyleToggle([this] { return isNumberNoTail; },
+		[this] { isNumberNoTail = false; });
 }
 
 // 序号文案：数字 → 1/2/3，字母 → A/B/…/Z/AA（与 ShapeNumber::formatLabel 一致）
@@ -2602,6 +3125,24 @@ float ToolSub::measureNumberInputW(const std::wstring& text) const
 	return std::clamp(tw + 16.f, 34.f, 160.f);
 }
 
+void ToolSub::stylePropInput(Ling::TextBox* box)
+{
+	if (!box) return;
+	box->setBg(Ling::Color(ToolbarTheme::hoverBg));
+	box->setBorder(0.f, 0);
+	box->setBorderRadius(6.f);
+	box->setPadding(6.f, 2.f, 6.f, 2.f);
+	box->setFontSize(12.f);
+	// 字色/光标色跟随工具栏主题（深色主题下用浅色，避免深底深字看不见）
+	box->setColor(Ling::Color(ToolbarTheme::iconNormal));
+	box->setCaretColor(Ling::Color(ToolbarTheme::iconNormal));
+	box->setSelectionBgColor(Ling::Color(0x34C75966u));
+	// 固定 24 高：宽度由调用方按内容 setWidth，文字在内容区上下居中
+	box->setAutoSize(false);
+	box->setHeight(24.f);
+	box->setVerticalCenter(true);
+}
+
 void ToolSub::buildNumberInput()
 {
 	constexpr float marginH{ 4.f };
@@ -2609,17 +3150,7 @@ void ToolSub::buildNumberInput()
 	numberInput->setMargin(marginH, 0.f, marginH, 0.f);
 	numberInput->setFlexGrow(0.f);
 	numberInput->setFlexShrink(0.f);
-	numberInput->setBg(Ling::Color(ToolbarTheme::hoverBg));
-	numberInput->setBorder(0.f, 0);
-	numberInput->setBorderRadius(6.f);
-	numberInput->setPadding(6.f, 2.f, 6.f, 2.f);
-	numberInput->setFontSize(12.f);
-	// 字色/光标色跟随工具栏主题（深色主题下用浅色，避免深底深字看不见）
-	numberInput->setColor(Ling::Color(ToolbarTheme::iconNormal));
-	numberInput->setCaretColor(Ling::Color(ToolbarTheme::iconNormal));
-	numberInput->setSelectionBgColor(Ling::Color(0x34C75966u));
-	numberInput->setAutoSize(true);
-	numberInput->setVerticalCenter(true);
+	stylePropInput(numberInput);
 	numberInput->setTextAlignCenter(true);   // 序号在输入框里居中
 	// 常态编辑：属性栏是 NOACTIVATE 气泡，宿主窗口焦点变化不该结束这里的编辑
 	numberInput->setKeepFocusOnWindowBlur(true);
@@ -2739,6 +3270,18 @@ void ToolSub::refreshNumberStyleBtns()
 {
 	for (size_t i = 0; i < numberStyleBtns.size() && i < numberStyleVals.size(); i++)
 		applyToggleStyle(numberStyleBtns[i], numberStyle == numberStyleVals[i]);
+	// 尾巴是属性、表情是工具：Emoji 形态下「停用尾巴」置灰不可用
+	if (noTailBtn) {
+		if (numberStyle == NumberEmoji) {
+			noTailBtn->setBg(0);
+			noTailBtn->setHoverBg(0);
+			noTailBtn->setColor(Icon::ColorDisabled);
+			noTailBtn->setHoverColor(Icon::ColorDisabled);
+		}
+		else {
+			applyToggleStyle(noTailBtn, isNumberNoTail);
+		}
+	}
 	if (emojiTrigger) {
 		const bool on = nestedPanel && nestedPanel->isOpen()
 			&& nestedPanel->kind() == ToolNestedPanel::Kind::Emoji;
@@ -2973,9 +3516,12 @@ float ToolSub::toPx(float logical) const
 
 float ToolSub::getDesiredHeight()
 {
-	if (flatPopup_)
-		return toPx(btnSize) + toPx(ToolbarTheme::shadowPad) * 2.f;
-	return toPx(btnSize) + toPx(marginTop) + toPx(ToolbarTheme::shadowPad);
+	float base = flatPopup_
+		? toPx(btnSize) + toPx(ToolbarTheme::shadowPad) * 2.f
+		: toPx(btnSize) + toPx(marginTop) + toPx(ToolbarTheme::shadowPad);
+	// 快照属性栏下面还有一块缩略图网格
+	if (sizeExtraH > 0.f) base += toPx(sizeExtraH);
+	return base;
 }
 
 void ToolSub::setFlatPopup(bool on)
@@ -3027,6 +3573,9 @@ void ToolSub::initSize(int btnCount, bool withColors, bool centerOnBtn, float ex
 void ToolSub::refreshSize()
 {
 	if (!hasTools) return;
+	// 快照属性栏的宽高按缩略图数量算，不走通用公式；
+	// 通用公式总会预留滑条宽度，套上去就把宽度锁死在固定值。
+	if (demoSnapToolsBuilt()) { refreshDemoSnapshot(); return; }
 	initSize(sizeBtnCount, sizeWithColors, centerOnBtn, sizeExtraW);
 }
 
@@ -3128,9 +3677,11 @@ void ToolSub::hideTools()
 	strokeBtn = nullptr;
 	wmTextBox = nullptr;
 	numberInput = nullptr;
+	noTailBtn = nullptr;
 	numberShowsSelected_ = false;
 	selectedNumberLabel_.clear();
 	angleBtn = nullptr;
+	wmOpacityBtn = nullptr;
 	patinaWmBtn = nullptr;
 	emojiTrigger = nullptr;
 	overlayBtn = nullptr;
@@ -3148,6 +3699,7 @@ void ToolSub::hideTools()
 	recCancelBtn = nullptr;
 	recDoneBtn = nullptr;
 	recTimerLabel = nullptr;
+	if (snapGhost) snapGhost->hide();
 	tip->hide();
 	if (!isVisible) return;
 	hide();

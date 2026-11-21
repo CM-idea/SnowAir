@@ -172,6 +172,10 @@ namespace Icon
 	inline constexpr const wchar_t* ClipLink = L"\ue67e";           // 链接（剪切板类别）
 	inline constexpr const wchar_t* ClipMusic = L"\ue67f";          // 音乐（剪切板类别）
 	inline constexpr const wchar_t* ClipVideo = L"\ue686";          // 视频（剪切板类别）
+	// —— 新字库 5228143 快照 / 序号尾巴（e698-e69a）——
+	inline constexpr const wchar_t* Snapshot = L"\ue698";           // 快照
+	inline constexpr const wchar_t* NoTail = L"\ue699";             // 停用尾巴
+	inline constexpr const wchar_t* CreateSnapshot = L"\ue69a";     // 创建快照
 	// —— 新字库 5228143 布局图标（e68c-e68e）——
 	inline constexpr const wchar_t* LayoutFree = L"\ue68c";         // 自由布局
 	inline constexpr const wchar_t* LayoutLR = L"\ue68d";           // 左右布局

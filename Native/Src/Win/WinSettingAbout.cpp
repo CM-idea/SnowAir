@@ -10,6 +10,7 @@
 #include <winrt/Windows.Web.Http.Headers.h>
 #include <winrt/Windows.System.Threading.h>
 
+#include "../App.h"
 #include "../Lang.h"
 #include "../Setting.h"
 #include "../Tool/IconCodes.h"
@@ -26,7 +27,7 @@
 //   ③ 版本号 + Lite beta 胶囊（高 22 / 字号 11.5 / 间距 9）
 //   ④ 口号 13.5px 实色
 //   ⑤ 按钮组 margin-top:auto → 顶到卡片底部；按钮高 36 / 圆角 8 / 间距 10
-//   ⑥ 分隔线 + 配置目录（含打开目录按钮）+ © 城迷 · Liuyiran · 更新日志
+//   ⑥ 分隔线 + 导入配置 / 导出配置 / 打开配置目录 + © 城迷 · Liuyiran · 更新日志
 // 页面高度恒等于卡片高度（WinSetting::loadPage 里直接挂 cardNode），
 // 这样 ⑤ 的 auto 边距才有可分配空间，底部信息才会贴卡片底。
 // 配图压字的实现：图片行高只占 176-39，图本身 176 向下溢出；再 bringToFront 提到标题之上。
@@ -70,6 +71,31 @@ void removeLegacyArtFile()
 	const auto legacy = Setting::get()->getDataPath() / L"about-art.png";
 	std::error_code ec;
 	std::filesystem::remove(legacy, ec);
+}
+
+// 选一个配置文件（导入用）。取消返回空串。
+std::wstring pickConfigFile(HWND owner)
+{
+	std::wstring out;
+	Microsoft::WRL::ComPtr<IFileOpenDialog> dlg;
+	if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+		IID_PPV_ARGS(dlg.GetAddressOf()))) || !dlg)
+		return out;
+	DWORD flags{ 0 };
+	if (SUCCEEDED(dlg->GetOptions(&flags)))
+		dlg->SetOptions(flags | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
+	COMDLG_FILTERSPEC spec[]{ { L"JSON (*.json)", L"*.json" } };
+	dlg->SetFileTypes(_countof(spec), spec);
+	dlg->SetFileTypeIndex(1);
+	if (FAILED(dlg->Show(owner))) return out;   // 取消
+	Microsoft::WRL::ComPtr<IShellItem> item;
+	if (FAILED(dlg->GetResult(item.GetAddressOf())) || !item) return out;
+	PWSTR p{ nullptr };
+	if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &p)) && p) {
+		out = p;
+		CoTaskMemFree(p);
+	}
+	return out;
 }
 
 // 整行居中的容器（水平居中 + 交叉轴居中）
@@ -371,56 +397,97 @@ WinSettingAbout::WinSettingAbout(Ling::WinBase* parent) : Ling::Node(parent)
 		setStatus(Lang::get(L"about.newVersion") + L" " + pending, L"", SettingTheme::success);
 	}
 
-	// ⑥ 分隔线 + 底部信息（打开配置目录 / 版权 / 更新日志）
+	// ⑥ 分隔线 + 底部信息（导入配置 / 导出配置 / 打开配置目录 / 版权 / 更新日志）
 	// 上下各 18：状态行上方 18、下方到分隔线也是 18，视觉上对称
 	SettingUi::separator(this, 18.f, 16.f);
 
-	// 「打开配置目录」：无边框的轻按钮，文字 + 图标（图标在右）。
-	// 常态与「更新日志」同色（textTertiary）；悬停加浅底、文字转深色。
 	auto* dirRow = makeChild<Ling::Node>();
 	dirRow->setWidthPercent(100.f);
 	dirRow->setFlexDirection(Ling::FlexDirection::Row);
 	dirRow->setAlignItems(Ling::Align::Center);
 
-	auto* openDir = dirRow->makeChild<Ling::Button>();
-	openDir->setText(L"");                                   // 内置 Text 置空，图标和文字用手动 Label
-	openDir->setHeight(22.f);
-	openDir->setBorderRadius(SettingTheme::radiusInner);      // 6：轻量圆角，贴合小字号
-	openDir->setPadding(6.f, 0.f, 6.f, 0.f);
-	openDir->setMarginLeft(-6.f);                             // 文字左缘与下面「© 城迷 · Liuyiran」对齐
-	openDir->setFlexDirection(Ling::FlexDirection::Row);
-	openDir->setJustifyContent(Ling::Justify::Center);
-	openDir->setAlignItems(Ling::Align::Center);
-	openDir->setBorder(0.f, 0);
-	openDir->setBg(0);
-	openDir->setHoverBg(SettingTheme::accent);
+	// 无边框的轻按钮（文字，可选右侧图标），三个入口共用一套样式；
+	// 常态与「更新日志」同色（textTertiary），悬停加浅底、文字转深色。
+	auto lightLink = [dirRow](const std::wstring& text, const wchar_t* icon, bool first,
+		std::function<void()> onClick) {
+		auto* btn = dirRow->makeChild<Ling::Button>();
+		btn->setText(L"");                                   // 内置 Text 置空，图标和文字用手动 Label
+		btn->setHeight(22.f);
+		btn->setBorderRadius(SettingTheme::radiusInner);      // 6：轻量圆角，贴合小字号
+		btn->setPadding(6.f, 0.f, 6.f, 0.f);
+		// 第一个按钮左缘与下面「© 城迷 · Liuyiran」对齐；其余紧挨着，读起来是「导入配置 导出配置 打开配置目录」一组
+		btn->setMarginLeft(first ? -6.f : 2.f);
+		btn->setFlexDirection(Ling::FlexDirection::Row);
+		btn->setJustifyContent(Ling::Justify::Center);
+		btn->setAlignItems(Ling::Align::Center);
+		btn->setBorder(0.f, 0);
+		btn->setBg(0);
+		btn->setHoverBg(SettingTheme::accent);
 
-	auto* dirText = openDir->makeChild<Ling::Label>();
-	dirText->setText(Lang::get(L"about.openDataDir"));
-	dirText->setFontSize(11.5f);
-	dirText->setColor(SettingTheme::textTertiary);
+		auto* label = btn->makeChild<Ling::Label>();
+		label->setText(text);
+		label->setFontSize(11.5f);
+		label->setColor(SettingTheme::textTertiary);
 
-	auto* dirIcon = openDir->makeChild<Ling::Label>();
-	dirIcon->setText(Icon::Folder);
-	dirIcon->setFontFamily(Icon::Family);
-	// 图标字形净高只有 em 的 ~0.75：11.5px 正文配 14px 图标才视觉等高
-	dirIcon->setFontSize(14.f);
-	dirIcon->setColor(SettingTheme::textTertiary);
-	dirIcon->setMarginLeft(5.f);
+		// 图标可选：导入 / 导出只留文字，打开配置目录保留文件夹图标
+		Ling::Label* iconLabel = nullptr;
+		if (icon) {
+			iconLabel = btn->makeChild<Ling::Label>();
+			iconLabel->setText(icon);
+			iconLabel->setFontFamily(Icon::Family);
+			// 图标字形净高只有 em 的 ~0.75：11.5px 正文配 14px 图标才视觉等高
+			iconLabel->setFontSize(14.f);
+			iconLabel->setColor(SettingTheme::textTertiary);
+			iconLabel->setMarginLeft(5.f);
+		}
 
-	// 两个 Label 不在 Button 的 hover 变色链上，手动跟随：悬停转深色
-	openDir->onEnter.add([dirText, dirIcon](Ling::Button*) {
-		dirText->setColor(SettingTheme::textPrimary);
-		dirIcon->setColor(SettingTheme::textPrimary);
+		// Label 不在 Button 的 hover 变色链上，手动跟随：悬停转深色
+		btn->onEnter.add([label, iconLabel](Ling::Button*) {
+			label->setColor(SettingTheme::textPrimary);
+			if (iconLabel) iconLabel->setColor(SettingTheme::textPrimary);
+		});
+		btn->onLeave.add([label, iconLabel](Ling::Button*) {
+			label->setColor(SettingTheme::textTertiary);
+			if (iconLabel) iconLabel->setColor(SettingTheme::textTertiary);
+		});
+		btn->onClick.add([onClick](Ling::Button*) { onClick(); });
+	};
+
+	const HWND owner = win ? win->hwnd : nullptr;
+
+	lightLink(Lang::get(L"about.importConfig"), nullptr, true, [owner]() {
+		const auto path = pickConfigFile(owner);
+		if (path.empty()) return;
+		const auto tip = Lang::get(L"about.sysTip");
+		if (!Setting::get()->importConfigFrom(path)) {
+			MessageBoxW(owner, Lang::get(L"about.importFailed").c_str(), tip.c_str(),
+				MB_OK | MB_ICONWARNING);
+			return;
+		}
+		MessageBoxW(owner, Lang::get(L"about.importOk").c_str(), tip.c_str(), MB_OK | MB_ICONINFORMATION);
+		// 提示关掉后自动重启，让新实例重新读一遍配置。
+		// 重启投递到调度队列：不在按钮自己的点击回调里同步退出进程
+		auto relaunch = [owner]() {
+			if (::App::restart()) return;
+			MessageBoxW(owner, Lang::get(L"about.importDone").c_str(),
+				Lang::get(L"about.sysTip").c_str(), MB_OK | MB_ICONWARNING);
+		};
+		if (auto* a = Ling::App::get()) a->dq.TryEnqueue(relaunch);
+		else relaunch();
 	});
-	openDir->onLeave.add([dirText, dirIcon](Ling::Button*) {
-		dirText->setColor(SettingTheme::textTertiary);
-		dirIcon->setColor(SettingTheme::textTertiary);
+
+	lightLink(Lang::get(L"about.exportConfig"), nullptr, false, [owner]() {
+		const auto path = Util::getSaveFilePath(owner, L"json", L"SnowAir-config.json", L"");
+		if (path.empty()) return;   // 用户取消
+		if (!Setting::get()->exportConfigTo(path)) {
+			MessageBoxW(owner, Lang::get(L"about.exportFailed").c_str(),
+				Lang::get(L"about.sysTip").c_str(), MB_OK | MB_ICONWARNING);
+		}
 	});
 
-	openDir->onClick.add([](Ling::Button*) {
+	lightLink(Lang::get(L"about.openDataDir"), Icon::Folder, false, [owner]() {
 		const auto dir = Setting::get()->getDataPath();
-		ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+		ShellExecuteW(owner, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 	});
 
 	auto* crRow = makeChild<Ling::Node>();

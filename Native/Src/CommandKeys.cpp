@@ -124,6 +124,8 @@ namespace
 		// 工具栏上没有"隐藏/显示工具栏"这颗按钮：纯命令键（演示画布时收起整条工具栏）。
 		// 它同样是**临时全局键** —— 穿透/收起之后焦点已经不在本软件上，窗口内收不到。
 		{ L"cmd_toggle_toolbar", kGrpCanvas, L"cmdkey.toggleToolbar", Scope::Global, Scene::Fullscreen, kFullscreen, true, false, L"F1" },
+		// 创建快照：与属性栏上的按钮同一入口；默认不绑键，由用户自己配
+		{ L"cmd_demo_snapshot", kGrpCanvas, L"cmdkey.demoSnapshot", Scope::Session, Scene::Fullscreen, kFullscreen, true, false, L"" },
 	};
 
 	const Entry* findEntry(const std::wstring& id)

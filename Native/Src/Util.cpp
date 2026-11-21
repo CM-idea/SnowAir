@@ -1149,14 +1149,13 @@ std::filesystem::path Util::desktopDir()
 
 std::filesystem::path Util::outputDir()
 {
-	// 「文件输出」里自定义了截图目录就用它；否则用系统「图片」下的 SnowAir
+	// 「文件输出」里自定义了截图目录就用它；否则用系统「图片」下的 SnowAir。
+	// 这里**只算路径、不建目录**：历史扫描 / 过期清理 / 打开菜单都会调用它，
+	// 顺手建目录会让用户删掉的默认空文件夹（图片\SnowAir）每次启动又被重新生成。
+	// 真正落盘时由 buildSavePath / commitRecordedFile 负责建目录。
 	auto* setting = Setting::get();
 	auto custom = setting ? setting->getScreenshotDir() : std::wstring{};
-	auto dir = custom.empty() ? defaultOutputDir() : std::filesystem::path{ custom };
-	if (dir.empty()) return {};
-	std::error_code ec;
-	if (!std::filesystem::exists(dir, ec)) std::filesystem::create_directories(dir, ec);
-	return dir;
+	return custom.empty() ? defaultOutputDir() : std::filesystem::path{ custom };
 }
 
 namespace {
@@ -1262,6 +1261,8 @@ std::wstring Util::buildSavePath(const std::wstring& format, const std::wstring&
 
 	std::filesystem::path dir = root;
 	std::error_code ec;
+	// outputDir 只解析路径不建目录：真正要落盘时才把根目录补出来
+	if (!std::filesystem::exists(dir, ec)) std::filesystem::create_directories(dir, ec);
 	for (auto& p : parts) {
 		dir.append(sanitizeSegment(p));
 		if (!std::filesystem::exists(dir, ec)) std::filesystem::create_directories(dir, ec);

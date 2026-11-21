@@ -98,9 +98,12 @@ SnowAir 本体以 **Apache License 2.0** 开源；运行依赖定制版 Ling（�
 ```text
 SnowAir.exe                     # 托盘待命，默认
 SnowAir.exe --auto-quit=true    # 截完即退出
-SnowAir.exe --enter=pin         # 框选后直接进入钉图
+SnowAir.exe --enter=pin         # 贴图
 SnowAir.exe --enter=long        # 长截图
 SnowAir.exe --enter=video       # 录屏
+SnowAir.exe --enter=ocr         # 文字识别
+SnowAir.exe --enter=demo        # 演示画布
+SnowAir.exe --enter=edit        # 图片编辑
 SnowAir.exe --enter=tray        # 仅托盘，等同于默认行为
 ```
 

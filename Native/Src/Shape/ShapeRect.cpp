@@ -44,6 +44,8 @@ ShapeRect::ShapeRect(AnnotHost* win, int kind, int sides) :ShapeBase(win), dragg
 	auto toolSub = win->toolSub.get();
 	auto d2d = Ling::D2D::get();
 	d2d->deviceContext->CreateSolidColorBrush(toolSub->getSelectedColor(), brush.GetAddressOf());
+	d2d->deviceContext->CreateSolidColorBrush(toolSub->getSelectedColor(), brushPaint.GetAddressOf());
+	opacity = std::clamp(toolSub->rectOpacity, 10, 100) / 100.f;
 	strokeWidth = toolSub->getSliderVal();
 	isFill = toolSub->isRectFill;
 	isDash = toolSub->isRectDash && !isFill;
@@ -86,6 +88,7 @@ void ShapeRect::applyStyle()
 	isDash = ts->isRectDash && !isFill;
 	strokeStyle = isDash ? makeDashStroke(strokeWidth) : nullptr;
 	brush->SetColor(ts->getSelectedColor());
+	opacity = std::clamp(ts->rectOpacity, 10, 100) / 100.f;
 	// 圆角仅在统一百分比模式下跟随；已单独拖动的角不被覆盖。
 	if (uniformPct_ && std::fabs(ts->cornerRadius - radiusPct_) >= 0.01f)
 		setCornerRadius(ts->cornerRadius);
@@ -104,6 +107,7 @@ void ShapeRect::syncToolFromShape() const
 		: (kind_ == Star ? ToolSub::StarShape : ToolSub::RectShape);
 	ts->cornerRadius = std::clamp(radiusPct_, 0.f, 100.f);
 	if (ts->cornerRadius > 0.f) ts->lastCornerRadius = ts->cornerRadius;
+	ts->rectOpacity = (int)std::lround(opacity * 100.f);
 	if (kind_ == Polygon) ts->polygonSides = sides_;
 	else if (kind_ == Star) ts->starPoints = sides_;
 	ts->setShapeSliderVal(L"rect", strokeWidth);
@@ -296,8 +300,11 @@ void ShapeRect::paint(ID2D1DeviceContext* ctx)
 		// 四角可不同圆角，走自建路径（D2D 的 RoundedRect 只支持统一半径）
 		auto geo = buildShape();
 		if (!geo) return;
-		if (isFill) ctx->FillGeometry(geo.Get(), brush.Get());
-		else ctx->DrawGeometry(geo.Get(), brush.Get(), strokeWidth, strokeStyle.Get());
+		auto c = brush->GetColor();
+		c.a *= opacity;
+		brushPaint->SetColor(c);
+		if (isFill) ctx->FillGeometry(geo.Get(), brushPaint.Get());
+		else ctx->DrawGeometry(geo.Get(), brushPaint.Get(), strokeWidth, strokeStyle.Get());
 	});
 }
 

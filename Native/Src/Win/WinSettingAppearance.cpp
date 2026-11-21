@@ -1512,6 +1512,19 @@ void WinSettingAppearance::tbBuildInitialEditor(Ling::Node* wrap)
 	tbDragGhostIcon->setFontFamily(Icon::Family);
 	tbDragGhostIcon->setFontSize(Icon::SizeSm);
 	tbDragGhostIcon->setColor(SettingTheme::textPrimary);
+	// 复合图标（马赛克 → 模糊）的叠字形：与 chip 内部一样叠一层，拖拽预览才不会只剩一张空卡片
+	tbDragGhostOverlay = tbDragGhost->makeChild<Ling::Label>();
+	tbDragGhostOverlay->setFontFamily(Icon::Family);
+	tbDragGhostOverlay->setFontSize(Icon::SizeSm);
+	tbDragGhostOverlay->setColor(SettingTheme::textPrimary);
+	tbDragGhostOverlay->setPositionType(Ling::Position::Absolute);
+	tbDragGhostOverlay->setPosition(Ling::Edge::Left, 0.f);
+	tbDragGhostOverlay->setPosition(Ling::Edge::Right, 0.f);
+	tbDragGhostOverlay->setPosition(Ling::Edge::Top, 0.f);
+	tbDragGhostOverlay->setPosition(Ling::Edge::Bottom, 0.f);
+	tbDragGhostOverlay->setJustifyContent(Ling::Justify::Center);
+	tbDragGhostOverlay->setAlignItems(Ling::Align::Center);
+	tbDragGhostOverlay->hide();
 	tbDragGhost->hide();
 
 	tbInitialSlot.clear();   // 初始为"未选中"→ 第二张卡片显示占位提示
@@ -1577,6 +1590,7 @@ void WinSettingAppearance::tbRefreshInitialEditor()
 	auto* box = tbInitialEditorBox;
 	box->removeAllChildren();
 	tbInitChips.clear();      // 先失效旧 chip 指针，避免占位态残留悬空引用
+	tbChipGlyphs.clear();
 	tbInitRow = nullptr;
 	tbInitCursor = nullptr;
 	tbInitDragIdx = -1;
@@ -1646,6 +1660,8 @@ void WinSettingAppearance::tbRefreshInitialEditor()
 		b->setHoverBg(SettingTheme::accent);
 		b->setHoverColor(SettingTheme::textPrimary);
 		if (tbTip_ && c.tipKey) tbTip_->bind(b, Lang::get(c.tipKey));
+		// 记下这个 chip 的图标字形（复合图标没有文本，拖拽预览要照抄这两层字形）
+		tbChipGlyphs[b] = { c.glyph ? c.glyph : L"", c.overlayGlyph ? c.overlayGlyph : L"" };
 		return b;
 	};
 
@@ -1866,7 +1882,21 @@ void WinSettingAppearance::tbInitDragDown(POINT pos)
 		tbInitDragIdx = (int)i;
 		tbInitDropIdx = -1;
 		if (tbDragGhost && tbDragGhostIcon) {
-			tbDragGhostIcon->setText(chip ? chip->getText() : L"");
+			auto it = tbChipGlyphs.find(chip);
+			const bool composite = it != tbChipGlyphs.end() && !it->second.second.empty();
+			if (it != tbChipGlyphs.end()) tbDragGhostIcon->setText(it->second.first);
+			else tbDragGhostIcon->setText(chip->getText());
+			// 复合图标（模糊）：把半透明叠字形也画上，否则预览就是一张空卡片
+			if (tbDragGhostOverlay) {
+				if (composite) {
+					tbDragGhostOverlay->setText(it->second.second);
+					tbDragGhostOverlay->setColor((SettingTheme::textPrimary & 0xFFFFFF00u) | 0x40u);
+					tbDragGhostOverlay->show();
+				}
+				else {
+					tbDragGhostOverlay->hide();
+				}
+			}
 			tbInitDragGhostMove(pos);
 			tbDragGhost->show();
 			win->refresh();

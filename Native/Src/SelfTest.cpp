@@ -8,6 +8,7 @@
 #include "Shape/ArrowPoly.h"
 #include "Win/PixLens.h"
 #include "Win/CursorImage.h"
+#include "Win/LongMatch.h"
 #include <cstdio>
 
 namespace
@@ -299,6 +300,388 @@ int RunSelfTest()
 		check(!matches(L"", L"任意标题", L"anything", L""), L"黑名单 空词条不匹配");
 	}
 
+	// —— 长截图拼接：位移估计 + 覆盖式拼接 ——
+	// 合成一页内容（文字行 + 照片块 + 渐变条），按真实滚动位置切帧，验证：
+	//   1. 各种步长（含一次滚过大半个视口）都能定位并拼上，画面逐行对得上；
+	//   2. 吸顶/吸底固定栏不会被反复拼进长图，也不会留在长图中间；
+	//   3. 来回滚动不重复写入；
+	//   4. 快滚帧（带运动模糊）之后补抓的清晰帧能刷新底部条带；
+	//   5. 固定背景（整帧背景不变）时只靠滚动的内容定位；
+	//   6. 噪声、慢滚、纯动画、跳太远都不会把长图拼坏；
+	//   7. 从页面中间往上滚能向上长；
+	//   8. 固定背景 + 长串滚动时正文连续、不重复（按文字像素逐行核对）。
+	{
+		const int W = 640, H = 720, PAGE_H = 12000;
+		const int barTop = 56, barBottom = 48; // 吸顶/吸底栏高度
+		std::vector<BYTE> page((size_t)W * PAGE_H * 4, 250);
+		for (int y = 0; y < PAGE_H; ++y) {
+			BYTE* row = page.data() + (size_t)y * W * 4;
+			const int line = y / 24;
+			const bool textRow = (y % 24) < 16;
+			const bool photo = (line % 37) >= 30;
+			const bool gradient = (line % 53) >= 48;
+			for (int x = 0; x < W; ++x) {
+				int v = 250;
+				if (textRow && x > 30 && x < W - 40) {
+					uint32_t hv = (uint32_t)y * 2654435761u ^ (uint32_t)(x / 3) * 40503u ^ (uint32_t)line;
+					hv ^= hv >> 13; hv *= 1274126177u; hv ^= hv >> 16;
+					if (hv % 5 < 2) v = 25 + (int)(hv % 40);
+				}
+				if (photo) {
+					uint32_t hv = (uint32_t)y * 2246822519u ^ (uint32_t)x * 3266489917u;
+					hv ^= hv >> 15; hv *= 668265263u; hv ^= hv >> 13;
+					v = 40 + (int)(hv % 170);
+				}
+				else if (gradient) {
+					v = 60 + (int)((y % 130) * 120 / 130) + (x * 20 / W);
+				}
+				BYTE* p = row + (size_t)x * 4;
+				p[0] = p[1] = p[2] = (BYTE)v;
+				p[3] = 255;
+			}
+		}
+		// 固定栏：带边框与竖条，页面本身永远不出现这些像素
+		std::vector<BYTE> topBarPix((size_t)W * barTop * 4);
+		std::vector<BYTE> bottomBarPix((size_t)W * barBottom * 4);
+		for (int y = 0; y < barTop; ++y) {
+			for (int x = 0; x < W; ++x) {
+				BYTE* p = topBarPix.data() + ((size_t)y * W + x) * 4;
+				const int v = (y < 2 || y >= barTop - 2) ? 60 : (((x / 40) % 2) ? 90 : 210);
+				p[0] = p[1] = p[2] = (BYTE)v;
+				p[3] = 255;
+			}
+		}
+		for (int y = 0; y < barBottom; ++y) {
+			for (int x = 0; x < W; ++x) {
+				BYTE* p = bottomBarPix.data() + ((size_t)y * W + x) * 4;
+				const int v = (y < 2 || y >= barBottom - 2) ? 70 : (((x / 30) % 2) ? 110 : 200);
+				p[0] = p[1] = p[2] = (BYTE)v;
+				p[3] = 255;
+			}
+		}
+		auto pageRow = [&](int y) -> const BYTE* { return page.data() + (size_t)y * W * 4; };
+
+		struct FrameOpt { bool bars{ false }; int blur{ 0 }; };
+		auto makeFrame = [&](int scroll, const FrameOpt& opt) {
+			std::vector<BYTE> f((size_t)W * H * 4, 250);
+			for (int y = 0; y < H; ++y) {
+				const int sy = std::clamp(scroll + y, 0, PAGE_H - 1);
+				memcpy(f.data() + (size_t)y * W * 4, pageRow(sy), (size_t)W * 4);
+			}
+			if (opt.blur > 0) {
+				// 垂直方向把相邻两行混合：模拟快速滚动时的运动模糊
+				std::vector<BYTE> src = f;
+				for (int y = 0; y < H; ++y) {
+					const int y2 = std::min(H - 1, y + opt.blur);
+					BYTE* dst = f.data() + (size_t)y * W * 4;
+					const BYTE* a = src.data() + (size_t)y * W * 4;
+					const BYTE* b = src.data() + (size_t)y2 * W * 4;
+					for (int i = 0; i < W * 4; ++i) dst[i] = (BYTE)(((int)a[i] + (int)b[i]) / 2);
+				}
+			}
+			if (opt.bars) {
+				memcpy(f.data(), topBarPix.data(), topBarPix.size());
+				memcpy(f.data() + (size_t)(H - barBottom) * W * 4, bottomBarPix.data(), bottomBarPix.size());
+			}
+			return f;
+		};
+
+		auto compareRows = [&](const std::vector<BYTE>& canvas, int canvasH, int fromRow, const wchar_t* name) {
+			int bad = -1;
+			for (int r = fromRow; r < canvasH && bad < 0; ++r) {
+				if (memcmp(canvas.data() + (size_t)r * W * 4, pageRow(r), (size_t)W * 4) != 0) bad = r;
+			}
+			wchar_t buf[192]{};
+			if (bad < 0) swprintf_s(buf, L"%s：画面与页面逐行一致（%d 行）", name, canvasH);
+			else swprintf_s(buf, L"%s：第 %d 行与页面对不上", name, bad);
+			check(bad < 0, buf);
+		};
+
+		struct RunResult { bool ok{ false }; int scroll{ 0 }; int maxScroll{ 0 }; int canvasH{ 0 }; std::vector<BYTE> canvas; std::vector<int> shifts; };
+		auto runSteps = [&](const std::vector<int>& steps, const FrameOpt& opt) {
+			RunResult out;
+			LongStitch::Stitcher st;
+			auto first = makeFrame(0, opt);
+			out.ok = st.begin(first.data(), W, H, W * 4, 36000, 256ull << 20);
+			if (!out.ok) return out;
+			for (int step : steps) {
+				out.scroll = std::clamp(out.scroll + step, 0, PAGE_H - H);
+				if (out.scroll > out.maxScroll) out.maxScroll = out.scroll;
+				auto f = makeFrame(out.scroll, opt);
+				const auto r = st.push(f.data(), W * 4);
+				out.shifts.push_back(r.shift);
+			}
+			out.canvasH = st.height();
+			if (st.data() && st.bytes() > 0) out.canvas.assign(st.data(), st.data() + st.bytes());
+			return out;
+		};
+
+		// 1) 普通页面：各种步长（含一次滚过大半个视口）
+		{
+			FrameOpt opt;
+			const std::vector<int> steps{ 120, 240, 360, 420, 60, 33 };
+			auto r = runSteps(steps, opt);
+			wchar_t buf[192]{};
+			swprintf_s(buf, L"长截图拼接 大步小步混合：画布高度 %d（应为 %d）", r.canvasH, r.maxScroll + H);
+			check(r.ok && r.canvasH == r.maxScroll + H, buf);
+			compareRows(r.canvas, r.canvasH, 0, L"长截图拼接 大步小步混合");
+			bool shiftsOk = (r.shifts.size() == steps.size());
+			for (size_t i = 0; shiftsOk && i < steps.size(); ++i)
+				shiftsOk = std::abs(r.shifts[i] + steps[i]) <= 1;
+			check(shiftsOk, L"长截图拼接 每步位移都估对（误差 <= 1 行）");
+		}
+
+		// 2) 吸顶/吸底固定栏：新行只从内容区取，固定栏不会被反复拼进去
+		{
+			FrameOpt opt;
+			opt.bars = true;
+			const std::vector<int> steps{ 120, 240, 360, 400, 180 };
+			auto r = runSteps(steps, opt);
+			const int expectH = r.scroll + (H - barBottom);
+			wchar_t buf[192]{};
+			swprintf_s(buf, L"长截图拼接 固定栏：画布高度 %d（应为 %d）", r.canvasH, expectH);
+			check(r.ok && std::abs(r.canvasH - expectH) <= 2, buf);
+			compareRows(r.canvas, r.canvasH, barTop, L"长截图拼接 固定栏");
+			// 顶部保留首帧的固定栏，而不是页面内容
+			bool topBarKept = r.canvas.size() >= (size_t)barTop * W * 4
+				&& memcmp(r.canvas.data(), topBarPix.data(), topBarPix.size()) == 0;
+			check(topBarKept, L"长截图拼接 顶部固定栏保留在长图开头");
+		}
+
+		// 3) 来回滚动：回看已拼区域不重复写入
+		{
+			FrameOpt opt;
+			auto r = runSteps({ 300, 300, -200, 400, -100 }, opt);
+			wchar_t buf[192]{};
+			swprintf_s(buf, L"长截图拼接 来回滚动：画布高度 %d（应为 %d）", r.canvasH, r.maxScroll + H);
+			check(r.ok && r.canvasH == r.maxScroll + H, buf);
+			compareRows(r.canvas, r.canvasH, 0, L"长截图拼接 来回滚动");
+		}
+
+		// 4) 快滚帧带运动模糊，最后用停稳帧刷新底部条带
+		{
+			FrameOpt opt;
+			opt.blur = 2;
+			LongStitch::Stitcher st;
+			auto first = makeFrame(0, opt);
+			bool ok = st.begin(first.data(), W, H, W * 4, 36000, 256ull << 20);
+			int scroll = 0;
+			bool shiftsOk = true;
+			for (int step : { 220, 260, 240 }) {
+				scroll += step;
+				auto f = makeFrame(scroll, opt);
+				const auto r = st.push(f.data(), W * 4);
+				if (!r.accepted || std::abs(r.shift + step) > 1) shiftsOk = false;
+			}
+			check(ok && shiftsOk, L"长截图拼接 运动模糊帧仍能估对位移");
+			auto sharp = makeFrame(scroll, FrameOpt{});
+			const bool refreshed = st.refreshTail(sharp.data(), W * 4);
+			int bad = -1;
+			const int canvasH = st.height();
+			for (int r = std::max(0, canvasH - 300); r < canvasH && bad < 0; ++r) {
+				if (memcmp(st.data() + (size_t)r * W * 4, pageRow(r), (size_t)W * 4) != 0) bad = r;
+			}
+			wchar_t buf[192]{};
+			swprintf_s(buf, L"长截图拼接 停稳帧刷新底部条带（首个不一致行 %d）", bad);
+			check(refreshed && bad < 0, buf);
+		}
+
+		// 5) 固定背景：整帧背景每帧一样，只有滚动的内容在动
+		{
+			std::vector<BYTE> backdrop((size_t)W * H * 4);
+			for (int y = 0; y < H; ++y) {
+				for (int x = 0; x < W; ++x) {
+					uint32_t hv = (uint32_t)y * 2654435761u ^ (uint32_t)x * 40503u;
+					hv ^= hv >> 13; hv *= 1274126177u; hv ^= hv >> 16;
+					BYTE* p = backdrop.data() + ((size_t)y * W + x) * 4;
+					p[0] = p[1] = p[2] = (BYTE)(30 + hv % 160);
+					p[3] = 255;
+				}
+			}
+			auto frameWithBackdrop = [&](int scroll) {
+				auto f = backdrop;
+				for (int y = 0; y < H; ++y) {
+					const int docY = std::clamp(scroll + y, 0, PAGE_H - 1);
+					const BYTE* src = pageRow(docY);
+					BYTE* dst = f.data() + (size_t)y * W * 4;
+					for (int x = 0; x < W; ++x) {
+						const BYTE* s = src + (size_t)x * 4;
+						if (s[0] < 200) memcpy(dst + (size_t)x * 4, s, 4); // 只有文字像素盖到背景上
+					}
+				}
+				return f;
+			};
+			LongStitch::Stitcher st;
+			auto f0 = frameWithBackdrop(0);
+			bool ok = st.begin(f0.data(), W, H, W * 4, 36000, 256ull << 20);
+			int scroll = 0, badShifts = 0;
+			for (int step : { 160, 220, 180, 240 }) {
+				scroll += step;
+				auto f = frameWithBackdrop(scroll);
+				const auto r = st.push(f.data(), W * 4);
+				if (!r.accepted || std::abs(r.shift + step) > 1) ++badShifts;
+			}
+			check(ok && badShifts == 0, L"长截图拼接 固定背景下只靠滚动内容定位");
+		}
+
+		// 6) 完全重复的帧不增长；一次跳太远（没有重叠）不写入
+		{
+			LongStitch::Stitcher st;
+			FrameOpt opt;
+			auto first = makeFrame(0, opt);
+			bool ok = st.begin(first.data(), W, H, W * 4, 36000, 256ull << 20);
+			auto again = makeFrame(0, opt);
+			const auto r0 = st.push(again.data(), W * 4);
+			const bool stable0 = !r0.accepted && !r0.grew && st.height() == H;
+			auto jump = makeFrame(H * 4, opt); // 位移远超帧高：没有重叠
+			const auto r1 = st.push(jump.data(), W * 4);
+			const bool stable1 = !r1.grew && st.height() == H;
+			check(ok && stable0, L"长截图拼接 画面没动时不增长");
+			check(stable1, L"长截图拼接 跳太远的一帧不写入");
+		}
+
+		// 7) 每帧带轻微噪声：噪声不能把定位带偏
+		{
+			auto noisy = [&](std::vector<BYTE> f, unsigned seed, int amp) {
+				unsigned s = seed;
+				for (size_t i = 0; i + 3 < f.size(); i += 4) {
+					s = s * 1664525u + 1013904223u;
+					const int d = (int)((s >> 24) % (unsigned)(amp * 2 + 1)) - amp;
+					f[i] = (BYTE)std::clamp((int)f[i] + d, 0, 255);
+					f[i + 1] = (BYTE)std::clamp((int)f[i + 1] + d, 0, 255);
+					f[i + 2] = (BYTE)std::clamp((int)f[i + 2] + d, 0, 255);
+				}
+				return f;
+			};
+			LongStitch::Stitcher st;
+			auto f0 = noisy(makeFrame(0, FrameOpt{}), 7, 3);
+			bool ok = st.begin(f0.data(), W, H, W * 4, 36000, 256ull << 20);
+			int scroll = 0, bad = 0;
+			for (int step : { 140, 260, 320, 190 }) {
+				scroll += step;
+				auto f = noisy(makeFrame(scroll, FrameOpt{}), 100 + (unsigned)scroll, 3);
+				const auto r = st.push(f.data(), W * 4);
+				if (!r.accepted || std::abs(r.shift + step) > 1) ++bad;
+			}
+			wchar_t buf[192]{};
+			swprintf_s(buf, L"长截图拼接 帧间噪声下仍能定位（失败 %d 步）", bad);
+			check(ok && bad == 0 && st.height() == scroll + H, buf);
+		}
+
+		// 8) 慢速滚动：每次只滚 1~3 行
+		{
+			LongStitch::Stitcher st;
+			auto f0 = makeFrame(0, FrameOpt{});
+			bool ok = st.begin(f0.data(), W, H, W * 4, 36000, 256ull << 20);
+			int scroll = 0, bad = 0;
+			for (int step : { 1, 2, 1, 3, 2, 3 }) {
+				scroll += step;
+				auto f = makeFrame(scroll, FrameOpt{});
+				const auto r = st.push(f.data(), W * 4);
+				if (!r.accepted || r.shift != -step) ++bad;
+			}
+			wchar_t buf[192]{};
+			swprintf_s(buf, L"长截图拼接 慢滚 1~3 行（失败 %d 步）", bad);
+			check(ok && bad == 0 && st.height() == scroll + H, buf);
+		}
+
+		// 9) 只有局部动画、页面没有滚动：不能增长
+		{
+			LongStitch::Stitcher st;
+			auto f0 = makeFrame(0, FrameOpt{});
+			bool ok = st.begin(f0.data(), W, H, W * 4, 36000, 256ull << 20);
+			int grew = 0;
+			for (int k = 1; k <= 3; ++k) {
+				auto f = makeFrame(0, FrameOpt{});
+				for (int y = 300; y < 380; ++y)
+					for (int x = 100; x < 260; ++x) {
+						BYTE* p = f.data() + ((size_t)y * W + x) * 4;
+						p[0] = p[1] = p[2] = (k % 2) ? 20 : 240;
+					}
+				const auto r = st.push(f.data(), W * 4);
+				if (r.grew) ++grew;
+			}
+			check(ok && grew == 0 && st.height() == H, L"长截图拼接 只有局部动画时不增长");
+		}
+
+		// 10) 从页面中间开始、往上滚：长图向上长，且依然逐行对得上、不重复
+		{
+			LongStitch::Stitcher st;
+			int scroll = 800;
+			auto f0 = makeFrame(scroll, FrameOpt{});
+			bool ok = st.begin(f0.data(), W, H, W * 4, 36000, 256ull << 20);
+			bool shiftsOk = true;
+			for (int step : { -100, -200, -300, -200 }) {
+				scroll += step;
+				auto f = makeFrame(scroll, FrameOpt{});
+				const auto r = st.push(f.data(), W * 4);
+				if (!r.accepted || r.shift != -step || !r.fromTop) shiftsOk = false;
+			}
+			int bad = -1;
+			for (int y = 0; y < st.height() && bad < 0; ++y)
+				if (memcmp(st.data() + (size_t)y * W * 4, pageRow(y), (size_t)W * 4) != 0) bad = y;
+			wchar_t buf[192]{};
+			swprintf_s(buf, L"长截图拼接 从中间往上滚：画布 %d 行（应为 %d），首个不一致行 %d",
+				st.height(), 800 + H, bad);
+			check(ok && shiftsOk && st.height() == 800 + H && bad < 0, buf);
+		}
+
+		// 11) 固定背景 + 长串自动滚动：正文必须连续、不能重复
+		// 背景是每帧都一样、且始终比文字亮的浅色噪点，所以“文字像素”能单独拎出来核对。
+		{
+			std::vector<BYTE> backdrop((size_t)W * H * 4);
+			for (int y = 0; y < H; ++y) {
+				for (int x = 0; x < W; ++x) {
+					uint32_t hv = (uint32_t)y * 2654435761u ^ (uint32_t)x * 40503u;
+					hv ^= hv >> 13; hv *= 1274126177u; hv ^= hv >> 16;
+					BYTE* p = backdrop.data() + ((size_t)y * W + x) * 4;
+					p[0] = p[1] = p[2] = (BYTE)(185 + hv % 60);
+					p[3] = 255;
+				}
+			}
+			auto frameWithBackdrop = [&](int scroll) {
+				auto f = backdrop;
+				for (int y = 0; y < H; ++y) {
+					const int docY = std::clamp(scroll + y, 0, PAGE_H - 1);
+					const BYTE* src = pageRow(docY);
+					BYTE* dst = f.data() + (size_t)y * W * 4;
+					for (int x = 0; x < W; ++x) {
+						if (src[(size_t)x * 4] < 150) memcpy(dst + (size_t)x * 4, src + (size_t)x * 4, 4);
+					}
+				}
+				return f;
+			};
+			LongStitch::Stitcher st;
+			int scroll = 0;
+			auto f0 = frameWithBackdrop(0);
+			bool ok = st.begin(f0.data(), W, H, W * 4, 36000, 256ull << 20);
+			int badAccept = 0;
+			for (int i = 0; i < 20; ++i) {
+				const int step = 110 + (i * 37) % 60; // 模拟自动滚动的不等步长
+				scroll = std::clamp(scroll + step, 0, PAGE_H - H);
+				auto f = frameWithBackdrop(scroll);
+				const auto r = st.push(f.data(), W * 4);
+				if (!r.accepted || !r.grew) ++badAccept;
+			}
+			int bad = -1;
+			for (int y = 0; y < st.height() && bad < 0; ++y) {
+				const BYTE* cv = st.data() + (size_t)y * W * 4;
+				const BYTE* pg = pageRow(std::clamp(y, 0, PAGE_H - 1));
+				int diff = 0, total = 0;
+				for (int x = 2; x < W - 2; x += 3) {
+					const bool a = cv[(size_t)x * 4] < 150;
+					const bool b = pg[(size_t)x * 4] < 150;
+					if (a != b) ++diff;
+					++total;
+				}
+				if (diff > total / 50) bad = y;
+			}
+			wchar_t buf[192]{};
+			swprintf_s(buf, L"长截图拼接 固定背景长串滚动：%d 行（应为 %d），失手 %d 步，首个重复/错位行 %d",
+				st.height(), scroll + H, badAccept, bad);
+			check(ok && badAccept == 0 && st.height() == scroll + H && bad < 0, buf);
+		}
+	}
 	if (g_log)
 	{
 		fwprintf(g_log, L"\n失败项：%d\n", g_fail);

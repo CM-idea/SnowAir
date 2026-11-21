@@ -2,6 +2,7 @@
 #include <include/Ling.h>
 #include <algorithm>
 #include <functional>
+#include <memory>
 #include <vector>
 #include <cmath>
 class AnnotHost;
@@ -11,6 +12,11 @@ public:
 	ShapeBase(AnnotHost* win);
 	virtual ~ShapeBase();
 	virtual void paint(ID2D1DeviceContext* ctx) = 0;
+	// 深拷贝一份独立标注（宿主换成 host）；不支持克隆的形状（撤销辅助项等）返回 nullptr。
+	// 演示画布「快照」用它把当前标注固化进快照，原件继续留在实时画布上。
+	virtual std::unique_ptr<ShapeBase> clone(AnnotHost* host) const { (void)host; return nullptr; }
+	// 克隆后重绑内部引用（线上文字宿主、连线目标）；map：旧指针 → 新指针
+	virtual void remapCloneRefs(const std::function<ShapeBase*(ShapeBase*)>& map) { (void)map; }
 	// 二次选中后工具条样式变化：把当前工具状态重新套到本形状（默认无动作）。
 	// 所有标注共用这一条路径，不再按类型各写一套分支。
 	virtual void applyStyle() {}
@@ -88,7 +94,7 @@ public:
 		const float nx = lx * sx, ny = ly * sy;
 		return D2D1::Point2F(pivotX + nx * c - ny * s, pivotY + nx * s + ny * c);
 	}
-	// 序号：尾巴被拖出控制圈后，Delete/Backspace 先把尾巴收回圈上而不是删标注。
+	// 序号：尾巴被动过时，Delete/Backspace 先把尾巴复位到初始位置与长度而不是删标注。
 	// 返回 true 表示这次按键已被消费。
 	virtual bool retractTail() { return false; }
 	// 分组变换结束（抬手）：马赛克/模糊这类需要重采样的形状在这里收尾
@@ -136,6 +142,8 @@ public:
 public:
 	AnnotHost* win;
 	bool isUndo;
+	// 矩形/椭圆/多边形/星形：整体不透明度（0–1），由属性栏「透明度」控制
+	float opacity{ 1.f };
 	// 白板「编辑背景」时画的标注属于背景层：关掉编辑背景后不参与点选/擦除，
 	// 「重置画布」也不会清掉它（编辑背景打开时才一起清）
 	bool backgroundLayer{ false };

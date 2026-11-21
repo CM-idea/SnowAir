@@ -1,4 +1,7 @@
 {
+  "instance": {
+    "takeOver": "An older SnowAir version is still running (possibly capturing or recording).\nClose it and continue with this version?\n\nIf it has unsaved work, cancel and handle it there first."
+  },
   "cap": {
     "mark": "Annotate Image",
     "long": "Scrolling Screenshot",
@@ -86,6 +89,7 @@
   },
   "tool": {
     "rect": "Rectangle",
+    "opacity": "Opacity",
     "rectDefault": "Square",
     "ellipse": "Ellipse",
     "polygon": "Polygon",
@@ -128,6 +132,7 @@
     "numberLetter": "Letter number",
     "numberEmoji": "Emoji",
     "numberEmojiPick": "Pick emoji",
+    "numberNoTail": "No tail",
     "emojiSize": "Emoji size",
     "patina": "Patina",
     "watermark": "Watermark",
@@ -169,9 +174,17 @@
     "resetCanvas": "Reset Canvas",
     "mouseThrough": "Mouse Through",
     "whiteboard": "Whiteboard",
+    "snapshot": "Snapshot",
     "showCursor": "Show Cursor",
     "hideCursor": "Hide Cursor",
     "cancel": "Cancel"
+  },
+  "snapshot": {
+    "create": "Create Snapshot",
+    "delete": "Delete Snapshot",
+    "saveAs": "Save As",
+    "empty": "No snapshots",
+    "exitConfirm": "Snapshots have unsaved changes that will be lost after exiting the demo canvas. Exit anyway?"
   },
   "board": {
     "noColor": "Exit whiteboard",
@@ -699,7 +712,13 @@
     "repo": "Repository",
     "slogan": "Fast and free, all in SnowAir",
     "dataDir": "Data folder",
-    "openDataDir": "Open data folder",
+    "openDataDir": "Open config folder",
+    "importConfig": "Import config",
+    "exportConfig": "Export config",
+    "importOk": "Import succeeded",
+    "importDone": "Config imported. Please restart SnowAir manually.",
+    "importFailed": "Import failed: please choose a valid config file.",
+    "exportFailed": "Export failed: cannot write to the selected location.",
     "changelog": "Changelog",
     "notChecked": "Not checked yet",
     "checking": "Checking for updates…",
@@ -779,18 +798,22 @@
     "toggleSystemAudio": "Toggle System Audio",
     "toggleMic": "Toggle Microphone",
     "toggleToolbar": "Hide/Show Toolbar",
+    "demoSnapshot": "Create Snapshot",
     "mouseThrough": "Mouse Through",
     "mouseRight": "Right Mouse Button",
     "conflict": "Shortcut [ %1 ] is already bound to \"%2\".\nOverwriting will unbind \"%2\". Continue?",
     "reserved": "Shortcut [ %1 ] is fixed to \"%2\" and cannot be assigned to another command."
   },
   "long": {
-    "start": "Start",
+    "start": "Start scrolling",
+    "hintStart": "Click Start scrolling or scroll the mouse wheel to begin",
+    "tooFast": "Scrolling too fast, slow down",
     "pause": "Pause",
     "resume": "Resume",
-    "edit": "Edit annotations",
+    "edit": "Edit",
     "reachedBottom": "Reached the bottom, capture stopped",
-    "tooLong": "Image too long, capture stopped",
+    "tooLong": "Reached the maximum length, capture stopped",
+    "stitchStopped": "Capture stopped",
     "toLong": "Go to long capture"
   },
   "util": {

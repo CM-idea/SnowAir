@@ -26,8 +26,10 @@
 #include "../Tool/ToolLong.h"
 #include "HotkeyHook.h"
 #include "../History.h"
+#include "../Shape/ShapeBase.h"
 #include "../Shape/ShapeText.h"
 #include "../Shape/ShapeRect.h"
+#include "../Shape/ShapeHighlight.h"
 #include "../Tool/ToolbarTheme.h"
 #include "../Tool/ToolbarChrome.h"
 #include "SettingWidgets.h"
@@ -43,6 +45,8 @@
 #include <algorithm>
 #include <filesystem>
 #include <thread>
+#include <unordered_map>
+#include <dwmapi.h>
 #include <wincodec.h>
 #include <shobjidl.h>
 #include <shellapi.h>
@@ -424,6 +428,14 @@ void WinCap::init(StartMode mode)
         }
     }
 
+    // --enter=demo（别名 canvas）不是「框选后进入某个工具」，而是整屏实时画布：
+    // 没有框选阶段，也没有要带进会话的一次性动作。这里直接把起始形态改成 Demo，
+    // 值不必留到 enterByArg（那边只认框选完成后才生效的工具）。
+    if (enterArg == L"demo" || enterArg == L"canvas") {
+        mode = StartMode::Demo;
+        enterArg.clear();
+    }
+
     // 抢在铺盾牌 / 建覆盖窗之前，抓一次"鼠标下真实窗口此刻的光标"（见 primeCursorForCapture）
     primeCursorForCapture();
 
@@ -609,6 +621,8 @@ void WinCap::startPenSlot(bool fade)
 void WinCap::toggleDemoThrough()
 {
     if (!demoMode) return;
+    // 快照编辑期间穿透不可用（按钮已置灰）：否则键盘又回到下层应用，Delete / Ctrl+S 会失效
+    if (demoSnapshotActive()) return;
     setMouseTransparent(!isMouseTransparent);
     if (toolCap) toolCap->setDemoThroughState(isMouseTransparent);
     refresh();
@@ -624,6 +638,8 @@ void WinCap::toggleDemoRecorder()
 	const bool barShown = toolSub && toolSub->demoRecToolsBuilt();
 	// 再点一次 = 收起属性栏；录制中收起栏不影响录制，按钮仍保持选中态
 	if (barShown) { closeDemoRecBar(); return; }
+	// 两个属性栏互斥
+	if (toolSub && toolSub->demoSnapToolsBuilt()) closeDemoSnapBar();
 	demoRecBarOpen_ = true;
 	if (toolCap) toolCap->setDemoRecordState(true);
 	if (toolSub) {
@@ -643,6 +659,409 @@ void WinCap::closeDemoRecBar()
 	if (toolCap) toolCap->setDemoRecordState(demoRecRunning_);
 	if (toolSub) toolSub->hideTools();
 	refresh();
+}
+
+// ---------------- 演示画布：快照 ----------------
+// 快照 = 冻结的整屏画面（桌面 + 白板）+ 当前标注的深拷贝。
+// 选中某个快照后，history->shapes 换成它自己的那一份，标注照常可编辑；
+// 切走时再整体 move 回去，所以实时画布的撤销栈与内容都不受影响。
+// 快照按钮绿色 = 快照栏开着，或选中了某个快照。
+// 两种取消方式不同：有选中时收栏仍保持绿色（还在编辑那张快照）；
+// 没选中时收栏就一并取消绿色。
+void WinCap::refreshDemoSnapshotButton()
+{
+	if (toolCap) toolCap->setDemoSnapshotState(demoSnapBarOpen_ || demoSnapshotActive());
+}
+
+// 点工具栏 / 属性栏后把键盘焦点拉回画布：这两条栏都是 WS_EX_NOACTIVATE 悬浮窗，
+// 点完它们前台/焦点不一定是画布，Delete、Backspace、Ctrl+S 这些窗口内按键会「按了没反应」。
+// 鼠标穿透时键盘本来就归下层应用，这种情况下不抢。
+void WinCap::focusDemoCanvas()
+{
+	if (!demoMode || !hwnd || isMouseTransparent) return;
+	if (GetForegroundWindow() == hwnd) {
+		SetFocus(hwnd);
+		return;
+	}
+	takeForegroundFocus();
+}
+
+// 进入快照编辑 = 全屏看冻结画面，这时键盘（Delete / Backspace / Ctrl+S）必须是我们的。
+// 鼠标穿透会把键盘交给下层应用，所以临时关掉，并把工具栏的穿透按钮置灰（表示暂时不可用）；
+// 回到实时画布时再恢复用户原来的穿透状态。
+void WinCap::suspendDemoThroughForSnapshot()
+{
+	if (!isMouseTransparent) return;
+	demoThroughBeforeSnap_ = true;
+	setMouseTransparent(false);
+	if (toolCap) {
+		toolCap->setDemoThroughState(false);
+		toolCap->setDemoThroughDisabled(true);
+	}
+}
+
+void WinCap::restoreDemoThroughAfterSnapshot()
+{
+	if (!demoThroughBeforeSnap_) return;
+	demoThroughBeforeSnap_ = false;
+	if (toolCap) toolCap->setDemoThroughDisabled(false);
+	setMouseTransparent(true);
+	if (toolCap) toolCap->setDemoThroughState(true);
+}
+
+// 抢前台 + 键盘焦点。SetForegroundWindow 可能被前台锁挡下，
+// 用「临时置顶再取消」和 AttachThreadInput 两级兜底（与设置窗同招）。
+void WinCap::takeForegroundFocus()
+{
+	if (!hwnd) return;
+	SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+	if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd)) {
+		// 前台锁：借"临时取消置顶再置顶"把窗口顶到前台
+		SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+		SetForegroundWindow(hwnd);
+		SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+	}
+	if (GetForegroundWindow() != hwnd) {
+		// 仍被挡：临时共享前台线程的输入队列，抢到焦点后再脱离
+		HWND fg = GetForegroundWindow();
+		const DWORD fgThread = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
+		const DWORD myThread = GetCurrentThreadId();
+		const bool attached = fgThread && fgThread != myThread
+			&& AttachThreadInput(fgThread, myThread, TRUE);
+		SetForegroundWindow(hwnd);
+		if (attached) AttachThreadInput(fgThread, myThread, FALSE);
+	}
+	SetFocus(hwnd);
+}
+
+// 点工具栏「快照」：展开 / 收起快照属性栏（收栏时的绿色规则见上）
+void WinCap::toggleDemoSnapshotBar()
+{
+	if (!demoMode) return;
+	ensureHistory();
+	if (toolSub && toolSub->demoSnapToolsBuilt()) { closeDemoSnapBar(); return; }
+	// 两个属性栏互斥
+	if (toolSub && toolSub->demoRecToolsBuilt()) closeDemoRecBar();
+	demoSnapBarOpen_ = true;
+	if (toolSub) {
+		toolSub->bindOwner(hwnd);
+		// 属性栏和工具栏都不能出现在快照画面里：打开快照栏期间一直保持「不参与屏幕捕获」
+		App::excludeFromCapture(toolSub->hwnd);
+		if (toolCap) App::excludeFromCapture(toolCap->hwnd);
+		toolSub->showDemoSnapshotTools();
+	}
+	// 绿色表示"快照栏开着或选中了某个快照"
+	refreshDemoSnapshotButton();
+	focusDemoCanvas();
+	layoutTools();
+	refresh();
+}
+
+void WinCap::closeDemoSnapBar()
+{
+	demoSnapBarOpen_ = false;
+	// 手动收栏只收栏：当前选中的快照保持不动（有选中时按钮仍绿）
+	if (toolSub) toolSub->hideTools();
+	refreshDemoSnapshotButton();
+	// 抓图排除是随快照栏一起开的，收栏时恢复（录制中仍要保持排除）
+	if (!demoRecRunning_) {
+		if (toolCap) App::clearCaptureExclusion(toolCap->hwnd);
+		if (toolSub) App::clearCaptureExclusion(toolSub->hwnd);
+	}
+	refresh();
+}
+
+void WinCap::demoSnapshotDetachSelection()
+{
+	// 切换/删除前把指向标注的裸指针全部摘掉，避免 move 后悬空
+	if (editingText) editingText->finishEdit();
+	dropStaleEditingText();
+	shapeHover = nullptr;
+	newShape = nullptr;
+	extraSelection_.clear();
+}
+
+std::vector<std::unique_ptr<ShapeBase>> WinCap::cloneVisibleShapes(
+	const std::vector<std::unique_ptr<ShapeBase>>& src)
+{
+	std::vector<std::unique_ptr<ShapeBase>> out;
+	std::unordered_map<ShapeBase*, ShapeBase*> map;
+	for (const auto& s : src) {
+		if (!s || s->isUndo) continue;
+		if (s->isEphemeral()) continue;         // 渐隐笔迹属于临时层，不进快照
+		auto c = s->clone(this);
+		if (!c) continue;                        // 撤销辅助项等不支持克隆
+		map[s.get()] = c.get();
+		out.push_back(std::move(c));
+	}
+	// 克隆是逐项拷贝，内部引用（线上文字宿主、连线目标）还指着旧对象，统一重绑
+	for (auto& c : out) {
+		c->remapCloneRefs([&map](ShapeBase* p) -> ShapeBase* {
+			auto it = map.find(p);
+			return it == map.end() ? nullptr : it->second;
+		});
+	}
+	return out;
+}
+
+ComPtr<ID2D1Bitmap1> WinCap::grabDemoSnapshotBg()
+{
+	ComPtr<ID2D1Bitmap1> bmp;
+	if (!hwnd || w <= 0 || h <= 0) return bmp;
+	// 抓图这一帧只留桌面和白板：工具栏/属性栏用「不参与屏幕捕获」标记剔除。
+	// 不再 hide/show —— 那样每建一张快照工具栏都会闪一下。
+	const bool canExclude = App::supportsCaptureExclusion();
+	const bool capVis = toolCap && IsWindowVisible(toolCap->hwnd);
+	const bool subVis = toolSub && IsWindowVisible(toolSub->hwnd);
+	if (capVis) App::excludeFromCapture(toolCap->hwnd);
+	if (subVis) App::excludeFromCapture(toolSub->hwnd);
+	// 老系统不支持该标记时只能退回隐藏（会闪一下，但没有别的办法）
+	const bool capHidden = capVis && !canExclude;
+	const bool subHidden = subVis && !canExclude;
+	if (capHidden) toolCap->hide();
+	if (subHidden) toolSub->hide();
+	snapshotCapturing_ = true;
+	layout();
+	DwmFlush();
+	auto pixels = Util::captureScreen((int)x, (int)y, (int)w, (int)h);
+	snapshotCapturing_ = false;
+	if (capHidden) toolCap->show();
+	if (subHidden) toolSub->show();
+	// 恢复排除标记：录制中、快照属性栏开着时本来就该保持排除
+	if (capVis && !capHidden && !demoRecRunning_ && !demoSnapBarOpen_) App::clearCaptureExclusion(toolCap->hwnd);
+	if (subVis && !subHidden && !demoRecRunning_ && !demoSnapBarOpen_) App::clearCaptureExclusion(toolSub->hwnd);
+	if (!pixels.empty())
+		App::createBitmapFromBGRA((int)w, (int)h, pixels, bmp.GetAddressOf());
+	refresh();
+	return bmp;
+}
+
+void WinCap::createDemoSnapshot()
+{
+	if (!demoMode) return;
+	ensureHistory();
+	auto snap = std::make_unique<DemoSnapshot>();
+	if (demoSnapshotActive() && demoSnaps_[demoSelSnap_]) {
+		// 在某个快照上再建：沿用当前冻结画面（不重抓，避免把编辑中的标注拍进去）
+		snap->bg = demoSnaps_[demoSelSnap_]->bg;
+	}
+	else {
+		snap->bg = grabDemoSnapshotBg();
+	}
+	if (!snap->bg) return;
+	snap->shapes = cloneVisibleShapes(history->shapes);
+	demoSnaps_.push_back(std::move(snap));
+	demoSnapsDirty_ = true;
+	// 不自动选中：实时画布保持原样
+	if (toolSub) toolSub->refreshDemoSnapshot();
+	refresh();
+}
+
+void WinCap::demoSnapshotReturnToLive()
+{
+	if (demoSelSnap_ < 0 || !history) return;
+	demoSnapshotDetachSelection();
+	demoSnaps_[demoSelSnap_]->shapes = std::move(history->shapes);
+	history->shapes = std::move(demoLiveShapes_);
+	demoSelSnap_ = -1;
+	// 回到实时画布：恢复进入快照前的穿透状态（如果原来是开着的）
+	restoreDemoThroughAfterSnapshot();
+	refreshDemoSnapshotButton();
+	refresh();
+}
+
+void WinCap::selectDemoSnapshot(int index)
+{
+	if (!demoMode || !history) return;
+	const int n = (int)demoSnaps_.size();
+	if (index < 0 || index >= n) return;
+	if (index == demoSelSnap_) {
+		demoSnapshotReturnToLive();
+		focusDemoCanvas();
+		if (toolSub) toolSub->refreshDemoSnapshot();
+		return;
+	}
+	// PPT 放映窗会盖住冻结画面，先结束放映
+	if (demoBoard_.mode == DemoBoard::Mode::Ppt) demoBoardStopPpt();
+	demoSnapshotDetachSelection();
+	if (demoSelSnap_ < 0) demoLiveShapes_ = std::move(history->shapes);
+	else demoSnaps_[demoSelSnap_]->shapes = std::move(history->shapes);
+	history->shapes = std::move(demoSnaps_[index]->shapes);
+	demoSelSnap_ = index;
+	// 快照编辑期间键盘必须归画布：穿透开着就先临时关掉（按钮置灰）
+	suspendDemoThroughForSnapshot();
+	// 绿色 = 快照栏开着或已选中某个快照
+	refreshDemoSnapshotButton();
+	focusDemoCanvas();
+	if (toolSub) toolSub->refreshDemoSnapshot();
+	refresh();
+}
+
+void WinCap::deleteDemoSnapshot()
+{
+	if (!demoMode || !history) return;
+	const int n = (int)demoSnaps_.size();
+	if (demoSelSnap_ < 0 || demoSelSnap_ >= n) return;
+	demoSnapshotDetachSelection();
+	// 正在编辑的这份标注随快照一起丢弃；先断开 history 的引用再释放
+	history->shapes.clear();
+	demoSnaps_.erase(demoSnaps_.begin() + demoSelSnap_);
+	demoSnapsDirty_ = true;
+	history->shapes = std::move(demoLiveShapes_);
+	demoSelSnap_ = -1;
+	// 删除后回到实时画布，穿透状态同样要还原
+	restoreDemoThroughAfterSnapshot();
+	refreshDemoSnapshotButton();
+	if (toolSub) toolSub->refreshDemoSnapshot();
+	refresh();
+}
+
+void WinCap::moveDemoSnapshot(int from, int to)
+{
+	const int n = (int)demoSnaps_.size();
+	if (from < 0 || to < 0 || from >= n || to >= n || from == to) return;
+	if (from < to) std::rotate(demoSnaps_.begin() + from, demoSnaps_.begin() + from + 1, demoSnaps_.begin() + to + 1);
+	else std::rotate(demoSnaps_.begin() + to, demoSnaps_.begin() + from, demoSnaps_.begin() + from + 1);
+	// 选中项跟着被拖动的那一项走，其余下标平移
+	if (demoSelSnap_ == from) demoSelSnap_ = to;
+	else if (from < demoSelSnap_ && demoSelSnap_ <= to) --demoSelSnap_;
+	else if (to <= demoSelSnap_ && demoSelSnap_ < from) ++demoSelSnap_;
+	// 顺序就是导出顺序：换过序就算有未保存改动
+	demoSnapsDirty_ = true;
+	// 只重绘不重建网格：拖拽过程中命中测试还要用当前的布局坐标
+	if (toolSub) toolSub->refresh();
+	refresh();
+}
+
+ComPtr<ID2D1Bitmap1> WinCap::demoSnapshotBitmap(int index) const
+{
+	if (index < 0 || index >= (int)demoSnaps_.size()) return nullptr;
+	auto& snap = demoSnaps_[index];
+	return snap ? snap->bg : nullptr;
+}
+
+ID2D1Bitmap* WinCap::annotSampleBitmap() const
+{
+	if (demoMode && demoSnapshotActive() && demoSnaps_[demoSelSnap_])
+		return demoSnaps_[demoSelSnap_]->bg.Get();
+	return screenImg.Get();
+}
+
+bool WinCap::renderDemoSnapshot(int index, std::vector<BYTE>& out, int& outW, int& outH)
+{
+	if (index < 0 || index >= (int)demoSnaps_.size()) return false;
+	auto& snap = demoSnaps_[index];
+	if (!snap || !snap->bg) return false;
+	auto d2d = Ling::D2D::get();
+	auto ctx = d2d ? d2d->deviceContext.Get() : nullptr;
+	if (!ctx) return false;
+	const auto px = snap->bg->GetPixelSize();
+	const UINT32 bw = px.width, bh = px.height;
+	if (!bw || !bh) return false;
+
+	D2D1_BITMAP_PROPERTIES1 targetProps{
+		.pixelFormat{ D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED) },
+		.dpiX{ 96.0f }, .dpiY{ 96.0f },
+		.bitmapOptions{ D2D1_BITMAP_OPTIONS_TARGET }
+	};
+	ComPtr<ID2D1Bitmap1> target;
+	if (FAILED(ctx->CreateBitmap(D2D1::SizeU(bw, bh), nullptr, 0, &targetProps, target.GetAddressOf())))
+		return false;
+
+	ctx->SetTarget(target.Get());
+	ctx->SetTransform(D2D1::Matrix3x2F::Identity());
+	ctx->BeginDraw();
+	ctx->Clear(D2D1::ColorF(0, 0.f));
+	ctx->DrawBitmap(snap->bg.Get(), D2D1::RectF(0.f, 0.f, (float)bw, (float)bh));
+	std::vector<ShapeHighlight*> highlights;
+	// 正在编辑的那张：最新标注还在 history 里（切走才回写），导出一律以它为准
+	auto& shapes = (demoSnapshotActive() && index == demoSelSnap_ && history)
+		? history->shapes : snap->shapes;
+	for (auto& shape : shapes) {
+		if (!shape || shape->isUndo || shape->isEphemeral()) continue;
+		if (auto* h = dynamic_cast<ShapeHighlight*>(shape.get())) { highlights.push_back(h); continue; }
+		shape->paint(ctx);
+	}
+	ShapeHighlight::paintMerged(ctx, this, highlights);
+	HRESULT hr = ctx->EndDraw();
+	ctx->SetTransform(D2D1::Matrix3x2F::Identity());
+	ctx->SetTarget(nullptr);
+	if (FAILED(hr)) return false;
+
+	D2D1_BITMAP_PROPERTIES1 cpuProps{
+		.pixelFormat{ D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED) },
+		.dpiX{ 96.0f }, .dpiY{ 96.0f },
+		.bitmapOptions{ D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW }
+	};
+	ComPtr<ID2D1Bitmap1> cpu;
+	if (FAILED(ctx->CreateBitmap(D2D1::SizeU(bw, bh), nullptr, 0, &cpuProps, cpu.GetAddressOf())))
+		return false;
+	if (FAILED(cpu->CopyFromBitmap(nullptr, target.Get(), nullptr))) return false;
+	D2D1_MAPPED_RECT mapped{};
+	if (FAILED(cpu->Map(D2D1_MAP_OPTIONS_READ, &mapped))) return false;
+	out.resize((size_t)bw * bh * 4);
+	for (UINT32 y = 0; y < bh; ++y)
+		memcpy(out.data() + (size_t)y * bw * 4, mapped.bits + (size_t)y * mapped.pitch, (size_t)bw * 4);
+	cpu->Unmap();
+	outW = (int)bw;
+	outH = (int)bh;
+	return true;
+}
+
+void WinCap::saveDemoSnapshots()
+{
+	if (!demoMode || demoSnaps_.empty()) return;
+	auto* st = Setting::get();
+	const std::wstring ext = Util::extensionFromSaveFormat(st->getSaveFormat());
+	// 默认文件名与「截图」一致（手动保存文件名格式的末段），导出时再拼 -1、-2…
+	std::wstring defName = Util::previewFileName(
+		st->getManualSaveFormat(), Setting::defaultManualSaveFormat(), focusAppName_);
+	if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos)
+		defName = defName.substr(slash + 1);
+	const std::wstring first = Util::getSaveFilePath(hwnd, ext, defName, Util::lastSaveDir(false));
+	if (first.empty()) return;
+	// 用户给的是基础名：实际落盘为 base-1、base-2…（序号与缩略图顺序一致）
+	std::filesystem::path base(first);
+	if (!base.has_extension()) base += L"." + ext;
+	const std::wstring stem = base.parent_path() / base.stem();
+	const std::wstring extDot = base.extension().wstring();
+	bool savedAny = false;
+	bool allOk = true;
+	for (size_t i = 0; i < demoSnaps_.size(); ++i) {
+		std::vector<BYTE> pixels;
+		int bw = 0, bh = 0;
+		if (!renderDemoSnapshot((int)i, pixels, bw, bh)) { allOk = false; continue; }
+		const std::wstring path = stem + L"-" + std::to_wstring(i + 1) + extDot;
+		if (Util::saveToFile(path, bw, bh, pixels.data())) {
+			if (!savedAny) Util::rememberSaveDir(false, path);
+			savedAny = true;
+		}
+		else {
+			allOk = false;
+		}
+	}
+	// 全部落盘成功才算「已保存」：之后无修改时退出演示不再弹确认
+	if (allOk) demoSnapsDirty_ = false;
+	refresh();
+}
+
+void WinCap::endDemoSnapshotSession()
+{
+	// 退出演示不需要把穿透"恢复"回来（紧接着 exitDemoCanvas 会统一关掉），
+	// 先清标记，避免回来时又把穿透打开一下
+	demoThroughBeforeSnap_ = false;
+	if (demoSelSnap_ >= 0 && history) demoSnapshotReturnToLive();
+	demoSnapshotDetachSelection();
+	demoSnaps_.clear();
+	demoLiveShapes_.clear();
+	demoSelSnap_ = -1;
+	demoSnapBarOpen_ = false;
+	demoSnapsDirty_ = false;
+	refreshDemoSnapshotButton();
+	if (!demoRecRunning_) {
+		if (toolCap && toolCap->hwnd) App::clearCaptureExclusion(toolCap->hwnd);
+		if (toolSub && toolSub->hwnd) App::clearCaptureExclusion(toolSub->hwnd);
+	}
 }
 
 void WinCap::startDemoRecording()
@@ -1575,6 +1994,25 @@ void WinCap::resetDemoCanvas()
     refresh();
 }
 
+// 退出演示的统一入口：有快照时先确认，避免点 ✕ / 按 Esc 时把未保存的快照一起清掉
+void WinCap::requestExitDemoCanvas()
+{
+    // 没有快照、或快照都已保存且之后没改过：直接退出，不打扰
+    if (!demoMode || demoSnaps_.empty() || !demoSnapsDirty_) { exitDemoCanvas(); return; }
+    // 确认框本身盖住宿主窗口，弹框期间不会重复触发
+    if (SettingUi::ConfirmDialog::isOpen()) return;
+    // 弹框期间把 Esc 让出来：这一次 Esc 只用来取消弹框，不能再让画布收到同一个按键
+    const bool hadEsc = CaptureEsc::isOwner(hwnd);
+    if (hadEsc) CaptureEsc::release(hwnd);
+    SettingUi::ConfirmDialog::ask(this,
+        Lang::get(L"snapshot.exitConfirm"),
+        [this, hadEsc](bool yes) {
+            if (yes) exitDemoCanvas();
+            else if (hadEsc) CaptureEsc::claim(hwnd);   // 取消：恢复 Esc 的原有职责
+        },
+        Lang::get(L"setting.confirm"), Lang::get(L"setting.cancel"));
+}
+
 void WinCap::exitDemoCanvas()
 {
     // 还在录制就按「取消」收工：临时文件丢掉，退出演示
@@ -1582,6 +2020,8 @@ void WinCap::exitDemoCanvas()
     demoRecBarOpen_ = false;
     // 退出演示：PPT 还在放映就先结束放映（文件保持打开，不关 PowerPoint）
     demoBoardStopPpt();
+    // 快照只活在本会话：先回到实时，再连冻结位图一起释放
+    endDemoSnapshotSession();
     // 关闭白板/演示前，把开栏时临时取消的渐隐画笔还原
     restoreTemporaryLaser();
     demoBoard_.mode = DemoBoard::Mode::None;
@@ -1646,27 +2086,7 @@ void WinCap::onCreated()
     show();
     // 覆盖窗必须真的拿到键盘焦点：热键唤起截图时前台仍属于其他进程，不主动抢焦点的话
     // Ctrl+C（取色）/ 方向键 / Enter 这些窗口内按键全都送不到这里。
-    // SetForegroundWindow 可能被前台锁挡下，用「临时置顶再取消」兜底（与设置窗同招）。
-    if (hwnd) {
-        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd)) {
-            // 前台锁：借"临时取消置顶再置顶"把窗口顶到前台
-            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-            SetForegroundWindow(hwnd);
-            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-        }
-        if (GetForegroundWindow() != hwnd) {
-            // 仍被挡：临时共享前台线程的输入队列，抢到焦点后再脱离
-            HWND fg = GetForegroundWindow();
-            const DWORD fgThread = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
-            const DWORD myThread = GetCurrentThreadId();
-            const bool attached = fgThread && fgThread != myThread
-                && AttachThreadInput(fgThread, myThread, TRUE);
-            SetForegroundWindow(hwnd);
-            if (attached) AttachThreadInput(fgThread, myThread, FALSE);
-        }
-        SetFocus(hwnd);
-    }
+    takeForegroundFocus();
     CaptureEsc::claim(hwnd);
     // 窗口已经能收鼠标了：把空窗期被盾牌吃掉的那一下按下补进来（还按着就接着拖）
     CaptureShield::drain(hwnd);
@@ -1679,11 +2099,20 @@ void WinCap::layout()
     if (!ctx) return;
     ctx->Clear(0);
     D2D1_RECT_F destRect = D2D1::RectF(0, 0, (float)w, (float)h);
-    if (!hideScreenImg) {
+    // 选中快照时整屏换成那张冻结画面（白板已经烘焙进去，不再重画实时白板）
+    ID2D1Bitmap1* snapBg = nullptr;
+    if (demoMode && demoSnapshotActive()) {
+        auto b = demoSnapshotBitmap(demoSelSnap_);
+        snapBg = b.Get();
+    }
+    if (snapBg) {
+        ctx->DrawBitmap(snapBg, destRect);
+    }
+    else if (!hideScreenImg) {
         ctx->DrawBitmap(screenImg.Get(), destRect);
     }
     // 演示画布：白板背景先于标注绘制（PPT 模式不画，露出下面放映窗口）
-    if (demoMode) paintDemoBoard(ctx);
+    if (demoMode && !snapBg) paintDemoBoard(ctx);
     // 压暗先画：标注绘制会切换 transform/clip（尤其文字/滤镜），若压暗后画会被这些状态裁掉。
     // 标注阶段压暗必须常驻，不再受 stage/isPress 的悬停分区影响。
     const bool predim = annotLive && !demoMode && !chrome_ && stage != CapStage::Long;
@@ -1694,10 +2123,10 @@ void WinCap::layout()
     }
     // 标注在底图上、暗色遮罩下：选区外被压暗，洞内正常显示（与「全屏纸+导出裁切」一致）
     // 长图选区大图由 CapLong 后画，标注需叠在其上
-    if (annotLive || (stage == CapStage::Video && hasAnnotShapes())) {
+    if (!snapshotCapturing_ && (annotLive || (stage == CapStage::Video && hasAnnotShapes()))) {
         if (stage != CapStage::Long) paintShapes(ctx);
     }
-    if (annotLive && (sizePreviewHold || GetTickCount64() < sizePreviewPulseUntil))
+    if (!snapshotCapturing_ && annotLive && (sizePreviewHold || GetTickCount64() < sizePreviewPulseUntil))
 		paintSizePreview(ctx);
     // 查找元素悬停：仅描边；已框选/标注中：截图选区控点一直显示
     // 演示模式不画遮罩的任何部件（不压暗、不描边、不控点、不标签）—— 整屏就是画布
@@ -1710,11 +2139,14 @@ void WinCap::layout()
         // 拖选区时不画控点，少一圈 FillRectangle（对齐跟手）
         const bool editingSel = isPress && (stage == CapStage::Adjust || maskDragging
             || videoCanAdjust() || (stage == CapStage::Select));
-		// 长图：选区已锁定（滚动/暂停/编辑都不能拖边），四周控点从进入长图起就不画
+		// 长图：真正开始滚动前仍可二次调整选区；开始（含暂停/编辑）后锁定
         const bool longEdit = stage == CapStage::Long && capLong && capLong->isEditMode();
-		// 长图编辑：对齐贴图——保留边框，隐藏四周调选区控点
-        cutMask->showHandles = stage != CapStage::Long && !editingSel && !longEdit
-			&& (stage == CapStage::Adjust || videoCanAdjust());
+		const bool longIdle = stage == CapStage::Long && capLong
+			&& capLong->canAdjustSelection() && !longEdit;
+        cutMask->showHandles = !editingSel && !longEdit
+			&& (stage == CapStage::Adjust || videoCanAdjust() || longIdle);
+		if (stage == CapStage::Long && capLong)
+			cutMask->hideLabel = !capLong->canAdjustSelection();
 		cutMask->showBorder = true;
         cutMask->paint(ctx, !predim);
     }
@@ -1731,14 +2163,19 @@ void WinCap::layout()
             capLong->endLongAnnotPaint(ctx, oldXform);
         }
     }
-    // 长图：拼接预览/标注会盖在 cutMask 之上，把描边压掉 —— 内容之后补画一遍，
-    // 让绿框在滚动、暂停、编辑全程持续可见（不再只在暂停那一瞬间闪一下）
-    if (stage == CapStage::Long && cutMask && !demoMode)
+    // 长图：拼接预览/标注会盖在 cutMask 之上，把描边压掉 —— 内容之后补画一遍。
+    // 还没开始滚动（仍可调整选区）时内容不会盖住选框，不再补画：否则同一圈线/控点
+    // 会画两遍，从截图页切到长图时看起来比原来粗/样式不一致。
+    if (stage == CapStage::Long && cutMask && !demoMode && capLong
+        && !capLong->canAdjustSelection())
         cutMask->paintBorderOverlay(ctx);
-    paintPix(ctx);
-    paintMouseHighlight(ctx);
-    paintCursor(ctx);
-    paintKeyOverlay(ctx);
+    // 抓快照这一帧只留桌面和白板：光标/高亮/按键提示都不进冻结画面
+    if (!snapshotCapturing_) {
+        paintPix(ctx);
+        paintMouseHighlight(ctx);
+        paintCursor(ctx);
+        paintKeyOverlay(ctx);
+    }
     canvas->finishPaint();
     // 识别浮层里的"标注镜像"跟着本窗口一起重画（标注一变就同步，避免两个窗口错帧）
     if (toolOcr) toolOcr->repaintOverlay();
@@ -2383,6 +2820,8 @@ bool WinCap::runCommand(const std::wstring& id)
 	if (id == L"cmd_close") {
 		// 演示画布 + 穿透中：第一次先退出穿透，再按一次才关画布
 		if (demoMode && isMouseTransparent) { toggleDemoThrough(); return true; }
+		// 演示画布：有快照时先确认（与工具栏 ✕ 同一入口）
+		if (demoMode) { requestExitDemoCanvas(); return true; }
 		closeByUser();
 		return true;
 	}
@@ -2407,15 +2846,25 @@ bool WinCap::runCommand(const std::wstring& id)
 			return true;
 		}
 		if (stage == CapStage::Video && capVideo) { capVideo->onSaveKey(true); return true; }
+		// 框完选区、还没点任何绘图工具（标注未激活）时也要能复制：
+		// 与 Enter（cmd_done）走同一条 Adjust 路径，不再等用户先点一次工具
+		if (stage == CapStage::Adjust && !demoMode) { copyToClipboard(); return true; }
 		return true;
 	}
 	if (id == L"cmd_save") {
+		// 演示画布 + 快照属性栏开着：Ctrl+S 保存的是快照（与截图/录屏的保存区分）
+		if (demoMode && demoSnapBarOpen_ && !demoSnaps_.empty()) {
+			saveDemoSnapshots();
+			return true;
+		}
 		if (annotLive) { saveToFile(demoMode); return true; }
 		if (stage == CapStage::Long && capLong && capLong->hasImage()) {
 			if (longSaveToFile()) close();   // 存失败就别关，让用户看到失败提示
 			return true;
 		}
 		if (stage == CapStage::Video && capVideo) { capVideo->onSaveKey(false); return true; }
+		// 同复制：刚框完选区就能直接存文件
+		if (stage == CapStage::Adjust && !demoMode) { saveToFile(false); return true; }
 		return true;
 	}
 
@@ -2461,6 +2910,7 @@ bool WinCap::runCommand(const std::wstring& id)
 		if (id == L"cmd_toggle_gif") { demoRecToggleGif(); return true; }
 		if (id == L"cmd_toggle_system_audio") { demoRecToggleAudio(); return true; }
 		if (id == L"cmd_toggle_mic") { demoRecToggleMic(); return true; }
+		if (id == L"cmd_demo_snapshot") { createDemoSnapshot(); return true; }
 	}
 	if (stage == CapStage::Video && capVideo) {
 		if (auto* tv = capVideo->toolBar()) {
@@ -2507,13 +2957,15 @@ void WinCap::forwardKey(UINT key)
 // 会话期间把「系统按键」里 Scope::Global 的那几条**临时**挂到全局钩子上；surface=0 即撤。
 // 为什么非挂不可：录屏时焦点在被录的程序上，而鼠标穿透 / 收起工具栏之后焦点也不在本软件上 ——
 // 窗口内根本收不到这些键。其余命令键一律**不挂**（以免在其他进程中消费用户的按键）。
-void WinCap::syncGlobalCommandKeys(unsigned surface)
+void WinCap::syncGlobalCommandKeys(unsigned surface, bool includeLongScroll)
 {
 	std::vector<HotkeyHook::Binding> list;
 	if (surface != 0) {
 		for (const auto& gkey : CommandKeys::groupOrder()) {
 			for (const auto& id : CommandKeys::idsInGroup(gkey)) {
-				if (CommandKeys::scopeOf(id) != CommandKeys::Scope::Global) continue;
+				const bool isGlobal = CommandKeys::scopeOf(id) == CommandKeys::Scope::Global;
+				const bool longPause = includeLongScroll && id == L"cmd_scroll_pause";
+				if (!isGlobal && !longPause) continue;
 				// 仅拦截「未实装」：只读 ≠ 不生效（见 CommandKeys::scan 的说明）
 				if (!CommandKeys::implemented(id)) continue;
 				if ((CommandKeys::surfaceMaskForId(id) & surface) == 0) continue;
@@ -2542,6 +2994,13 @@ void WinCap::onKey(UINT key)
     // 演示画布 + 白板：PgUp/PgDn 翻页（多图）或转发给 PPT 放映
     if (demoMode && demoBoardActive() && (key == VK_PRIOR || key == VK_NEXT)) {
         demoBoardStepPage(key == VK_NEXT ? 1 : -1);
+        return;
+    }
+    // 演示画布·快照：Delete / Backspace 删当前选中的快照
+    //（Ctrl+S 保存走命令表 cmd_save，见 runCommand）
+    // 鼠标穿透时键盘归下层应用，不算数（穿透下本就不该删快照）
+    if (demoMode && !isMouseTransparent && (key == VK_DELETE || key == VK_BACK) && demoSnapshotActive()) {
+        deleteDemoSnapshot();
         return;
     }
     // 鼠标穿透态：键盘也归下层应用 —— ESC 等不应关掉本会话。
@@ -2910,6 +3369,8 @@ void WinCap::onDown(POINT pos, bool isRight)
 			}
 			return;
 		}
+		// 未开始滚动：选区仍可拖边 / 整体移动（点按不再开始滚动）
+		if (!isRight && capLong->canAdjustSelection() && beginMaskResize(pos)) return;
 		capLong->onDown(pos, false);
 		return;
 	}
@@ -3092,6 +3553,16 @@ void WinCap::onMove(POINT pos)
     }
     // 长截图：预览交互优先于标注（编辑态也要能拖/悬停预览）
     if (stage == CapStage::Long && capLong) {
+        // 未开始滚动：拖边 / 整体移动选区（与 Adjust 同一套跟手逻辑）
+        if (maskDragging && isPress) {
+            POINT cur{};
+            GetCursorPos(&cur);
+            ScreenToClient(hwnd, &cur);
+            cutMask->adjust(cur);
+            if (cutMask->isResizingEdge()) setPixForMask(cur);
+            refresh();
+            return;
+        }
         capLong->onMove(pos);
         if (capLong->isPreviewPanning() || capLong->isSelViewportPanning()
 			|| capLong->hitPreview(pos)) {
@@ -3214,6 +3685,18 @@ void WinCap::onUp(POINT pos, bool isRight)
         return;
     }
     if (stage == CapStage::Long && capLong) {
+        // 未开始滚动：结束选区拖边 / 移动
+        if (maskDragging) {
+            maskDragging = false;
+            isPress = false;
+            if (GetCapture() == hwnd) ReleaseCapture();
+            if (cutMask) cutMask->endAdjust();
+            syncViewportFilters();
+            setToolChromeHidden(false);
+            capLong->layoutTool();
+            refresh();
+            return;
+        }
         if (capLong->isPreviewPanning()) {
             capLong->onUp(pos);
             return;
@@ -3404,7 +3887,6 @@ bool WinCap::enterByArg()
     if (val == L"long") startLong();
     else if (val == L"video") startVideo();
     else if (val == L"ocr") startOcr();
-    else if (val == L"qr" || val == L"qrcode") startQrcode();
     else if (val == L"pin") startPin();
     else return false;
     return true;
@@ -3638,6 +4120,9 @@ void WinCap::onMaskRectChanged()
 {
 	if (stage == CapStage::Video && capVideo && capVideo->isRecording())
 		capVideo->syncCaptureMove();
+	// 长图未开始时允许二次调整选区：工具条跟着新选区重新贴边
+	if (stage == CapStage::Long && capLong)
+		capLong->layoutTool();
 	// 识别/翻译浮层是按**旧选区**裁出来的：选区只要动了（挪位置或改大小），
 	// 旧结果就和当前画面/选区对不上，继续跟着走只会让文字错位。直接收起，要看得重新识别。
 	// 选区内部整体拖动已在 onDown 里挡住；拖边/方向键/滚轮改到这里时一并作废。
@@ -3792,7 +4277,9 @@ bool WinCap::handleLayerCancel(bool fromToolbar)
 	}
 	// 5) 有标注工具 → 取消工具
 	if (toolCap && !toolCap->curId.empty()) {
-		toolCap->cancelSelect();   // 白板属性栏会保留，等后面的层级再收
+		// 水印输入过文字：右键只收属性栏，水印保留在画面上
+		const bool keepWm = toolCap->curId == L"watermark" && toolSub && !toolSub->watermarkText.empty();
+		toolCap->cancelSelect(!keepWm);   // 白板属性栏会保留，等后面的层级再收
 		refresh();
 		return false;
 	}
@@ -3810,6 +4297,16 @@ bool WinCap::handleLayerCancel(bool fromToolbar)
 		toolSub->hideTools();
 		demoBoardBarOpen_ = false;
 		restoreTemporaryLaser();
+		return false;
+	}
+	// 7) 演示画布：退出选中的快照（属性栏保留），再右键一次才收快照属性栏
+	if (demoMode && demoSnapshotActive()) {
+		demoSnapshotReturnToLive();
+		if (toolSub && toolSub->demoSnapToolsBuilt()) toolSub->refreshDemoSnapshot();
+		return false;
+	}
+	if (demoMode && demoSnapBarOpen_) {
+		closeDemoSnapBar();
 		return false;
 	}
 	// 工具栏上右键：最多退到未选工具，不重框选、不退出
@@ -3863,6 +4360,11 @@ void WinCap::startAnnotate(const std::wstring& toolId)
 		demoRecBarOpen_ = false;
 		if (toolCap) toolCap->setDemoRecordState(false);
 	}
+	// 选标注工具会顶掉快照属性栏（只收栏，不改变"当前选中了哪张快照"）
+	if (demoMode && demoSnapBarOpen_) {
+		demoSnapBarOpen_ = false;
+		refreshDemoSnapshotButton();
+	}
 	// 没开"编辑背景"时，选标注工具就是收起白板属性栏（工具属性栏接管）；
 	// 开了编辑背景才把它当成临时替换，取消工具后恢复（见 restoreDemoBoardBar）。
 	if (demoMode && demoBoardActive() && !demoBoard_.adjust) demoBoardBarOpen_ = false;
@@ -3913,10 +4415,11 @@ void WinCap::layoutTools()
 	// 工具栏整体隐藏时，属性栏也一起收着；期间任何重排版都不能把它又摆出来
 	if (toolHidden) { toolSub->suspendChrome(); return; }
 	// 白板属性栏不依赖当前绘图工具：即使用户已经取消选中工具（curId 为空），
-	// 点白板也要能把属性栏摆出来。演示录屏属性栏同理。
+	// 点白板也要能把属性栏摆出来。演示录屏/快照属性栏同理。
 	const bool boardBar = toolSub->boardToolsBuilt();
 	const bool recBar = toolSub->demoRecToolsBuilt();
-	if (!boardBar && !recBar && (!annotLive || !toolSub->hasContent() || getCurToolId().empty())) {
+	const bool snapBar = toolSub->demoSnapToolsBuilt();
+	if (!boardBar && !recBar && !snapBar && (!annotLive || !toolSub->hasContent() || getCurToolId().empty())) {
 		if (getCurToolId().empty()) toolSub->hideTools();
 		return;
 	}
@@ -3942,6 +4445,8 @@ void WinCap::onHistoryChanged()
 	AnnotHost::onHistoryChanged();
 	if (capVideo) capVideo->notifyHistoryChanged();
 	if (capLong) capLong->notifyHistoryChanged();
+	// 停在某张快照上时的标注改动（新增/擦除/撤销…）都算这张快照有未保存修改
+	if (demoMode && demoSnapshotActive()) demoSnapsDirty_ = true;
 	// 角标只在"选区里没有标注"时存在：画上第一笔就退场，全部撤销/删除后要自己回来。
 	// 这条规则只看"有没有标注"，不看有没有选中画笔 —— 否则选过一次工具就再也回不来了。
 	if (stage != CapStage::Adjust) return;
@@ -4095,8 +4600,16 @@ void WinCap::startLong()
     stage = CapStage::Long;
     enterLiveStage();
     ensureNoMousePierce(); // 长截图全程不允许鼠标穿透
+    // 真正开始滚动前仍可二次调整选区：把尺寸标签放出来（开始滚动时再隐藏）
+    if (cutMask) {
+        cutMask->hideLabel = false;
+        cutMask->refreshLabel();
+    }
     capLong = std::make_unique<CapLong>(this);
     capLong->makeTool();
+    // 滚动会话期间「开始/暂停滚动」是临时全局键：挖洞后焦点可能在页面侧
+    syncGlobalCommandKeys(CommandKeys::SurfaceCapture, true);
+    refresh();
 }
 
 void WinCap::startVideo()
@@ -4170,11 +4683,6 @@ void WinCap::longToggle()
     if (capLong) capLong->toggleCapture();
 }
 
-void WinCap::longPreviewPanChanged()
-{
-	if (capLong) capLong->onPreviewPanChanged();
-}
-
 bool WinCap::longSaveToFile()
 {
     return capLong ? capLong->saveToFile() : false;
@@ -4189,29 +4697,9 @@ void WinCap::hollowWin()
 {
     HRGN rgn1 = CreateRectRgn(0, 0, (int)w, (int)h);
     auto& r = cutMask->maskRect;
-    // 挖洞时把选区向内收一个描边宽度：绿框贴着选区内沿画，整块挖掉会把框一起裁掉 ——
-    // 表现就是滚动时看不到框、暂停/继续时"闪一下"。内收 2px 不影响页面滚动。
-    int left = (int)r.left, top = (int)r.top, right = (int)r.right, bottom = (int)r.bottom;
-    const int inset = (int)std::lround(cutMask->strokeWidth);
-    HRGN rgn2{ nullptr };
-    if (right - left > inset * 2 && bottom - top > inset * 2) {
-        left += inset;
-        top += inset;
-        right -= inset;
-        bottom -= inset;
-        // 选区带圆角时，洞也做成同心的圆角：描边的内沿半径 = 选区半径 - 半线宽
-        int radius = 0;
-        if (cutMask->selRadius() > 0.f) {
-            const float dpiScale = dpi > 0.f ? dpi : 1.f;
-            radius = (int)std::lround(std::max(0.f,
-                cutMask->selRadius() * dpiScale - cutMask->strokeWidth * 0.5f));
-        }
-        rgn2 = CreateRoundRectRgn(left, top, right, bottom, radius * 2, radius * 2);
-    }
-    else {
-        // 选区太小、收不了描边：退回整块挖掉，至少保证还能滚动
-        rgn2 = CreateRectRgn((int)r.left, (int)r.top, (int)r.right, (int)r.bottom);
-    }
+    // 滚动时挖掉**完整矩形选区**（不内缩放描边、不做圆角）：采集区域里不能残留任何遮罩像素，
+    // 否则绿框/圆角会被拼进长图。代价是滚动期间看不到选框，暂停/结束后 restoreWin 恢复。
+    HRGN rgn2 = CreateRectRgn((int)r.left, (int)r.top, (int)r.right, (int)r.bottom);
     CombineRgn(rgn1, rgn1, rgn2, RGN_DIFF);
     DeleteObject(rgn2);
     if (SetWindowRgn(hwnd, rgn1, TRUE) == 0) {

@@ -8,4 +8,6 @@ namespace CaptureEsc
 {
 	void claim(HWND hwnd);
 	void release(HWND hwnd);
+	// 当前是否由该窗口持有 Esc（弹确认框前用来判断是否需要临时让出）
+	bool isOwner(HWND hwnd);
 }

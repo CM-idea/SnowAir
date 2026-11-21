@@ -27,4 +27,9 @@ namespace CaptureEsc
 		UnregisterHotKey(g_owner, kEscHotkeyId);
 		g_owner = nullptr;
 	}
+
+	bool isOwner(HWND hwnd)
+	{
+		return hwnd && g_owner == hwnd;
+	}
 }

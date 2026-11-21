@@ -25,7 +25,7 @@ ShapeMosaic::ShapeMosaic(AnnotHost* win) : ShapeArea(win)
 	// 必须在此刻截图：构造函数在鼠标按下时执行，此时**本图形尚未绘制**，屏幕上仍是原始桌面。
 	//   拖动结束后再截图会包含自身的全屏覆盖窗（绿色占位），占位块被一并烘焙进
 	//   马赛克位图，导致临时范围提示残留。
-	if (!win->screenImg && win->w > 0 && win->h > 0) {
+	if (!win->annotSampleBitmap() && win->w > 0 && win->h > 0) {
 		auto pixels = Util::captureScreen(win->x, win->y, (int)win->w, (int)win->h);
 		if (!pixels.empty())
 			App::createBitmapFromBGRA((int)win->w, (int)win->h, pixels, liveSource.GetAddressOf());
@@ -137,8 +137,9 @@ ComPtr<ID2D1Bitmap> ShapeMosaic::createEffectBitmap()
 	ComPtr<ID2D1Bitmap> result;
 	if (win->w <= 0 || win->h <= 0) return result;
 
-	// 取样源：会话底图；演示画布用构造时拍的那张桌面快照
-	ID2D1Bitmap* src = win->screenImg ? win->screenImg.Get() : liveSource.Get();
+	// 取样源：会话底图 / 演示画布选中快照时的冻结画面；都没有则用构造时拍的那张桌面快照
+	ID2D1Bitmap* src = win->annotSampleBitmap();
+	if (!src) src = liveSource.Get();
 	if (!src) return result;
 	// 取样/绘制按底图自然尺寸：贴图缩放后窗口尺寸 ≠ 图像尺寸，用窗口尺寸会取样错位、效果被裁
 	const auto srcSize = src->GetSize();

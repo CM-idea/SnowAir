@@ -1,4 +1,7 @@
 {
+  "instance": {
+    "takeOver": "检测到旧版本的 SnowAir 正在运行（可能正在截图或录屏）。\n关闭它并使用当前版本继续吗？\n\n若旧版本里有未保存的内容，请先取消、手动处理。"
+  },
   "cap": {
     "mark": "标注图片",
     "long": "长截图",
@@ -86,6 +89,7 @@
   },
   "tool": {
     "rect": "矩形",
+    "opacity": "透明度",
     "rectDefault": "方形",
     "ellipse": "椭圆",
     "polygon": "多边形",
@@ -99,6 +103,7 @@
     "numberLetter": "字母序号",
     "numberEmoji": "Emoji",
     "numberEmojiPick": "选择表情",
+    "numberNoTail": "停用尾巴",
     "emojiSize": "表情大小",
     "line": "标注",
     "lineDefault": "线段",
@@ -169,9 +174,17 @@
     "resetCanvas": "重置画布",
     "mouseThrough": "穿透模式",
     "whiteboard": "白板",
+    "snapshot": "快照",
     "showCursor": "显示光标",
     "hideCursor": "隐藏光标",
     "cancel": "取消"
+  },
+  "snapshot": {
+    "create": "创建快照",
+    "delete": "删除快照",
+    "saveAs": "保存为",
+    "empty": "暂无快照",
+    "exitConfirm": "快照有未保存的修改，退出演示画布后会丢失。确定退出吗？"
   },
   "board": {
     "noColor": "退出白板",
@@ -700,6 +713,12 @@
     "slogan": "高效自由，尽在轻雪",
     "dataDir": "配置目录",
     "openDataDir": "打开配置目录",
+    "importConfig": "导入配置",
+    "exportConfig": "导出配置",
+    "importOk": "导入成功",
+    "importDone": "配置已导入，请手动重启软件。",
+    "importFailed": "导入失败：请选择有效的配置文件。",
+    "exportFailed": "导出失败：无法写入所选位置。",
     "changelog": "更新日志",
     "notChecked": "尚未检查",
     "checking": "正在检查更新…",
@@ -779,18 +798,22 @@
     "toggleSystemAudio": "开启/关闭系统音量",
     "toggleMic": "开启/关闭麦克风",
     "toggleToolbar": "隐藏/显示工具栏",
+    "demoSnapshot": "创建快照",
     "mouseThrough": "鼠标穿透",
     "mouseRight": "鼠标右键",
     "conflict": "快捷键 [ %1 ] 已绑定给「%2」。\n覆盖后将解除「%2」的绑定，是否继续？",
     "reserved": "快捷键 [ %1 ] 是「%2」的固定键，不能改绑给其他命令。"
   },
   "long": {
-    "start": "开始",
+    "start": "开始滚动",
+    "hintStart": "点按「开始滚动」或滚动鼠标滚轮开始",
+    "tooFast": "滚得太快啦，慢一点",
     "pause": "暂停",
     "resume": "继续",
-    "edit": "编辑标注",
+    "edit": "编辑",
     "reachedBottom": "已到底部",
-    "tooLong": "图片过长，已停止",
+    "tooLong": "已到最大长度，截图已停止",
+    "stitchStopped": "截图已停止",
     "toLong": "去长截图"
   },
   "util": {

@@ -7,6 +7,13 @@ class ShapeEllipse : public ShapeBase
 public:
 	ShapeEllipse(AnnotHost* win);
 	~ShapeEllipse();
+	std::unique_ptr<ShapeBase> clone(AnnotHost* host) const override
+	{
+		auto p = std::make_unique<ShapeEllipse>(*this);
+		p->win = host;
+		p->isUndo = false;
+		return p;
+	}
 	void paint(ID2D1DeviceContext* ctx) override;
 	void paintDragger(ID2D1DeviceContext* ctx) override;
 	void applyStyle() override;
@@ -42,6 +49,8 @@ private:
 	std::vector<D2D1_RECT_F> draggers;
 	D2D1_RECT_F rect{ 0,0,0,0 };
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+	// 套用整体不透明度后的绘制刷（与矩形同一套）
+	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushPaint;
 	Microsoft::WRL::ComPtr<ID2D1StrokeStyle> strokeStyle;
 	float strokeWidth{ 1.f }, pressX{ 0.f }, pressY{ 0.f };
 	float cx{ 0.f }, cy{ 0.f }, rx{ 0.f }, ry{ 0.f };

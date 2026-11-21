@@ -1,9 +1,19 @@
 #pragma once
+#include <atomic>
+#include <mutex>
+#include <thread>
 #include <include/Ling.h>
+#include "LongMatch.h"
 
 class WinCap;
 class ToolLong;
-// 滚动截图。侧栏预览随长图加长但不超过屏幕；悬停/拖预览时选区同步大图。
+// 滚动截图。
+// 采集：一个常驻抓帧线程按“最新帧覆盖”的方式把画面交给拼接线程，拼接线程只认最新一帧，
+//       因此手动快滚时不会因为排队而积压旧画面。
+// 拼接：位移估计只用来预测，落点由“已拼画布”裁定（见 LongMatch.h），画布只增不减。
+// 驱动：自动滚动优先直接设置目标窗口的滚动位置（位置由我们给定，因此是匀速的），
+//       容器不支持时退回滚轮事件流；手动滚动完全交给用户，滚轮一动就自动接管。
+// 侧栏预览随长图加长但不超过屏幕；悬停/拖预览时选区同步大图（这套交互保持不变）。
 class CapLong
 {
 public:
@@ -21,22 +31,18 @@ public:
 	void copyToClipboard();
 	bool saveToFile();
 	void pin();
-	bool hasImage() const { return !imgData.empty(); }
+	bool hasImage() const { return resultH > 0; }
 	void layoutTool();
 	void setToolVisible(bool visible);
-	// 长图阶段的工具条（ToolLong）。与 CapVideo::toolBar() 同款：给「系统按键」的
-	// 绘图工具 / 工具循环用 —— 长图阶段的工具在这条工具条上，不在截图条上。
 	ToolLong* toolBar() const { return tool.get(); }
 	void raiseTool();
-	// 开始/暂停/继续滚动（「系统按键」截图组的「开始/暂停滚动」，默认 Space）：
-	// 未开始时按键即开滚；滚动中按键暂停；暂停中再按继续。
+	// 开始/暂停/继续：未开始时即开滚；滚动中暂停；暂停中再按继续（保持原自动/手动模式）
 	void toggleCapture();
-	void startCapture();
+	void startCapture();             // 自动滚动
+	void startManualScroll(float wheelSpace); // 用户滚轮：切手动并把这下滚轮转给页面
 	void setPaused(bool on);
-	// 是否处于滚动截图会话中（含暂停与编辑态，它们属同一次滚动）。
-	// 选区锁定判定用；不可命名为 isCapturing（该名字已被成员变量占用）
 	bool capturing() const { return isCapturing; }
-	void onPreviewPanChanged();
+	bool canAdjustSelection() const { return !isCapturing && !isFinish; }
 	bool hitPreview(POINT clientPos) const;
 	bool hitSelViewport(POINT clientPos) const;
 	bool isEditMode() const;
@@ -57,67 +63,148 @@ public:
 	void endLongAnnotPaint(ID2D1DeviceContext* ctx, const D2D1_MATRIX_3X2_F& parentXform);
 	bool exportPixels(std::vector<BYTE>& out);
 private:
+	// —— 采集 / 拼接 ——
+	std::vector<BYTE> captureFrame();
+	void startGrabThread();
+	void stopGrabThread();
+	void grabLoop(const RECT& sel);
+	void publishFrame(std::vector<BYTE>&& data);
+	bool takeFrame(std::vector<BYTE>& out);
+	void startStitchThread();
+	void stopStitchThread();
+	void stitchLoop();
+	void resetStitchState();
 	void firstStep();
-	void makeImgPreview();
-	void capStep();
-	bool tryAppendFrame(); // 暂停前再拼一帧；不调度下一轮滚动
-	void paintStartBtn(ID2D1DeviceContext* ctx);
+	void flushTail();
+	// —— 驱动 ——
+	void startCaptureMode(bool manual);
+	void switchToAuto();
+	void switchToManual();
+	void startAutoScroll();
+	void stopAutoScroll();
+	void autoPulseTick();
+	void pumpTick();
+	// 自动滚动优先“按位置滚动”（UIA ScrollPattern）：位置由我们给定，没有应用自己的加速动画；
+	// 容器不支持时才退回滚轮事件流。
+	struct UiaScroll;
+	bool initUiaScroll();
+	void releaseUiaScroll();
+	bool uiaDrive(double px);
+	void resolveScrollTarget();
+	HWND scrollTarget();
+	bool postWheelStep(int delta);
+	bool injectWheelStep(int delta);
+	void sendWheelDelta(int delta);
+	void installMouseHook();
+	void removeMouseHook();
+	static LRESULT CALLBACK mouseHookProc(int code, WPARAM wParam, LPARAM lParam);
+	void noteUserWheel(POINT screenPt, int wheelDelta);
+	void requestManualTakeover(POINT screenPt);
+	void syncToolBtn();
+	// —— 预览 / 交互 ——
 	void paintImgPreview(ID2D1DeviceContext* ctx);
 	void paintSelViewport(ID2D1DeviceContext* ctx);
-	void stopCap();
-	void makeStopText();
-	void syncToolBtn();
-	bool showSelViewport() const;
-	void ensureExcludeFromCapture(bool on);
-	void resolveScrollTarget();
-	void sendScrollWheel();
+	void paintStartHint(ID2D1DeviceContext* ctx);
+	void paintTooFastHint(ID2D1DeviceContext* ctx); // 滚太快、这一帧拼不上时的临时提示
+	void paintHintBadge(ID2D1DeviceContext* ctx, IDWriteTextLayout* layout);
+	bool makeImgPreview();
 	void updatePreviewLayout();
-	void setPreviewPanY(float y, bool fromUser);
+	float previewFrameH() const;              // 绿框在缩略图里的高度（与选区高度同比）
+	void syncPreviewPanToRatio(float ratio);  // 按比例滚动缩略图，保证绿框可见
 	void setInspectRatio(float r, bool fromUser);
 	void nudgeInspectByDelta(float dyPx);
-	void nudgeInspectBySelDelta(float dyPx); // 选区相对拖动
-	void scrubInspectAtClientY(float clientY); // 拖动：光标位置绝对映射预览位置
-	bool autoPanPreviewAtEdge(float clientY); // 拖动贴近上下沿时缓慢滚缩略图
+	void scrubInspectAtClientY(float clientY);
+	bool autoPanPreviewAtEdge(float clientY);
 	void startPreviewDragPanTimer();
 	void stopPreviewDragPanTimer();
 	void syncPierceWithPreviewHot();
 	void ensureSelPreviewBmp();
-	bool isInspecting() const { return previewHot || previewPanning; }
-	float previewTopRatio() const;
-	float viewRatio() const; // 选区大图浏览位置
 	void paintPreviewViewFrame(ID2D1DeviceContext* ctx);
+	bool showSelViewport() const;
+	bool isInspecting() const { return previewHot || previewPanning; }
+	float viewRatio() const;
+	float viewportRatio() const; // 当前采集视口在长图里的位置（0=顶，1=底）
+	// —— 收尾 ——
+	void stopCap();
+	void makeStopText();
+	void ensureExcludeFromCapture(bool on);
 private:
 	WinCap* win;
-	bool isShowStartBtn{ false };
 	bool isCapturing{ false };
 	bool isPaused{ false };
 	bool isFinish{ false };
-	bool firstCheck{ true };
-	// 首帧如果走了 DXGI（HDR 屏友好），后续拼接帧也走它，避免同一张长图混两种色彩管线
-	bool useDxgiCapture{ false };
+	bool manualMode{ false };
+	// 抓帧：单槽“最新帧”，拼接线程取走后置空
+	std::thread grabThread;
+	std::atomic<bool> grabRunning{ false };
+	std::mutex frameMutex;
+	std::vector<BYTE> latestFrame;
+	bool latestFresh{ false };
+	// 拼接：常驻线程 + 画布互斥
+	std::thread stitchThread;
+	std::atomic<bool> stitchRunning{ false };
+	std::mutex canvasMutex;
+	LongStitch::Stitcher stitcher;
+	std::atomic<bool> previewDirty{ false };
+	// 画面尺寸与画布快照（拼接线程写，UI 读）
+	int imgW{ 0 }, imgH{ 0 };
+	int resultH{ 0 };
+	int viewportTop{ 0 };
+	bool stoppedAtEnd{ false };
+	bool hitMaxHeight{ false };
 	bool excludedFromCapture{ false };
-	int dismissTime{ 0 };
-	int settleRecheckCount{ 0 };
-	int changeStartY{ -1 };
+	bool toolChromeHidden{ false }; // 工具条被临时收起（拖边/拖移选区），右上角文字提示随之隐藏
+	bool timerResRaised{ false };
+	bool manualMagActive{ false }; // 抓帧线程当前是否走放大镜（决定能否恢复窗口）
+	int capPipeline{ -1 };         // 抓帧管线：-1 未定，0 放大镜，1 DXGI，2 GDI
+	std::atomic<int> lastShift{ 0 };
+	HHOOK mouseHook{ nullptr };
+	// 自动滚动：匀速。按拍投递很小的滚轮量，投递量/投递频率按“画布实际滚过的像素”闭环校准。
+	double autoUnitsPerPulse{ 3.0 };    // 每个滚轮事件携带的滚轮单位（120 = 一个 notch）
+	double autoPulseIntervalMs{ 12.0 }; // 相邻两个事件之间的间隔
+	double autoPulseAccum{ 0.0 };       // 毫秒预算（不足一个间隔就不发）
+	std::atomic<int> movedPx{ 0 };      // 上一次测速以来画布实际滚过的像素
+	std::atomic<int> manualUnits{ 0 };  // 手动滚动时累计的用户滚轮单位（用来学刻度）
+	ULONGLONG manualScaleMs{ 0 };
+	int autoQuickSamples{ 0 };          // 还剩几个“快速收敛”采样窗口
+	std::wstring rateKey_;              // 目标进程名：用来记住/复用这个应用的滚动刻度
+	ULONGLONG autoPulseMs{ 0 };
+	ULONGLONG speedSampleMs{ 0 };
+	ULONGLONG autoStartMs{ 0 };
+	HWND scrollTargetCache{ nullptr };
+	ULONGLONG scrollTargetCacheMs{ 0 };
+	std::atomic<ULONGLONG> lastMotionMs{ 0 }; // 最后一次确认画面在滚动的时刻
+	bool autoUseInjection{ false };
+	std::unique_ptr<UiaScroll> uia;    // 位置驱动（可用时优先于滚轮事件流）
+	double uiaPxCarry{ 0.0 };          // 不足一个像素的余量，攒到下一拍
+	// 供手动/自动切换用
+	bool takeoverPending{ false };
+	POINT scrollCenterScreen{};
+	// 预览
 	D2D1_RECT_F stopTextRect{};
 	D2D1_POINT_2F stopTextPos{};
-	D2D1_SIZE_F startTextSize{};
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> textBrush;
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> bgBrush;
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> viewportBgBrush;
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> previewFrameBrush;
-	Microsoft::WRL::ComPtr<IDWriteTextLayout> layoutTextStart;
 	Microsoft::WRL::ComPtr<IDWriteTextLayout> layoutTextEnd;
+	Microsoft::WRL::ComPtr<IDWriteTextLayout> hintLayout;
+	Microsoft::WRL::ComPtr<IDWriteTextLayout> hintTooFastLayout;
+	float hintDpi{ 0.f };
+	float hintTooFastDpi{ 0.f };
+	std::atomic<ULONGLONG> tooFastUntilMs{ 0 }; // 这段时间内显示“滚得太快”提示
+	int fastRejects{ 0 };                       // 连续“在动但拼不上”的帧数（拼接线程用）
+	bool hintTooFastShown{ false };             // UI 侧记录当前是否在显示该提示
 	Microsoft::WRL::ComPtr<ID2D1Bitmap1> imgPreview;
 	Microsoft::WRL::ComPtr<ID2D1Bitmap1> fullPreviewBmp;
-	float startCircleR{ 30.f };
-	POINT circleCenter{};
-	POINT scrollCenterScreen{};
-	std::unique_ptr<ToolLong> tool;
-	std::vector<BYTE> imgData;
-	std::vector<BYTE> img1;
-	int imgW{ 0 }, imgH{ 0 };
-	int resultH{ 0 };
+	// 选区大图只存“当前可见那一屏”的 1:1 像素，而不是整张长图。
+	// 整张长图会超过 D2D 纹理上限，降采样后又会把标注背景糊掉。
+	int fullPreviewW{ 0 };
+	int fullPreviewSrcY{ -1 };
+	int fullPreviewSrcH{ 0 };
+	int fullPreviewRows{ 0 };
+	ULONGLONG canvasStamp{ 0 };
+	ULONGLONG fullPreviewStamp{ 0 };
 	POINT capStartPos{};
 	// 预览视窗（客户区）；高度随长图加长但钳在屏幕内，超出则平移
 	D2D1_RECT_F previewViewRect{};
@@ -126,10 +213,12 @@ private:
 	float previewPanY{ 0.f };
 	float inspectRatio{ 1.f }; // 0=顶 1=底；侧栏未溢出时用此浏览长图
 	bool previewFollowBottom{ true };
+	bool previewFollowTop{ false };
 	bool previewHot{ false };
 	bool previewPanning{ false };
-	POINT previewPanLast{};
 	bool selViewportPanning{ false };
 	POINT selPanLast{};
-	bool scrollPending_{ false }; // 已发滚轮、尚未 capStep
+	ULONGLONG lastPreviewMs{ 0 };
+	ULONGLONG lastFullPreviewMs{ 0 };
+	std::unique_ptr<ToolLong> tool;
 };

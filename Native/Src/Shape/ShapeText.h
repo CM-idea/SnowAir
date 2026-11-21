@@ -11,6 +11,19 @@ public:
 	bool isBurst() const { return burst_; }
 	bool isFrame() const { return bubble_ || burst_; }
 	~ShapeText();
+	std::unique_ptr<ShapeBase> clone(AnnotHost* host) const override
+	{
+		auto p = std::make_unique<ShapeText>(*this);
+		p->win = host;
+		p->isUndo = false;
+		p->isEditing = false;
+		p->attachTo = nullptr;
+		return p;
+	}
+	void remapCloneRefs(const std::function<ShapeBase*(ShapeBase*)>& map) override
+	{
+		if (attachTo) attachTo = map(attachTo);
+	}
 	void paint(ID2D1DeviceContext* ctx) override;
 	void paintDragger(ID2D1DeviceContext* ctx) override;
 	// 文字描边：先画字形轮廓，再画填充字（填充盖住轮廓内侧，只留外侧描边）

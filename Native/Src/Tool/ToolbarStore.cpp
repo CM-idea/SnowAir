@@ -57,7 +57,7 @@ namespace ToolbarStore {
 			// 穿透独立放在最左边，后面跟一个分隔符，与演示工具栏一致
 			st.active = { L"mouse-through", L"whiteboard", L"split-4", L"rect", L"arrow", L"pen", L"text",
 				L"serial-number", L"mosaic", L"eraser", L"laser-pointer", L"split-0",
-				L"undo", L"split-1", L"extra", L"reset-canvas", L"cancel" };
+				L"undo", L"split-1", L"snapshot", L"extra", L"reset-canvas", L"cancel" };
 		}
 		else {
 			// 贴图栏（kind=3）：椭圆不单列。
@@ -112,6 +112,16 @@ namespace ToolbarStore {
 				auto it = std::find(st.active.begin(), st.active.end(), L"reset-canvas");
 				const size_t pos = (it == st.active.end()) ? st.active.size() : (size_t)(it - st.active.begin());
 				st.active.insert(st.active.begin() + pos, L"extra");
+				dropped = true;
+			}
+			// 快照槽位同样是后加的：补在「屏幕录制」左边（没有录屏就补在「重置画布」前）
+			const bool hasSnap = std::find(st.active.begin(), st.active.end(), L"snapshot") != st.active.end()
+				|| std::find(st.inactive.begin(), st.inactive.end(), L"snapshot") != st.inactive.end();
+			if (!hasSnap) {
+				auto it = std::find(st.active.begin(), st.active.end(), L"extra");
+				if (it == st.active.end()) it = std::find(st.active.begin(), st.active.end(), L"reset-canvas");
+				const size_t pos = (it == st.active.end()) ? st.active.size() : (size_t)(it - st.active.begin());
+				st.active.insert(st.active.begin() + pos, L"snapshot");
 				dropped = true;
 			}
 		}
@@ -267,6 +277,7 @@ namespace ToolbarStore {
 		if (id == L"mosaic") return Icon::Mosaic;
 		if (id == L"eraser") return Icon::Eraser;
 		if (id == L"undo") return Icon::Undo;
+		if (id == L"snapshot") return Icon::Snapshot;
 		if (id == L"extra") return Icon::Video;
 		if (id == L"fixed") return Icon::Pin;
 		if (id == L"ocr") return Icon::Ocr;

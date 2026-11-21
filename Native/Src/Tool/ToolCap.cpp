@@ -276,19 +276,19 @@ void ToolCap::applyDemoLayout()
 		L"mouse-through", L"whiteboard", L"|",
 		L"rect", L"arrow", L"pen", L"text", L"number", L"mosaic", L"eraser", L"laser", L"|",
 		L"undo", L"|",
-		L"extra", L"reset-canvas", L"close"
+		L"snapshot", L"extra", L"reset-canvas", L"close"
 	};
 	btnCodes = {
 		Icon::Cursor, Icon::Board, L"",
 		Icon::Rect, Icon::Arrow, Icon::Pen, Icon::Text, Icon::Number, Icon::Mosaic, Icon::Eraser, Icon::FadePen, L"|",
 		Icon::Undo, L"|",
-		Icon::Video, Icon::Redo, Icon::Cancel
+		Icon::Snapshot, Icon::Video, Icon::Redo, Icon::Cancel
 	};
 	btnTips = {
 		L"tool.mouseThrough", L"tool.whiteboard", L"",
 		L"tool.rect", L"tool.arrow", L"tool.pen", L"tool.text", L"tool.number", L"tool.mosaic", L"tool.eraser", L"tool.fadePen", L"",
 		L"tool.undo", L"",
-		L"cap.video", L"tool.resetCanvas", L"tool.close"
+		L"tool.snapshot", L"cap.video", L"tool.resetCanvas", L"tool.close"
 	};
 	// 槽位换了必须重算窗口宽度：构造函数里那次 refreshSize 用的是默认（截图栏）槽位表，
 	// 不重算的话演示栏会带着截图栏的宽度留一大截空白（"工具栏宽度没自适应"）。
@@ -317,6 +317,19 @@ void ToolCap::applyDemoLayout()
 			btnTips.insert(btnTips.begin() + pos, L"cap.video");
 		}
 	}
+	// 快照槽位也是后加的：补在「屏幕录制」左边（没有录屏就补在「重置画布」前）
+	{
+		bool hasSnap = false;
+		for (const auto& id : btnIds) if (id == L"snapshot") { hasSnap = true; break; }
+		if (!hasSnap) {
+			auto it = std::find(btnIds.begin(), btnIds.end(), L"extra");
+			if (it == btnIds.end()) it = std::find(btnIds.begin(), btnIds.end(), L"reset-canvas");
+			const size_t pos = (it == btnIds.end()) ? btnIds.size() : (size_t)(it - btnIds.begin());
+			btnIds.insert(btnIds.begin() + pos, L"snapshot");
+			btnCodes.insert(btnCodes.begin() + pos, Icon::Snapshot);
+			btnTips.insert(btnTips.begin() + pos, L"tool.snapshot");
+		}
+	}
 	refreshSize();
 }
 
@@ -340,12 +353,40 @@ void ToolCap::setDemoRecordState(bool on)
 	}
 }
 
+void ToolCap::setDemoSnapshotState(bool on)
+{
+	for (auto* b : btns) {
+		if (!b || b->id != L"snapshot") continue;
+		if (on) applySelectedStyle(b);
+		else applyNormalStyle(b);
+		break;
+	}
+}
+
 void ToolCap::setDemoThroughState(bool on)
 {
 	for (auto* b : btns) {
 		if (!b || b->id != L"mouse-through") continue;
 		if (on) applySelectedStyle(b);
 		else applyNormalStyle(b);
+		break;
+	}
+}
+
+void ToolCap::setDemoThroughDisabled(bool on)
+{
+	for (auto* b : btns) {
+		if (!b || b->id != L"mouse-through") continue;
+		if (on) {
+			// 置灰：与删除/保存按钮的不可用态同一套色（灰色图标、无选中底）
+			b->setBg(0);
+			b->setHoverBg(0);
+			b->setColor(Icon::ColorDisabled);
+			b->setHoverColor(Icon::ColorDisabled);
+		}
+		else {
+			applyNormalStyle(b);
+		}
 		break;
 	}
 }
@@ -1275,8 +1316,9 @@ void ToolCap::onClickCap(Ling::Button* btn)
 		if (btn->id == L"reset-canvas") { winCap->resetDemoCanvas(); return; }
 		if (btn->id == L"mouse-through") { winCap->toggleDemoThrough(); return; }
 		if (btn->id == L"whiteboard") { winCap->toggleDemoBoard(); return; }
+		if (btn->id == L"snapshot") { winCap->toggleDemoSnapshotBar(); return; }
 		if (btn->id == L"extra") { winCap->toggleDemoRecorder(); return; }
-		if (btn->id == L"close") { winCap->exitDemoCanvas(); return; }
+		if (btn->id == L"close") { winCap->requestExitDemoCanvas(); return; }
 	}
 	// 「显示光标」：截图/导出时把会话开始那一刻的系统光标一起拍进去（开关类，不参与工具排他）
 	if (btn->id == L"show-cursor") {

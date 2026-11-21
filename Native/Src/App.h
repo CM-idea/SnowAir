@@ -16,6 +16,8 @@ class App
 		// 以管理员身份重新启动（runas 拉起提权新实例，本进程退出）。
 		// 用户取消 UAC 时返回 false 且不退出。
 		static bool restartAsAdmin();
+		// 以当前权限重新启动（导入配置后使用）：先拉起新实例，本进程随即退出
+		static bool restart();
 		void takeScreenShot(int x, int y, int w, int h,ID2D1Bitmap1** img);
 		// 由 BGRA 缓冲（top-down，w*4*h）在 **UI 线程**建 D2D 位图。
 		// 抓屏的 GDI 部分（BitBlt+GetDIBits，整屏分辨率下要几十~几百毫秒）可放到工作线程做，
@@ -30,6 +32,8 @@ class App
 		// 只适合小窗口：铺满整屏的窗口一旦被涂黑（老系统）就是整段录像全黑，
 		// 这类窗口的正确做法是"不在录制区域内绘制内容"，而不是依赖该标记
 		static void excludeFromCapture(HWND hwnd);
+		// 当前系统是否支持 WDA_EXCLUDEFROMCAPTURE（抓图前据此决定要不要退回 hide/show）
+		static bool supportsCaptureExclusion();
 		// 取消 excludeFromCapture（长截图结束后恢复）
 		static void clearCaptureExclusion(HWND hwnd);
 		// 静默整屏截图（托盘「截取全屏」）：不建任何窗口，抓整个虚拟桌面 →

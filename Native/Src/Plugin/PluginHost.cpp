@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <set>
 
 namespace {
 
@@ -143,6 +144,8 @@ int clipPath(void*, int index, wchar_t* path, int capacity)
 
 std::vector<Setting::HistoryItem> g_entries;
 std::vector<std::wstring> g_entryTags;
+/* 剪贴板里哪几条是文本：entryText 用它区分「没有正文」和「正文为空」。 */
+std::set<std::wstring> g_clipTextIds;
 bool g_entriesDirty = true;
 
 bool hasExt(const std::wstring& path, std::initializer_list<const wchar_t*> exts)
@@ -256,12 +259,9 @@ std::wstring entryLabelOf(const Setting::HistoryItem& it)
     return name;
 }
 
-std::wstring entryTagsOf(const Setting::HistoryItem& it)
+/* 把标签拼成 '\n' 分隔的一串（信封面板的 entry_tags 用这个格式）。 */
+std::wstring joinTags(const std::vector<std::wstring>& tags)
 {
-    auto* s = Setting::get();
-    if (!s) return {};
-    const std::vector<std::wstring> tags = it.source == L"clipboard"
-        ? s->getClipboardTags(it.id) : s->getHistoryTags(it.filePath);
     std::wstring joined;
     for (const auto& t : tags) {
         if (t.empty()) continue;
@@ -277,9 +277,19 @@ void ensureEntries()
     g_entriesDirty = false;
     g_entries.clear();
     g_entryTags.clear();
+    g_clipTextIds.clear();
     auto* s = Setting::get();
     if (!s) return;
-    for (const auto& c : s->getClipboardItems()) {
+    /* 剪贴板列表只读一次盘。以前每条记录都调 entryTagsOf → getClipboardTags(id)，
+       而它内部会把整份 local.json 重新读盘+解析+排序：137 条就是 137 次全量解析，
+       信封面板因此要等几百毫秒才弹出来。 */
+    const auto clips = s->getClipboardItems();
+    std::map<std::wstring, std::wstring> clipTags;
+    for (const auto& c : clips) {
+        clipTags.emplace(c.id, joinTags(c.tags));
+        if (c.type == L"text") g_clipTextIds.insert(c.id);
+    }
+    for (const auto& c : clips) {
         Setting::HistoryItem it;
         it.id = c.id;
         it.source = L"clipboard";
@@ -296,13 +306,34 @@ void ensureEntries()
         it.files = c.files;
         g_entries.push_back(std::move(it));
     }
-    for (auto& h : s->getHistoryItemsForUi(false)) g_entries.push_back(std::move(h));
+    auto history = s->getHistoryItemsForUi(false);
+    /* 历史标签同样一次批量取回，不再每条重读索引文件。 */
+    std::vector<std::wstring> historyPaths;
+    historyPaths.reserve(history.size());
+    for (const auto& h : history) historyPaths.push_back(h.filePath);
+    const auto historyTags = s->getHistoryTagsForPaths(historyPaths);
+    std::map<std::wstring, std::wstring> pathTags;
+    for (size_t i = 0; i < history.size() && i < historyTags.size(); ++i) {
+        if (history[i].filePath.empty()) continue;
+        pathTags.emplace(history[i].filePath, joinTags(historyTags[i]));
+    }
+    for (auto& h : history) g_entries.push_back(std::move(h));
     std::stable_sort(g_entries.begin(), g_entries.end(),
                      [](const Setting::HistoryItem& a, const Setting::HistoryItem& b) {
                          return a.createdAt > b.createdAt;
                      });
     g_entryTags.reserve(g_entries.size());
-    for (const auto& it : g_entries) g_entryTags.push_back(entryTagsOf(it));
+    for (const auto& it : g_entries) {
+        std::wstring joined;
+        if (it.source == L"clipboard") {
+            auto found = clipTags.find(it.id);
+            if (found != clipTags.end()) joined = found->second;
+        } else {
+            auto found = pathTags.find(it.filePath);
+            if (found != pathTags.end()) joined = found->second;
+        }
+        g_entryTags.push_back(std::move(joined));
+    }
 }
 
 int entryCount(void*)
@@ -561,15 +592,16 @@ int entryId(void*, int index, wchar_t* out, int capacity)
 int entryText(void*, const wchar_t* id, wchar_t* out, int capacity)
 {
     if (!id || !*id) return -1;
-    auto* s = Setting::get();
-    if (!s) return -1;
-    for (const auto& c : s->getClipboardItems()) {
-        if (c.id != id) continue;
-        if (c.type != L"text") return -1;
+    /* 直接查内存快照。旧实现每次都调 getClipboardItems()，
+       等于把整份 local.json 重读一遍再线性找 —— 面板逐条取正文时就是 O(n²)。 */
+    ensureEntries();
+    if (g_clipTextIds.find(id) == g_clipTextIds.end()) return -1;
+    for (const auto& it : g_entries) {
+        if (it.id != id) continue;
         if (out && capacity > 0) {
-            wcsncpy_s(out, static_cast<size_t>(capacity), c.text.c_str(), _TRUNCATE);
+            wcsncpy_s(out, static_cast<size_t>(capacity), it.text.c_str(), _TRUNCATE);
         }
-        return static_cast<int>(c.text.size());
+        return static_cast<int>(it.text.size());
     }
     return -1;
 }

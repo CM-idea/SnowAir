@@ -175,8 +175,8 @@ void ToolNestedPanel::place(const RECT& workArea, Ling::Button* anchor)
 	const float refTop = (float)parent.top + subPad;
 	const float refBottom = (float)parent.bottom - subPad;
 	const bool preferBelow = !owner->tipDown();
-	// 荧光笔透明度 / 多边形边数气泡：与属性栏左对齐（尖仍指向触发按钮）
-	float desiredX = (kind_ == Kind::PenOpacity || kind_ == Kind::ShapeSides)
+	// 荧光笔/水印透明度 / 多边形边数气泡：与属性栏左对齐（尖仍指向触发按钮）
+	float desiredX = (kind_ == Kind::PenOpacity || kind_ == Kind::WmOpacity || kind_ == Kind::ShapeSides)
 		? (float)owner->x : ax - w / 2.f;
 	const auto place = ToolbarChrome::placeBubble(
 		workArea, refTop, refBottom, w, h, gap,
@@ -255,6 +255,29 @@ void ToolNestedPanel::openWmAngle(const RECT& workArea, Ling::Button* anchor)
 	sliderTip_ = Lang::get(L"tool.wmAngle");
 	addSlider(0.f, 360.f, owner->watermarkAngle, [this](float nv) {
 		owner->watermarkAngle = nv;
+		owner->notifyStyleChanged();
+	});
+	finishOpen(workArea, anchor,
+		ToolbarTheme::propPad * 2.f + PropSlider::rowLogicW() + ToolbarTheme::shadowPad * 2.f);
+	owner->refreshNestedTrigger();
+}
+
+void ToolNestedPanel::openWmOpacity(const RECT& workArea, Ling::Button* anchor)
+{
+	if (open_ && kind_ == Kind::WmOpacity) {
+		closePanel();
+		owner->refreshNestedTrigger();
+		return;
+	}
+	closePanel();
+	owner->closeColorPopup();
+	kind_ = Kind::WmOpacity;
+	clearContent();
+	prepareContentRow();
+	sliderTip_ = Lang::get(L"tool.opacity");
+	owner->watermarkOpacity = std::clamp(owner->watermarkOpacity, 5, 50);
+	addSlider(5.f, 50.f, (float)owner->watermarkOpacity, [this](float nv) {
+		owner->watermarkOpacity = (int)std::lround(nv);
 		owner->notifyStyleChanged();
 	});
 	finishOpen(workArea, anchor,
@@ -364,6 +387,28 @@ void ToolNestedPanel::openPenOpacity(const RECT& workArea, Ling::Button* anchor)
 	sliderTip_ = Lang::get(L"tool.markerOpacity");
 	addSlider(10.f, 100.f, (float)owner->penMarkerOpacity, [this](float nv) {
 		owner->penMarkerOpacity = (int)std::lround(nv);
+		owner->notifyStyleChanged();
+	});
+	finishOpen(workArea, anchor,
+		ToolbarTheme::propPad * 2.f + PropSlider::rowLogicW() + ToolbarTheme::shadowPad * 2.f);
+	owner->refreshNestedTrigger();
+}
+
+void ToolNestedPanel::openRectOpacity(const RECT& workArea, Ling::Button* anchor)
+{
+	if (open_ && kind_ == Kind::RectOpacity) {
+		closePanel();
+		owner->refreshNestedTrigger();
+		return;
+	}
+	closePanel();
+	owner->closeColorPopup();
+	kind_ = Kind::RectOpacity;
+	clearContent();
+	prepareContentRow();
+	sliderTip_ = Lang::get(L"tool.opacity");
+	addSlider(10.f, 100.f, (float)owner->rectOpacity, [this](float nv) {
+		owner->rectOpacity = (int)std::lround(nv);
 		owner->notifyStyleChanged();
 	});
 	finishOpen(workArea, anchor,

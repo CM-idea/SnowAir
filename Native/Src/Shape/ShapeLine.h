@@ -30,6 +30,19 @@ public:
 	static constexpr float HighlighterWidthScale{ 5.f };
 	bool isHighlighter() const { return highlighter; }
 	~ShapeLine();
+	std::unique_ptr<ShapeBase> clone(AnnotHost* host) const override
+	{
+		auto p = std::make_unique<ShapeLine>(*this);
+		p->win = host;
+		p->isUndo = false;
+		p->creating = false;
+		return p;
+	}
+	void remapCloneRefs(const std::function<ShapeBase*(ShapeBase*)>& map) override
+	{
+		poly.linkStart.shape = map(poly.linkStart.shape);
+		poly.linkEnd.shape = map(poly.linkEnd.shape);
+	}
 	void paint(ID2D1DeviceContext* ctx) override;
 	void paintDragger(ID2D1DeviceContext* ctx) override;
 	void applyStyle() override;

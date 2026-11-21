@@ -258,6 +258,9 @@ private:
 	{
 		const auto dir = Util::outputDir();
 		if (dir.empty()) return;
+		// outputDir 不再顺手建目录（见 Util::outputDir 注释），打开前在这里补建
+		std::error_code ec;
+		if (!std::filesystem::exists(dir, ec)) std::filesystem::create_directories(dir, ec);
 		ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 	}
 

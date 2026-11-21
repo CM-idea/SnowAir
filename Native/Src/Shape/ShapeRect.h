@@ -9,6 +9,13 @@ public:
 	enum Kind { Rect = 0, Polygon = 1, Star = 2 };
 	ShapeRect(AnnotHost* win, int kind = Rect, int sides = 0);
 	~ShapeRect();
+	std::unique_ptr<ShapeBase> clone(AnnotHost* host) const override
+	{
+		auto p = std::make_unique<ShapeRect>(*this);
+		p->win = host;
+		p->isUndo = false;
+		return p;
+	}
 	int kind() const { return kind_; }
 	int sides() const { return sides_; }
 	// 多边形边数 / 星形角数（3–20）：属性栏滑条实时改选中的形状
@@ -68,6 +75,8 @@ private:
 	int kind_{ Rect };
 	int sides_{ 3 };   // 多边形边数 / 星形角数（3–20）
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+	// 套用整体不透明度后的绘制刷：颜色不变，只压 alpha，避免污染 brush 的原色
+	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushPaint;
 	Microsoft::WRL::ComPtr<ID2D1StrokeStyle> strokeStyle;
 	float strokeWidth{ 1.f }, pressX{ 0.f }, pressY{ 0.f };
 	float angle{ 0.f }; // 弧度，顶部为 0

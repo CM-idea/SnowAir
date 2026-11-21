@@ -57,15 +57,16 @@ void ToolLong::refreshSize()
 ToolLong::~ToolLong()
 {
 	// WinBase 析构不销毁 HWND：正常路径由 CapLong::dispose() 先 close，
-	// 这里是兜底 —— 漏了就会留下"幽灵窗"，系统发 WM_DPICHANGED 时重入已释放对象
+	// 这里是兜底 —— 漏了会留下残留窗口，系统发 WM_DPICHANGED 时重入已释放对象
 	if (hwnd) { close(); hwnd = nullptr; }
 }
 
-void ToolLong::syncCaptureState(bool capturing, bool paused, bool finished)
+void ToolLong::syncCaptureState(bool capturing, bool paused, bool finished, bool autoActive)
 {
 	this->capturing = capturing;
 	this->paused = paused;
 	this->finished = finished;
+	this->autoActive = autoActive;
 	applyLongBtnStyle();
 	bindLongTip();
 	if (hwnd) layout();
@@ -112,11 +113,14 @@ float ToolLong::getBtnCenterX() const
 	const float pad = ToolbarTheme::shadowPad * dpi;
 	float x = pad + ToolbarTheme::paddingLeft * dpi
 		+ ToolbarTheme::dragIconSize * dpi + dragMarginRight() * dpi;
-	if (!editMode_ || curAnnotId_.empty()) {
-		// 对准编辑钮（第 2 个图标）
+	if (!editMode_) {
+		// 非编辑栏：对准「编辑」钮（第 2 个图标）
 		return x + btnSize * dpi * 1.5f;
 	}
-	const float sep = (spliterW + (ToolbarTheme::splitterGap - hoverInset) * 2.f) * dpi;
+	if (curAnnotId_.empty()) {
+		// 编辑栏但还没选工具：对准第一个标注钮（矩形）
+		return x + btnSize * dpi * 0.5f;
+	}
 	static const wchar_t* kAnnot[] = {
 		L"rect", L"arrow", L"pen", L"text", L"number", L"mosaic", L"eraser"
 	};
@@ -133,12 +137,12 @@ float ToolLong::getBtnCenterX() const
 void ToolLong::applyLongBtnStyle()
 {
 	if (!btnLong) return;
-	const bool on = capturing && !paused && !finished;
+	// 只有“自动滚动正在跑”才点亮；手动滚动时按钮保持“开始滚动”的样子，
+	// 这时点它就是把滚动交给自动（无缝接上）。
+	const bool on = autoActive && capturing && !paused && !finished;
 	const uint32_t c = on ? Icon::ColorActive : Icon::ColorNormal;
 	btnLong->setColor(c);
 	btnLong->setHoverColor(c);
-	// 第一个按钮是「开始/暂停滚动」：空闲/暂停显示「开始滚动」，滚动中显示「暂停滚动」；
-	// 这一轮长图完成后回到长截图图标（此时按钮不再响应）
 	btnLong->setText(finished ? Icon::LongShot : (on ? Icon::ScrollPause : Icon::ScrollStart));
 }
 
@@ -147,8 +151,7 @@ void ToolLong::bindLongTip()
 	if (!tip || !btnLong) return;
 	std::wstring key = L"long.start";
 	if (finished) key = L"cap.long";
-	else if (capturing && paused) key = L"long.resume";
-	else if (capturing) key = L"long.pause";
+	else if (autoActive && capturing && !paused) key = L"long.pause";
 	tip->bind(btnLong, Lang::get(key));
 }
 
@@ -247,7 +250,7 @@ Ling::Node* ToolLong::makeSpliter()
 void ToolLong::buildBar()
 {
 	annotBtns.clear();
-	btnLong = btnEdit = btnUndo = dragHandle = nullptr;
+	btnLong = btnUndo = dragHandle = nullptr;
 	tip->hide();
 	contentNode->removeAllChildren();
 	refreshSize();
@@ -275,7 +278,7 @@ void ToolLong::buildBar()
 		applyLongBtnStyle();
 		bindLongTip();
 
-		btnEdit = makeIconBtn(Icon::Pen, L"edit");
+		auto btnEdit = makeIconBtn(Icon::Pen, L"edit");
 		tip->bind(btnEdit, Lang::get(L"long.edit"));
 		btnEdit->onClick.add([this](Ling::Button* b) { onClick(b); });
 

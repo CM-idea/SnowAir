@@ -22,6 +22,7 @@
   "tool": {
     "rect": "矩形",
     "ellipse": "圓形",
+    "opacity": "透明度",
     "polygon": "多邊形",
     "star": "星形",
     "polygonSides": "多邊形邊數",
@@ -388,9 +389,13 @@
     "toggle_pins": "隱藏/顯示貼圖"
   },
   "long": {
-    "start": "開始",
+    "start": "開始捲動",
+    "hintStart": "點按「開始捲動」或滾動滑鼠滾輪開始",
+    "tooFast": "滾得太快啦，慢一點",
+    "pause": "暫停",
+    "edit": "編輯",
     "reachedBottom": "已觸底，抓圖停止",
-    "tooLong": "圖像過長，抓圖停止"
+    "tooLong": "已到最大長度，抓圖停止"
   },
   "util": {
     "file": "檔案"

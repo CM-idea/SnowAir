@@ -4,6 +4,7 @@
     "long": "Scrolling Screenshot",
     "video": "Record Screen",
     "ocr": "Text Recognition",
+    "opacity": "Opacity",
     "ocrClear": "Clear OCR result",
     "qrcode": "QR Code Recognition",
     "qrcodeEmpty": "No QR code found",
@@ -24,6 +25,7 @@
   },
   "tool": {
     "rect": "Rectangle",
+    "opacity": "Opacity",
     "ellipse": "Ellipse",
     "polygon": "Polygon",
     "star": "Star",
@@ -58,6 +60,7 @@
     "numberLetter": "Letter number",
     "numberEmoji": "Emoji",
     "numberEmojiPick": "Pick emoji",
+    "numberNoTail": "No tail",
     "emojiSize": "Emoji size",
     "patina": "Patina",
     "watermark": "Watermark",
@@ -541,6 +544,7 @@
     "videoRecord": "Video Record",
     "pin": "Pin",
     "ocr": "Text Recognition",
+    "opacity": "Opacity",
     "scanQrcode": "Scan QR Code",
     "translate": "Translate",
     "scrollCapture": "Scroll Capture",
@@ -556,12 +560,14 @@
     "reserved": "Shortcut [ %1 ] is fixed to \"%2\" and cannot be assigned to another command."
   },
   "long": {
-    "start": "Start",
+    "start": "Start scrolling",
+    "hintStart": "Click Start scrolling or scroll the mouse wheel to begin",
+    "tooFast": "Scrolling too fast, slow down",
     "pause": "Pause",
     "resume": "Resume",
-    "edit": "Edit annotations",
+    "edit": "Edit",
     "reachedBottom": "Reached the bottom, capture stopped",
-    "tooLong": "Image too long, capture stopped",
+    "tooLong": "Reached the maximum length, capture stopped",
     "toLong": "Go to long capture"
   },
   "util": {

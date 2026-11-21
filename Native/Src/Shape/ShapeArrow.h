@@ -10,6 +10,19 @@ public:
 	// dimension=true：「尺寸」——固定标注箭头样式 + 只有两个端点（不提供中间加折点的控点）
 	explicit ShapeArrow(AnnotHost* win, int headOverride = -1, bool dimension = false);
 	~ShapeArrow();
+	std::unique_ptr<ShapeBase> clone(AnnotHost* host) const override
+	{
+		auto p = std::make_unique<ShapeArrow>(*this);
+		p->win = host;
+		p->isUndo = false;
+		p->creating = false;
+		return p;
+	}
+	void remapCloneRefs(const std::function<ShapeBase*(ShapeBase*)>& map) override
+	{
+		poly.linkStart.shape = map(poly.linkStart.shape);
+		poly.linkEnd.shape = map(poly.linkEnd.shape);
+	}
 	void paint(ID2D1DeviceContext* ctx) override;
 	void paintDragger(ID2D1DeviceContext* ctx) override;
 	void applyStyle() override;

@@ -90,8 +90,7 @@ namespace {
     // 免得出现"能录入、能保存、按下去却不生效"的迷惑行为。
     bool isPendingHotkey(const std::wstring& id)
     {
-        return id == L"quick_translate" || id == L"translate_selection"
-            || id == L"open_clipboard";
+        return id == L"quick_translate" || id == L"open_clipboard";
     }
 
     // 每一项的「?」说明（目前快速贴屏、图片编辑 Beta 需要；其余行不给问号）
@@ -171,10 +170,9 @@ WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
             { L"quick_pin",             Lang::get(L"shortcut.quick_pin") },
             { L"open_clipboard",        Lang::get(L"shortcut.open_clipboard") },
         }},
-        // 2 翻译组 2 项
+        // 2 翻译组 1 项
         {Lang::get(L"setting.hotkeyGrpTranslate"),{
             { L"quick_translate",       Lang::get(L"shortcut.quick_translate") },
-            { L"translate_selection",   Lang::get(L"shortcut.translate_selection") },
         }},
         // 3 其他组 5 项
         {Lang::get(L"setting.hotkeyGrpOther"),{

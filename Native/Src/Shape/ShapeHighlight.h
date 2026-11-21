@@ -5,6 +5,13 @@ class ShapeHighlight : public ShapeArea
 {
 public:
 	ShapeHighlight(AnnotHost* win);
+	std::unique_ptr<ShapeBase> clone(AnnotHost* host) const override
+	{
+		auto p = std::make_unique<ShapeHighlight>(*this);
+		p->win = host;
+		p->isUndo = false;
+		return p;
+	}
 	void paint(ID2D1DeviceContext* ctx) override;
 	void applyStyle();
 	void syncToolFromShape() const override;

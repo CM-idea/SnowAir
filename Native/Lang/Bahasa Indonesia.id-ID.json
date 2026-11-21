@@ -22,6 +22,7 @@
     "tool": {
         "rect": "Persegi",
         "ellipse": "Elips",
+        "opacity": "Opak",
         "polygon": "Poligon",
         "star": "Bintang",
         "polygonSides": "Jumlah sisi",
@@ -356,9 +357,13 @@
         "toggle_pins": "Tampil/Sembunyi Semua Sematan"
     },
     "long": {
-        "start": "Mulai",
+        "start": "Mulai menggulir",
+        "hintStart": "Klik Mulai menggulir atau gulir roda mouse untuk memulai",
+        "tooFast": "Terlalu cepat, pelan-pelan",
+        "pause": "Jeda",
+        "edit": "Edit",
         "reachedBottom": "Sudah mencapai dasar, tangkapan dihentikan",
-        "tooLong": "Gambar terlalu panjang, tangkapan dihentikan"
+        "tooLong": "Sudah mencapai panjang maksimum, tangkapan dihentikan"
     },
     "util": {
         "file": "File"

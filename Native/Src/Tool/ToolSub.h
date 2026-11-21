@@ -51,6 +51,10 @@ public:
 	void showDemoRecTools();
 	void refreshDemoRecState();
 	bool demoRecToolsBuilt() const { return hasTools && curToolId == L"demo-rec"; }
+	// 演示画布内的快照属性栏（第一行三个动作，下面是缩略图网格）
+	void showDemoSnapshotTools();
+	void refreshDemoSnapshot();
+	bool demoSnapToolsBuilt() const { return hasTools && curToolId == L"demo-snapshot"; }
 	bool demoRecGifMode() const { return demoRecGif_; }
 	// 白板背景透明度（二级面板滑条调用）
 	void setBoardOpacity(int percent);
@@ -147,9 +151,10 @@ public:
 		bool isLine{}, isPenDash{}, isPenSoft{}, isPenMarker{}, isPenFade{};
 		bool isTextBold{}, isTextItalic{}, isTextStroke{};
 		bool isHighlightBorder{}, isHighlightEllipse{}, isMosaicBlur{};
-		bool isArrowFill{}, isNumberFill{};
+		bool isArrowFill{}, isNumberFill{}, isNumberNoTail{};
 		int rectKind{}, polygonSides{}, starPoints{}, arrowHead{}, lineKind{}, numberStyle{};
 		float cornerRadius{}, lastCornerRadius{};
+		int rectOpacity{};
 		float sliderVal{}, sliderMin{}, sliderMax{};
 		std::wstring curSliderKey;
 		UINT selectColorIndex{};
@@ -163,7 +168,7 @@ public:
 		bool size{}, color{}, dash{}, round{}, fill{};
 		bool bold{}, italic{}, textStroke{};
 		bool form{}, corner{}, sides{};
-		bool blur{}, border{}, ellipse{}, numberStyle{};
+		bool blur{}, border{}, ellipse{}, numberStyle{}, numberNoTail{};
 	};
 	StyleState captureStyleState() const;
 	void restoreStyleState(const StyleState& s);
@@ -231,6 +236,8 @@ public:
 	enum ArrowHead : int { ArrowDefault = 0, ArrowBig = 1, ArrowBoth = 2, ArrowAnnot = 3, ArrowFun = 4 };
 	bool isRectFill{ false }, isEllipse{ false }, isRectDash{ false };
 	bool isArrowFill{ true }, isNumberFill{ true };
+	// 序号「停用尾巴」：数字/字母序号画成纯圆徽章；Emoji 形态下该属性置灰不可用
+	bool isNumberNoTail{ false };
 	bool isLine{ false }; // 箭头属性栏内切换直线（无独立主栏按钮）
 	bool isArrowDash{ false }, isArrowRound{ false };
 	bool isPenDash{ false }, isPenSoft{ false }, isPenFade{ false };
@@ -246,10 +253,14 @@ public:
 	int patinaPlan{ 0 }; // 0 右下 / 1 右下角 / 2 中下
 	int patinaWmSize{ 20 };
 	float watermarkAngle{ 45.f };
+	// 水印不透明度（5–50，默认 15）
+	int watermarkOpacity{ 15 };
 	std::wstring watermarkText;
 	std::wstring serialEmoji; // Emoji 序号当前表情
 	float cornerRadius{ 0.f }; // 0–100：0 = 直角，100 = 该形状能到的最大圆角
 	float lastCornerRadius{ 10.f }; // 关圆角后再开时恢复
+	// 矩形/椭圆/多边形/星形不透明度（10–100）
+	int rectOpacity{ 100 };
 private:
 	void onCreated() override;
 	void applyUniformStyle(const StyleState& desired);
@@ -277,9 +288,13 @@ private:
 	void updateDashAvailability();
 	// 序号输入框：日常显示下一个序号，点进去可改成数字或任意文字（含中文）
 	void buildNumberInput();
+	// 「停用尾巴」开关：紧挨在序号输入框右侧
+	void makeNumberNoTailBtn();
 	void syncNumberInput();
 	void applyNumberInputEdited();
 	float measureNumberInputW(const std::wstring& text) const;
+	// 属性栏单行输入框统一外观：固定 24 高、文字上下居中（序号 / 水印共用）
+	static void stylePropInput(Ling::TextBox* box);
 	int autoNextNumber(int style) const;
 	static std::wstring formatNumberLabel(int style, int val);
 	void makeArrowHeadBtn(const wchar_t* icon, int style, const wchar_t* tipKey);
@@ -302,6 +317,7 @@ private:
 	float rememberedSlider(const std::wstring& key, float def, float mn, float mx) const;
 	void rememberSlider(const std::wstring& key, float val);
 private:
+	Ling::Button* noTailBtn{ nullptr };
 	Ling::Button* colorTrigger{ nullptr };
 	Ling::Node* colorTriggerRing{ nullptr };
 	Ling::Label* colorTriggerSwatch{ nullptr };
@@ -330,6 +346,7 @@ private:
 		bool isEllipse{}, isRectFill{}, isRectDash{}, isArrowDash{}, isArrowRound{};
 		bool isLine{}, isPenDash{}, isPenSoft{}, isPenMarker{};
 		bool isTextBold{}, isTextItalic{}, isTextStroke{}, isHighlightBorder{}, isHighlightEllipse{}, isMosaicBlur{};
+		bool isNumberNoTail{};
 		int rectKind{}, polygonSides{}, starPoints{}, arrowHead{}, lineKind{}, numberStyle{};
 		float cornerRadius{}, lastCornerRadius{}, sliderVal{}, sliderMin{}, sliderMax{}, textStrokeWidth{};
 		UINT strokeColorIndex{};
@@ -403,7 +420,9 @@ private:
 	Ling::Button* rectBtn{ nullptr };   // 形态默认不是矩形时，属性栏里的「基础矩形」
 	Ling::Button* polyBtn{ nullptr };
 	Ling::Button* starBtn{ nullptr };
+	Ling::Button* rectOpacityBtn{ nullptr };
 	Ling::Button* angleBtn{ nullptr };
+	Ling::Button* wmOpacityBtn{ nullptr };
 	Ling::Button* patinaWmBtn{ nullptr };
 	Ling::Button* emojiTrigger{ nullptr };
 	// 白板属性栏
@@ -434,6 +453,33 @@ private:
 	float overlayAlpha{ 0.25f };
 	bool* overlayFlag{ nullptr };
 	float sizeExtraW{ 0.f };
+	float sizeExtraH{ 0.f };   // 额外高度（快照属性栏的缩略图网格）
+	// —— 演示画布：快照属性栏 ——
+	Ling::Node* snapRow{ nullptr };      // 第一行：创建 / 弹簧 / 删除 / 保存为
+	Ling::Button* snapCreateBtn{ nullptr };
+	Ling::Button* snapDeleteBtn{ nullptr };
+	Ling::Button* snapSaveBtn{ nullptr };
+	Ling::ScrollerBox* snapScroll{ nullptr };
+	Ling::Canvas* snapCanvas{ nullptr };
+	std::vector<Ling::Label*> snapBadges;
+	// 拖拽排序：跟手预览挂在窗口 body 上，不受网格滚动裁剪（与图片编辑器图层拖拽同一套手感）
+	Ling::Canvas* snapGhost{ nullptr };
+	POINT snapPressPos{};
+	int snapDropSlot{ -1 };       // 插入位置（0..n）
+	int snapDragFrom{ -1 };       // 按下时命中的缩略图下标
+	bool snapDragging{ false };
+	bool snapDragMoved{ false };
+	// 快照栏宽高由缩略图数量决定：refreshSize() 遇到它时改走 refreshDemoSnapshot()，
+	// 不能套用通用「图标 + 滑条」宽度公式（否则宽度被固定）。
+	bool snapRefreshing_{ false };
+	// 新建快照后滚到底部（超过 3 行时让用户马上看到刚创建的那张）
+	int snapLastCount_{ 0 };
+	bool snapScrollToEnd_{ false };
+	int snapIndexAt(POINT pos) const;   // 窗口坐标 → 缩略图下标（-1 = 不在格子上）
+	int snapSlotAt(POINT pos) const;    // 窗口坐标 → 插入位置（0..n）
+	void paintSnapshotThumbs();
+	void paintSnapshotGhost();
+	void updateSnapshotButtons();
 	// 仅本会话记忆；不写盘
 	std::unordered_map<std::wstring, float> sliderMem;
 	std::unordered_map<std::wstring, UINT> colorIndexMem;

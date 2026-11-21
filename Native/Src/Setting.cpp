@@ -27,6 +27,7 @@
 #include "Win/WinImageEdit.h"
 #include "App.h"
 #include <algorithm>
+#include <map>
 #include <set>
 #include <cwctype>
 #include <sddl.h>   // ConvertSidToStringSidW
@@ -34,8 +35,8 @@
 namespace {
     std::unique_ptr<Setting> setting;
     // 全局热键表：id（配置键 = 设置页那一行）→ msgId（RegisterHotKey 的 id，也是 onHotKey 收到的值）。
-    // 只有**真正绑定了动作**的行才在此处；设置页里其余几行（show_cursor / translate_selection /
-    //   toggle_pins）目前没有对应实现，不注册 —— 否则会出现"按键被消费但没有任何效果"。
+    // 只有**真正绑定了动作**的行才在此处；设置页里其余几行（show_cursor / quick_translate /
+    //   open_clipboard）目前没有对应实现，不注册 —— 否则会出现"按键被消费但没有任何效果"。
     struct HotkeyEntry { const wchar_t* id; UINT msgId; };
     const HotkeyEntry kHotkeys[] = {
         { L"capture",                100 },
@@ -906,6 +907,28 @@ Setting* Setting::get()
 std::filesystem::path Setting::getDataPath()
 {
     return dataPath; //复制一份路径对象，不允许就地修改
+}
+
+// 「关于」页导出：把内存中的当前配置（含本次运行改过、还没落盘的值）写到用户选的文件
+bool Setting::exportConfigTo(const std::filesystem::path& path)
+{
+    if (path.empty()) return false;
+    return writeConfigAtomic(path, std::wstring{ configObj.Stringify() });
+}
+
+// 「关于」页导入：选中的文件必须是可解析的配置对象。
+// 覆盖配置文件后把本次运行切成只读，否则内存里的旧配置会在下一次 save() 时把刚导入的内容冲掉。
+bool Setting::importConfigFrom(const std::filesystem::path& path)
+{
+    if (path.empty() || configPath.empty()) return false;
+    std::wstring text;
+    if (!readConfigContent(path, text) || isBlankConfig(text)) return false;
+    JsonObject parsed{ nullptr };
+    if (!JsonObject::TryParse(text, parsed)) return false;
+    backupConfigFile();
+    if (!writeConfigAtomic(configPath, text)) return false;
+    configReadOnly = true;
+    return true;
 }
 
 std::wstring Setting::getPluginDir()
@@ -1978,6 +2001,8 @@ void Setting::applyHotkeys()
 {
     auto* lingApp = Ling::App::get();
     if (!lingApp) return;
+    // 已让给同机的完整版：一个全局热键都不注册（否则同一按键会触发两遍动作）
+    if (hotkeysYielded_) return;
     // 先全部注销，再按当前配置重注册（配置改过、或从钩子兜底切回都要走这一遍）
     for (const auto& hk : kHotkeys) lingApp->unRegHotKey(hk.msgId);
 
@@ -2354,7 +2379,12 @@ void Setting::runHotkeyAction(const std::wstring& id)
     if (id == L"open_history") { if (!getDisableCaptureHistory()) WinSetting::togglePage(5); return; }
     if (id == L"open_screenshot_dir") {
         const auto dir = Util::outputDir();
-        if (!dir.empty()) ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        if (!dir.empty()) {
+            // outputDir 只解析路径不建目录：热键打开前补建一次
+            std::error_code ec;
+            if (!std::filesystem::exists(dir, ec)) std::filesystem::create_directories(dir, ec);
+            ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
         return;
     }
 }
@@ -2372,6 +2402,16 @@ void Setting::suspendShortcutKeys()
 void Setting::resumeShortcutKeys()
 {
     applyHotkeys();
+}
+
+// 全局热键归谁：完整版与 Lite 版可以并存，但同一时刻只许一套热键生效。
+// 交出时把已注册的全部注销（含兜底钩子），取回时按配置重新注册。
+void Setting::setHotkeysYielded(bool yielded)
+{
+    if (hotkeysYielded_ == yielded) return;
+    hotkeysYielded_ = yielded;
+    if (yielded) suspendShortcutKeys();
+    else applyHotkeys();
 }
 
 void Setting::startHotkeyRetry()
@@ -2392,9 +2432,11 @@ void Setting::stopHotkeyRetry()
 
 void CALLBACK Setting::onHotkeyRetry(HWND, UINT, UINT_PTR id, DWORD)
 {
-    if (id != kHotkeyRetryTimerId) return;
     auto* self = get();
     if (!self) return;
+    // hWnd 传 NULL 的线程定时器会**忽略 nIDEvent 并另发一个 id**（见 startHotkeyRetry），
+    // 所以这里只能和 SetTimer 的返回值比；拿 kHotkeyRetryTimerId 比永远不相等 → 重试从不执行。
+    if (id != self->hotkeyRetryTimer) return;
     ++self->hotkeyRetryTick;
     // **不设重试次数上限**。此前重试满 1 分钟即停止，导致：开机时某条键被其他程序短暂占用 →
     // 落到钩子上 → 对方释放后无线程重新抢占 → 钩子再被系统摘除或被其他程序抢占 →
@@ -2981,6 +3023,40 @@ std::vector<std::wstring> Setting::getHistoryTags(const std::wstring& filePath)
             }
         }
         break;
+    }
+    return out;
+}
+
+std::vector<std::vector<std::wstring>> Setting::getHistoryTagsForPaths(
+    const std::vector<std::wstring>& paths)
+{
+    std::vector<std::vector<std::wstring>> out(paths.size());
+    if (paths.empty()) return out;
+    auto store = loadHistoryStore();
+    const auto all = historyTagsArr(store);
+    if (!all) return out;
+    // 先把整份标签表按路径 key 归一化一次，之后每条记录只查 map。
+    std::map<std::wstring, std::vector<std::wstring>> byKey;
+    for (auto const& v : all) {
+        if (v.ValueType() != JsonValueType::Object) continue;
+        auto o = v.GetObjectW();
+        const std::wstring key = historyPathKey(o.GetNamedString(L"path", L"").c_str());
+        if (key.empty()) continue;
+        if (!o.HasKey(L"tags") ||
+            o.GetNamedValue(L"tags").ValueType() != JsonValueType::Array) {
+            continue;
+        }
+        auto& tags = byKey[key];
+        for (auto const& t : o.GetNamedArray(L"tags")) {
+            if (t.ValueType() != JsonValueType::String) continue;
+            std::wstring s = t.GetString().c_str();
+            if (!s.empty()) tags.push_back(std::move(s));
+        }
+    }
+    for (size_t i = 0; i < paths.size(); ++i) {
+        if (paths[i].empty()) continue;
+        auto found = byKey.find(historyPathKey(paths[i]));
+        if (found != byKey.end()) out[i] = found->second;
     }
     return out;
 }

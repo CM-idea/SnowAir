@@ -58,7 +58,7 @@ private:
 	void onDragDown(POINT pos, bool isRight);
 	void onDragMove(POINT pos);
 	void onDragUp(POINT pos, bool isRight);
-	// —— 贴边隐藏（早期 QQ 那种）——
+	// —— 贴边隐藏 ——
 	// 只有"手动拖动后松手贴在屏幕上/下边缘"才触发；自动布局本来就在边缘不算。
 	// 隐藏后只留一条边在屏幕上，鼠标移到边上滑出，移开后自动缩回。
 	void peekCollapse();

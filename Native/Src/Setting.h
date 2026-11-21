@@ -13,6 +13,10 @@ public:
 	static void dispose();
 	static Setting* get();
 	std::filesystem::path getDataPath();
+	// 「关于」页：把当前配置另存为指定文件；把选中的配置文件导入并覆盖现有配置。
+	// 导入后本次运行转入只读（不再回写内存里的旧配置），重启后生效。
+	bool exportConfigTo(const std::filesystem::path& path);
+	bool importConfigFrom(const std::filesystem::path& path);
 	// 插件（OCR / 翻译模型等）根目录。留空 = 自动：exe 同目录下已有 plugin 文件夹就用它
 	// （绿色包 / 不想占用 C 盘），否则退回 %AppData%\SnowAir\plugin。见 Ocr/PluginPaths.h。
 	std::wstring getPluginDir();
@@ -44,6 +48,11 @@ public:
 	// 否则用户在设置页录入热键时，按键会先被全局热键消费而无法录入。
 	void suspendShortcutKeys();
 	void resumeShortcutKeys();
+	// 全局热键归谁：完整版与 Lite 版可以并存，但热键只归完整版。
+	// Lite 版发现完整版在跑时调 setHotkeysYielded(true) 交出热键（注销已注册的），
+	// 完整版退出后调 setHotkeysYielded(false) 取回。
+	void setHotkeysYielded(bool yielded);
+	bool hotkeysYielded() const { return hotkeysYielded_; }
 	void purgeRemovedAiSettings();
 	// 启动时清理旧程序 ScreenCapture 留下的历史键位（`cap`，现用 id 为 capture）；见 Setting.cpp
 	void purgeLegacyShortcutKeys();
@@ -314,6 +323,10 @@ public:
 		const std::vector<BYTE>& coverBgra = {});
 	// 自定义标签：按真实文件路径存（目录扫描出来、未登记的条目也能打标签）
 	std::vector<std::wstring> getHistoryTags(const std::wstring& filePath);
+	// 批量取标签：一次读盘，按传入顺序逐条返回（信封面板批量填标签用，
+	// 避免每条都调 getHistoryTags 把整份索引重读一遍）。
+	std::vector<std::vector<std::wstring>> getHistoryTagsForPaths(
+		const std::vector<std::wstring>& paths);
 	void setHistoryTags(const std::wstring& filePath, const std::vector<std::wstring>& tags);
 	// 所有可用标签（去重 + 字典序，只保留文件仍存在的条目）
 	std::vector<std::wstring> getAllHistoryTags();
@@ -391,6 +404,8 @@ private:
 	unsigned long long historyUiCacheAt_{ 0 };
 	bool historyUiCacheDirty_{ true };
 	// —— 全局热键 ——
+	// 全局热键是否已让给同机的完整版（Lite 版专用）：为 true 时不注册任何全局热键
+	bool hotkeysYielded_{ false };
 	// 注册/重注册全部全局热键：先走系统 RegisterHotKey；注册失败则退到低级键盘钩子兜底
 	void applyHotkeys();
 	// 执行一条全局热键的动作（id 取自 Setting.cpp 的 kHotkeys）
