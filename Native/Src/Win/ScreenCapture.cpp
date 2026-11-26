@@ -348,8 +348,6 @@ bool ensureStaging(DxgiSession& s, const D3D11_TEXTURE2D_DESC& source)
 	s.width = (int)source.Width;
 	s.height = (int)source.Height;
 	s.format = source.Format;
-	s.desktopW = (int)source.Width;
-	s.desktopH = (int)source.Height;
 	resolveRotation(s);
 
 	D3D11_TEXTURE2D_DESC desc = source;
@@ -744,4 +742,18 @@ std::vector<BYTE> ScreenCapture::captureOrGdi(int x, int y, int w, int h)
 	auto data = capture(x, y, w, h);
 	if (data.empty()) data = Util::captureScreen(x, y, w, h);
 	return data;
+}
+
+void ScreenCapture::dropCachedFrames()
+{
+	// 先在会话表锁里把会话捞出来，再逐个加自己的锁，避免和抓帧线程反向持锁
+	std::vector<std::shared_ptr<DxgiSession>> sessions;
+	{
+		std::lock_guard<std::mutex> lock(sessionMutex());
+		for (auto& entry : sessionStore()) sessions.push_back(entry.second);
+	}
+	for (auto& session : sessions) {
+		std::lock_guard<std::mutex> guard(session->lock);
+		session->haveFrame = false;
+	}
 }

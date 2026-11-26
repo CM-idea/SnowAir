@@ -100,8 +100,9 @@ void ImageEditAnnotHost::activateTool(const std::wstring& id)
     // 属性栏优先在主栏下方弹出（箭头朝上指向工具按钮）
     if (toolSub) toolSub->setBubbleAbove(false);
     if (toolSub && editor_ && editor_->hwnd) toolSub->bindOwner(editor_->hwnd);
-    // 图片编辑器是普通窗口：属性栏不能置顶压到别的应用上
-    if (toolSub) toolSub->setTopmost(false);
+    // 图片编辑器是普通窗口：属性栏不能置顶压到别的应用上；
+    // 从贴图导入时编辑器自己会临时置顶，属性栏要跟着进入置顶组才不会被盖住
+    if (toolSub) toolSub->setTopmost(editor_ && editor_->pinAwareTopmostActive());
     // 打开工具时属性栏回到初始属性（与截图工具栏一致）
     if (toolSub) toolSub->endShapeStylePreview();
     if (toolSub) toolSub->resetStyleToDefaults();
@@ -207,6 +208,26 @@ void ImageEditAnnotHost::undoAnnot()
 void ImageEditAnnotHost::clearAllShapesNow()
 {
     clearAllShapes(false);
+    if (editor_) editor_->refresh();
+}
+
+void ImageEditAnnotHost::adoptShapes(std::vector<std::unique_ptr<ShapeBase>> shapes,
+    const D2D1_RECT_F& imageRect, float scale)
+{
+    ensureHistory();
+    clearAllShapesNow();
+    if (!(scale > 0.f)) scale = 1.f;
+    for (auto& s : shapes) {
+        if (!s) continue;
+        s->win = this;
+        s->isUndo = false;
+        // 贴图标注坐标 = 底图像素；先按底图在画板里的显示倍率缩放，再平移到图片左上角
+        if (std::abs(scale - 1.f) > 0.001f)
+            s->scaleBy(0.f, 0.f, 0.f, scale, scale);
+        s->translateBy(imageRect.left, imageRect.top);
+        history->shapes.push_back(std::move(s));
+    }
+    onHistoryChanged();
     if (editor_) editor_->refresh();
 }
 

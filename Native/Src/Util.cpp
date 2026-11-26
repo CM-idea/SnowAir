@@ -3,6 +3,9 @@
 #include <d2d1_3.h>
 #include <shobjidl.h>
 #include <shellapi.h>
+#include <commoncontrols.h>
+#include <propkey.h>
+#include <propsys.h>
 #include <winver.h>
 #include <fstream>
 #include <cwctype>
@@ -375,9 +378,207 @@ void Util::saveToClipboard(const int w, const int h, BYTE* data)
 	if (auto* s = Setting::get()) s->markOwnClipboardWrite();
 }
 
-bool Util::saveToFile(const std::wstring& path, const int w, const int h, BYTE* data, int qualityPercent)
+namespace {
+	// 粘贴进图片编辑器的位图先落成临时 PNG：文件名带毫秒 + 序号，连续粘贴不会撞名。
+	// 它只作为「这一次粘贴」的素材，不参与导出；交给系统临时目录回收。
+	std::wstring pasteTempPngPath()
+	{
+		wchar_t buf[MAX_PATH]{};
+		const DWORD n = GetTempPathW(MAX_PATH, buf);
+		std::filesystem::path dir = (n > 0 && n < MAX_PATH)
+			? std::filesystem::path(buf) : std::filesystem::temp_directory_path();
+		dir /= L"SnowAir";
+		std::error_code ec;
+		std::filesystem::create_directories(dir, ec);
+
+		static unsigned seq = 0;
+		SYSTEMTIME st{};
+		GetLocalTime(&st);
+		wchar_t name[96]{};
+		swprintf_s(name, L"paste-%04u%02u%02u-%02u%02u%02u-%03u-%u.png",
+			st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+			st.wMilliseconds, ++seq);
+		return (dir / name).wstring();
+	}
+
+	// 和图片编辑器认的扩展名保持一致（png/jpg/jpeg/webp/bmp/gif/tif/tiff）
+	bool isImageFilePath(const std::wstring& path)
+	{
+		const auto dot = path.find_last_of(L'.');
+		if (dot == std::wstring::npos) return false;
+		std::wstring ext = path.substr(dot);
+		for (auto& c : ext) c = (wchar_t)towlower(c);
+		return ext == L".png" || ext == L".jpg" || ext == L".jpeg" || ext == L".webp"
+			|| ext == L".bmp" || ext == L".gif" || ext == L".tif" || ext == L".tiff";
+	}
+
+	bool writeFileBytes(const std::wstring& path, const BYTE* data, const size_t bytes)
+	{
+		HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+			CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (f == INVALID_HANDLE_VALUE) return false;
+		DWORD written = 0;
+		const bool ok = WriteFile(f, data, (DWORD)bytes, &written, nullptr) && written == bytes;
+		CloseHandle(f);
+		if (!ok) DeleteFileW(path.c_str());
+		return ok;
+	}
+
+	// CF_DIB / CF_DIBV5 → BGRA、top-down、行紧凑（步长 = w*4）。
+	// 只认最常见的 24 / 32 位真彩（截图、浏览器、Office、画图都给这两种）。
+	bool dibToBgra(HGLOBAL h, int& w, int& hgt, std::vector<BYTE>& out)
+	{
+		if (!h) return false;
+		auto* base = static_cast<const BYTE*>(GlobalLock(h));
+		if (!base) return false;
+
+		bool ok = false;
+		const SIZE_T size = GlobalSize(h);
+		if (size >= sizeof(BITMAPINFOHEADER)) {
+			const auto* bi = reinterpret_cast<const BITMAPINFOHEADER*>(base);
+			const int bw = (int)bi->biWidth;
+			const int bhRaw = (int)bi->biHeight;
+			const int bh = bhRaw < 0 ? -bhRaw : bhRaw;   // 负 = top-down
+			const WORD bpp = bi->biBitCount;
+			if (bi->biSize >= sizeof(BITMAPINFOHEADER) && bw > 0 && bh > 0
+				&& bw <= 32768 && bh <= 32768
+				&& (bi->biCompression == BI_RGB || bi->biCompression == BI_BITFIELDS)
+				&& (bpp == 32 || bpp == 24)) {
+				size_t offset = bi->biSize;
+				// BITMAPINFOHEADER + BI_BITFIELDS：三个掩码紧跟在头后面
+				if (bi->biSize == sizeof(BITMAPINFOHEADER) && bi->biCompression == BI_BITFIELDS)
+					offset += 3 * sizeof(DWORD);
+				const size_t stride = ((size_t)bw * bpp + 31) / 32 * 4;
+				if (size >= offset + stride * (size_t)bh) {
+					out.assign((size_t)bw * 4 * bh, 0xFF);
+					bool anyAlpha = false;
+					for (int y = 0; y < bh; ++y) {
+						const BYTE* src = base + offset
+							+ (bhRaw < 0 ? (size_t)y : (size_t)(bh - 1 - y)) * stride;
+						BYTE* dst = out.data() + (size_t)y * bw * 4;
+						if (bpp == 32) {
+							memcpy(dst, src, (size_t)bw * 4);
+							for (int x = 0; x < bw && !anyAlpha; ++x) anyAlpha = dst[x * 4 + 3] != 0;
+						}
+						else {
+							for (int x = 0; x < bw; ++x) {
+								dst[x * 4 + 0] = src[x * 3 + 0];
+								dst[x * 4 + 1] = src[x * 3 + 1];
+								dst[x * 4 + 2] = src[x * 3 + 2];
+							}
+						}
+					}
+					// 有些程序给的 32 位 CF_DIB 没有 alpha（全 0）：当成不透明，
+					// 否则贴进编辑器是一张全透明的图
+					if (bpp == 32 && !anyAlpha)
+						for (size_t i = 3; i < out.size(); i += 4) out[i] = 0xFF;
+					w = bw;
+					hgt = bh;
+					ok = true;
+				}
+			}
+		}
+		GlobalUnlock(h);
+		return ok;
+	}
+}
+
+bool Util::clipboardImagePaths(std::vector<std::wstring>& paths)
 {
-	if (path.empty() || w <= 0 || h <= 0 || !data) return false;
+	paths.clear();
+	// OpenClipboard 可能被别的进程短暂占用：和写剪贴板一样有限次重试（最多约 100ms）
+	bool opened = false;
+	for (int attempt = 0; attempt < 10 && !opened; ++attempt) {
+		if (OpenClipboard(nullptr)) opened = true;
+		else Sleep(10);
+	}
+	if (!opened) return false;
+
+	// 1) 资源管理器里复制的图片文件：和拖放完全一样，直接把路径交出去（可以有多个）
+	const bool hasFiles = IsClipboardFormatAvailable(CF_HDROP) != 0;
+	if (hasFiles) {
+		if (auto drop = (HDROP)GetClipboardData(CF_HDROP)) {
+			const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+			for (UINT i = 0; i < count; ++i) {
+				const UINT len = DragQueryFileW(drop, i, nullptr, 0);
+				if (len == 0) continue;
+				// 多留一个 wchar 给结尾的 '\0'：DragQueryFileW 会写 len+1 个字符，
+				// 只按 len 开 string 再传 len+1 属于越界写（即使看起来能用）
+				std::wstring p((size_t)len + 1, L'\0');
+				if (DragQueryFileW(drop, i, p.data(), len + 1) == 0) continue;
+				p.resize(len);
+				if (isImageFilePath(p)) paths.push_back(std::move(p));
+			}
+		}
+	}
+	if (hasFiles) {
+		// 复制的是文件就按文件处理：里面没有图片（比如复制了一个 txt）就是「没得贴」。
+		// 不能接着往下取位图 —— 资源管理器给非图片文件也会附一张缩略图，
+		// 那样就会把一张 txt 的缩略图贴进画布。
+		CloseClipboard();
+		return !paths.empty();
+	}
+
+	// 2) PNG：浏览器 / Electron / 本软件复制图片都给这个格式。原始字节直接落盘，
+	//    不重新编码（无损、也快）；落完读一次文件头，确认不是带脏数据的半截流。
+	const UINT cfPng = RegisterClipboardFormatW(L"PNG");
+	if (cfPng != 0 && IsClipboardFormatAvailable(cfPng)) {
+		if (auto h = (HGLOBAL)GetClipboardData(cfPng)) {
+			if (auto* src = static_cast<const BYTE*>(GlobalLock(h))) {
+				const std::wstring path = pasteTempPngPath();
+				const bool written = writeFileBytes(path, src, GlobalSize(h));
+				GlobalUnlock(h);
+				if (written && imageSize(path).first > 0) {
+					paths.push_back(path);
+					CloseClipboard();
+					return true;
+				}
+				DeleteFileW(path.c_str());
+			}
+		}
+	}
+
+	// 3) 位图（CF_DIBV5 / CF_DIB / CF_BITMAP）：解成 BGRA 再按 PNG 落盘
+	int w = 0, h = 0;
+	std::vector<BYTE> bgra;
+	if (!dibToBgra((HGLOBAL)GetClipboardData(CF_DIBV5), w, h, bgra)
+		&& !dibToBgra((HGLOBAL)GetClipboardData(CF_DIB), w, h, bgra)) {
+		if (auto hbmp = (HBITMAP)GetClipboardData(CF_BITMAP)) {
+			BITMAP bm{};
+			if (GetObjectW(hbmp, sizeof(bm), &bm) && bm.bmWidth > 0 && bm.bmHeight > 0
+				&& bm.bmWidth <= 32768 && bm.bmHeight <= 32768) {
+				BITMAPINFOHEADER bih{};
+				bih.biSize = sizeof(bih);
+				bih.biWidth = bm.bmWidth;
+				bih.biHeight = -bm.bmHeight;   // 负 = top-down
+				bih.biPlanes = 1;
+				bih.biBitCount = 32;
+				bih.biCompression = BI_RGB;
+				std::vector<BYTE> px((size_t)bm.bmWidth * 4 * bm.bmHeight);
+				if (HDC dc = GetDC(nullptr)) {
+					const int got = GetDIBits(dc, hbmp, 0, (UINT)bm.bmHeight, px.data(),
+						reinterpret_cast<BITMAPINFO*>(&bih), DIB_RGB_COLORS);
+					ReleaseDC(nullptr, dc);
+					if (got > 0) {
+						for (size_t i = 3; i < px.size(); i += 4) px[i] = 0xFF;
+						w = bm.bmWidth;
+						h = bm.bmHeight;
+						bgra = std::move(px);
+					}
+				}
+			}
+		}
+	}
+	CloseClipboard();
+	if (w <= 0 || h <= 0 || bgra.empty()) return false;
+	const std::wstring path = pasteTempPngPath();
+	if (!Util::saveToFile(path, w, h, bgra.data())) return false;
+	paths.push_back(path);
+	return true;
+}
+
+bool Util::saveToFile(const std::wstring& path, const int w, const int h, BYTE* data, int qualityPercent)
+{	if (path.empty() || w <= 0 || h <= 0 || !data) return false;
 	std::wstring ext = std::filesystem::path(path).extension().wstring();
 	for (auto& c : ext) c = (wchar_t)towlower(c);
 	// WebP 走内置编码器（libwebp）：系统 WIC 不一定带 WebP 编码器，不能再依赖它。
@@ -430,44 +631,121 @@ bool Util::saveToFile(const std::wstring& path, const int w, const int h, BYTE* 
 	return encodeImage(stream.Get(), w, h, data, container, quality);
 }
 
+namespace {
+	// 系统「另存为」对话框的通用外壳：exts / names 逐项对应「保存类型」下拉里的条目，
+	// typeIndex 是初始选中项（0 起）。followChosenType=true 时以最终选中的类型为准校正扩展名。
+	std::wstring showSaveDialog(HWND hwnd, const std::vector<std::wstring>& exts,
+		const std::vector<std::wstring>& names, int typeIndex,
+		const std::wstring& defaultName, const std::wstring& defaultDir,
+		bool followChosenType = false)
+	{
+		if (exts.empty() || exts.size() != names.size()) return {};
+		typeIndex = std::clamp(typeIndex, 0, (int)exts.size() - 1);
+
+		std::wstring result;
+		ComPtr<IFileSaveDialog> saveDialog;
+		auto hr = CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(saveDialog.GetAddressOf()));
+		if (FAILED(hr)) return result;
+		DWORD dwFlags{ 0 };
+		saveDialog->GetOptions(&dwFlags);
+		saveDialog->SetOptions(dwFlags | FOS_OVERWRITEPROMPT | FOS_STRICTFILETYPES);
+		// 过滤器的文本由对话框自己拼成「名称 (*.扩展名)」；数组和字符串只在这里构造一次，
+		// SetFileTypes 会把内容拷进对话框，函数返回后释放没问题。
+		std::vector<std::wstring> patterns;
+		patterns.reserve(exts.size());
+		for (const auto& ext : exts) patterns.push_back(L"*." + ext);
+		std::vector<COMDLG_FILTERSPEC> filterSpecs;
+		filterSpecs.reserve(exts.size());
+		for (size_t i = 0; i < exts.size(); ++i)
+			filterSpecs.push_back(COMDLG_FILTERSPEC{ names[i].c_str(), patterns[i].c_str() });
+		saveDialog->SetFileTypes((UINT)filterSpecs.size(), filterSpecs.data());
+		saveDialog->SetFileTypeIndex((UINT)typeIndex + 1);   // COM 接口的类型索引从 1 开始
+		saveDialog->SetDefaultExtension(exts[(size_t)typeIndex].c_str());
+		auto fileName = defaultName.empty() ? Util::createFileName(exts[(size_t)typeIndex]) : defaultName;
+		saveDialog->SetFileName(fileName.c_str());
+		if (!defaultDir.empty()) {
+			ComPtr<IShellItem> folder;
+			if (SUCCEEDED(SHCreateItemFromParsingName(defaultDir.c_str(), nullptr, IID_PPV_ARGS(folder.GetAddressOf()))))
+				// 必须用 SetFolder 而不是 SetDefaultFolder：后者只是"没有历史记录时才用"的兜底，
+				// 用户上次在别处保存过之后，对话框会重开在上次那个目录，而不是这里指定的目录。
+				// 手动保存要求"一打开就在桌面"，所以要每次强制初始目录。
+				saveDialog->SetFolder(folder.Get());
+		}
+		// 用户取消时 Show 返回 HRESULT_FROM_WIN32(ERROR_CANCELLED)，一样走 FAILED 分支
+		hr = saveDialog->Show(hwnd);
+		if (FAILED(hr)) return result;
+		ComPtr<IShellItem> item;
+		hr = saveDialog->GetResult(item.GetAddressOf());
+		if (FAILED(hr)) return result;
+		PWSTR filePath{ nullptr };
+		hr = item->GetDisplayName(SIGDN_FILESYSPATH, &filePath);
+		if (FAILED(hr)) return result;
+		result = filePath;
+		CoTaskMemFree(filePath);
+
+		// 切换「保存类型」时系统一般会同步改掉文件名里的扩展名，但用户手动敲的扩展名不会被纠正。
+		// 不兜这一下就会出现「选了 JPEG，文件却还叫 xxx.png」——内容与扩展名对不上，
+		// 下游 saveToFile 是按扩展名选编码器的，等于偷偷换了格式。
+		// 只在图片另存为时启用：文本 / 配置 / 视频这些对话框保持原来的“用户写什么就是什么”。
+		UINT chosen{ 0 };
+		if (followChosenType && SUCCEEDED(saveDialog->GetFileTypeIndex(&chosen))
+			&& chosen >= 1 && chosen <= exts.size()) {
+			const std::wstring& want = exts[(size_t)chosen - 1];
+			std::filesystem::path file(result);
+			std::wstring have = file.extension().wstring();
+			if (!have.empty() && have.front() == L'.') have.erase(have.begin());
+			for (auto& c : have) c = (wchar_t)towlower(c);
+			if (have != want) file.replace_extension(L"." + want);
+			result = file.wstring();
+		}
+		return result;
+	}
+}
+
 std::wstring Util::getSaveFilePath(HWND hwnd, const std::wstring& ext, const std::wstring& defaultName,
 	const std::wstring& defaultDir)
 {
-	std::wstring result;
-	ComPtr<IFileSaveDialog> saveDialog;
-	auto hr = CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(saveDialog.GetAddressOf()));
-	if (FAILED(hr)) return result;
-	DWORD dwFlags{ 0 };
-	saveDialog->GetOptions(&dwFlags);
-	saveDialog->SetOptions(dwFlags | FOS_OVERWRITEPROMPT | FOS_STRICTFILETYPES);
-	auto pattern = L"*." + ext;
-	auto typeName = Lang::get(L"util.file");
-	COMDLG_FILTERSPEC filterSpec[]{ { typeName.c_str(), pattern.c_str() } };
-	saveDialog->SetFileTypes(_countof(filterSpec), filterSpec);
-	saveDialog->SetFileTypeIndex(1);
-	saveDialog->SetDefaultExtension(ext.c_str());
-	auto fileName = defaultName.empty() ? createFileName(ext) : defaultName;
-	saveDialog->SetFileName(fileName.c_str());
-	if (!defaultDir.empty()) {
-		ComPtr<IShellItem> folder;
-		if (SUCCEEDED(SHCreateItemFromParsingName(defaultDir.c_str(), nullptr, IID_PPV_ARGS(folder.GetAddressOf()))))
-			// 必须用 SetFolder 而不是 SetDefaultFolder：后者只是"没有历史记录时才用"的兜底，
-			// 用户上次在别处保存过之后，对话框会重开在上次那个目录，而不是这里指定的目录。
-			// 手动保存要求"一打开就在桌面"，所以要每次强制初始目录。
-			saveDialog->SetFolder(folder.Get());
+	return showSaveDialog(hwnd, { ext }, { Lang::get(L"util.file") }, 0, defaultName, defaultDir);
+}
+
+std::wstring Util::getImageSaveFilePath(HWND hwnd, const std::wstring& ext, const std::wstring& defaultName,
+	const std::wstring& defaultDir)
+{
+	// 受支持的图片格式，和设置页「文件输出 → 截图保存格式」的四个选项保持一致。
+	// 名字只写格式名，系统会自己补成「PNG (*.png)」这种显示形式。
+	struct Format { const wchar_t* ext; const wchar_t* name; };
+	static constexpr Format kFormats[]{
+		{ L"png",  L"PNG" },
+		{ L"jpg",  L"JPEG" },
+		{ L"webp", L"WebP" },
+		{ L"bmp",  L"BMP" },
+	};
+	std::wstring want = ext;
+	for (auto& c : want) c = (wchar_t)towlower(c);
+	if (want == L"jpeg") want = L"jpg";
+
+	std::vector<std::wstring> exts, names;
+	int defaultIndex = 0;
+	for (const auto& fmt : kFormats) {
+		if (want == fmt.ext) defaultIndex = (int)exts.size();
+		exts.push_back(fmt.ext);
+		names.push_back(fmt.name);
 	}
-	// 用户取消时 Show 返回 HRESULT_FROM_WIN32(ERROR_CANCELLED)，一样走 FAILED 分支
-	hr = saveDialog->Show(hwnd);
-	if (FAILED(hr)) return result;
-	ComPtr<IShellItem> item;
-	hr = saveDialog->GetResult(item.GetAddressOf());
-	if (FAILED(hr)) return result;
-	PWSTR filePath{ nullptr };
-	hr = item->GetDisplayName(SIGDN_FILESYSPATH, &filePath);
-	if (FAILED(hr)) return result;
-	result = filePath;
-	CoTaskMemFree(filePath);
-	return result;
+	// 调用方给的默认名可能自带扩展名。先去掉受支持的那几种，让对话框按当前类型补：
+	// 否则系统会在原扩展名后面再追加一个，得到 "SnowAir.png.webp" 这种双后缀。
+	std::wstring baseName = defaultName;
+	if (!baseName.empty()) {
+		std::filesystem::path name(baseName);
+		std::wstring have = name.extension().wstring();
+		if (!have.empty() && have.front() == L'.') have.erase(have.begin());
+		for (auto& c : have) c = (wchar_t)towlower(c);
+		const bool imageExt = have == L"jpeg"
+			|| std::any_of(std::begin(kFormats), std::end(kFormats),
+				[&](const Format& fmt) { return have == fmt.ext; });
+		if (imageExt) baseName = (name.parent_path() / name.stem()).wstring();
+	}
+	// 认不出来的扩展名（空串、历史配置里的 avif/jxl 等）退化成 PNG
+	return showSaveDialog(hwnd, exts, names, defaultIndex, baseName, defaultDir, true);
 }
 
 std::wstring Util::lastSaveDir(bool video)
@@ -775,13 +1053,18 @@ void Util::cursorBodyOffset(float& dx, float& dy)
 
 	CURSORINFO ci{};
 	ci.cbSize = sizeof(ci);
-	if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING) || !ci.hCursor) return;
-	if (ci.hCursor == s_cur) {
+	// 单击放大期间 WinCap 会临时 ShowCursor(FALSE)。这时 GetCursorInfo 仍可能给出句柄，
+	// 也可能给回另一个（本线程的）光标；无论哪种都不能把圆心退回热点，否则镜头会在
+	// 单击开始/结束时"跳"一下 —— 形状解析失败或取不到光标时沿用上一次的有效偏移。
+	if (!GetCursorInfo(&ci) || !ci.hCursor) {
 		if (s_valid) { dx = s_dx; dy = s_dy; }
 		return;
 	}
-	s_cur = ci.hCursor;
-	s_valid = false;
+	if (ci.hCursor == s_cur && s_valid) {
+		dx = s_dx;
+		dy = s_dy;
+		return;
+	}
 
 	ICONINFO ii{};
 	if (!GetIconInfo(ci.hCursor, &ii)) return;
@@ -840,6 +1123,7 @@ void Util::cursorBodyOffset(float& dx, float& dy)
 		if (maxX >= minX && maxY >= minY) {
 			s_dx = (minX + maxX) * 0.5f - (float)ii.xHotspot;
 			s_dy = (minY + maxY) * 0.5f - (float)ii.yHotspot;
+			s_cur = ci.hCursor;
 			s_valid = true;
 			dx = s_dx;
 			dy = s_dy;
@@ -901,6 +1185,204 @@ std::pair<int, int> Util::imageSize(const std::wstring& path)
 	UINT w = 0, h = 0;
 	if (FAILED(frame->GetSize(&w, &h)) || w == 0 || h == 0) return { 0, 0 };
 	return { (int)w, (int)h };
+}
+
+std::wstring Util::formatFileSize(uintmax_t bytes)
+{
+	if (bytes < 1024) return std::to_wstring(bytes) + L" B";
+	const wchar_t* units[] = { L"KB", L"MB", L"GB", L"TB" };
+	double v = (double)bytes;
+	int unit = -1;
+	do {
+		v /= 1024.0;
+		++unit;
+	} while (v >= 1024.0 && unit < 3);
+	wchar_t buf[32]{};
+	swprintf_s(buf, L"%.1f %s", v, units[unit]);
+	return buf;
+}
+
+// 视频宽高/时长走属性系统（GPS_DEFAULT）：和资源管理器「详细信息」读的是同一份数据。
+// 某些容器（尤其 mkv / 无解码器）取不到值，调用方按 0 处理即可。缓存按小写路径去重。
+namespace {
+	struct CachedMediaInfo { int w{ 0 }, h{ 0 }, dur{ 0 }; bool valid{ false }; };
+	// 只在 UI 线程调用（贴屏卡片创建时），不需要加锁；静态表随进程存活，避免重复解析
+	std::unordered_map<std::wstring, CachedMediaInfo> g_mediaInfoCache;
+
+	unsigned long long readStoreUInt(IPropertyStore* store, const PROPERTYKEY& key)
+	{
+		if (!store) return 0;
+		// 零初始化的 PROPVARIANT 等价于 PropVariantInit 的结果（vt = VT_EMPTY）
+		PROPVARIANT v{};
+		unsigned long long out = 0;
+		if (SUCCEEDED(store->GetValue(key, &v))) {
+			if (v.vt == VT_UI4) out = v.ulVal;
+			else if (v.vt == VT_UI8) out = v.uhVal.QuadPart;
+			else if (v.vt == VT_I4) out = v.lVal < 0 ? 0ull : (unsigned long long)v.lVal;
+		}
+		PropVariantClear(&v);
+		return out;
+	}
+}
+
+Util::MediaInfo Util::mediaInfo(const std::wstring& path)
+{
+	MediaInfo out{};
+	if (path.empty()) return out;
+	std::wstring key = path;
+	for (auto& c : key) c = (wchar_t)towlower(c);
+	if (auto it = g_mediaInfoCache.find(key); it != g_mediaInfoCache.end()) {
+		out.width = it->second.w;
+		out.height = it->second.h;
+		out.durationSec = it->second.dur;
+		return out;
+	}
+	ComPtr<IShellItem2> item;
+	if (SUCCEEDED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(item.GetAddressOf()))) && item) {
+		ComPtr<IPropertyStore> store;
+		if (SUCCEEDED(item->GetPropertyStore(GPS_DEFAULT, IID_PPV_ARGS(store.GetAddressOf()))) && store) {
+			out.width = (int)readStoreUInt(store.Get(), PKEY_Video_FrameWidth);
+			out.height = (int)readStoreUInt(store.Get(), PKEY_Video_FrameHeight);
+			// PKEY_Media_Duration 是 100ns 单位
+			out.durationSec = (int)(readStoreUInt(store.Get(), PKEY_Media_Duration) / 10000000ull);
+		}
+	}
+	g_mediaInfoCache[key] = CachedMediaInfo{ out.width, out.height, out.durationSec, true };
+	return out;
+}
+
+int Util::folderItemCount(const std::wstring& path, int cap)
+{
+	if (path.empty() || cap <= 0) return 0;
+	std::error_code ec;
+	std::filesystem::directory_iterator it(path, ec), end;
+	if (ec) return 0;
+	int n = 0;
+	for (; it != end; it.increment(ec)) {
+		if (ec) break;
+		if (++n >= cap) return cap;
+	}
+	return n;
+}
+
+namespace {
+	// 图标缓存键：文件夹一张，其它按扩展名各一张（同类型共用，不给每个文件单独取图标）
+	std::wstring typeIconKey(const std::wstring& path, bool isDir)
+	{
+		if (isDir) return L"v1_folder";
+		std::wstring ext = std::filesystem::path(path).extension().wstring();
+		if (!ext.empty() && ext.front() == L'.') ext.erase(ext.begin());
+		std::wstring key = L"v1_ext";
+		for (wchar_t c : ext) {
+			c = (wchar_t)towlower(c);
+			// 只留字母数字，其余一律 '_'：缓存文件名不能被怪字符带坏
+			const bool ok = (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'z');
+			key.push_back(ok ? c : L'_');
+		}
+		return key == L"v1_ext" ? L"v1_file" : key;
+	}
+
+	// HICON → BGRA（直通 alpha，正好是 PNG 编码要的格式）。老式图标颜色位图没有 alpha 通道，
+	// 这时用 AND 掩码补不透明度（掩码位 0 = 不透明）。
+	bool iconToBgra(HICON icon, int& outW, int& outH, std::vector<BYTE>& out)
+	{
+		if (!icon) return false;
+		ICONINFO ii{};
+		if (!GetIconInfo(icon, &ii)) return false;
+		bool ok = false;
+		BITMAP bm{};
+		if (ii.hbmColor && GetObjectW(ii.hbmColor, sizeof(bm), &bm) && bm.bmWidth > 0 && bm.bmHeight > 0) {
+			const int w = bm.bmWidth, h = bm.bmHeight;
+			std::vector<BYTE> px((size_t)w * h * 4);
+			BITMAPINFO bi{};
+			bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+			bi.bmiHeader.biWidth = w;
+			bi.bmiHeader.biHeight = -h;   // top-down
+			bi.bmiHeader.biPlanes = 1;
+			bi.bmiHeader.biBitCount = 32;
+			bi.bmiHeader.biCompression = BI_RGB;
+			HDC dc = GetDC(nullptr);
+			const int got = dc ? GetDIBits(dc, ii.hbmColor, 0, (UINT)h, px.data(), &bi, DIB_RGB_COLORS) : 0;
+			if (dc) ReleaseDC(nullptr, dc);
+			if (got == h) {
+				bool anyAlpha = false;
+				for (size_t i = 3; i < px.size(); i += 4) {
+					if (px[i]) { anyAlpha = true; break; }
+				}
+				if (!anyAlpha && ii.hbmMask) {
+					BITMAP mb{};
+					if (GetObjectW(ii.hbmMask, sizeof(mb), &mb) && mb.bmWidth == w && mb.bmHeight > 0) {
+						const int stride = ((mb.bmWidth + 31) / 32) * 4;
+						std::vector<BYTE> bits((size_t)stride * (size_t)mb.bmHeight);
+						if (GetBitmapBits(ii.hbmMask, (LONG)bits.size(), bits.data()) == (LONG)bits.size()) {
+							// 单色图标掩码可能是 2 倍高（AND + XOR）；按图标高度取靠下的那段
+							const int offY = (std::max)(0, (int)mb.bmHeight - h);
+							for (int y = 0; y < h; ++y) {
+								const BYTE* row = bits.data() + (size_t)(offY + y) * stride;
+								for (int x = 0; x < w; ++x) {
+									const bool transparent = ((row[x >> 3] >> (7 - (x & 7))) & 1) != 0;
+									px[((size_t)y * w + x) * 4 + 3] = transparent ? 0 : 255;
+								}
+							}
+						}
+					}
+				}
+				outW = w;
+				outH = h;
+				out.swap(px);
+				ok = true;
+			}
+		}
+		if (ii.hbmColor) DeleteObject(ii.hbmColor);
+		if (ii.hbmMask) DeleteObject(ii.hbmMask);
+		return ok;
+	}
+}
+
+std::wstring Util::typeIconPng(const std::wstring& path, bool isDir)
+{
+	auto* s = Setting::get();
+	if (!s) return {};
+	const auto dir = s->getIconCacheDir();
+	const std::wstring key = typeIconKey(path, isDir);
+	const std::wstring png = (dir / (key + L".png")).wstring();
+	std::error_code ec;
+	if (std::filesystem::exists(png, ec) && std::filesystem::file_size(png, ec) > 0 && !ec) return png;
+	std::filesystem::create_directories(dir, ec);
+
+	// SHGFI_USEFILEATTRIBUTES：只按「扩展名 / 文件夹」解析类型，不碰磁盘、不落到具体文件的
+	// 自定义图标上 —— 这样同一类文件共用一张缓存，也不会因为装了某个播放器就换一张图。
+	const DWORD attrs = isDir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+	const std::wstring probe = isDir ? L"folder"
+		: (L"icon" + std::filesystem::path(path).extension().wstring());
+	HICON icon = nullptr;
+	SHFILEINFOW sfi{};
+	if (SHGetFileInfoW(probe.c_str(), attrs, &sfi, sizeof(sfi),
+		SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES | SHGFI_LARGEICON) && sfi.iIcon >= 0) {
+		// 系统「超大图标」清单（48px）：贴屏卡片的槽位 40px，用它最清楚
+		IImageList* list = nullptr;
+		if (SUCCEEDED(SHGetImageList(SHIL_EXTRALARGE, IID_IImageList, (void**)&list)) && list) {
+			list->GetIcon(sfi.iIcon, ILD_TRANSPARENT, &icon);
+			list->Release();
+		}
+	}
+	if (!icon) {
+		// 超大清单不可用（老系统）：退回系统大图标（32px）
+		SHFILEINFOW sfi2{};
+		if (SHGetFileInfoW(probe.c_str(), attrs, &sfi2, sizeof(sfi2),
+			SHGFI_ICON | SHGFI_USEFILEATTRIBUTES | SHGFI_LARGEICON))
+			icon = sfi2.hIcon;
+	}
+	if (!icon) return {};
+
+	int w = 0, h = 0;
+	std::vector<BYTE> px;
+	const bool ok = iconToBgra(icon, w, h, px);
+	DestroyIcon(icon);
+	if (!ok || w <= 0 || h <= 0) return {};
+	// 落盘失败（数据目录只读等）就当拿不到：调用方会退回图标字体
+	if (!saveToFile(png, w, h, px.data())) return {};
+	return png;
 }
 
 namespace {
@@ -1103,12 +1585,12 @@ void Util::copyHistoryFileToClipboard(const std::wstring& historyId)
 	addFileToClipboard(path);
 }
 
-void Util::pinHistoryFile(const std::wstring& historyId)
+bool Util::pinHistoryFile(const std::wstring& historyId)
 {
 	auto path = findHistoryFilePath(historyId);
-	if (path.empty()) return;
+	if (path.empty()) return false;
 	auto [w, h, data] = Util::loadImagePixels(path);
-	if (w <= 0 || h <= 0 || data.empty()) return;
+	if (w <= 0 || h <= 0 || data.empty()) return false;
 	// 位置：屏幕工作区中央
 	RECT rc{};
 	SystemParametersInfo(SPI_GETWORKAREA, 0, &rc, 0);
@@ -1116,7 +1598,7 @@ void Util::pinHistoryFile(const std::wstring& historyId)
 	int areaH = rc.bottom - rc.top;
 	int x = rc.left + (std::max)(0, (areaW - w) / 2);
 	int y = rc.top + (std::max)(0, (areaH - h) / 2);
-	WinPin::initFromData(x, y, w, h, data);
+	return WinPin::initFromData(x, y, w, h, data, path) != nullptr;
 }
 
 // ============ 截图输出路径 ============

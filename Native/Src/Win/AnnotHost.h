@@ -70,6 +70,13 @@ public:
 	// 当前选中的全部标注，主选中在前；已按历史表校验存活
 	std::vector<ShapeBase*> selectedShapes() const;
 	bool isShapeSelected(ShapeBase* s) const;
+	// —— 标注的复制 / 粘贴 ——
+	// 走应用内缓冲，不写系统剪贴板，因此不会进剪贴板历史。
+	// 复制返回 false 表示没有选中任何可复制的标注；粘贴返回 false 表示缓冲是空的。
+	bool copySelectedShapes();
+	bool pasteShapes();
+	// 图形设备要重建 / 退出前清空缓冲（缓冲里的形状可能还挂着设备资源）
+	static void clearShapeClipboard();
 	// 用画板像素矩形做框选（图片编辑器的橡皮筋同时选容器与标注）
 	void selectShapesInRect(const D2D1_RECT_F& rect, bool additive);
 	bool hasAnyAnnotSelection() const;
@@ -105,13 +112,21 @@ public:
 	// 滤镜（马赛克/油画）取样用的底图：默认是会话底图 screenImg。
 	// 演示画布选中快照时覆盖为快照的冻结画面（见 WinCap）。
 	virtual ID2D1Bitmap* annotSampleBitmap() const { return screenImg.Get(); }
+	// 荧光笔固定用「滤色」混合：以截图位图做 backdrop，用 ColorMatrix 提亮，
+	// 再用笔迹矩形做遮罩；返回 false 表示宿主/上下文不支持，调用方回退普通半透明笔迹。
+	bool paintHighlighterBlend(ID2D1DeviceContext* ctx, const D2D1_POINT_2F& a, const D2D1_POINT_2F& b,
+		float width, const D2D1_COLOR_F& color);
+	// 当前宿主能否把截图位图当混合 backdrop（长图等底图与标注坐标不是 1:1 时为 false）
+	virtual bool annotBlendBackdropAvailable() const { return annotSampleBitmap() != nullptr; }
 	// 按当前工具/选中态设置光标（WinCap/WinPin::setCursor 调用）
 	void applyAnnotCursor();
 	void applyToolDrawCursor();
 	// 白板「编辑背景」是否开启：决定新标注是否归入背景层、背景层能否被点选
 	virtual bool boardBackgroundEditing() const { return false; }
 	// 离屏合成底图+标注；crop 非空则只输出该矩形（全屏坐标）
-	bool getAnnotPixels(std::vector<BYTE>& pixels, D2D1_SIZE_U& size, const D2D1_RECT_F* crop = nullptr);
+	// includeShapes=false：只输出底图（不烘焙标注），用于把标注以矢量形式搬到图片编辑器
+	bool getAnnotPixels(std::vector<BYTE>& pixels, D2D1_SIZE_U& size,
+		const D2D1_RECT_F* crop = nullptr, bool includeShapes = true);
 	// 长图：在已有 BGRA 底图上叠标注（形状已是长图像素坐标）
 	bool composeAnnotOnImage(const BYTE* bgra, int imgW, int imgH, std::vector<BYTE>& out);
 protected:
@@ -228,6 +243,9 @@ protected:
 	ULONGLONG sizePreviewPulseUntil{ 0 };
 	// 最近一次调整的是形状参数（边数/角数/圆角）还是笔迹粗细
 	bool sizePreviewShape{ false };
+	// 荧光笔滤色混合：一次 paintShapes 内共用的一组效果（进入时重置，避免跨帧持有已销毁上下文的资源）
+	Microsoft::WRL::ComPtr<ID2D1Effect> hiBlendCrop_, hiBlendMatrix_;
+	ID2D1DeviceContext* hiBlendCtx_{ nullptr };
 	// 拖动已有标注：记录编辑前的几何，抬手时补一条撤销步骤
 	ShapeBase* editStepTarget{ nullptr };
 	std::vector<float> editStepBefore;

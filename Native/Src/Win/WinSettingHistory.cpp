@@ -18,6 +18,13 @@
 #include "WinPin.h"
 #include "ClipPin.h"
 
+namespace {
+	// 定义见后文「长正文的视口化」：按可视宽高取一段能排下的前缀，
+	// 让排版代价只和可视高度有关、与正文总长度无关。
+	std::wstring fitClipboardPreview(const std::wstring& text, float maxW, float maxH,
+		float fontSize, float dpi, DWRITE_WORD_WRAPPING wrapping);
+}
+
 // 停悬预览：独立置顶小窗（不抢焦点）。
 //   · 图片：只显示图片本身（无底色 / 边框 / 内边距），按宽高比定尺寸贴在卡片旁边；
 //   · 文字：用设置页「文字气泡」的底色；宽度贴着正文自适应（最短 120，常规在 500 折行，
@@ -70,22 +77,6 @@ public:
 		constexpr float kPadX = 12.f;        // 与设置页文字气泡一致的内边距
 		constexpr float kPadY = 8.f;
 		auto* d2d = Ling::D2D::get();
-		// 量正文：maxW 传极大值得到「完全不折行」的自然宽度；传 TextBox 的真实宽度得到
-		// 该宽度下的排版高度。字体 / 字号 × dpi / 折行方式都和预览里的 TextBox 一致。
-		auto measure = [&](float maxW) {
-			DWRITE_TEXT_METRICS m{};
-			if (d2d) {
-				Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
-				if (SUCCEEDED(d2d->dwriteFactory->CreateTextLayout(text.c_str(), (UINT32)text.size(),
-					d2d->getTextFormat(L""), (std::max)(1.f, maxW), 20000.f * dpi,
-					layout.GetAddressOf())) && layout) {
-					layout->SetFontSize(SettingTheme::fontBase * dpi, { 0, UINT32_MAX });
-					layout->SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
-					layout->GetMetrics(&m);
-				}
-			}
-			return m;
-		};
 		const float areaWLogical = (float)(mi.rcWork.right - mi.rcWork.left) / dpi;
 		const float areaHLogical = (float)(mi.rcWork.bottom - mi.rcWork.top) / dpi;
 		// 常规折行宽 / 放宽后的绝对上限，两者都不能超出工作区
@@ -96,6 +87,29 @@ public:
 		const float maxHLogical = (std::max)(100.f, areaHLogical - 16.f);
 		const int maxPxH = (int)std::lround(maxHLogical * dpi);
 		const int minPxH = (int)std::lround(100.f * dpi);
+		// 正文可能任意长（一条几千行的剪贴板记录）：这个气泡只有一屏高，而且预览窗对鼠标
+		// 透明、滚轮根本到不了它 —— 超出工作区的部分本来就看不到。所以先按「常规折行宽 ×
+		// 工作区高」取一次可见前缀，后面的自然宽度、高度、逐步加宽都只排这一小段
+		// （见 fitClipboardPreview：代价只与可视高度有关，与正文总长度无关）。
+		const std::wstring body = fitClipboardPreview(text, wrapW * dpi, maxHLogical * dpi,
+			SettingTheme::fontBase, dpi, DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
+		if (body.empty()) return;
+		// 量正文：maxW 传极大值得到「完全不折行」的自然宽度；传 TextBox 的真实宽度得到
+		// 该宽度下的排版高度。字体 / 字号 × dpi / 折行方式都和预览里的 TextBox 一致。
+		auto measure = [&](float maxW) {
+			DWRITE_TEXT_METRICS m{};
+			if (d2d) {
+				Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
+				if (SUCCEEDED(d2d->dwriteFactory->CreateTextLayout(body.c_str(), (UINT32)body.size(),
+					d2d->getTextFormat(L""), (std::max)(1.f, maxW), 20000.f * dpi,
+					layout.GetAddressOf())) && layout) {
+					layout->SetFontSize(SettingTheme::fontBase * dpi, { 0, UINT32_MAX });
+					layout->SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
+					layout->GetMetrics(&m);
+				}
+			}
+			return m;
+		};
 		// 1) 宽度：按正文的自然宽度定（多行取最长那行），夹进 [kMinWidth, 常规折行宽]。
 		//    多给 2px：DWrite 量的是字形宽度，Yoga 会把折行宽度吸附到整像素，差 1px 就会多折一行。
 		const float naturalW = measure(100000.f * dpi).widthIncludingTrailingWhitespace;
@@ -109,7 +123,7 @@ public:
 		// 不能等 WM_PAINT 里的异步 layout —— 那时文字已经按旧宽度建好 layout 了，会少一行/多折行。
 		setSize(wLogical, 100.f);
 		layout();
-		text_->setText(text);
+		text_->setText(body);
 		// 2) 按当前宽度同步排版并算出需要的高度：用 TextBox 自己的真实折行宽度（物理像素），
 		//    口径和它内部排版用的完全一致，量出来就是它真正需要的高度。
 		auto evalH = [&]() {
@@ -537,6 +551,7 @@ namespace {
 		if (src == L"long")       return Lang::get(L"setting.srcLong");
 		if (src == L"record")     return Lang::get(L"setting.srcRecord");
 		if (src == L"autosave")   return Lang::get(L"setting.srcAutoSave");
+		if (src == L"pin")        return Lang::get(L"setting.historyTabPin");
 		if (src == L"clipboard")  return Lang::get(L"setting.historyTabClipboard");
 		return Lang::get(L"setting.srcCapture");
 	}
@@ -586,7 +601,8 @@ namespace {
 		case 1: return L"setting.clearShots";
 		case 2: return L"setting.clearRecords";
 		case 3: return L"setting.clearOther";
-		case 4: return L"setting.clearClipboard";
+		case 4: return L"setting.clearPins";
+		case 5: return L"setting.clearClipboard";
 		default: return L"setting.clearAll";
 		}
 	}
@@ -641,6 +657,126 @@ namespace {
 	}
 	// —— 文字型剪切板内容的细分：纯文字 / 链接 / 色值 ——
 	enum class ClipTextKind { Plain, Link, Color };
+
+	// —— 长正文的视口化 ——
+	// Ling 的 Label(Text) 把「文档尺寸」当成「控件尺寸」：绘制表面 = 整段文字的排版高度。
+	// 剪贴板里一条几千行的正文（整份域名列表、整篇 HTML）会量出三四万像素高，超过 D3D
+	// 纹理上限（16384px）后 CreateDrawingSurface 抛 E_INVALIDARG —— 这个异常没人接，
+	// 进程直接退出。卡片本来只有几十像素高，能看见的就是前几行，所以这里先问 DWrite
+	// 「这个宽高能排下多少字」，只把这一小段交给 Text；正文本身一个字都不动（复制、贴屏、
+	// 搜索仍用全文），只是不再让排版去处理看不见的部分。
+	// 探测长度从一行量级指数增长、最多长到「装不下」为止，因此代价只与可视高度有关，
+	// 与正文总长度无关 —— 10 行和 10 万行走的是同一条路径。
+	std::wstring fitClipboardPreview(const std::wstring& text, float maxW, float maxH,
+		float fontSize, float dpi, DWRITE_WORD_WRAPPING wrapping)
+	{
+		if (text.empty() || maxW <= 1.f || maxH <= 1.f) return {};
+		auto fits = [&](const std::wstring& s) {
+			if (s.empty()) return true;
+			// 字体 / 字号与卡片里的 Text 完全一致（Text::makeLayout 用的也是 baseTextFormat）
+			auto* d2d = Ling::D2D::get();
+			if (!d2d || !d2d->dwriteFactory || !d2d->baseTextFormat) return s.size() <= 32;
+			Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
+			if (FAILED(d2d->dwriteFactory->CreateTextLayout(s.c_str(), (UINT32)s.size(),
+				d2d->baseTextFormat.Get(), maxW, FLT_MAX, layout.GetAddressOf())) || !layout)
+				return false;
+			layout->SetFontSize(fontSize * dpi, { 0, UINT32_MAX });
+			layout->SetWordWrapping(wrapping);   // 必须和真正排版的那个控件一致
+			DWRITE_TEXT_METRICS m{};
+			if (FAILED(layout->GetMetrics(&m))) return false;
+			// 高度决定绘制表面的高度（超过 16384px 就是刚才那个崩溃）。
+			// 宽度用 m.width（不含行尾空白）：折行后行尾那个空格允许悬出折行宽度，
+			// 用 widthIncludingTrailingWhitespace 会把「本来排得下的前缀」判成溢出，
+			// 卡片就会莫名其妙只显示一两行。
+			return m.height <= maxH && m.width <= maxW + 1.f;
+		};
+		// 取前 n 个字符交给排版（换行 / 制表压成空格：卡片按宽度折行，保留原换行只会多出空行）。
+		// 没取完时补省略号，并且把省略号一起算进排版，免得「刚好排满」再多顶出一行。
+		auto build = [&](size_t n) {
+			std::wstring s;
+			s.reserve((std::min)(n, text.size()) + 1);
+			for (size_t i = 0; i < text.size() && s.size() < n; ++i) {
+				const wchar_t c = text[i];
+				s.push_back((c == L'\r' || c == L'\n' || c == L'\t') ? L' ' : c);
+			}
+			if (s.size() < text.size()) {
+				// 别把代理对劈成两半，也别让省略号跟在一串空格后面
+				if (!s.empty() && s.back() >= 0xD800 && s.back() <= 0xDBFF) s.pop_back();
+				while (!s.empty() && s.back() == L' ') s.pop_back();
+				s += L'…';
+			}
+			return s;
+		};
+		// 指数放大找「装不下」的上界（第二趟从这一档二分收敛）
+		size_t lo = 0, hi = 32;
+		while (hi < text.size() && fits(build(hi))) { lo = hi; hi *= 2; }
+		if (hi >= text.size()) {
+			auto all = build(text.size());
+			if (fits(all)) return all;   // 全文都排得下：原样交给 Text，一个字符都不少
+			hi = text.size();
+		}
+		while (hi > lo + 1) {
+			const size_t mid = lo + (hi - lo) / 2;
+			if (fits(build(mid))) lo = mid;
+			else hi = mid;
+		}
+		// 一个字符都排不下（开头就是一整段没有断点的超长串，横向就溢出了）：
+		// 宁可先画开头这几十个字符、让控件横向裁掉，也别给一张空卡片。
+		// 高度最多几行，离 16384px 的表面上限很远。
+		if (lo == 0) return build((std::min)(text.size(), (size_t)32));
+		return build(lo);
+	}
+
+	// 卡片里的正文视口：宽度定下来之后才决定显示多少字（见 fitClipboardPreview）。
+	// 直接把整段正文塞给 Label 就会为整段文字建表面 —— 超过纹理上限即崩溃，所以这里
+	// 把「视口」做成了控件：每次排版按当前宽高取一次可见前缀，宽度变了再重算。
+	class ClipTextPreview : public Ling::Node
+	{
+	public:
+		explicit ClipTextPreview(Ling::WinBase* win) : Ling::Node(win)
+		{
+			label_ = makeChild<Ling::Label>();
+			label_->setWidthPercent(100.f);
+			label_->setBg(0);
+			label_->setJustifyContent(Ling::Justify::Start);
+			label_->setAlignItems(Ling::Align::FlexStart);
+		}
+		void setBody(const std::wstring& text)
+		{
+			body_ = text;
+			lastW_ = lastH_ = -1.f;      // 强制下一次排版重算可见前缀
+			label_->setText(L"");
+		}
+		void setFontSize(float v)
+		{
+			fontSize_ = v;
+			label_->setFontSize(v);
+			lastW_ = lastH_ = -1.f;
+		}
+		void setColor(Ling::Color c) { label_->setColor(c); }
+		void layout() override
+		{
+			Ling::Node::layout();
+			const float d = win->dpi > 0.f ? win->dpi : 1.f;
+			// 宽度要扣掉左右内边距（Label 的折行宽度就是内容宽）；高度按整个视口算：
+			// 内边距只是留白，卡片的硬边界是「裁剪框」，正文最后一行压进下留白一两像素
+			// 和以前（整段排版、裁掉多余部分）看到的样子一致，能多显示一行。
+			const float availW = w - (getPaddingLeft() + getPaddingRight()) * d;
+			const float availH = h;
+			// 布局结果已吸附到整像素，同一尺寸下直接相等：没变就不重算，免得每帧都排版一次
+			if (availW == lastW_ && availH == lastH_) return;
+			lastW_ = availW;
+			lastH_ = availH;
+			label_->setText(fitClipboardPreview(body_, availW, availH, fontSize_, d,
+				DWRITE_WORD_WRAPPING_WRAP));
+		}
+	private:
+		Ling::Label* label_{ nullptr };
+		std::wstring body_;
+		float fontSize_{ 13.f };
+		float lastW_{ -1.f }, lastH_{ -1.f };
+	};
+
 	std::wstring trimCopy(std::wstring s)
 	{
 		while (!s.empty() && iswspace(s.front())) s.erase(s.begin());
@@ -767,7 +903,7 @@ namespace {
 		const int areaH = (int)rc.bottom - (int)rc.top;
 		const int x = (int)rc.left + (std::max)(0, (areaW - w) / 2);
 		const int y = (int)rc.top + (std::max)(0, (areaH - h) / 2);
-		WinPin::initFromData(x, y, w, h, px);
+		WinPin::initFromData(x, y, w, h, px, path);
 	}
 	// 剪切板里的 SVG 代码：渲染成图片后贴到屏幕中央
 	void pinSvgText(const std::wstring& svg)
@@ -807,6 +943,7 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 	navPills = SettingUi::segmentedPills(topRow,
 		{ Lang::get(L"setting.historyTabAll"), Lang::get(L"setting.historyTabShots"),
 		  Lang::get(L"setting.historyTabRecord"), Lang::get(L"setting.historyTabOther"),
+		  Lang::get(L"setting.historyTabPin"),
 		  Lang::get(L"setting.historyTabClipboard") },
 		sourceTab,
 		[this](int idx) {
@@ -815,12 +952,12 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 			shownCount = kBatch;
 			this->closeFilterPanel();
 			this->closeModal();
-			if (blacklistBtn) idx == 4 ? blacklistBtn->show() : blacklistBtn->hide();
+			if (blacklistBtn) idx == 5 ? blacklistBtn->show() : blacklistBtn->hide();
 			// 筛选对所有分类通用（剪切板也按时间 / 关键词 / 标签筛）
 			if (filterHost) filterHost->show();
 			if (clearBtn) clearBtn->setText(Lang::get(clearLabelKeyFor(idx)));
-			// 剪切板只记录路径，没有本地历史目录，不显示「打开历史目录」
-			if (openDirBtn) idx == 4 ? openDirBtn->hide() : openDirBtn->show();
+			// 剪切板只记录路径，没有本地历史目录，不显示「打开历史目录」；贴图历史同理
+			if (openDirBtn) (idx == 5 || idx == 4) ? openDirBtn->hide() : openDirBtn->show();
 			this->refreshGrid();
 		});
 	if (navPills.row) navPills.row->setFlexShrink(0.f);
@@ -997,7 +1134,7 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 		Setting::get()->clipboardChanged = [this, weak]() {
 			auto run = [this, weak]() {
 				if (!weak.lock()) return;
-				if (this->sourceTab == 4 || (this->sourceTab == 0 && !this->filter.tag.empty()))
+				if (this->sourceTab == 5 || (this->sourceTab == 0 && !this->filter.tag.empty()))
 					this->refreshGrid();
 			};
 			if (auto* app = Ling::App::get()) app->dq.TryEnqueue(run);
@@ -1036,7 +1173,8 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 		case 1: msgKey = L"setting.clearHistoryConfirmShots"; break;
 		case 2: msgKey = L"setting.clearHistoryConfirmRecord"; break;
 		case 3: msgKey = L"setting.clearHistoryConfirmOther"; break;
-		case 4: msgKey = L"setting.clearHistoryConfirmClipboard"; break;
+		case 4: msgKey = L"setting.clearHistoryConfirmPin"; break;
+		case 5: msgKey = L"setting.clearHistoryConfirmClipboard"; break;
 		default: break;
 		}
 		SettingUi::ConfirmDialog::ask(win, Lang::get(msgKey),
@@ -1048,12 +1186,19 @@ WinSettingHistory::WinSettingHistory(Ling::WinBase* parent) : Ling::Node(parent)
 					Setting::get()->clearOtherFiles();
 					break;
 				case 4:
+					// 「贴图」：只删历史记录，不删源图片
+					Setting::get()->clearPinHistory();
+					break;
+				case 5:
 					Setting::get()->clearClipboardHistory();
 					break;
 				default:
 					// 全部 / 截图 / 录屏：只删本软件登记过的文件
 					Setting::get()->clearAllHistory(this->sourceTab);
-					if (this->sourceTab == 0) Setting::get()->clearClipboardHistory();
+					if (this->sourceTab == 0) {
+						Setting::get()->clearClipboardHistory();
+						Setting::get()->clearPinHistory();
+					}
 					break;
 				}
 				this->refreshGrid();
@@ -1180,7 +1325,11 @@ bool WinSettingHistory::baseTabMatch(const Setting::HistoryItem& it) const
 {
 	const bool userFile = isUserHistoryFile(it);
 	const bool clip = (it.source == L"clipboard");
-	if (sourceTab == 4) return clip;
+	const bool pin = (it.source == L"pin");
+	if (sourceTab == 5) return clip;
+	if (sourceTab == 4) return pin;
+	// 贴图记录只在「贴图」页显示：源文件若同时是截图/录屏，在那边仍按原分类显示，避免「全部」重复
+	if (pin) return false;
 	if (clip) return sourceTab == 0;
 	if (sourceTab == 3) return userFile;
 	if (sourceTab == 0) return true;
@@ -1224,7 +1373,7 @@ bool WinSettingHistory::matchFilters(const Setting::HistoryItem& it) const
 	if (!filter.tag.empty()) {
 		const bool clip = (it.source == L"clipboard");
 		bool hit = false;
-		const auto tags = clip ? Setting::get()->getClipboardTags(it.id)
+		const auto tags = clip ? clipTagsOf(it.id)
 			: Setting::get()->getHistoryTags(it.filePath);
 		for (auto& t : tags)
 			if (_wcsicmp(t.c_str(), filter.tag.c_str()) == 0) { hit = true; break; }
@@ -1246,7 +1395,7 @@ bool WinSettingHistory::matchFilters(const Setting::HistoryItem& it) const
 				}
 			}
 			// 卡片上显示的标签：剪切板类型标签（链接 / SVG / 色值…）、历史来源标签、自定义标签
-			const auto tags = clip ? Setting::get()->getClipboardTags(it.id)
+			const auto tags = clip ? clipTagsOf(it.id)
 				: Setting::get()->getHistoryTags(it.filePath);
 			if (!hit && clip) hit = searchHit(searchNormalize(clipTypeTag(it)), kw);
 			if (!hit && !clip && tags.empty()) {
@@ -2050,7 +2199,7 @@ void WinSettingHistory::rebuildFilterPanel()
 		if (!baseTabMatch(it)) continue;
 		for (auto& t : Setting::get()->getHistoryTags(it.filePath)) addTag(t);
 	}
-	if (sourceTab == 0 || sourceTab == 4) {
+	if (sourceTab == 0 || sourceTab == 5) {
 		for (auto& c : Setting::get()->getClipboardItems())
 			for (auto& t : c.tags) addTag(t);
 	}
@@ -2338,9 +2487,9 @@ void WinSettingHistory::closeWindowBlacklist()
 	if (topRow) topRow->show();
 	if (filterHost) filterHost->show();
 	if (clearBtn) clearBtn->show();
-	if (openDirBtn) sourceTab == 4 ? openDirBtn->hide() : openDirBtn->show();
+	if (openDirBtn) (sourceTab == 5 || sourceTab == 4) ? openDirBtn->hide() : openDirBtn->show();
 	if (countLabel) countLabel->show();
-	if (blacklistBtn && sourceTab == 4) blacklistBtn->show();
+	if (blacklistBtn && sourceTab == 5) blacklistBtn->show();
 	setBlacklistBtnActive(false);
 	this->refreshGrid();
 }
@@ -2590,9 +2739,18 @@ void WinSettingHistory::showTagDialogFor(const std::wstring& key, std::vector<st
 		}, 72.f);
 }
 
+std::vector<std::wstring> WinSettingHistory::clipTagsOf(const std::wstring& id) const
+{
+	// 缓存由这次 refreshGrid 的 collectItems 填好；没命中（条目已被删 / 不在剪切板页）就当没标签
+	auto hit = clipTags_.find(id);
+	if (hit == clipTags_.end()) return {};
+	return hit->second;
+}
+
 std::vector<Setting::HistoryItem> WinSettingHistory::collectItems(bool forceRescan)
 {
 	auto list = Setting::get()->getHistoryItemsForUi(forceRescan);
+	clipTags_.clear();
 	// 建「我们自己产出的文件 → 封面」表：剪贴板里复制本软件录的屏时，卡片直接用媒体历史的封面，
 	// 不再显示文件名。媒体历史条目本身在「录屏」页照旧显示，两边各自独立。
 	ourMediaCover_.clear();
@@ -2606,8 +2764,9 @@ std::vector<Setting::HistoryItem> WinSettingHistory::collectItems(bool forceResc
 		ourMediaCover_[std::move(key)] = cover;
 	}
 	// 「全部」和「剪切板」页要把剪切板条目并进来（「全部」里是否显示由 matchSourceTab 决定）
-	if (sourceTab == 0 || sourceTab == 4) {
+	if (sourceTab == 0 || sourceTab == 5) {
 		for (auto& c : Setting::get()->getClipboardItems()) {
+			clipTags_.emplace(c.id, c.tags);   // 卡片与筛选都用这份，避免逐条重读 local.json
 			Setting::HistoryItem it;
 			it.id = c.id;
 			it.source = L"clipboard";
@@ -2663,7 +2822,8 @@ void WinSettingHistory::refreshGrid(bool forceRescan)
 		const wchar_t* emptyKey = sourceTab == 0 ? L"setting.noAnyHistory"
 			: (sourceTab == 2 ? L"setting.noRecordHistory"
 				: (sourceTab == 3 ? L"setting.noOtherHistory"
-					: (sourceTab == 4 ? L"setting.noClipboardHistory" : L"setting.noHistory")));
+					: (sourceTab == 4 ? L"setting.noPinHistory"
+						: (sourceTab == 5 ? L"setting.noClipboardHistory" : L"setting.noHistory"))));
 		emptyLabel->setText(Lang::get(emptyKey));
 		empty ? emptyLabel->show() : emptyLabel->hide();
 	}
@@ -2849,7 +3009,15 @@ void WinSettingHistory::refreshGrid(bool forceRescan)
 
 		// 缩略图按缩略图级分辨率解码：历史页会随滚动不断累积格子，若每格都持有整张 4K 原图
 		// （约 33MB）解码位图，内存会很快堆起来。上限取显示尺寸的 2 倍（物理像素）足够清晰。
+		// 优先走 ThumbCache\<条目 id>.png：原图是 2K/3K 全屏 PNG 时，每张卡整读+整解码在慢盘上
+		// 要几十~上百 ms，9/18 张就是「打开历史等一会」的主要成本。老条目没有小图时补生成一次。
+		const bool hasThumbId = (it.id != it.filePath);   // 目录扫描条目的 id 就是路径，不能当文件名
+		auto thumbOf = [&](const std::wstring& src) -> std::wstring {
+			if (!hasThumbId || src.empty()) return {};
+			return Setting::get()->ensureHistoryThumb(it.id, src);
+		};
 		std::wstring thumbPath;
+		std::wstring previewSource;   // 停悬大图仍用原图；小图只喂卡片
 		if (isMedia) {
 			const auto cached = (Setting::get()->getHistoryThumbDir() / (it.id + L".png")).wstring();
 			std::error_code ec;
@@ -2861,10 +3029,11 @@ void WinSettingHistory::refreshGrid(bool forceRescan)
 				// 选第一个仍存在的图片作为缩略图；都不存在时留空，回退到下面的文件名显示。
 				for (const auto& f : it.files) {
 					std::error_code ec;
-					if (std::filesystem::exists(f, ec)) {
-						thumbPath = f;
-						break;
-					}
+					if (!std::filesystem::exists(f, ec)) continue;
+					thumbPath = thumbOf(f);
+					previewSource = f;
+					if (thumbPath.empty()) thumbPath = f;
+					break;
 				}
 			}
 			else {
@@ -2876,13 +3045,19 @@ void WinSettingHistory::refreshGrid(bool forceRescan)
 			}
 		}
 		else if (!clipText) {
-			thumbPath = it.filePath;
+			previewSource = it.filePath;
+			thumbPath = thumbOf(it.filePath);
+			if (thumbPath.empty()) thumbPath = it.filePath;
 		}
 		// 缩略图路径可能已失效（外部文件被删除、缓存被清理）：不要交给 ImageBox，
 		// 否则卡片只剩一块空白；下面会回退到文件名或类型占位图标。
 		if (!thumbPath.empty()) {
 			std::error_code ec;
 			if (!std::filesystem::exists(thumbPath, ec)) thumbPath.clear();
+		}
+		if (!previewSource.empty()) {
+			std::error_code ec;
+			if (!std::filesystem::exists(previewSource, ec)) previewSource.clear();
 		}
 		Ling::ScrollerBox* imgScroll = nullptr;   // 剪切板图片的滚动容器（无滑条）
 		Ling::TextBox* textScroll = nullptr;      // 剪切板文字预览（省略显示，不滚动）
@@ -2899,13 +3074,19 @@ void WinSettingHistory::refreshGrid(bool forceRescan)
 			img->loadImg(svgPreview, 800.f * win->dpi, 3200.f * win->dpi);
 		}
 		else if (clipText) {
-			std::wstring preview = it.text;
-			for (auto& ch : preview)
-				if (ch == L'\r' || ch == L'\n' || ch == L'\t') ch = L' ';
 			uint32_t rgb{};
 			const bool colorEntry = clipTextKind(it.text, &rgb) == ClipTextKind::Color;
 			if (colorEntry) {
 				// 色值条目：整个缩略图区域铺色，文字叠在上面；不画底部遮挡块。
+				// 能解析成色值的正文本身就只有几个字符（#RGB / #RRGGBB / rgb(...)），
+				// 这里只按「前 64 个字符」读，避免为了一个短色值去扫几 MB 的正文。
+				std::wstring colorText;
+				for (size_t i = 0; i < it.text.size() && colorText.size() < 64; ++i) {
+					const wchar_t c = it.text[i];
+					colorText.push_back((c == L'\r' || c == L'\n' || c == L'\t') ? L' ' : c);
+				}
+				while (!colorText.empty() && colorText.front() == L' ') colorText.erase(colorText.begin());
+				while (!colorText.empty() && colorText.back() == L' ') colorText.pop_back();
 				auto* fill = thumbHost->makeChild<Ling::Node>();
 				fill->setWidthPercent(100.f);
 				fill->setHeightPercent(100.f);
@@ -2918,13 +3099,15 @@ void WinSettingHistory::refreshGrid(bool forceRescan)
 				tb->setBg(0);
 				tb->setJustifyContent(Ling::Justify::Start);
 				tb->setAlignItems(Ling::Align::FlexStart);
-				tb->setText(preview);
+				tb->setText(colorText);
 				const int lum = (((rgb >> 16) & 0xFF) * 299 + ((rgb >> 8) & 0xFF) * 587 + (rgb & 0xFF) * 114) / 1000;
 				tb->setColor(lum > 150 ? 0x14181CFFu : 0xFFFFFFFFu);
 				tb->setFontSize(SettingTheme::fontSm);
 			}
 			else {
-				// 换行 / 制表都压成空格；只画四行，剩下的用同色块挡住
+				// 换行 / 制表都压成空格；只画四行，剩下的用同色块挡住。
+				// 正文交给视口控件：它按当前宽高只取能排下的前缀，整段（可能几万行）
+				// 永远不进 Text 的排版。
 				auto* clip = thumbHost->makeChild<Ling::ScrollerBox>();
 				clip->setWidthPercent(100.f);
 				clip->setHeight(72.f);
@@ -2932,15 +3115,13 @@ void WinSettingHistory::refreshGrid(bool forceRescan)
 				clip->setWheelEnabled(false);
 				clip->content->setFlexDirection(Ling::FlexDirection::Column);
 				clip->content->setWidthPercent(100.f);
-				auto* tb = clip->makeChild<Ling::Label>();
-				tb->setWidthPercent(100.f);
-				tb->setPadding(8.f, 4.f, 8.f, 4.f);
-				tb->setBg(0);
-				tb->setJustifyContent(Ling::Justify::Start);
-				tb->setAlignItems(Ling::Align::FlexStart);
-				tb->setText(preview);
-				tb->setColor(SettingTheme::textPrimary);
-				tb->setFontSize(SettingTheme::fontSm);
+				auto* bodyBox = clip->makeChild<ClipTextPreview>();
+				bodyBox->setWidthPercent(100.f);
+				bodyBox->setHeight(72.f);
+				bodyBox->setPadding(8.f, 4.f, 8.f, 4.f);
+				bodyBox->setColor(SettingTheme::textPrimary);
+				bodyBox->setFontSize(SettingTheme::fontSm);
+				bodyBox->setBody(it.text);
 				const uint32_t maskColor = SettingTheme::isDark() ? 0x111111FFu : SettingTheme::secondary;
 				auto* mask = thumbHost->makeChild<Ling::Node>();
 				mask->setPositionType(Ling::Position::Absolute);
@@ -2953,11 +3134,13 @@ void WinSettingHistory::refreshGrid(bool forceRescan)
 		}
 		else if (!thumbPath.empty()) {
 			if (clip) {
-				// 剪切板图片：整块铺满卡片（与截图卡片一致），不做内部滚动
+				// 剪切板图片：整块铺满卡片（与截图卡片一致），不做内部滚动。
+				// 上限按显示尺寸的 2 倍即可；以前写的 800×dpi / 3200×dpi 在 200% 缩放下
+				// 等于按 1600 px 宽去解一张全屏原图，白白多花几倍解码时间。
 				auto* img = thumbHost->makeChild<Ling::ImageBox>();
 				img->setWidthPercent(100.f);
 				img->setHeightPercent(100.f);
-				img->loadImg(thumbPath, 800.f * win->dpi, 3200.f * win->dpi);
+				img->loadImg(thumbPath, 576.f * win->dpi, 288.f * win->dpi);
 			}
 			else {
 				auto* img = thumbHost->makeChild<Ling::ImageBox>();
@@ -3114,9 +3297,10 @@ void WinSettingHistory::refreshGrid(bool forceRescan)
 		slot.btns = std::move(btnList);
 		slot.imgScroll = imgScroll;
 		slot.textScroll = textScroll;
-		// 有静态小图的卡片提供停悬大图（录屏用的是缓存封面，不做预览）
-		if (!thumbPath.empty() && !isMedia) {
-			slot.previewPath = thumbPath;
+		// 有静态小图的卡片提供停悬大图（录屏用的是缓存封面，不做预览）。
+		// 停悬预览要看清细节，仍然喂原图；小图只用于卡片本身。
+		if (!previewSource.empty() && !isMedia) {
+			slot.previewPath = previewSource;
 			slot.previewW = it.width;
 			slot.previewH = it.height;
 		}
@@ -3149,7 +3333,7 @@ void WinSettingHistory::refreshGrid(bool forceRescan)
 		// 标签位：剪切板固定先显示类型标签（图片/视频/文字/文件）+ 自定义标签；
 		// 文件历史有自定义标签就显示标签，否则显示来源标签。
 		struct TagChip { std::wstring text; bool editable; };
-		const auto tags = clip ? Setting::get()->getClipboardTags(it.id)
+		const auto tags = clip ? clipTagsOf(it.id)
 			: Setting::get()->getHistoryTags(it.filePath);
 		std::vector<TagChip> chips;
 		// 便签卡片只留「便签」一个标签：不再叠一层类型标签（文字 / 链接 / SVG…）。
@@ -3424,7 +3608,7 @@ void WinSettingHistory::applyReorderToTop()
 	pendingReorderId_.clear();
 	if (id.empty()) return;
 	// 只有当前页面真的会显示剪切板条目时才有必要播动画
-	const bool visible = (sourceTab == 4 || (sourceTab == 0 && !filter.tag.empty()));
+	const bool visible = (sourceTab == 5 || (sourceTab == 0 && !filter.tag.empty()));
 	if (!Setting::get()->touchClipboardItem(id)) return;   // 已在最前：让提示自然收起
 	if (!visible) return;
 	hideCopyToast();

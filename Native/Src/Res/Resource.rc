@@ -1,4 +1,4 @@
-#define APSTUDIO_READONLY_SYMBOLS
+﻿#define APSTUDIO_READONLY_SYMBOLS
 #include "winres.h"
 #undef APSTUDIO_READONLY_SYMBOLS
 // 源文件按 UTF-8 保存；告知 rc 编译器以 UTF-8 解析其后的窄字符串，
@@ -16,10 +16,15 @@ en-US RCDATA "lang.en-US.json"
 // 这样 .rc 里只写裸文件名，不依赖 rc 的工作目录/搜索路径。
 // MSBuild 不跟踪 RCDATA 数据文件，换图后需要让本 .rc 重新编译。
 about RCDATA "About.png"
+// 关于页彩蛋：悬停「Liuyiran」时气泡左侧的二维码。源图在仓库根目录 images/，
+// 同样由 CopyAboutImage 拷到本目录再打包。两种配色各一张：
+// 深色主题的气泡是浅色底 → 用黑码；浅色主题的气泡是深色底 → 用白码。
+qrcode_black RCDATA "QRCodeBlack.png"
+qrcode_white RCDATA "QRCodeWhite.png"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 0,1,26,0
-PRODUCTVERSION 0,1,26,0
+FILEVERSION 0,1,27,0
+PRODUCTVERSION 0,1,27,0
 FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
 FILEFLAGS 0x1L
@@ -36,12 +41,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "CM-idea"
             VALUE "FileDescription", "SnowAir 轻雪"
-            VALUE "FileVersion", "0.1.26.0"
+            VALUE "FileVersion", "0.1.27.0"
             VALUE "InternalName", "SnowAir.exe"
             VALUE "LegalCopyright", "Copyright (C) CM-idea"
             VALUE "OriginalFilename", "SnowAir.exe"
             VALUE "ProductName", "SnowAir 轻雪"
-            VALUE "ProductVersion", "0.1.26.0"
+            VALUE "ProductVersion", "0.1.27.0"
         END
     END
     BLOCK "VarFileInfo"

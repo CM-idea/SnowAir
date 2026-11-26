@@ -14,6 +14,7 @@
 #include <oleacc.h>
 #include <UIAutomationClient.h>
 #include "Setting.h"
+#include "Ocr/PluginPaths.h"
 #include "BlacklistMatch.h"
 #include "ConfigMerge.h"
 #include "Plugin/PluginHost.h"
@@ -27,6 +28,7 @@
 #include "Win/WinImageEdit.h"
 #include "App.h"
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <set>
 #include <cwctype>
@@ -45,6 +47,7 @@ namespace {
         { L"fullscreen_canvas",      103 },
         { L"record",                 104 },
         { L"toggle_pins",            105 },
+        { L"restore_pin",            114 },
         { L"show_main",              106 },
         { L"open_screenshot_dir",    107 },
         { L"open_history",           108 },
@@ -356,7 +359,7 @@ namespace {
 }
 
 
-Setting::Setting() :dataPath{ initDataPath() }, configPath{ initConfigPath() }
+Setting::Setting() :dataPath{ initDataPath() }, configPath{ initConfigPath() }, cachePath{ initCachePath() }
 {
     if (std::filesystem::exists(configPath)) {
         std::wstring content;
@@ -876,9 +879,14 @@ void Setting::init()
     setting.reset(ptr);
     // 旧配置的顶层节可能不是对象；进入业务代码前统一归一化。
     setting->normalizeConfigSections();
+    // 缓存目录允许用户自定义（文件输出 → 保存路径 → 缓存文件路径），没设置就用默认。
+    setting->cachePath = setting->resolveCachePath();
     // 将旧版本分散在 config.json、clipboard.json、history.json、state.json 中的本机数据
     // 迁移到 local.json。此后本机数据只写入 local.json，用户设置只写入 config.json。
     setting->migrateLocalDataToFile();
+    // 缩略图/封面与剪贴板图片集中到 %LocalAppData%\SnowAir\Cache；旧目录搬走并改写索引里的路径。
+    // 必须在 pruneOrphanThumbCache 之前做，否则旧目录还按旧路径找不到文件会被当孤儿清掉。
+    setting->migrateCacheDirs();
     // 启动时清理旧版本遗留的 AI 配置（AI 对话 / AI 视觉 OCR / AI 翻译）
     setting->purgeRemovedAiSettings();
     // 启动时清理旧程序（ScreenCapture）留下的历史键位
@@ -1231,6 +1239,407 @@ std::filesystem::path Setting::initConfigPath()
     if (std::filesystem::exists(path)) return path;
     auto fallback = this->dataPath; //复制一份路径对象，append 会就地改
     return fallback.append(L"config.json");
+}
+
+std::filesystem::path Setting::initCachePath()
+{
+    // 缓存（缩略图/封面、剪贴板图片）不属于配置，放本机 LocalAppData：
+    // Roaming 在域环境/漫游配置下会被同步，几百 MB 的图片没必要跟着走。
+    PWSTR local = nullptr;
+    std::filesystem::path dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local)) && local) {
+        dir = local;
+        CoTaskMemFree(local);
+    }
+    if (dir.empty()) dir = dataPath;   // 极端兜底：拿不到 LocalAppData 就退回原来的根
+    dir.append(L"SnowAir");
+    dir.append(L"Cache");
+    return dir;
+}
+
+std::filesystem::path Setting::getCacheRoot()
+{
+    std::error_code ec;
+    if (!std::filesystem::exists(cachePath, ec)) std::filesystem::create_directories(cachePath, ec);
+    return cachePath;
+}
+
+std::filesystem::path Setting::resolveCachePath()
+{
+    auto custom = getCacheDir();
+    if (custom.empty()) return initCachePath();
+    std::filesystem::path p{ custom };
+    if (p.is_relative()) p = dataPath / p;
+    return p.lexically_normal();
+}
+
+std::wstring Setting::getCacheDir() { return featStr(L"cacheDir", L""); }
+
+std::filesystem::path Setting::getDefaultCacheRoot() { return initCachePath(); }
+
+namespace {
+void rewriteJsonPaths(const std::filesystem::path& file,
+    const std::vector<std::pair<std::wstring, std::wstring>>& pairs);
+}
+
+bool Setting::setCacheDir(const std::wstring& dir)
+{
+    std::wstring v = dir;
+    const auto first = v.find_first_not_of(L" \t\r\n");
+    const auto last = v.find_last_not_of(L" \t\r\n");
+    v = (first == std::wstring::npos) ? L"" : v.substr(first, last - first + 1);
+
+    const auto def = initCachePath();
+    std::filesystem::path target;
+    std::wstring stored;
+    if (v.empty() || _wcsicmp(v.c_str(), def.c_str()) == 0) {
+        target = def;
+        stored.clear();
+    }
+    else {
+        target = std::filesystem::path{ v };
+        if (target.is_relative()) target = dataPath / target;
+        target = target.lexically_normal();
+        // 自定义时选的是"放在哪"，实际缓存根统一收在 <所选目录>\SnowAir\Cache，
+        // 避免目标位置直接出现一个泛泛的 Cache 目录，分不清是哪个软件的。
+        if (!(_wcsicmp(target.filename().c_str(), L"Cache") == 0 &&
+              _wcsicmp(target.parent_path().filename().c_str(), L"SnowAir") == 0)) {
+            if (_wcsicmp(target.filename().c_str(), L"SnowAir") == 0)
+                target /= L"Cache";
+            else {
+                target /= L"SnowAir";
+                target /= L"Cache";
+            }
+        }
+        stored = target.wstring();
+    }
+    if (_wcsicmp(target.wstring().c_str(), cachePath.wstring().c_str()) == 0) return true;
+
+    const auto oldRoot = cachePath;
+    // 不允许把新目录放到旧缓存目录里面，否则复制会递归自己
+    {
+        const std::wstring oldPrefix = oldRoot.wstring() + L"\\";
+        const std::wstring newPath = target.wstring();
+        if (newPath.size() > oldPrefix.size() &&
+            _wcsnicmp(newPath.c_str(), oldPrefix.c_str(), oldPrefix.size()) == 0)
+            return false;
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(target, ec);
+    if (ec && !std::filesystem::is_directory(target, ec)) return false;
+
+    // 先复制旧缓存到新目录（保留 Images / Misc 以及旧版扁平目录的结构），
+    // 成功后再改写 local.json / 晾衣架 JSON 里的绝对路径，最后才删旧目录。
+    static const wchar_t* kSubdirs[] = {
+        L"Images", L"Misc", L"Thumb", L"Clipboard", L"PinHistory", L"RackQuick", L"IconCache"
+    };
+    bool copied = true;
+    auto copyDir = [&](auto&& self, const std::filesystem::path& from,
+                       const std::filesystem::path& to) -> bool {
+        std::error_code ce;
+        std::filesystem::create_directories(to, ce);
+        if (ce) return false;
+        for (const auto& entry : std::filesystem::directory_iterator(from, ce)) {
+            if (ce) return false;
+            const auto dest = to / entry.path().filename();
+            if (entry.is_directory(ce)) {
+                if (!self(self, entry.path(), dest)) return false;
+            } else if (entry.is_regular_file(ce)) {
+                std::error_code fe;
+                std::filesystem::copy_file(entry.path(), dest,
+                    std::filesystem::copy_options::overwrite_existing, fe);
+                if (fe) return false;
+            }
+        }
+        return true;
+    };
+    for (const wchar_t* rel : kSubdirs) {
+        const auto from = oldRoot / rel;
+        std::error_code se;
+        if (!std::filesystem::is_directory(from, se)) continue;
+        if (!copyDir(copyDir, from, target / rel)) { copied = false; break; }
+    }
+    if (!copied) return false;
+
+    const std::vector<std::pair<std::wstring, std::wstring>> pairs{
+        { oldRoot.wstring(), target.wstring() },
+    };
+    rewriteJsonPaths(getLocalDataPath(), pairs);
+    const auto rackData = PluginPaths::root() / L"rack" / L"data";
+    rewriteJsonPaths(rackData / L"rack.json", pairs);
+    rewriteJsonPaths(rackData / L"rack_items.json", pairs);
+
+    for (const wchar_t* rel : kSubdirs) {
+        std::error_code re;
+        std::filesystem::remove_all(oldRoot / rel, re);
+    }
+    {
+        std::error_code re;
+        if (std::filesystem::is_directory(oldRoot, re) &&
+            std::filesystem::is_empty(oldRoot, re))
+            std::filesystem::remove(oldRoot, re);
+        // 默认缓存根是 ...\SnowAir\Cache；Cache 搬空后，SnowAir 这一层也空了就一起删掉，
+        // 避免 LocalAppData 下留一个空壳。只处理名字确实是 SnowAir 的父目录，不碰用户自定义目录。
+        const auto parent = oldRoot.parent_path();
+        re.clear();
+        if (_wcsicmp(parent.filename().c_str(), L"SnowAir") == 0 &&
+            std::filesystem::is_directory(parent, re) &&
+            std::filesystem::is_empty(parent, re))
+            std::filesystem::remove(parent, re);
+    }
+
+    setFeatStr(L"cacheDir", stored);
+    cachePath = target;
+    return true;
+}
+
+namespace {
+std::string toUtf8(const std::wstring& w)
+{
+    if (w.empty()) return {};
+    const int need = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    if (need <= 0) return {};
+    std::string s((size_t)need, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), s.data(), need, nullptr, nullptr);
+    return s;
+}
+
+// 把插件 JSON 数据里的旧绝对路径前缀换成新位置（原样替换，不解析 JSON）：
+// rack_items.json 里存的是 hung 卡片的 path，路径搬了不改就会变死卡。
+void rewriteJsonPaths(const std::filesystem::path& file,
+    const std::vector<std::pair<std::wstring, std::wstring>>& pairs)
+{
+    std::error_code ec;
+    if (!std::filesystem::exists(file, ec)) return;
+    std::ifstream in(file, std::ios::binary);
+    if (!in) return;
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    if (text.empty()) return;
+
+    bool changed = false;
+    auto replaceAll = [&](const std::string& from, const std::string& to) {
+        if (from.empty() || from == to) return;
+        size_t pos = 0;
+        while ((pos = text.find(from, pos)) != std::string::npos) {
+            text.replace(pos, from.size(), to);
+            pos += to.size();
+            changed = true;
+        }
+    };
+    for (const auto& [oldW, newW] : pairs) {
+        if (oldW.empty()) continue;
+        const std::string oldU = toUtf8(oldW);
+        const std::string newU = toUtf8(newW);
+        if (oldU.empty()) continue;
+        std::string oldEsc, newEsc;
+        for (char c : oldU) { if (c == '\\') oldEsc += "\\\\"; else oldEsc += c; }
+        for (char c : newU) { if (c == '\\') newEsc += "\\\\"; else newEsc += c; }
+        replaceAll(oldEsc, newEsc);
+        replaceAll(oldU, newU);
+    }
+    if (!changed) return;
+
+    auto bak = file; bak += L".cache-move.bak";
+    if (!std::filesystem::exists(bak, ec))
+        std::filesystem::copy_file(file, bak, std::filesystem::copy_options::overwrite_existing, ec);
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    if (out) out.write(text.data(), (std::streamsize)text.size());
+}
+}
+
+void Setting::migrateCacheDirs()
+{
+    const auto newThumb = getHistoryThumbDir();
+    const auto newClip = getClipboardDir();
+    const auto newPin = getPinHistoryDir();
+    const auto newRackQuick = getRackQuickDir();
+    const auto newIcon = getIconCacheDir();
+    const auto oldThumb = dataPath / L"ThumbCache";
+    const auto oldClip = dataPath / L"Clipboard";
+    const auto oldPin = dataPath / L"PinHistory";
+    const auto oldRackQuick = dataPath / L"RackQuick";
+    const auto oldIcon = dataPath / L"IconCache";
+    // 0.1.27 早期版本已经把缓存放到 Cache 根下，但还没分组；这次一并收进 Images / Misc。
+    const auto flatThumb = getCacheRoot() / L"Thumb";
+    const auto flatClip = getCacheRoot() / L"Clipboard";
+    const auto flatPin = getCacheRoot() / L"PinHistory";
+    const auto flatRackQuick = getCacheRoot() / L"RackQuick";
+    const auto flatIcon = getCacheRoot() / L"IconCache";
+
+    std::error_code ec;
+    auto isDir = [&](const std::filesystem::path& p) {
+        std::error_code e;
+        return std::filesystem::is_directory(p, e);
+    };
+    const bool hasOldThumb = isDir(oldThumb) || isDir(flatThumb);
+    const bool hasOldClip = isDir(oldClip) || isDir(flatClip);
+    const bool hasOldPin = isDir(oldPin) || isDir(flatPin);
+    const bool hasOldRackQuick = isDir(oldRackQuick) || isDir(flatRackQuick);
+    const bool hasOldIcon = isDir(oldIcon) || isDir(flatIcon);
+    if (!hasOldThumb && !hasOldClip && !hasOldPin && !hasOldRackQuick && !hasOldIcon) return;
+
+    // 先确认 local.json 能读：损坏/被占用时暂不搬，否则文件搬走了、索引里的旧路径还在，
+    // 反而全变失效。读不出来就保持原样，下次启动再试。
+    const auto local = getLocalDataPath();
+    std::error_code le;
+    const bool localHasContent =
+        std::filesystem::exists(local, le) && std::filesystem::file_size(local, le) > 0;
+    auto data = loadLocalData();
+    if (localHasContent && !data) return;
+
+    std::map<std::wstring, std::wstring> moved;   // lower(旧路径) -> 新路径
+    auto moveDir = [&](const std::filesystem::path& from, const std::filesystem::path& to) {
+        std::error_code e;
+        if (!std::filesystem::is_directory(from, e)) return;
+        std::filesystem::create_directories(to, e);
+        for (const auto& entry : std::filesystem::directory_iterator(from, e)) {
+            if (e || !entry.is_regular_file(e)) continue;
+            const auto target = to / entry.path().filename();
+            std::error_code te;
+            if (std::filesystem::exists(target, te)) {
+                std::filesystem::remove(entry.path(), te);   // 新位置已有同名文件：旧的是重复
+            } else {
+                std::filesystem::rename(entry.path(), target, te);
+                if (te) {
+                    te.clear();
+                    std::filesystem::copy_file(entry.path(), target,
+                        std::filesystem::copy_options::overwrite_existing, te);
+                    if (te) continue;
+                    std::filesystem::remove(entry.path(), te);
+                }
+            }
+            std::wstring key = entry.path().wstring();
+            for (auto& c : key) c = (wchar_t)towlower(c);
+            moved[key] = target.wstring();
+        }
+        std::error_code re;
+        if (std::filesystem::is_empty(from, re)) std::filesystem::remove(from, re);
+    };
+    moveDir(oldThumb, newThumb);
+    moveDir(oldClip, newClip);
+    moveDir(oldPin, newPin);
+    moveDir(oldRackQuick, newRackQuick);
+    moveDir(oldIcon, newIcon);
+    moveDir(flatThumb, newThumb);
+    moveDir(flatClip, newClip);
+    moveDir(flatPin, newPin);
+    moveDir(flatRackQuick, newRackQuick);
+    moveDir(flatIcon, newIcon);
+    if (moved.empty()) return;
+
+    // 路径要改写，先留一份 local.json 备份
+    if (localHasContent) {
+        auto bak = local; bak += L".cache-move.bak";
+        if (!std::filesystem::exists(bak, ec))
+            std::filesystem::copy_file(local, bak, std::filesystem::copy_options::overwrite_existing, ec);
+    }
+
+    bool changed = false;
+    auto mapOne = [&](std::wstring& p) {
+        if (p.empty()) return;
+        std::wstring key = p;
+        for (auto& c : key) c = (wchar_t)towlower(c);
+        auto it = moved.find(key);
+        if (it == moved.end()) return;
+        p = it->second;
+        changed = true;
+    };
+
+    // 剪贴板条目：filePath 与 files[]
+    if (data.HasKey(L"clipboard") && data.GetNamedValue(L"clipboard").ValueType() == JsonValueType::Object) {
+        auto store = data.GetNamedObject(L"clipboard");
+        if (store.HasKey(L"items") && store.GetNamedValue(L"items").ValueType() == JsonValueType::Array) {
+            auto arr = store.GetNamedArray(L"items");
+            for (UINT32 i = 0; i < arr.Size(); ++i) {
+                if (arr.GetAt(i).ValueType() != JsonValueType::Object) continue;
+                auto o = arr.GetAt(i).GetObjectW();
+                bool itemChanged = false;
+                if (o.HasKey(L"filePath") && o.GetNamedValue(L"filePath").ValueType() == JsonValueType::String) {
+                    std::wstring p = o.GetNamedString(L"filePath", L"").c_str();
+                    mapOne(p);
+                    if (!p.empty()) {
+                        o.SetNamedValue(L"filePath", JsonValue::CreateStringValue(p));
+                        itemChanged = true;
+                    }
+                }
+                if (o.HasKey(L"files") && o.GetNamedValue(L"files").ValueType() == JsonValueType::Array) {
+                    auto files = o.GetNamedArray(L"files");
+                    for (UINT32 j = 0; j < files.Size(); ++j) {
+                        if (files.GetAt(j).ValueType() != JsonValueType::String) continue;
+                        std::wstring p = files.GetAt(j).GetString().c_str();
+                        mapOne(p);
+                        if (!p.empty()) {
+                            files.SetAt(j, JsonValue::CreateStringValue(p));
+                            itemChanged = true;
+                        }
+                    }
+                    o.SetNamedValue(L"files", files);
+                }
+                if (itemChanged) arr.SetAt(i, o);
+            }
+            store.SetNamedValue(L"items", arr);
+        }
+        data.SetNamedValue(L"clipboard", store);
+    }
+
+    // 历史条目 / 标签：贴图历史可能引用剪贴板图片
+    if (data.HasKey(L"history") && data.GetNamedValue(L"history").ValueType() == JsonValueType::Object) {
+        auto store = data.GetNamedObject(L"history");
+        if (store.HasKey(L"items") && store.GetNamedValue(L"items").ValueType() == JsonValueType::Array) {
+            auto arr = store.GetNamedArray(L"items");
+            for (UINT32 i = 0; i < arr.Size(); ++i) {
+                if (arr.GetAt(i).ValueType() != JsonValueType::Object) continue;
+                auto o = arr.GetAt(i).GetObjectW();
+                if (o.HasKey(L"filePath") && o.GetNamedValue(L"filePath").ValueType() == JsonValueType::String) {
+                    std::wstring p = o.GetNamedString(L"filePath", L"").c_str();
+                    mapOne(p);
+                    if (!p.empty()) {
+                        o.SetNamedValue(L"filePath", JsonValue::CreateStringValue(p));
+                        arr.SetAt(i, o);
+                    }
+                }
+            }
+            store.SetNamedValue(L"items", arr);
+        }
+        if (store.HasKey(L"tags") && store.GetNamedValue(L"tags").ValueType() == JsonValueType::Array) {
+            auto arr = store.GetNamedArray(L"tags");
+            for (UINT32 i = 0; i < arr.Size(); ++i) {
+                if (arr.GetAt(i).ValueType() != JsonValueType::Object) continue;
+                auto o = arr.GetAt(i).GetObjectW();
+                if (o.HasKey(L"path") && o.GetNamedValue(L"path").ValueType() == JsonValueType::String) {
+                    std::wstring p = o.GetNamedString(L"path", L"").c_str();
+                    mapOne(p);
+                    if (!p.empty()) {
+                        o.SetNamedValue(L"path", JsonValue::CreateStringValue(p));
+                        arr.SetAt(i, o);
+                    }
+                }
+            }
+            store.SetNamedValue(L"tags", arr);
+        }
+        data.SetNamedValue(L"history", store);
+    }
+
+    if (changed) saveLocalData(data);
+
+    // 晾衣架自己的数据：rack_items.json 里的 hung 卡片路径
+    const std::vector<std::pair<std::wstring, std::wstring>> pairs{
+        { oldClip.wstring(), newClip.wstring() },
+        { oldThumb.wstring(), newThumb.wstring() },
+        { oldPin.wstring(), newPin.wstring() },
+        { oldRackQuick.wstring(), newRackQuick.wstring() },
+        { oldIcon.wstring(), newIcon.wstring() },
+        { flatClip.wstring(), newClip.wstring() },
+        { flatThumb.wstring(), newThumb.wstring() },
+        { flatPin.wstring(), newPin.wstring() },
+        { flatRackQuick.wstring(), newRackQuick.wstring() },
+        { flatIcon.wstring(), newIcon.wstring() },
+    };
+    const auto rackData = PluginPaths::root() / L"rack" / L"data";
+    rewriteJsonPaths(rackData / L"rack.json", pairs);
+    rewriteJsonPaths(rackData / L"rack_items.json", pairs);
 }
 
 void Setting::save()
@@ -1819,8 +2228,10 @@ void Setting::restoreFunctionRecordDefaults()
 	setSelFollowMouse(false);
 	setRecordToolbarPeek(false);
 	setRecordDefaultPierce(false);
-	setMouseHighlight(false);
+	setMouseTrailEffect(kMouseTrailNone);
+	setMouseClickEffect(kMouseClickNone);
 	featuresObj().Remove(L"mouseHighlightColor");
+	featuresObj().Remove(L"mouseHighlight");   // 旧版布尔开关一并清掉
 	save();
 }
 
@@ -1886,7 +2297,9 @@ bool Setting::functionRecordAtDefaults()
 		&& getVideoEncoder() == 0 && getEncodeSpeed() == 1 && getHwAccel()
 		&& getHideToolbarInRecord() && getKeyOverlayPos() == kKeyOverlayNone && !getSelFollowMouse()
 		&& !getRecordToolbarPeek() && !getRecordDefaultPierce()
-		&& !getMouseHighlight() && getMouseHighlightColor() == 0x0FDC78FF;
+		&& getMouseTrailEffect() == kMouseTrailNone
+		&& getMouseClickEffect() == kMouseClickNone
+		&& getMouseHighlightColor() == 0x0FDC78FF;
 }
 
 bool Setting::functionOutputAtDefaults()
@@ -1952,8 +2365,47 @@ bool Setting::getRecordToolbarPeek() { return featBool(L"recordToolbarPeek", fal
 void Setting::setRecordToolbarPeek(bool on) { setFeatBool(L"recordToolbarPeek", on); }
 bool Setting::getRecordDefaultPierce() { return featBool(L"recordDefaultPierce", false); }
 void Setting::setRecordDefaultPierce(bool on) { setFeatBool(L"recordDefaultPierce", on); }
-bool Setting::getMouseHighlight() { return featBool(L"mouseHighlight", false); }
-void Setting::setMouseHighlight(bool on) { setFeatBool(L"mouseHighlight", on); }
+int Setting::getMouseTrailEffect()
+{
+	auto f = featuresObj();
+	if (f.HasKey(L"mouseTrailEffect")
+		&& f.GetNamedValue(L"mouseTrailEffect").ValueType() == JsonValueType::Number) {
+		const int v = static_cast<int>(f.GetNamedValue(L"mouseTrailEffect").GetNumber());
+		if (v < kMouseTrailHighlight || v > kMouseTrailMagnifier) return kMouseTrailNone;
+		return v;
+	}
+	// 旧配置只有布尔 mouseHighlight（开 = 高亮提醒，关 = 无）
+	return featBool(L"mouseHighlight", false) ? kMouseTrailHighlight : kMouseTrailNone;
+}
+void Setting::setMouseTrailEffect(int effect)
+{
+	const int v = (effect < kMouseTrailHighlight || effect > kMouseTrailMagnifier)
+		? kMouseTrailNone : effect;
+	setFeatInt(L"mouseTrailEffect", v);
+	// 新键已经落盘，旧布尔开关不再需要（避免以后读不到新键时又按旧值回退）
+	if (featuresObj().HasKey(L"mouseHighlight")) {
+		featuresObj().Remove(L"mouseHighlight");
+		save();
+	}
+}
+bool Setting::getMouseHighlight() { return getMouseTrailEffect() == kMouseTrailHighlight; }
+void Setting::setMouseHighlight(bool on)
+{
+	setMouseTrailEffect(on ? kMouseTrailHighlight : kMouseTrailNone);
+}
+int Setting::getMouseClickEffect()
+{
+	const int v = featInt(L"mouseClickEffect", kMouseClickNone);
+	// 2 是旧版的「无」，3 是新增的「光标波纹组合」；未知值一律按「无」
+	if (v < kMouseClickRipple || v > kMouseClickCombo) return kMouseClickNone;
+	return v;
+}
+void Setting::setMouseClickEffect(int effect)
+{
+	const int v = (effect < kMouseClickRipple || effect > kMouseClickCombo)
+		? kMouseClickNone : effect;
+	setFeatInt(L"mouseClickEffect", v);
+}
 UINT32 Setting::getMouseHighlightColor()
 {
 	auto f = featuresObj();
@@ -2026,6 +2478,8 @@ void Setting::applyHotkeys()
 //   ② 前台窗口里拖选的一段文字（UIA 选区，不需要先复制）
 //   ③ 否则贴当前剪贴板内容（文字 / 图片 / 文件）
 namespace {
+    unsigned clipboardHash(const std::vector<BYTE>& data);
+
     /* 快速贴屏上绳开关 + 插件在场时，快速贴屏整体交给晾衣架接管。
        图片仍走插件原有的 on_quick_hang；文字和文件走新的可选导出。 */
     bool rackQuickHangEnabled()
@@ -2054,7 +2508,7 @@ namespace {
         if (s && s->getRackFlag(L"rack.quick_pin_hang", false)) {
             std::wstring hangPath = sourcePath;
             if (hangPath.empty()) {
-                auto dir = s->getDataPath() / L"RackQuick";
+                auto dir = s->getRackQuickDir();
                 std::error_code ec;
                 std::filesystem::create_directories(dir, ec);
                 hangPath = (dir / wfmt(L"quick-%llu.png", GetTickCount64())).wstring();
@@ -2072,8 +2526,20 @@ namespace {
         SystemParametersInfo(SPI_GETWORKAREA, 0, &rc, 0);
         const int areaW = (int)rc.right - (int)rc.left;
         const int areaH = (int)rc.bottom - (int)rc.top;
+        // 剪贴板图片：监听端已经把它落到了 Clipboard 缓存。能找到就引用那份，不另存贴图历史副本
+        std::wstring historyPath = sourcePath;
+        if (historyPath.empty()) {
+            const unsigned hash = clipboardHash(px);
+            for (const auto& c : s->getClipboardItems()) {
+                if (c.type == L"image" && c.hash == hash && c.width == w && c.height == h
+                    && !c.filePath.empty()) {
+                    historyPath = c.filePath;
+                    break;
+                }
+            }
+        }
         WinPin::initFromData(rc.left + (std::max)(0, (areaW - w) / 2),
-            rc.top + (std::max)(0, (areaH - h) / 2), w, h, px);
+            rc.top + (std::max)(0, (areaH - h) / 2), w, h, px, historyPath);
     }
 
     // 贴一组文件：单张图片按图片贴图，其余（文件夹 / 视频 / 其它文件）贴成文件贴屏
@@ -2376,6 +2842,7 @@ void Setting::runHotkeyAction(const std::wstring& id)
     if (id == L"rack_quick_hang") { PluginHost::instance().quickHang(); return; }
     if (id == L"rack_toggle") { PluginHost::instance().toggleRack(); return; }
     if (id == L"toggle_pins") { WinPin::toggleAllHidden(); return; }
+    if (id == L"restore_pin") { WinPin::restoreLastClosed(); return; }
     if (id == L"open_history") { if (!getDisableCaptureHistory()) WinSetting::togglePage(5); return; }
     if (id == L"open_screenshot_dir") {
         const auto dir = Util::outputDir();
@@ -2820,12 +3287,75 @@ bool Setting::saveHistoryStore(const JsonObject& store)
 
 std::filesystem::path Setting::getHistoryThumbDir()
 {
-    // 只存录屏封面的小图，不是历史副本
-    auto dir = dataPath;
-    dir.append(L"ThumbCache");
+    // 只存小图（含录屏封面），不是历史副本；和历史/剪贴板图片一起放在 Cache 下
+    auto dir = getCacheRoot();
+    dir.append(L"Images");
+    dir.append(L"Thumb");
     std::error_code ec;
     if (!std::filesystem::exists(dir, ec)) std::filesystem::create_directories(dir, ec);
     return dir;
+}
+
+namespace {
+// 历史页缩略图的最长边：卡片显示尺寸在 200% 缩放下约 400 px，512 足够清晰；
+// 单张只有几十~两百 KB，慢盘上读 9/18 张也不再是瓶颈。
+constexpr int kHistoryThumbMax = 512;
+
+// BGRA → 小图（面积平均）：只给网格用，不需要高质量重采样。
+std::vector<BYTE> downscaleBgra(const BYTE* src, int sw, int sh, int maxDim, int& ow, int& oh)
+{
+    ow = oh = 0;
+    if (!src || sw <= 0 || sh <= 0 || maxDim <= 0) return {};
+    const int longSide = (std::max)(sw, sh);
+    const double k = (longSide > maxDim) ? (double)maxDim / longSide : 1.0;
+    ow = (std::max)(1, (int)std::lround(sw * k));
+    oh = (std::max)(1, (int)std::lround(sh * k));
+    std::vector<BYTE> out((size_t)ow * (size_t)oh * 4);
+    for (int y = 0; y < oh; ++y) {
+        const int sy0 = (int)((long long)y * sh / oh);
+        const int sy1 = (std::max)(sy0 + 1, (int)((long long)(y + 1) * sh / oh));
+        for (int x = 0; x < ow; ++x) {
+            const int sx0 = (int)((long long)x * sw / ow);
+            const int sx1 = (std::max)(sx0 + 1, (int)((long long)(x + 1) * sw / ow));
+            unsigned long long b = 0, g = 0, r = 0, a = 0;
+            unsigned n = 0;
+            for (int sy = sy0; sy < sy1; ++sy) {
+                const BYTE* p = src + ((size_t)sy * (size_t)sw + (size_t)sx0) * 4;
+                for (int sx = sx0; sx < sx1; ++sx, p += 4) {
+                    b += p[0]; g += p[1]; r += p[2]; a += p[3]; ++n;
+                }
+            }
+            BYTE* d = out.data() + ((size_t)y * (size_t)ow + (size_t)x) * 4;
+            d[0] = (BYTE)(b / n); d[1] = (BYTE)(g / n);
+            d[2] = (BYTE)(r / n); d[3] = (BYTE)(a / n);
+        }
+    }
+    return out;
+}
+}
+
+void Setting::writeHistoryThumb(const std::wstring& id, int w, int h, const BYTE* bgra)
+{
+    if (id.empty() || !bgra || w <= 0 || h <= 0) return;
+    int tw = 0, th = 0;
+    auto thumbPixels = downscaleBgra(bgra, w, h, kHistoryThumbMax, tw, th);
+    if (thumbPixels.empty()) return;
+    Util::saveToFile((getHistoryThumbDir() / (id + L".png")).wstring(), tw, th, thumbPixels.data());
+}
+
+std::wstring Setting::ensureHistoryThumb(const std::wstring& id, const std::wstring& srcPath)
+{
+    if (id.empty() || srcPath.empty() || id == srcPath) return {};
+    auto path = getHistoryThumbDir() / (id + L".png");
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec)) return path.wstring();
+    // 老条目：补生成一次。只在历史页首次显示时走到这里，之后都是小图。
+    auto [w, h, px] = Util::loadImagePixels(srcPath);
+    if (w <= 0 || h <= 0 || px.size() < (size_t)w * (size_t)h * 4) return {};
+    int tw = 0, th = 0;
+    auto thumbPixels = downscaleBgra(px.data(), w, h, kHistoryThumbMax, tw, th);
+    if (thumbPixels.empty() || !Util::saveToFile(path.wstring(), tw, th, thumbPixels.data())) return {};
+    return path.wstring();
 }
 
 static JsonObject historyItemToJson(const Setting::HistoryItem& it)
@@ -3116,7 +3646,7 @@ std::vector<std::wstring> Setting::getAllHistoryTags()
 // 登记一条已落盘的历史文件（截图 / 长图 / 静默截图 / 录屏）：
 // 历史只记真实路径，不再复制一份图像。返回条目 id。
 std::wstring Setting::addHistoryFile(const std::wstring& filePath, int width, int height,
-    const std::wstring& source)
+    const std::wstring& source, const std::vector<BYTE>* bgra)
 {
     if (filePath.empty()) return L"";
     std::error_code ec;
@@ -3134,6 +3664,10 @@ std::wstring Setting::addHistoryFile(const std::wstring& filePath, int width, in
     it.width = width;
     it.height = height;
     it.createdAt = (long long)nowMs;
+
+    // 落盘时手里已经有像素：顺手生成网格用小图，历史页就不必每次整读原图
+    if (bgra && width > 0 && height > 0 && bgra->size() >= (size_t)width * (size_t)height * 4)
+        writeHistoryThumb(it.id, width, height, bgra->data());
 
     JsonArray arr;
     arr.Append(historyItemToJson(it));   // 新的排在前面（与 getHistoryItems 的排序一致）
@@ -3190,6 +3724,85 @@ std::wstring Setting::addHistoryMedia(const std::wstring& mediaPath, int width, 
     return it.id;
 }
 
+// 贴图缓存只用于没有源文件的截图贴图；引用源文件的贴图记录不能删源图。
+namespace {
+bool isPinHistoryFile(const std::wstring& path)
+{
+    auto* s = Setting::get();
+    if (!s || path.empty()) return false;
+    return std::filesystem::path(path).parent_path() == s->getPinHistoryDir();
+}
+}
+
+// 贴图历史：有源文件时只引用、不复制；没有源文件（截图直接贴图等）时，
+// 只在 PinHistory 里存一份按内容去重的缓存，反复贴同一张图不会重复存。
+// 同一文件重复贴图只更新贴图记录；原来的截图/录屏记录保持不动。
+std::wstring Setting::addPinHistory(const std::wstring& sourcePath, int width, int height,
+    const std::vector<BYTE>& bgra)
+{
+    if (width <= 0 || height <= 0) return L"";
+    std::wstring filePath = sourcePath;
+    std::error_code ec;
+    if (filePath.empty() || !std::filesystem::exists(filePath, ec)) {
+        if (bgra.size() < (size_t)width * 4u * (size_t)height) return L"";
+        const auto dir = getPinHistoryDir();
+        std::filesystem::create_directories(dir, ec);
+        const unsigned hash = clipboardHash(bgra);
+        filePath = (dir / wfmt(L"pin-%08x-%dx%d.png", hash, width, height)).wstring();
+        if (!std::filesystem::exists(filePath, ec)) {
+            std::vector<BYTE> copy = bgra;
+            if (!Util::saveToFile(filePath, width, height, copy.data())) return L"";
+        }
+    }
+    historyUiCacheDirty_ = true;
+
+    static UINT64 seq = 0;
+    const auto now = std::chrono::system_clock::now();
+    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+
+    auto oldItems = getHistoryItems();
+    HistoryItem it;
+    // 同一张图反复贴：沿用旧记录的 id，历史条目的身份保持稳定（恢复热键按 id 判断
+    // 这张图是不是已经在桌面上）。createdAt 仍刷新，所以它仍算“新的一条”。
+    for (auto& old : oldItems) {
+        if (old.filePath == filePath && old.source == L"pin") { it.id = old.id; break; }
+    }
+    if (it.id.empty()) it.id = wfmt(L"p%lld-%d", (long long)nowMs, (int)++seq);
+    it.filePath = filePath;
+    it.source = L"pin";
+    it.width = width;
+    it.height = height;
+    it.createdAt = (long long)nowMs;
+
+    JsonArray arr;
+    arr.Append(historyItemToJson(it));
+    for (auto& old : oldItems) {
+        // 同一张图只留一条贴图记录；其它分类的记录（截图/录屏等）原样保留
+        if (old.filePath == filePath && old.source == L"pin") continue;
+        arr.Append(historyItemToJson(old));
+    }
+    auto store = loadHistoryStore();
+    store.SetNamedValue(L"items", arr);
+    saveHistoryStore(store);
+    return it.id;
+}
+
+void Setting::clearPinHistory()
+{
+    historyUiCacheDirty_ = true;
+    JsonArray arr;
+    for (auto& it : getHistoryItems()) {
+        if (it.source != L"pin") { arr.Append(historyItemToJson(it)); continue; }
+        // 只删 PinHistory 缓存；引用截图/剪贴板等源文件的记录只删记录，不动原图
+        std::error_code ec;
+        if (isPinHistoryFile(it.filePath))
+            std::filesystem::remove(it.filePath, ec);
+    }
+    auto store = loadHistoryStore();
+    store.SetNamedValue(L"items", arr);
+    saveHistoryStore(store);
+}
+
 namespace {
 bool isUnderDir(const std::wstring& file, const std::filesystem::path& dir)
 {
@@ -3207,8 +3820,18 @@ bool isCachePath(const std::wstring& path)
     if (!s || path.empty()) return false;
     const std::wstring file = std::filesystem::path(path).lexically_normal().wstring();
     const auto data = s->getDataPath();
-    return isUnderDir(file, data / L"Clipboard") || isUnderDir(file, data / L"ThumbCache") ||
-           isUnderDir(file, data / L"RackQuick");
+    return isUnderDir(file, s->getClipboardDir()) ||
+           isUnderDir(file, s->getHistoryThumbDir()) ||
+           isUnderDir(file, s->getPinHistoryDir()) ||
+           isUnderDir(file, s->getRackQuickDir()) ||
+           isUnderDir(file, s->getIconCacheDir()) ||
+           isUnderDir(file, s->getCacheRoot() / L"Clipboard") ||
+           isUnderDir(file, s->getCacheRoot() / L"Thumb") ||
+           isUnderDir(file, s->getCacheRoot() / L"RackQuick") ||
+           isUnderDir(file, s->getCacheRoot() / L"IconCache") ||
+           isUnderDir(file, data / L"Clipboard") || isUnderDir(file, data / L"ThumbCache") ||
+           isUnderDir(file, data / L"RackQuick") || isUnderDir(file, data / L"IconCache") ||
+           isPinHistoryFile(file);
 }
 
 void deleteHistoryFile(const std::wstring& path)
@@ -3238,6 +3861,13 @@ void Setting::pruneExpiredHistory()
         // 超过保留天数的截图与录屏都会清理
         if (it.createdAt >= cutoff) {
             keep.push_back(it);
+            continue;
+        }
+        // 贴图记录：只删 PinHistory 缓存；引用截图/剪贴板等源文件的记录不动原图
+        if (it.source == L"pin") {
+            std::error_code ec;
+            if (isPinHistoryFile(it.filePath))
+                std::filesystem::remove(it.filePath, ec);
             continue;
         }
         std::error_code ec;
@@ -3278,29 +3908,36 @@ void Setting::pruneOrphanThumbCache()
     std::error_code ec;
     if (!std::filesystem::is_directory(dir, ec)) return;
 
-    std::vector<std::wstring> keep;
-    for (const auto& it : getHistoryItems()) {
-        if (it.source != L"record" || it.filePath.empty()) continue;
-        std::error_code fileEc;
-        if (!std::filesystem::exists(it.filePath, fileEc)) continue;
-        keep.push_back(it.id + L".png");
-    }
+    // 历史条目（截图/录屏/贴图）与剪贴板条目都可能带 <id>.png 小图；
+    // 用 set 比对，避免 O(缩略图 × 条目) 的线性查找。
+    std::set<std::wstring> keep;
+    for (const auto& it : getHistoryItems()) keep.insert(it.id + L".png");
+    for (const auto& c : getClipboardItems()) keep.insert(c.id + L".png");
 
     for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
         if (ec || !entry.is_regular_file(ec)) continue;
         if (_wcsicmp(entry.path().extension().c_str(), L".png") != 0) continue;
         const std::wstring name = entry.path().filename().wstring();
-        bool referenced = false;
-        for (const auto& kept : keep) {
-            if (_wcsicmp(name.c_str(), kept.c_str()) == 0) {
-                referenced = true;
-                break;
-            }
-        }
-        if (!referenced) {
-            std::error_code removeEc;
-            std::filesystem::remove(entry.path(), removeEc);
-        }
+        if (keep.find(name) != keep.end()) continue;
+        std::error_code removeEc;
+        std::filesystem::remove(entry.path(), removeEc);
+    }
+
+    // 剪贴板缓存（原图 / SVG 预览）：文件名以条目 id 开头，如 <id>.png、<id>.svg3.png。
+    // 清空/删除条目后可能留下孤儿文件，这里一并按"还有没有条目引用"清掉。
+    auto clipDir = getClipboardDir();
+    if (!std::filesystem::is_directory(clipDir, ec)) return;
+    std::set<std::wstring> clipIds;
+    for (const auto& c : getClipboardItems()) clipIds.insert(c.id);
+    for (const auto& entry : std::filesystem::directory_iterator(clipDir, ec)) {
+        if (ec || !entry.is_regular_file(ec)) continue;
+        const std::wstring name = entry.path().filename().wstring();
+        const size_t dot = name.find(L'.');
+        if (dot == std::wstring::npos) continue;
+        const std::wstring id = name.substr(0, dot);
+        if (clipIds.find(id) != clipIds.end()) continue;
+        std::error_code removeEc;
+        std::filesystem::remove(entry.path(), removeEc);
     }
 }
 
@@ -3313,9 +3950,18 @@ void Setting::removeHistoryItem(const std::wstring& id, bool deleteFile)
     for (auto& it : list) {
         if (it.id == id) {
             found = true;
-            // 历史即真实文件：deleteFile=true 时删条目就删文件（缓存直接删，用户文件走回收站）
+            // 历史即真实文件：deleteFile=true 时删条目就删文件（缓存直接删，用户文件走回收站）。
+            // 贴图记录：只删 PinHistory 缓存，不动截图/剪贴板等源文件。
             std::error_code ec;
-            if (deleteFile && !it.filePath.empty()) deleteHistoryFile(it.filePath);
+            if (deleteFile && !it.filePath.empty()) {
+                if (it.source == L"pin") {
+                    if (isPinHistoryFile(it.filePath))
+                        std::filesystem::remove(it.filePath, ec);
+                }
+                else {
+                    deleteHistoryFile(it.filePath);
+                }
+            }
             std::filesystem::remove(getHistoryThumbDir() / (it.id + L".png"), ec);
         } else {
             keep.push_back(it);
@@ -3342,6 +3988,7 @@ void Setting::clearAllHistory(int sourceTab)
     auto list = getHistoryItemsForUi(true);
     for (auto& it : list) {
         if (it.id == it.filePath) continue;   // 目录里用户自己放的文件，跳过
+        if (it.source == L"pin") continue;    // 贴图记录只记引用；由 clearPinHistory 单独清
         const bool isRecord = (it.source == L"record");
         if (sourceTab == 1 && isRecord) continue;   // 只清截图
         if (sourceTab == 2 && !isRecord) continue;  // 只清录屏
@@ -3349,9 +3996,13 @@ void Setting::clearAllHistory(int sourceTab)
         if (!it.filePath.empty()) deleteHistoryFile(it.filePath);
         std::filesystem::remove(getHistoryThumbDir() / (it.id + L".png"), ec);
     }
-    // 索引里保留没被清掉的分类
+    // 索引里保留没被清掉的分类（贴图记录始终保留，清「全部」时由调用方另调 clearPinHistory）
     JsonArray arr;
     for (auto& it : getHistoryItems()) {
+        if (it.source == L"pin") {
+            arr.Append(historyItemToJson(it));
+            continue;
+        }
         const bool isRecord = (it.source == L"record");
         if ((sourceTab == 1 && isRecord) || (sourceTab == 2 && !isRecord))
             arr.Append(historyItemToJson(it));
@@ -3445,8 +4096,40 @@ namespace {
 
 std::filesystem::path Setting::getClipboardDir()
 {
-    auto dir = dataPath;
+    // 剪贴板原图与 SVG 预览缓存：Cache\Clipboard（和缩略图同根，但不混在一起）
+    auto dir = getCacheRoot();
+    dir.append(L"Images");
     dir.append(L"Clipboard");
+    std::error_code ec;
+    if (!std::filesystem::exists(dir, ec)) std::filesystem::create_directories(dir, ec);
+    return dir;
+}
+
+std::filesystem::path Setting::getPinHistoryDir()
+{
+    auto dir = getCacheRoot();
+    dir.append(L"Images");
+    dir.append(L"PinHistory");
+    std::error_code ec;
+    if (!std::filesystem::exists(dir, ec)) std::filesystem::create_directories(dir, ec);
+    return dir;
+}
+
+std::filesystem::path Setting::getRackQuickDir()
+{
+    auto dir = getCacheRoot();
+    dir.append(L"Misc");
+    dir.append(L"RackQuick");
+    std::error_code ec;
+    if (!std::filesystem::exists(dir, ec)) std::filesystem::create_directories(dir, ec);
+    return dir;
+}
+
+std::filesystem::path Setting::getIconCacheDir()
+{
+    auto dir = getCacheRoot();
+    dir.append(L"Misc");
+    dir.append(L"IconCache");
     std::error_code ec;
     if (!std::filesystem::exists(dir, ec)) std::filesystem::create_directories(dir, ec);
     return dir;
@@ -3697,6 +4380,7 @@ void Setting::addClipboardImage(int w, int h, const std::vector<BYTE>& bgra)
     if (it.filePath.empty()) return;
     std::vector<BYTE> copy = bgra;   // saveToFile 要非 const 指针
     if (!Util::saveToFile(it.filePath, w, h, copy.data())) return;
+    writeHistoryThumb(it.id, w, h, copy.data());   // 历史页用的小图
     items.insert(items.begin(), std::move(it));
     writeClipboardItems(items);
 }
@@ -3836,6 +4520,10 @@ void Setting::clearClipboardHistory()
     }
     std::vector<ClipboardItem> empty;
     writeClipboardItems(empty);
+
+    // 条目清空后，缓存目录里可能还留着早先删除/去重时变成孤儿的原图或 SVG 预览；
+    // 这里立刻按"还有没有条目引用"清一遍，避免用户点了「清除全部」目录里仍有文件。
+    pruneOrphanThumbCache();
 }
 
 void Setting::markOwnClipboardWrite()
@@ -3844,5 +4532,6 @@ void Setting::markOwnClipboardWrite()
     // 随后的 WM_CLIPBOARDUPDATE / 定时轮询就会跳过，不会在剪切板历史里再生一条
     g_lastClipSeq = GetClipboardSequenceNumber();
 }
+
 
 

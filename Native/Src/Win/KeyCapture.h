@@ -59,6 +59,15 @@ private:
     void onKeyUp(UINT key, UINT mods);
     void preview(UINT mods);
 
+    // 录制期间修饰键的**实际按下顺序**（MOD_* 位，按第一次按下的先后记）。
+    // 落盘与预览都按它拼：先按 Win 再按 Alt 就是 Win+Alt+主键，先按 Alt 就是 Alt+Win+主键。
+    std::vector<UINT> modOrder_;
+    void rememberModifier(UINT bit);
+    void forgetModifier(UINT bit);
+    // 当前仍按住的修饰键键名，按实际按下顺序；拿不到顺序的路径（录制前就按住的键、注入按键）
+    // 按 Win → Ctrl → Alt → Shift 补齐。
+    std::vector<std::wstring> orderedModifiers(UINT mods) const;
+
     Ling::WinBase* win_{ nullptr };
     UINT timerId_{ 0 };
     RefreshFn refresh_;

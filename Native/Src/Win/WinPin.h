@@ -1,5 +1,6 @@
 #pragma once
 #include "AnnotHost.h"
+#include "PinShake.h"
 
 class ShapeText;
 class ToolOcr;
@@ -11,9 +12,13 @@ class WinPin : public AnnotHost
 public:
 	~WinPin();
 	static void init(int x, int y, int w, int h, const std::wstring& initialTool = L"", std::unique_ptr<ToolCap> toolCap = nullptr);
-	static WinPin* initFromData(int x, int y, int w, int h, std::vector<BYTE>& data);
+	static WinPin* initFromData(int x, int y, int w, int h, std::vector<BYTE>& data,
+		const std::wstring& sourcePath = L"");
 	static bool hasWindow();
 	static void dispose();
+	// 全局热键「恢复历史贴图」：按「历史记录 > 贴图」顺序，每次恢复下一条（新的在前），
+	// 只读历史文件重新贴出，删记录 / 文件丢失 / 已在桌面上的跳过
+	static void restoreLastClosed();
 	// 全局热键「隐藏/显示贴图」：临时隐藏 / 放回全部贴图（不落盘，重启照常显示）
 	static void toggleAllHidden();
 	// 外观页改了贴图边框颜色 / 粗细 / 圆角后，让已经开着的贴图立即重绘
@@ -27,6 +32,10 @@ public:
 	void setEditing(bool on);
 	void finishEditing(bool apply);
 	void toggleBorderVisible();
+	// 同一张图已经贴在桌面上：不再新建，把它抬到最前并抖动提示
+	void pulseDuplicate();
+	// 太小的贴图放不下悬停控件（锁/编辑/关闭），只保留右键菜单
+	bool hidesHoverChrome() const;
 	bool isEditing() const { return editing; }
 	bool isBorderVisible() const { return borderVisible; }
 	int getOpacityPercent() const { return opacityPercent; }
@@ -71,11 +80,17 @@ private:
 	D2D1_RECT_F editBtnRect() const;
 	HoverBtn hitHoverBtn(POINT pos) const;
 	HoverBtn hitHoverBtnAt(POINT pos) const;   // 不含"鼠标是否在窗口内"的判断（浮层转发用）
+	// 按光标位置刷新悬停控件显隐（命中变了才重绘，识别浮层开着时同步重画它的控件）
+	void syncHoverChrome(POINT pos);
+	// 无条件收起悬停控件：拖动开始、鼠标离开时用；本来就没显示则什么也不做
+	void hideHoverChrome();
 	// 识别浮层在贴图之上：控件改画在浮层里，悬停/点击由浮层转发回来
 	void pinChromeHover(POINT pos);
 	bool pinChromeDown(POINT pos);
 	// 点击贴图会把贴图抬到置顶组最前，识别浮层会被压住 —— 每次激活后重新把浮层抬回来
 	void raiseOcrPanel();
+	// 把当前贴图（含标注）导出成临时 PNG，交给图片编辑器导入
+	void importToImageEditor();
 	Microsoft::WRL::ComPtr<IDWriteTextLayout> makeHoverIcon(const wchar_t* code);
 	bool sizePreviewOrigin(float& cx, float& cy, float& halfSpan) const override;
 	bool annotRightClick() override;
@@ -101,6 +116,9 @@ private:
 	// 逐帧重建太贵（每个文本框一套 swap chain），滚轮缩放和拖边框改尺寸都走这里。
 	void deferOcrRelayout();
 	void toggleOcrPanel(bool copyText = true);
+	// 在所有开着的贴图里找同一张图（尺寸 + 像素指纹都相同、且还没被标注过）：
+	// 命中就返回它，调用方不再新建窗口。
+	static WinPin* findDuplicate(int w, int h, uint64_t hash);
 private:
 	Ling::Canvas* canvas{ nullptr };
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> borderBrush;
@@ -155,6 +173,13 @@ private:
 	float edgeStartScale{ 1.f };
 	// —— 识别文字 ——
 	std::unique_ptr<ToolOcr> toolOcr;
+	// —— 重复贴图 ——
+	uint64_t contentHash{ 0 };        // 底图像素指纹（0 = 未知，不参与重复判定）
+	// 这张贴图在「历史记录 → 贴图」里的条目 id；删除历史记录后恢复热键不再恢复它
+	std::wstring pinHistoryId;
+	PinShake::State shakeState;       // 「重复」抖动提示
+	// 窗口短边小于这个值就收起悬停控件；控件本身按 dpi 缩放，阈值也跟着缩放
+	static constexpr float kChromeMinSide{ 50.f };
 
 	static constexpr float kBtn{ 32.f };
 	static constexpr float kBtnGap{ 8.f };

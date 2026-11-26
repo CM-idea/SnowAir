@@ -35,6 +35,10 @@ public:
 	// 多边形/星形二级滑条：悬停/拖动时在画布上显示形状预览
 	void setShapePreviewHold(bool hold);
 	void pulseShapePreview();
+	// 荧光笔透明度气泡打开期间：画布上显示半透明笔迹预览；有本体（选中/刚画完）时直接看本体
+	void setPenOpacityPreview(bool on);
+	// 透明度等属性实时作用到「刚画完、还没选中」的荧光笔本体（选中的由 onToolStyleChanged 统一下发）
+	void applyLiveHighlighterStyle();
 	void showPenTools();
 	void showNumberTools();
 	void showTextTools();
@@ -155,6 +159,7 @@ public:
 		int rectKind{}, polygonSides{}, starPoints{}, arrowHead{}, lineKind{}, numberStyle{};
 		float cornerRadius{}, lastCornerRadius{};
 		int rectOpacity{};
+		int penMarkerOpacity{};   // 荧光笔透明度也随「二次选中」载入/还原
 		float sliderVal{}, sliderMin{}, sliderMax{};
 		std::wstring curSliderKey;
 		UINT selectColorIndex{};
@@ -241,7 +246,7 @@ public:
 	bool isLine{ false }; // 箭头属性栏内切换直线（无独立主栏按钮）
 	bool isArrowDash{ false }, isArrowRound{ false };
 	bool isPenDash{ false }, isPenSoft{ false }, isPenFade{ false };
-	// 荧光笔：与普通画笔共用同一个粗细滑条（显示 4 时实际 20）、半透明
+	// 荧光笔：与普通画笔共用同一个粗细滑条（显示 4 时实际 28）、半透明
 	bool isPenMarker{ false };
 	int penMarkerOpacity{ 35 };   // 荧光笔不透明度（10–100）
 	bool isLineTransparent{ false }, isTextBold{ false }, isTextItalic{ false };
@@ -310,6 +315,8 @@ private:
 	void beginTool(const std::wstring& id);
 	void initSize(int btnCount, bool withColors, bool centerOnBtn = false, float extraLogicW = 0.f);
 	void refreshSize();
+	// 跨屏后按新显示器的缩放重算尺寸（ToolbarWindow::adoptMonitorDpi 的回调）
+	void onDpiAdopted() override;
 	void applyToolbarSize();
 	float toPx(float logical) const;
 	void styleToolbarBtn(Ling::Button* btn);
@@ -456,7 +463,6 @@ private:
 	float sizeExtraH{ 0.f };   // 额外高度（快照属性栏的缩略图网格）
 	// —— 演示画布：快照属性栏 ——
 	Ling::Node* snapRow{ nullptr };      // 第一行：创建 / 弹簧 / 删除 / 保存为
-	Ling::Button* snapCreateBtn{ nullptr };
 	Ling::Button* snapDeleteBtn{ nullptr };
 	Ling::Button* snapSaveBtn{ nullptr };
 	Ling::ScrollerBox* snapScroll{ nullptr };

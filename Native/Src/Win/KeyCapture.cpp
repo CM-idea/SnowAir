@@ -5,6 +5,7 @@
 #include "HotkeyHook.h"
 #include "KeyCapture.h"
 #include "SettingTheme.h"
+#include <algorithm>
 
 namespace
 {
@@ -32,21 +33,17 @@ namespace
         }
     }
 
-    // 录制中的实时预览：按当前按住的修饰键拼前缀（顺序与落盘口径一致，末尾带 "+"）。
-    // 只反映修饰键，主键一按下就整条落盘并结束录制，所以预览到这里为止。
-    std::wstring modifierPrefix(UINT mods)
+    // 修饰键位 → 落盘键名。Win 统一写 Win（左右 Win 都是 MOD_WIN，注册时不区分），
+    // 与 KeyCapture::joinKeys / 默认键位表 / 保留键表里的写法保持一致。
+    const wchar_t* modNameOf(UINT bit)
     {
-        std::wstring out;
-        auto add = [&out](const wchar_t* name) {
-            if (!out.empty()) out += L"+";
-            out += name;
-        };
-        if (mods & MOD_CONTROL) add(L"Ctrl");
-        if (mods & MOD_ALT) add(L"Alt");
-        if (mods & MOD_SHIFT) add(L"Shift");
-        if (mods & MOD_WIN) add(L"Win");
-        if (!out.empty()) out += L"+";
-        return out;
+        switch (bit) {
+        case MOD_CONTROL: return L"Ctrl";
+        case MOD_ALT: return L"Alt";
+        case MOD_SHIFT: return L"Shift";
+        case MOD_WIN: return L"Win";
+        default: return L"";
+        }
     }
 }
 
@@ -78,6 +75,7 @@ void KeyCapture::begin(Ling::Button* btn, const std::wstring& id, StyleFn style)
     id_ = id;
     style_ = std::move(style);
     heldMods_ = 0;
+    modOrder_.clear();
 
     // 清空按钮内置文本，改用自定义的两个子节点（加载指示 + 文案）。Button 的内置 Text
     // 固定为 flex 首个子节点，无法插入到加载指示左侧，因此先置空，再以 (spinner, label) 居中排列。
@@ -158,7 +156,13 @@ void KeyCapture::handleKey(UINT key)
 void KeyCapture::handleKeyUp()
 {
     if (!active()) return;
-    preview(asyncMods());
+    const UINT mods = asyncMods();
+    // 窗口消息路径不知道抬起的是哪一颗键：按实时状态把已松开的修饰键从顺序表里剔掉，
+    // 否则同一个修饰键再按下时会被当成"还按着"，顺序停在旧位置。
+    modOrder_.erase(std::remove_if(modOrder_.begin(), modOrder_.end(),
+        [mods](UINT bit) { return (mods & bit) == 0; }),
+        modOrder_.end());
+    preview(mods);
 }
 
 void KeyCapture::handleMouseDown(POINT pos)
@@ -191,8 +195,10 @@ void KeyCapture::onKeyDown(UINT key, UINT mods)
     // 只按修饰键：先记下并显示出来，继续等主键；
     // 若这行允许"纯修饰键"，松手那一刻才落盘（见 onKeyUp）
     if (isModifierKey(keyStr)) {
-        heldMods_ |= modBitsOf(key);
-        preview(mods);
+        const UINT bit = modBitsOf(key);
+        heldMods_ |= bit;
+        rememberModifier(bit);   // 记下按下先后，落盘与预览都照它排
+        preview(mods | bit);
         return;
     }
 
@@ -204,12 +210,9 @@ void KeyCapture::onKeyDown(UINT key, UINT mods)
         return;
     }
 
-    // 组合取"主键按下这一刻"按住的修饰键：与按下/松开的先后顺序无关
-    std::vector<std::wstring> keys;
-    if (mods & MOD_CONTROL) keys.push_back(L"Ctrl");
-    if (mods & MOD_ALT) keys.push_back(L"Alt");
-    if (mods & MOD_SHIFT) keys.push_back(L"Shift");
-    if (mods & MOD_WIN) keys.push_back(L"LWin");
+    // 组合取"主键按下这一刻"按住的修饰键，排列顺序取实际按下的先后：
+    // 先按 Win 再按 Alt 就是 Win+Alt+主键；先按 Alt 就是 Alt+Win+主键。
+    std::vector<std::wstring> keys = orderedModifiers(mods);
     keys.push_back(keyStr);
 
     // 先结束录制，再进行校验与赋值：按钮在确认前必须恢复原值；冲突被取消时不做任何修改
@@ -226,14 +229,13 @@ void KeyCapture::onKeyUp(UINT key, UINT mods)
     if (!active()) return;
     const std::wstring name = keyToStr(key);
     if (!isModifierKey(name)) { preview(mods); return; }
-    // 纯修饰键：松到"一个不剩"时才算录完，用松开前按住的那些修饰键拼组合。
+    const UINT bit = modBitsOf(key);
+    // 纯修饰键：松到"一个不剩"时才算录完，用松开前按住的那些修饰键（按按下顺序）拼组合。
     // 合不合法交给这一行的 valid_ 判：普通命令要求"修饰键 + 主键"，于是这里等同什么都不做。
-    std::vector<std::wstring> keys;
-    if (heldMods_ & MOD_CONTROL) keys.push_back(L"Ctrl");
-    if (heldMods_ & MOD_ALT) keys.push_back(L"Alt");
-    if (heldMods_ & MOD_SHIFT) keys.push_back(L"Shift");
-    if (heldMods_ & MOD_WIN) keys.push_back(L"LWin");
-    heldMods_ &= ~modBitsOf(key);
+    // 注意 keys 要在清 heldMods_ 之前取 —— 最后松开的这颗也要算进去。
+    std::vector<std::wstring> keys = orderedModifiers(heldMods_);
+    heldMods_ &= ~bit;
+    forgetModifier(bit);
     if (heldMods_ != 0 || keys.empty()) { preview(mods); return; }
     if (!valid_ || !valid_(keys)) { preview(mods); return; }
     const std::wstring id = id_;
@@ -244,8 +246,48 @@ void KeyCapture::onKeyUp(UINT key, UINT mods)
 void KeyCapture::preview(UINT mods)
 {
     if (!label_) return;
-    const std::wstring prefix = modifierPrefix(mods);
+    // 预览与落盘同一套顺序（实际按下顺序），用户看到的前缀就是最终键位的写法
+    std::wstring prefix;
+    for (const auto& name : orderedModifiers(mods)) {
+        if (!prefix.empty()) prefix += L"+";
+        prefix += name;
+    }
+    if (!prefix.empty()) prefix += L"+";
     label_->setText(prefix.empty() ? Lang::get(L"shortcut.pressKey") : prefix);
+}
+
+void KeyCapture::rememberModifier(UINT bit)
+{
+    if (!bit) return;
+    for (UINT held : modOrder_) {
+        if (held == bit) return;   // 长按自动重复：保持第一次按下时的位置
+    }
+    modOrder_.push_back(bit);
+}
+
+void KeyCapture::forgetModifier(UINT bit)
+{
+    modOrder_.erase(std::remove(modOrder_.begin(), modOrder_.end(), bit), modOrder_.end());
+}
+
+std::vector<std::wstring> KeyCapture::orderedModifiers(UINT mods) const
+{
+    std::vector<UINT> order;
+    for (UINT bit : modOrder_) {
+        if ((mods & bit) && std::find(order.begin(), order.end(), bit) == order.end())
+            order.push_back(bit);
+    }
+    // 兜底：录制前就按住 / 注入按键这条路径拿不到先后，用 Win 优先的惯例顺序补齐，
+    // 这样即使漏了顺序，Win 组合也不会被排成 Alt+Win。
+    static const UINT kFallback[] = { MOD_WIN, MOD_CONTROL, MOD_ALT, MOD_SHIFT };
+    for (UINT bit : kFallback) {
+        if ((mods & bit) && std::find(order.begin(), order.end(), bit) == order.end())
+            order.push_back(bit);
+    }
+    std::vector<std::wstring> out;
+    out.reserve(order.size());
+    for (UINT bit : order) out.emplace_back(modNameOf(bit));
+    return out;
 }
 
 std::wstring KeyCapture::joinKeys(const std::vector<std::wstring>& keys)

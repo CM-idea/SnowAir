@@ -13,6 +13,12 @@ public:
 	static void dispose();
 	static Setting* get();
 	std::filesystem::path getDataPath();
+	// 缓存根目录（默认 %LocalAppData%\SnowAir\Cache）：缩略图/录屏封面、剪贴板图片都在这里。
+	// 用户可在「文件输出 → 保存路径 → 缓存文件路径」改成别的目录。
+	std::filesystem::path getCacheRoot();
+	std::wstring getCacheDir();
+	bool setCacheDir(const std::wstring& dir);
+	std::filesystem::path getDefaultCacheRoot();
 	// 「关于」页：把当前配置另存为指定文件；把选中的配置文件导入并覆盖现有配置。
 	// 导入后本次运行转入只读（不再回写内存里的旧配置），重启后生效。
 	bool exportConfigTo(const std::filesystem::path& path);
@@ -52,7 +58,6 @@ public:
 	// Lite 版发现完整版在跑时调 setHotkeysYielded(true) 交出热键（注销已注册的），
 	// 完整版退出后调 setHotkeysYielded(false) 取回。
 	void setHotkeysYielded(bool yielded);
-	bool hotkeysYielded() const { return hotkeysYielded_; }
 	void purgeRemovedAiSettings();
 	// 启动时清理旧程序 ScreenCapture 留下的历史键位（`cap`，现用 id 为 capture）；见 Setting.cpp
 	void purgeLegacyShortcutKeys();
@@ -121,7 +126,6 @@ public:
 	void setPauseHotkeysFullscreen(bool on);
 	// 由全屏检测驱动：暂时摘掉 / 重新装回全部全局热键（幂等）
 	void setHotkeysSuppressed(bool on);
-	bool hotkeysSuppressed() const { return hotkeysSuppressed_; }
 	bool getPinAutoOcr();
 	void setPinAutoOcr(bool on);
 	bool getPinAutoFit();
@@ -226,10 +230,27 @@ public:
 	// 录屏默认开启鼠标穿透：开录即穿透，录制中可用快捷键/工具条按钮临时开关
 	bool getRecordDefaultPierce();
 	void setRecordDefaultPierce(bool on);
-	// 「鼠标高亮提醒」（视频录制）：录制中在光标下垫一个半透明圆形色块
+	// 「鼠标轨迹效果」（视频录制）：0 = 高亮提醒，1 = 线条跟随，2 = 无（默认），
+	// 3 = 局部放大（跟随光标的圆形放大镜）。2 保持为「无」是为了兼容旧配置。
+	static constexpr int kMouseTrailHighlight{ 0 };
+	static constexpr int kMouseTrailLine{ 1 };
+	static constexpr int kMouseTrailNone{ 2 };
+	static constexpr int kMouseTrailMagnifier{ 3 };
+	int getMouseTrailEffect();
+	void setMouseTrailEffect(int effect);
+	// 兼容旧配置：旧版只有布尔 mouseHighlight（开 = 高亮提醒）
 	bool getMouseHighlight();
 	void setMouseHighlight(bool on);
-	// 高亮圆的颜色（0xRRGGBBAA，取色存不透明值；绘制时按固定透明度做半透明色块）
+	// 「鼠标单击效果」（视频录制）：0 = 单色波纹，1 = 光标放大，2 = 无（默认），
+	// 3 = 光标波纹组合。2 保持为「无」是为了兼容旧配置；组合效果追加在最后。
+	static constexpr int kMouseClickRipple{ 0 };
+	static constexpr int kMouseClickZoom{ 1 };
+	static constexpr int kMouseClickNone{ 2 };
+	static constexpr int kMouseClickCombo{ 3 };
+	int getMouseClickEffect();
+	void setMouseClickEffect(int effect);
+	// 轨迹颜色（0xRRGGBBAA，取色存不透明值）：高亮色块 / 跟随线条 / 单击波纹共用；
+	// 绘制时再按各自的固定透明度做半透明效果
 	UINT32 getMouseHighlightColor();
 	void setMouseHighlightColor(UINT32 rgba);
 
@@ -295,7 +316,7 @@ public:
 		std::wstring id;
 		// 真实文件路径（截图/长图/静默截图在截图目录，录屏在用户保存的位置）
 		std::wstring filePath;
-		// "fullscreen" / "focused" / "capture" / "long" / "record" / "clipboard"
+		// "fullscreen" / "focused" / "capture" / "long" / "record" / "clipboard" / "pin"
 		std::wstring source;
 		int width{ 0 };
 		int height{ 0 };
@@ -314,13 +335,24 @@ public:
 	// 文件名是否由本软件的保存模板生成（手动 / 自动保存前缀）：
 	// 这类磁盘扫描条目仍算「截图」，不归到「其他」
 	bool isOwnHistoryFile(const std::wstring& filePath);
-	// 登记一条已落盘的历史文件；文件不存在则不登记。返回条目 id
+	// 登记一条已落盘的历史文件；文件不存在则不登记。返回条目 id。
+	// bgra 可选：给了就顺手在 ThumbCache 写一张小缩略图，历史页直接读小图，
+	// 不再每次刷新都把整张 2K/3K 原图读进内存再解码。
 	std::wstring addHistoryFile(const std::wstring& filePath, int width, int height,
-		const std::wstring& source);
+		const std::wstring& source, const std::vector<BYTE>* bgra = nullptr);
+	// 历史页用：保证 ThumbCache 里有这条目的小缩略图，返回小图路径；不适用/失败返回空。
+	// 老条目没有缩略图时首次访问补生成一次，之后都走小图。
+	std::wstring ensureHistoryThumb(const std::wstring& id, const std::wstring& srcPath);
 	// 录屏：登记视频路径，coverBgra 只写进缩略图缓存当网格缩略图
 	std::wstring addHistoryMedia(const std::wstring& mediaPath, int width, int height,
 		const std::wstring& source, int durationSec = 0,
 		const std::vector<BYTE>& coverBgra = {});
+	// 贴图历史：有源文件时只引用、不复制；没有源文件时按内容去重存一份 PinHistory 缓存。
+	// 同一路径的贴图记录只保留最新一条。
+	std::wstring addPinHistory(const std::wstring& sourcePath, int width, int height,
+		const std::vector<BYTE>& bgra = {});
+	// 清空贴图历史：只删记录，不动源图片
+	void clearPinHistory();
 	// 自定义标签：按真实文件路径存（目录扫描出来、未登记的条目也能打标签）
 	std::vector<std::wstring> getHistoryTags(const std::wstring& filePath);
 	// 批量取标签：一次读盘，按传入顺序逐条返回（信封面板批量填标签用，
@@ -356,6 +388,9 @@ public:
 		std::vector<std::wstring> tags;   // 自定义标签（筛选「全部」时可把剪切板条目筛出来）
 	};
 	std::filesystem::path getClipboardDir();
+	std::filesystem::path getPinHistoryDir();
+	std::filesystem::path getRackQuickDir();
+	std::filesystem::path getIconCacheDir();
 	std::vector<ClipboardItem> getClipboardItems();
 	std::vector<std::wstring> getClipboardTags(const std::wstring& id);
 	// 插件本地数据（local.json）：key 用点分路径，如 "rack.items"，值为 JSON 对象。
@@ -399,6 +434,8 @@ private:
 	bool writeClipboardItemsToFile(const std::vector<ClipboardItem>& items);
 	JsonObject loadHistoryStore();
 	bool saveHistoryStore(const JsonObject& store);
+	// 把 BGRA 缩到 ≤512 px 写进 ThumbCache\<id>.png（失败静默）
+	void writeHistoryThumb(const std::wstring& id, int w, int h, const BYTE* bgra);
 	// 历史页目录扫描缓存：鼠标移动/滚动会频繁取列表，不能每次都遍历目录
 	std::vector<HistoryItem> historyUiCache_;
 	unsigned long long historyUiCacheAt_{ 0 };
@@ -418,6 +455,12 @@ private:
 	JsonObject getToolObj(const std::wstring& tool);
 	std::filesystem::path initDataPath();
 	std::filesystem::path initConfigPath();
+	std::filesystem::path initCachePath();
+	std::filesystem::path resolveCachePath();
+	// 旧版把缩略图放 Roaming\ThumbCache、剪贴板图片放 Roaming\Clipboard；
+	// 统一搬到 %LocalAppData%\SnowAir\Cache 下（Thumb / Clipboard），并改写 local.json
+	// 以及晾衣架数据里的旧绝对路径。只做一次，迁移前备份 local.json。
+	void migrateCacheDirs();
 	void save();
 	// config.json 的兜底：读失败不覆盖、解析失败留现场并回退到上一份可用配置
 	void backupConfigFile();
@@ -437,6 +480,7 @@ private:
 private:
 	const std::filesystem::path dataPath;
 	const std::filesystem::path configPath;
+	std::filesystem::path cachePath;
 	JsonObject configObj;
 	// 上次成功写入的配置文本；内容未变化时跳过写入
 	std::wstring lastSavedConfig;

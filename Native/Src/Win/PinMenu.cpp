@@ -27,7 +27,8 @@ namespace {
 std::unique_ptr<PinMenu> PinMenu::s_root;
 HHOOK PinMenu::s_hook{ nullptr };
 
-PinMenu::PinMenu(std::vector<Item> items) : Ling::WinBase(), items_(std::move(items))
+PinMenu::PinMenu(std::vector<Item> items, bool fromPlugin)
+	: Ling::WinBase(), items_(std::move(items)), fromPlugin_(fromPlugin)
 {
 	dpi = (float)GetDpiForSystem() / 96.f;
 	if (dpi <= 0.f) dpi = 1.f;
@@ -36,16 +37,19 @@ PinMenu::PinMenu(std::vector<Item> items) : Ling::WinBase(), items_(std::move(it
 
 PinMenu::~PinMenu() {}
 
-void PinMenu::popup(std::vector<Item> items, POINT at)
+void PinMenu::popup(std::vector<Item> items, POINT at, bool fromPlugin)
 {
 	closeAll();
-	s_root.reset(new PinMenu(std::move(items)));
+	s_root.reset(new PinMenu(std::move(items), fromPlugin));
 	if (!s_root->hwnd) { s_root.reset(); return; }
 	s_root->openAt(at);
 	s_hook = SetWindowsHookExW(WH_MOUSE_LL, lowLevelProc, GetModuleHandleW(nullptr), 0);
 }
 
 bool PinMenu::isOpen() { return s_root != nullptr; }
+// 插件查询「自己的菜单」用：贴图 / 贴屏的右键菜单不算插件菜单。
+// 晾衣架会把 menu_open 当成展开自己的信号 —— 不限定时右键贴图会把晾衣架一并弹开。
+bool PinMenu::isPluginMenuOpen() { return s_root && s_root->fromPlugin_; }
 void PinMenu::closeMenu() { closeAll(); }
 
 void PinMenu::closeAll()
@@ -128,7 +132,7 @@ void PinMenu::openSubmenu(int rowIndex, Ling::Button* ownerBtn)
 	if (submenu_ && submenuOwner_ == rowIndex) return;
 	closeSubmenu();
 
-	auto sub = std::unique_ptr<PinMenu>(new PinMenu(items_[rowIndex].submenu));
+	auto sub = std::unique_ptr<PinMenu>(new PinMenu(items_[rowIndex].submenu, fromPlugin_));
 	if (!sub->hwnd) return;
 	sub->applySize();
 

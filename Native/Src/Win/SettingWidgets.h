@@ -35,38 +35,6 @@ inline constexpr const wchar_t* kEditionTag{ L" - Lite beta" };
 void closePopup(Ling::WinBase* win);
 bool hasPopup();
 
-// ─── 可见坐标换算：返回 node 当前在窗口中的可见原点（逻辑像素）────────
-//   ScrollerBox 滚动只平移 content 视觉偏移、不改子节点布局坐标，故 node->x/y 是
-//   "未滚动"的窗口坐标。本函数沿 parent 链累加祖先 ScrollerBox 的 scrollY，
-//   换算回按钮当前显示位置，供 popup 等浮层绝对定位（滚动后仍对齐按钮）。
-std::pair<float, float> visiblePos(Ling::Node* node);
-
-// ─── 滚动跟随：让挂在 win->body 上的浮层随内容滚动自动重新锚定 ──────────
-//   ScrollerBox 滚动只平移 content 视觉、不触发子节点重排，因此浮层一旦按
-//   "打开时"的可见位置定位，滚动内容后就会停留原地（下拉项漂移缺陷）。
-//   本类在浮层存活期间监听滚轮/拖动滚动条，每次位置变化时调用 compute()
-//   （须基于 visiblePos 的当前值）重算期望坐标并重定位；位置未变则跳过，
-//   避免无谓重排。浮层关闭时析构本对象即可移除监听。
-class ScrollFollower {
-public:
-    // compute(): 返回浮层期望的窗口逻辑坐标 {left, top}，随滚动应调用 visiblePos 实时计算。
-    ScrollFollower(Ling::WinBase* win,
-        Ling::ScrollerBox* popup,
-        std::function<std::pair<float, float>()> compute);
-    ~ScrollFollower();
-    ScrollFollower(const ScrollFollower&) = delete;
-    ScrollFollower& operator=(const ScrollFollower&) = delete;
-    // 立即按 compute() 定位（打开浮层时调用一次）。
-    void place();
-    float left{ 0.f }, top{ 0.f };   // 最近一次定位坐标（便于外部读取）
-private:
-    Ling::WinBase* win;
-    Ling::ScrollerBox* popup;
-    std::function<std::pair<float, float>()> compute;
-    winrt::event_token wheelTok{}, moveTok{};
-    float lastLeft{ -1.f }, lastTop{ -1.f };
-};
-
 // ─── 独立浮层窗口：下拉/弹层用独立 WS_POPUP 顶层窗口承载 ──────────────
 //   原实现把 ScrollerBox 挂到宿主 win->body 下，会被窗口客户区裁剪（下拉项靠近
 //   底部时被迫上拉、且内容被截断）。改用独立顶层窗口后不再受宿主客户区裁剪，
@@ -139,16 +107,35 @@ public:
     // 一个实例可绑定任意多个按钮（当前锚点/文本在每次悬停时确定）。
     void bind(Ling::Button* btn, const std::wstring& text);
     // 手动指定锚点与文本显示（供自定义悬停场景，如文件输出预览）；owner 可为任意 Node。
-    void showFor(Ling::Node* owner, const std::wstring& text);
+    // noWrap=true：气泡按文本自然宽度展开，不折行（文件名预览这类短文本用）。
+    void showFor(Ling::Node* owner, const std::wstring& text, bool noWrap = false);
     // 仅当当前锚点就是 owner 时收起（避免误关别人的气泡）。
     void hideFor(Ling::Node* owner);
     // 立刻收起（未显示时是空操作）。
     void hideTip();
+    // 当前是否正显示着（调用方据此决定要不要跟着复位自己的状态）
+    bool isShown() const { return isVisible; }
+    // 气泡被收起时回调（任何路径收起都会触发一次）
+    std::function<void()> onHidden;
+    // 自定义内容：build 往内容区塞节点（图片 + 文字等），contentW/contentH 是内容区的逻辑尺寸。
+    // 外壳（圆角 + 小三角）、DPI、定位全部复用文本气泡那一套；内容只建一次。
+    void showCustom(Ling::Node* owner, float contentW, float contentH,
+        std::function<void(Ling::Node*)> build);
 private:
     void onCreated() override;
     void layout() override;
     // 量出文本占位 → 定窗口逻辑尺寸 → 定位 → 显示。
     void showNow();
+    // 首次显示前把气泡搬到锚点所在屏，让 dpi 落定再量尺寸。
+    void settleAtAnchor();
+    // 光标是否停在气泡窗口上（custom 内容里有可点元素时，离开锚点先不急着收）。
+    // inflate：向外放宽的逻辑像素。锚点与气泡之间有一两个像素的缝，
+    // 跨缝的瞬间按"已经在气泡上"处理，才能顺利移到气泡里。
+    bool cursorOverTip(float inflate = 0.f) const;
+    // 自定义内容的气泡内边距：小三角占的那一侧多让出 caret，四周视觉留白保持相同
+    void applyCustomContentPad();
+    // 定尺寸 → 定位 → 显示：文本气泡与自定义内容气泡共用这一段。
+    void present(float boxW, float boxH);
     // 按锚定控件当前可见位置重定位（屏幕物理坐标；含上下翻转判断）。
     void place();
 private:
@@ -161,6 +148,16 @@ private:
     float arrowX{ 0.f };     // 小三角在窗口内的物理横坐标
     bool tipDown{ true };    // true：气泡在锚定控件上方、三角朝下
     bool isVisible{ false };
+    // 光标进过气泡窗口没有：只有进过再离开才立刻收。
+    // 气泡刚弹出时光标还在外面，此时收到的"离开"不能当作用户走了。
+    bool enteredTip_{ false };
+    bool customBuilt_{ false };   // 自定义内容是否已经建过（只建一次）
+    bool custom_{ false };        // 当前显示的是自定义内容（内边距按四边等宽算）
+    bool noWrap_{ false };        // 本次文本气泡是否强制单行（不按 kTipW 折行）
+    float customPad_{ 12.f };     // 自定义内容的视觉内边距（气泡边缘到内容）
+    // 气泡与锚点的间距：文本气泡留 4px；自定义内容（彩蛋）贴紧锚点，
+    // 这样光标从锚点上移能直接进到气泡里，离开则立刻收，不需要任何缓冲定时器。
+    float gap_{ 4.f };
     winrt::event_token moveTok{};
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushBg;
 };
@@ -222,6 +219,7 @@ Ling::Node* groupCard(Ling::Node* parent,
 
 // ─── Group Label：card 内分组小标题（粗 13 zinc-900 + marginTop）───────
 Ling::Label* groupLabel(Ling::Node* parent, const std::wstring& text);
+Ling::Label* groupLabelFirst(Ling::Node* parent, const std::wstring& text);
 //   带说明的版本：标题右侧多一个「?」，悬停显示 tip
 Ling::Label* groupLabel(Ling::Node* parent, const std::wstring& text, const std::wstring& tip);
 

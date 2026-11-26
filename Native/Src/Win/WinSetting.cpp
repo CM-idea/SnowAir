@@ -435,7 +435,12 @@ void WinSetting::initMenuItems(Ling::Node* sideNav)
 void WinSetting::onMenuItemClick(Ling::Button* menuItem)
 {
 	auto index = Ling::Util::getIndex(menus, menuItem);
-	if (index < 0 || index == menuIndex) return;
+	if (index < 0) return;
+	if (index == menuIndex) {
+		// 已在该页：关于页的绿色「立即更新」按钮在这里恢复默认（不重建整页）
+		if (index == 7 && pageAbout) pageAbout->resetCheckButton();
+		return;
+	}
 
 	// 切换选中样式
 	ApplyMenuItemStyle(menus[menuIndex], false, gMenuData[menuIndex]);

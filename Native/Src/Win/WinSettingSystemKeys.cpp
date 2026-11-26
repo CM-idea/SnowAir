@@ -88,6 +88,7 @@ WinSettingSystemKeys::WinSettingSystemKeys(Ling::WinBase* parent) : Ling::Node(p
 		SettingUi::groupLabel(this, Lang::get(gkey));
 		// 本页一律双栏：两两一行，每格 = 与「全局热键」页同款的行（标签 + 键位框）
 		auto* grid = SettingUi::grid2(this);
+		std::vector<Ling::Node*> keyRows;
 		for (const auto& id : CommandKeys::idsInGroup(gkey)) {
 			const std::wstring chord = CommandKeys::binding(id);
 			const bool ro = CommandKeys::readOnly(id);
@@ -96,6 +97,7 @@ WinSettingSystemKeys::WinSettingSystemKeys(Ling::WinBase* parent) : Ling::Node(p
 			const bool editable = impl && !ro;
 
 			auto r = SettingUi::optionRow(grid, Lang::get(CommandKeys::labelKey(id)), L"", true);
+			keyRows.push_back(r.row);
 			r.row->setHeight(SettingTheme::hotkeyRowH);
 			// 与热键页同一套行内边距：按右侧控件高度取上下留白
 			r.row->setPadding(SettingTheme::sp4, 0,
@@ -105,6 +107,9 @@ WinSettingSystemKeys::WinSettingSystemKeys(Ling::WinBase* parent) : Ling::Node(p
 			// 免得两行都写着 Tab，被当成重复配置或以为工具循环坏了
 			if (id == L"cmd_toggle_pix_color")
 				SettingUi::helpTipButton(r.labRow, Lang::get(L"setting.toggleColorValueTip"));
+			// 局部放大：说明连按两次修饰键 / 修饰键+滚轮调倍率
+			if (id == L"cmd_toggle_magnifier")
+				SettingUi::helpTipButton(r.labRow, Lang::get(L"cmdkey.localMagnifierKeyTip"));
 
 			// 只读 / 未实装行：键位框换成只读展示框（不给手型、不可点），行名称保持正常色
 			if (!editable) {
@@ -119,13 +124,21 @@ WinSettingSystemKeys::WinSettingSystemKeys(Ling::WinBase* parent) : Ling::Node(p
 			key->setWidth(kKeyBoxW);
 			key->setBorderRadius(SettingTheme::radiusCtl);
 			styleKeyBtn(key, false);
-			key->setText(chordDisplay(chord));
+			std::wstring shown = chordDisplay(chord);
+			if (id == L"cmd_toggle_magnifier" && !chord.empty()) shown += L" ×2";
+			key->setText(shown);
 			// 未绑定的行：占位文案走 muted（与「点击设置」同色）
 			if (chord.empty()) key->setColor(SettingTheme::textMuted);
 			key->onClick.add([this](Ling::Button* b) { this->onBtnClick(b); });
 			rows.push_back({ id, key });
 		}
 		SettingUi::grid2Cells(grid);
+		// grid2Cells 会把每格高度统一成 gridItemH(44)：键位框 32 → 上下留白 6，
+		// 右侧也取 6（不再沿用 50 行高的 9），三边一致；行高保持双栏原本的 44。
+		const float rowPad = (SettingTheme::gridItemH - SettingTheme::ctrlH) * 0.5f;
+		for (auto* row : keyRows) {
+			row->setPadding(SettingTheme::sp4, 0, rowPad, 0);
+		}
 	}
 	SettingUi::trimTrailingGap(this);
 
@@ -191,7 +204,8 @@ WinSettingSystemKeys::~WinSettingSystemKeys()
 void WinSettingSystemKeys::refreshRow(const std::wstring& id)
 {
 	const std::wstring chord = CommandKeys::binding(id);
-	const std::wstring text = chordDisplay(chord);
+	std::wstring text = chordDisplay(chord);
+	if (id == L"cmd_toggle_magnifier" && !chord.empty()) text += L" ×2";
 	for (auto& row : rows) {
 		if (row.id != id) continue;
 		row.btn->setText(text);
@@ -215,7 +229,10 @@ void WinSettingSystemKeys::applyChord(const std::wstring& id, const std::vector<
 	const std::wstring chord = KeyCapture::joinKeys(keys);
 	// 录到的还是原键位：没变化，不必走冲突判定
 	//（否则「切换色值」重录一次默认的 Tab 会弹一句"已被 工具循环 占用"，莫名其妙）
-	if (_wcsicmp(chord.c_str(), CommandKeys::binding(id).c_str()) == 0) return;
+	// 比较按规范化后的形态：旧配置里同样的键可能写成别的修饰键顺序，
+	// 只是书写顺序不同时仍应视为"没变化"。
+	if (_wcsicmp(CommandKeys::canonicalChord(chord).c_str(),
+		CommandKeys::canonicalChord(CommandKeys::binding(id)).c_str()) == 0) return;
 	std::wstring otherLabel, otherId;
 	// 只读行占用的固定键不让其他命令改绑（也即不提供"覆盖"），直接拒绝并说明被哪条占用
 	std::wstring ownerLabel;

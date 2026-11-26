@@ -46,6 +46,9 @@ private:
 	void clearContent();
 	void place(const RECT& workArea, Ling::Button* anchor);
 	void finishOpen(const RECT& workArea, Ling::Button* anchor, float logicW, float logicH = 0.f);
+	// 按所属属性栏当前所在显示器校正缩放；有尺寸记录时同步重建窗口大小
+	void applyOwnerDpi();
+	float logicW_{ 0.f }, logicH_{ 0.f };
 	void prepareContentRow();
 	void applyTipDirection(bool tipDown);
 	void rebuildPatinaWmRow();
@@ -76,6 +79,7 @@ private:
 	std::wstring sliderTip_;
 	bool sliderHover_{ false };
 	bool sidesHover_{ false };
+	bool opacityHover_{ false };   // 荧光笔透明度滑条悬停：画布上显示半透明笔迹预览
 	inline static float btnSize{ 42.f };
 	inline static float iconInner{ 34.f };
 	static constexpr float marginTop{ ToolbarTheme::caretSize };

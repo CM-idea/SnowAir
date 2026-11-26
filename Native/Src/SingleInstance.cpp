@@ -72,7 +72,6 @@ namespace {
 	struct Sibling
 	{
 		DWORD pid{ 0 };
-		std::filesystem::path exe;
 		ULONGLONG version{ 0 };   // major<<48 | minor<<32 | build<<16 | rev
 		bool lite{ false };       // 文件名带 lite = Lite 版
 		HWND msgWnd{ nullptr };   // 它的实例窗口
@@ -174,7 +173,6 @@ namespace {
 		const std::wstring name = exeNameLower(exe);
 		if (!isSnowAirName(name)) return false;
 		out.pid = pid;
-		out.exe = exe;
 		out.lite = isLiteName(name);
 		out.version = versionOf(exe);
 		for (HWND w : topLevelWindows(pid)) {
@@ -236,11 +234,10 @@ namespace {
 
 }
 
-InstanceDecision enforceSingleInstance(bool autoQuit)
+InstanceDecision enforceSingleInstance()
 {
 	InstanceDecision decision;
 	// 脚本并发截图（--auto-quit=true）不参与
-	if (autoQuit) return decision;
 
 	const auto self = modulePath();
 	const ULONGLONG selfVer = versionOf(self);

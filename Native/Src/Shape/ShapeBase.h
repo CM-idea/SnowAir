@@ -132,7 +132,6 @@ public:
 	virtual bool hitLinkButton(const float x, const float y, const float dpi) const { return false; }
 	// 把绑定的端点重新贴回形状边缘（形状移动/缩放/旋转、或形状没了）
 	virtual void syncLinks() {}
-	bool isInRect(const D2D1_RECT_F rect, const float x, const float y);
 	void paintHandle(ID2D1DeviceContext* ctx, const D2D1_RECT_F& rect);
 	bool isSelected() const;
 	// 未选中时悬停：点选手型；已选中时由子类设缩放/移动光标
@@ -215,3 +214,11 @@ protected:
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushHandleBorder;
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushHandleShadow;
 };
+
+// 克隆一组可见标注：跳过撤销项/渐隐笔迹，克隆后重绑内部引用（线上文字、连线目标）。
+// host 是克隆标注的新宿主；传 nullptr 时由调用方之后接管 host。
+std::vector<std::unique_ptr<ShapeBase>> cloneShapesForHost(
+	AnnotHost* host, const std::vector<std::unique_ptr<ShapeBase>>& src);
+// 同上。给"手上只有裸指针"的场景（选中集合）用，两种写法共用一套克隆与重绑逻辑。
+std::vector<std::unique_ptr<ShapeBase>> cloneShapesForHost(
+	AnnotHost* host, const std::vector<ShapeBase*>& src);

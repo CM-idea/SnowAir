@@ -3,6 +3,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include "../Setting.h"
 #include "SettingWidgets.h"
@@ -26,6 +27,10 @@ private:
 	void refreshGrid(bool forceRescan = true);
 	// 当前分类的完整条目列表：文件历史 + （全部/剪切板页）剪切板条目，按时间倒序
 	std::vector<Setting::HistoryItem> collectItems(bool forceRescan);
+	// 这次 refreshGrid 缓存的剪切板标签：getClipboardTags() 每次都要把整份 local.json 重新
+	// 读盘 + 解析，9 张卡片 + 逐条筛选加起来会解析几十次；collectItems 已经拿到全量条目，
+	// 顺手缓存一份即可（缓存每次 refreshGrid 重建）。
+	std::vector<std::wstring> clipTagsOf(const std::wstring& id) const;
 	// 已渲染内容盖不住「当前滚动位置 + 一屏 + 一行余量」时续补一批
 	void fillCheck();
 	void scheduleFillCheck();
@@ -147,6 +152,7 @@ private:
 	// 「我们自己产出的文件」→ 封面图路径（小写路径为键）。剪贴板里复制本软件的录屏时，
 	// 卡片直接复用媒体历史的封面，不再显示文件名。collectItems 时重建。
 	std::unordered_map<std::wstring, std::wstring> ourMediaCover_;
+	std::unordered_map<std::wstring, std::vector<std::wstring>> clipTags_;   // 见 clipTagsOf
 	std::unique_ptr<Tip> tip;                // 三个图标按钮的停悬提示（系统 tooltip，同截图工具栏）
 	winrt::event_token wheelTok{}, moveTok{}, sizeTok{}, timerTok{}, focusTok{}, mouseDownTok{}, keyTok{}, modalKeyTok{}, cursorTok{}, blurTok{};
 	bool modalKeyBound{ false };

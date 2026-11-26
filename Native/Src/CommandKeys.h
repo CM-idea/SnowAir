@@ -83,6 +83,11 @@ namespace CommandKeys
 	// forId：正在改绑的命令 —— 少数"分属不同阶段"的组合（切换色值 / 工具循环 都是 Tab）允许共存。
 	bool reservedChord(const std::wstring& chord, std::wstring* ownerLabelKey, const std::wstring& forId = L"");
 
+	// 组合键规范化：修饰键按「Win → Ctrl → Alt → Shift」重排、Win 统一写成 Win，主键原样保留。
+	// 录制结果本身已按固定顺序写出；这里兜住手改配置 / 旧版本存下的其它写法，
+	// 让"是否与某条固定键 / 其他命令相同"的判定不受书写顺序影响。
+	std::wstring canonicalChord(const std::wstring& chord);
+
 	// chord 是否"可解析"（修饰键 + 一个能被 strToKey 认出来的主键）。
 	// 设置页落盘前的最后一道闸：存进去但解析不出来的键 = 一条永远命中不了的死绑定。
 	bool validChord(const std::wstring& chord);

@@ -4,6 +4,7 @@
 #pragma comment(lib, "Magnification.lib")
 #pragma comment(lib, "UIAutomationCore.lib")
 #include <timeapi.h>
+#include <dwmapi.h>
 #pragma comment(lib, "winmm.lib")
 #include <include/Ling.h>
 #include <mutex>
@@ -19,6 +20,7 @@
 #include "ScreenCapture.h"
 #include "../Lang.h"
 #include "../Setting.h"
+#include "../Tool/DpiUtil.h"
 using namespace Microsoft::WRL;
 
 namespace {
@@ -50,6 +52,29 @@ namespace {
 	constexpr int maxPreviewTexDim = 8192;
 	constexpr ULONG_PTR syntheticWheelMark = 0x534E4F57;
 	CapLong* g_mouseHookOwner = nullptr;
+
+	// 首帧内容校验：HDR 未映射/采集接口异常时常见“尺寸正确、内容全黑”。
+	// 只判近黑（并同时要求无明显亮部），避免把正常的深色页面误判成空白。
+	bool frameLooksBlank(const std::vector<BYTE>& data, size_t need)
+	{
+		if (data.size() < need || need < 4) return true;
+		const size_t pixels = need / 4;
+		const size_t step = std::max<size_t>(1, pixels / 4096);
+		const BYTE* p = data.data();
+		unsigned maxLuma = 0;
+		unsigned long long sum = 0;
+		size_t samples = 0;
+		for (size_t i = 0; i < pixels; i += step) {
+			const unsigned b = p[i * 4], g = p[i * 4 + 1], r = p[i * 4 + 2];
+			const unsigned luma = (r * 77 + g * 150 + b * 29) >> 8;
+			if (luma > maxLuma) maxLuma = luma;
+			sum += luma;
+			++samples;
+		}
+		if (!samples) return true;
+		const unsigned avg = (unsigned)(sum / samples);
+		return maxLuma < 16 && avg < 8;
+	}
 
 	uint64_t frameSignature(const std::vector<BYTE>& data)
 	{
@@ -135,13 +160,21 @@ namespace {
 			g_magFrame.ready = false;
 			if (!MagSetWindowSource(mag_, sel)) return {};
 			if (!g_magFrame.ready) {
+				// 有界等待，且只派发放大镜自己的消息。原来用 PeekMessageW(nullptr) 泵整个
+				// UI 线程：hollowWin 刚置脏时遮罩重绘/定时器会不断重生消息，在 UI 线程上
+				// 形成无限重入，点“开始滚动”就卡死。等不到就返回空，由调用方降级。
 				MSG msg{};
-				for (int i = 0; i < 9 && !g_magFrame.ready; ++i) {
-					while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+				const ULONGLONG deadline = GetTickCount64() + 90;
+				while (!g_magFrame.ready && GetTickCount64() < deadline) {
+					while (!g_magFrame.ready && PeekMessageW(&msg, mag_, 0, 0, PM_REMOVE)) {
 						TranslateMessage(&msg);
 						DispatchMessageW(&msg);
 					}
-					Sleep(10);
+					while (!g_magFrame.ready && PeekMessageW(&msg, host_, 0, 0, PM_REMOVE)) {
+						TranslateMessage(&msg);
+						DispatchMessageW(&msg);
+					}
+					if (!g_magFrame.ready) Sleep(5);
 				}
 			}
 			if (!g_magFrame.ready) return {};
@@ -303,18 +336,35 @@ void CapLong::paint(ID2D1DeviceContext* ctx)
 	// 滚动太快、这一帧拼不上：给个临时提示（不中断采集）
 	if (isCapturing && !isFinish) paintTooFastHint(ctx);
 	if (isFinish && layoutTextEnd) {
-		auto borderRadius{ 4.f * win->dpi };
+		auto borderRadius{ 4.f * selDpi() };
 		ctx->FillRoundedRectangle(D2D1::RoundedRect(stopTextRect, borderRadius, borderRadius), bgBrush.Get());
 		ctx->DrawTextLayout(stopTextPos, layoutTextEnd.Get(), textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
 	}
 }
 
+float CapLong::selDpi() const
+{
+	if (!win) return 1.f;
+	// 没有选区时沿用宿主 dpi：与旧行为一致，也避免拿空矩形去猜显示器
+	if (!win->cutMask || !win->cutMask->hasRect()) return win->dpi;
+	const auto& m = win->cutMask->maskRect;
+	if (m.right <= m.left || m.bottom <= m.top) return win->dpi;
+	const RECT scr{
+		(LONG)std::lround((float)win->x + m.left),
+		(LONG)std::lround((float)win->y + m.top),
+		(LONG)std::lround((float)win->x + m.right),
+		(LONG)std::lround((float)win->y + m.bottom)
+	};
+	return DpiUtil::dpiForRect(scr);
+}
+
 void CapLong::paintStartHint(ID2D1DeviceContext* ctx)
 {
 	if (!ctx || !win->cutMask || !win->cutMask->hasRect()) return;
-	if (!hintLayout || hintDpi != win->dpi) {
-		hintLayout = Ling::D2D::get()->makeTextLayout(Lang::get(L"long.hintStart"), 13 * win->dpi);
-		hintDpi = win->dpi;
+	const float d = selDpi();
+	if (!hintLayout || std::fabs(hintDpi - d) > 0.01f) {
+		hintLayout = Ling::D2D::get()->makeTextLayout(Lang::get(L"long.hintStart"), 13 * d);
+		hintDpi = d;
 	}
 	paintHintBadge(ctx, hintLayout.Get());
 }
@@ -323,9 +373,10 @@ void CapLong::paintStartHint(ID2D1DeviceContext* ctx)
 void CapLong::paintTooFastHint(ID2D1DeviceContext* ctx)
 {
 	if (!ctx || tooFastUntilMs.load() <= GetTickCount64()) return;
-	if (!hintTooFastLayout || hintTooFastDpi != win->dpi) {
-		hintTooFastLayout = Ling::D2D::get()->makeTextLayout(Lang::get(L"long.tooFast"), 13 * win->dpi);
-		hintTooFastDpi = win->dpi;
+	const float d = selDpi();
+	if (!hintTooFastLayout || std::fabs(hintTooFastDpi - d) > 0.01f) {
+		hintTooFastLayout = Ling::D2D::get()->makeTextLayout(Lang::get(L"long.tooFast"), 13 * d);
+		hintTooFastDpi = d;
 	}
 	paintHintBadge(ctx, hintTooFastLayout.Get());
 }
@@ -339,13 +390,14 @@ void CapLong::paintHintBadge(ID2D1DeviceContext* ctx, IDWriteTextLayout* layout)
 	DWRITE_TEXT_METRICS tm{};
 	if (FAILED(layout->GetMetrics(&tm)) || tm.width <= 0.f || tm.height <= 0.f) return;
 
-	const float pad = 8.f * win->dpi;
-	const float padX = pad + 2.f * win->dpi; // 左右比上下多留 2
+	const float hintDpi = selDpi();
+	const float pad = 8.f * hintDpi;
+	const float padX = pad + 2.f * hintDpi; // 左右比上下多留 2
 	// 底的高度按字号算：布局框含行距，直接用会把上下留白撑得比左右大
 	const float boxW = tm.width + padX * 2.f;
-	const float boxH = 13.f * win->dpi + pad * 2.f;
+	const float boxH = 13.f * hintDpi + pad * 2.f;
 	// 距选框底边留一点余量，不要压住选区边线
-	const float gap = win->cutMask->strokeWidth + 10.f * win->dpi;
+	const float gap = win->cutMask->strokeWidth + 10.f * hintDpi;
 	float left = (mask.left + mask.right) * 0.5f - boxW * 0.5f;
 	float top = mask.bottom - gap - boxH;
 	// 选区太矮时往上顶会超出选区，夹在选区内部
@@ -369,7 +421,7 @@ void CapLong::paintHintBadge(ID2D1DeviceContext* ctx, IDWriteTextLayout* layout)
 		}
 	}
 
-	const float radius = std::min(6.f * win->dpi, boxH * 0.5f);
+	const float radius = std::min(6.f * hintDpi, boxH * 0.5f);
 	const D2D1_RECT_F box{ left, top, left + boxW, top + boxH };
 	ctx->FillRoundedRectangle(D2D1::RoundedRect(box, radius, radius), bgBrush.Get());
 	ctx->DrawTextLayout(
@@ -914,13 +966,20 @@ void CapLong::onDown(POINT pos, bool isRight)
 	if (isRight) return;
 	updatePreviewLayout();
 	if (hitPreview(pos) && resultH > imgH) {
+		// 按下就进入临时暂停：onMove 的 hot 分支可能还没跑到（取决于进入方式）
+		if (isCapturing && !isPaused && !isFinish) {
+			previewHot = true;
+			enterPreviewHold();
+		}
 		previewPanning = true;
 		previewHot = true;
 		previewFollowBottom = false;
 		previewFollowTop = false;
+		// 拖动期间光标可能移出预览窗甚至窗口边界：抓住鼠标，继续收到移动与抬起
+		if (GetCapture() != win->hwnd) SetCapture(win->hwnd);
 		// 拖动期间由定时器在贴近上下沿时持续缓滚；不先启动会在 onUp 之前一直不触发
 		startPreviewDragPanTimer();
-		syncPierceWithPreviewHot();
+		if (!previewHold) syncPierceWithPreviewHot();
 		// 拖动开始前一定要有大图位图，否则 paintSelViewport 会直接跳过，
 		// 表现为“拖右侧预览没反应”（尤其刚恢复窗口时）。
 		ensureSelPreviewBmp();
@@ -945,6 +1004,17 @@ void CapLong::onMove(POINT pos)
 	updatePreviewLayout();
 	const bool hot = hitPreview(pos);
 	if (hot != previewHot) {
+		if (hot && isCapturing && !isPaused && !isFinish) {
+			// 悬停预览窗 = 临时暂停并进入预览：停滚动、停抓帧，选区里显示大图
+			previewHot = true;
+			enterPreviewHold();
+			return;
+		}
+		if (!hot && previewHold) {
+			// 移出预览窗 = 恢复滚动与实时模式
+			exitPreviewHold();
+			return;
+		}
 		previewHot = hot;
 		if (hot) {
 			// 悬停冻结：采集阶段先对齐到当前滚动视口，避免使用上一帧的旧位置；
@@ -975,7 +1045,15 @@ void CapLong::onUp(POINT pos)
 	if (previewPanning) {
 		previewPanning = false;
 		stopPreviewDragPanTimer();
-		syncPierceWithPreviewHot();
+		if (GetCapture() == win->hwnd) ReleaseCapture();
+		updatePreviewLayout();
+		// 松开时如果已不在预览窗里（拖出了边界），直接恢复采集
+		if (!hitPreview(pos) && previewHold) {
+			previewHot = false;
+			exitPreviewHold();
+			return;
+		}
+		if (!previewHold) syncPierceWithPreviewHot();
 		win->refresh();
 		return;
 	}
@@ -1570,13 +1648,23 @@ void CapLong::startCaptureMode(bool manual)
 	previewFollowBottom = true;
 	inspectRatio = 1.f;
 	autoUseInjection = false;
-	lastShift = 0;
 	// 目标应用（按进程名）决定“滚轮刻度”缓存键：手动阶段量到的刻度也记在它名下
 	rateKey_.clear();
 	if (HWND target = scrollTarget()) rateKey_ = processNameOf(target);
 	manualUnits = 0;
 	manualScaleMs = GetTickCount64();
+	// 手动滚轮进入时，挖洞 / 排除捕获的合成还没落定，桌面复制可能把“挖洞前”的缓存帧
+	// 交回来，首帧就把选框边缘拼进长图；自动滚动从工具条按钮进入，中间多一轮合成
+	// 所以没暴露。首帧先把遮罩窗藏一拍再抓，抓完立刻恢复。
+	const bool hideForFirst = manual && win->hwnd && IsWindowVisible(win->hwnd);
+	if (hideForFirst) ShowWindow(win->hwnd, SW_HIDE);
+	DwmFlush();
+	if (hideForFirst) ScreenCapture::dropCachedFrames();
 	firstStep();
+	if (hideForFirst) {
+		ShowWindow(win->hwnd, SW_SHOWNOACTIVATE);
+		raiseTool();
+	}
 	if (isFinish) {
 		syncToolBtn();
 		win->refresh();
@@ -1601,7 +1689,6 @@ void CapLong::resetStitchState()
 	viewportTop = 0;
 	stoppedAtEnd = false;
 	hitMaxHeight = false;
-	lastShift = 0;
 	lastPreviewMs = 0;
 	lastFullPreviewMs = 0;
 	std::lock_guard<std::mutex> fl(frameMutex);
@@ -1672,26 +1759,35 @@ std::vector<BYTE> CapLong::captureFrame()
 		mag.destroy();
 		return d;
 	};
+	auto fetch = [&](int pipeline) -> std::vector<BYTE> {
+		switch (pipeline) {
+		case 0: return tryMag();
+		case 1: return ScreenCapture::capture(capStartPos.x, capStartPos.y, imgW, imgH);
+		default: return Util::captureScreen(capStartPos.x, capStartPos.y, imgW, imgH);
+		}
+	};
 	if (capPipeline < 0) {
-		// 首帧用来确定本次会话用的采集管线：后续所有帧沿用同一条，
-		// 否则同一张长图里会混入不同色彩管线的帧，出现色带/接缝。
-		auto d = tryMag();
-		if (d.size() >= need) { capPipeline = 0; return d; }
-		auto dxgi = ScreenCapture::capture(capStartPos.x, capStartPos.y, imgW, imgH);
-		if (dxgi.size() >= need) { capPipeline = 1; return dxgi; }
-		capPipeline = 2;
-	}
-	if (capPipeline == 0) {
-		auto d = tryMag();
-		if (d.size() >= need) return d;
+		// 首帧用来确定本次会话用的采集管线：DXGI（HDR 友好）→ GDI → 放大镜。
+		// 放大镜只作补充；尺寸不足或产出近黑帧就继续换下一条，避免首帧全黑被当成底图。
+		for (int pipeline : { 1, 2, 0 }) {
+			auto d = fetch(pipeline);
+			if (d.size() >= need && !frameLooksBlank(d, need)) {
+				capPipeline = pipeline;
+				return d;
+			}
+		}
 		return {};
 	}
-	if (capPipeline == 1) {
-		auto d = ScreenCapture::capture(capStartPos.x, capStartPos.y, imgW, imgH);
-		if (d.size() >= need) return d;
-		return {};
+	// 放大镜管线由 grabLoop 持有的实例负责；走到这里说明它刚刚失败，不再重建重试。
+	auto d = (capPipeline == 0) ? std::vector<BYTE>{} : fetch(capPipeline);
+	if (d.size() >= need) return d;
+	// 已选管线中途失败：按同样优先级降级。宁可混一条不同色彩的帧，也不能整帧空白。
+	for (int pipeline : { 1, 2, 0 }) {
+		if (pipeline == capPipeline) continue;
+		auto fallback = fetch(pipeline);
+		if (fallback.size() >= need) { capPipeline = pipeline; return fallback; }
 	}
-	return Util::captureScreen(capStartPos.x, capStartPos.y, imgW, imgH);
+	return {};
 }
 
 void CapLong::publishFrame(std::vector<BYTE>&& data)
@@ -1752,6 +1848,8 @@ void CapLong::grabLoop(const RECT& sel)
 	int idle = 0;
 	while (grabRunning.load(std::memory_order_relaxed)) {
 		std::vector<BYTE> data = magOk ? mag.capture(sel) : captureFrame();
+		// 放大镜只是补充路径：这一帧失败就立刻回到 captureFrame 的 DXGI/GDI 降级链。
+		if (magOk && data.size() < need) data = captureFrame();
 		if (data.size() >= need) {
 			if (data.size() > need) data.resize(need);
 			const uint64_t h = frameSignature(data);
@@ -1806,7 +1904,6 @@ void CapLong::stitchLoop()
 				previewDirty = true;
 			}
 			if (r.tooLong) hitMaxHeight = true;
-			if (r.accepted) lastShift = r.shift;
 		}
 		if (r.sawMotion) lastMotionMs = GetTickCount64();
 		// 测速用：画布实际滚过的像素（落点位移），供自动滚动的速度闭环使用
@@ -1848,7 +1945,7 @@ void CapLong::flushTail()
 			lastPreviewMs = 0;
 		}
 	}
-	if (isCapturing && !isPaused && !isFinish) {
+	if (isCapturing && !isPaused && !previewHold && !isFinish) {
 		startGrabThread();
 		startStitchThread();
 	}
@@ -1892,6 +1989,59 @@ void CapLong::setPaused(bool on)
 			if (!uia) initUiaScroll();
 			startAutoScroll();
 		}
+	}
+	syncToolBtn();
+	win->refresh();
+}
+
+void CapLong::enterPreviewHold()
+{
+	if (previewHold || !isCapturing || isPaused || isFinish) return;
+	// 先置位再 flushTail：它收尾后不会再把抓帧线程拉起来，暂停期间不再产生新帧
+	previewHold = true;
+	stopAutoScroll();
+	win->killTimer(pumpMsgId);
+	flushTail();
+	stopGrabThread();
+	stopStitchThread();
+	// 抓帧已停，遮罩不会再进入画面：取消挖洞，选区里才画得下大图预览
+	win->restoreWin();
+	win->ensureNoMousePierce();
+	// 与主动暂停同一口径：停在当前采集视口对应的位置
+	inspectRatio = viewportRatio();
+	previewFollowTop = inspectRatio <= 0.001f;
+	previewFollowBottom = inspectRatio >= 0.999f;
+	syncPreviewPanToRatio(inspectRatio);
+	ensureSelPreviewBmp();
+	makeImgPreview();
+	win->refresh();
+}
+
+void CapLong::exitPreviewHold()
+{
+	if (!previewHold) return;
+	previewHold = false;
+	previewHot = false;
+	previewPanning = false;
+	selViewportPanning = false;
+	stopPreviewDragPanTimer();
+	if (!isCapturing || isPaused || isFinish) {
+		win->refresh();
+		return;
+	}
+	// 恢复采集：先挖洞再抓帧；丢掉“恢复窗口期间”的缓存帧，
+	// 否则第一帧可能还是带大图预览的画面，接续会错位。
+	win->hollowWin();
+	ensureExcludeFromCapture(true);
+	raiseTool();
+	DwmFlush();
+	ScreenCapture::dropCachedFrames();
+	startGrabThread();
+	startStitchThread();
+	win->setTimer(pumpTickMs, pumpMsgId);
+	if (!manualMode) {
+		if (!uia) initUiaScroll();
+		startAutoScroll();
 	}
 	syncToolBtn();
 	win->refresh();
@@ -2136,6 +2286,8 @@ void CapLong::stopCap()
 	previewFollowTop = false;
 	previewHot = false;
 	previewPanning = false;
+	previewHold = false;
+	if (GetCapture() == win->hwnd) ReleaseCapture();
 	previewPanY = 0.f;
 	inspectRatio = 0.f; // 结束后从顶部浏览；遮罩仍钉在底部当前截图
 	makeImgPreview();
@@ -2145,14 +2297,15 @@ void CapLong::stopCap()
 
 void CapLong::makeStopText()
 {
+	const float d = selDpi();
 	if (hitMaxHeight) {
-		layoutTextEnd = Ling::D2D::get()->makeTextLayout(Lang::get(L"long.tooLong"), 13 * win->dpi);
+		layoutTextEnd = Ling::D2D::get()->makeTextLayout(Lang::get(L"long.tooLong"), 13 * d);
 	}
 	else if (stoppedAtEnd) {
-		layoutTextEnd = Ling::D2D::get()->makeTextLayout(Lang::get(L"long.reachedBottom"), 13 * win->dpi);
+		layoutTextEnd = Ling::D2D::get()->makeTextLayout(Lang::get(L"long.reachedBottom"), 13 * d);
 	}
 	else {
-		layoutTextEnd = Ling::D2D::get()->makeTextLayout(Lang::get(L"long.stitchStopped"), 13 * win->dpi);
+		layoutTextEnd = Ling::D2D::get()->makeTextLayout(Lang::get(L"long.stitchStopped"), 13 * d);
 	}
 	if (!layoutTextEnd) return;
 	DWRITE_TEXT_METRICS tm = {};
@@ -2160,11 +2313,11 @@ void CapLong::makeStopText()
 	auto& maskRect = win->cutMask->maskRect;
 	auto halfX = maskRect.left + (maskRect.right - maskRect.left) / 2;
 	auto halfW = tm.width / 2;
-	float padding{ 8 * win->dpi };
+	float padding{ 8 * d };
 	stopTextRect.left = halfX - halfW - padding;
 	// 选区很矮时不要把提示框顶到选区外（倒置的 D2D 矩形会画不出来）
 	const float bottom = maskRect.bottom - padding;
-	const float top = std::max(maskRect.top, bottom - 30 * win->dpi);
+	const float top = std::max(maskRect.top, bottom - 30 * d);
 	stopTextRect.top = top;
 	stopTextRect.right = halfX + halfW + padding;
 	stopTextRect.bottom = std::max(top + 1.f, bottom);
@@ -2187,7 +2340,7 @@ void CapLong::copyToClipboard()
 	if (!saved.empty() && action == 1) Util::addFileToClipboard(saved);
 	else if (!saved.empty() && action == 2) Util::addFileToClipboardCut(saved);
 	else Util::saveToClipboard(imgW, resultH, pixels.data());
-	if (!saved.empty()) st->addHistoryFile(saved, imgW, resultH, L"long");
+	if (!saved.empty()) st->addHistoryFile(saved, imgW, resultH, L"long", &pixels);
 }
 
 bool CapLong::saveToFile()
@@ -2200,11 +2353,11 @@ bool CapLong::saveToFile()
 	std::wstring defName = Util::previewFileName(
 		st->getManualSaveFormat(), Setting::defaultManualSaveFormat(), L"");
 	if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos) defName = defName.substr(slash + 1);
-	auto path = Util::getSaveFilePath(win->hwnd,
+	auto path = Util::getImageSaveFilePath(win->hwnd,
 		Util::extensionFromSaveFormat(st->getSaveFormat()), defName, Util::desktopDir().wstring());
 	if (path.empty()) return false;
 	if (!Util::saveToFile(path, imgW, resultH, pixels.data())) return false;
-	st->addHistoryFile(path, imgW, resultH, L"long");
+	st->addHistoryFile(path, imgW, resultH, L"long", &pixels);
 	return true;
 }
 

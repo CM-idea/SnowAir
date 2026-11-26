@@ -68,15 +68,12 @@ public:
     void redo();
     bool canUndo() const { return !undoStack_.empty(); }
 
-    // 素材缩略图
-    struct Thumb { std::wstring path; bool selected; int cell; };
-    std::vector<Thumb> thumbnails() const;
     void selectCell(int index);
 
     // 拖放与文件
-    void handleDrop(const std::vector<std::wstring>& paths, POINT clientPos);
+    void handleDrop(const std::vector<std::wstring>& paths, POINT clientPos, bool allowReplace = true);
     void pickImageForSelected();
-    // 底部素材条：替换指定容器的图片（弹文件选择）
+    // 替换指定容器的图片（弹文件选择）
     void replaceCellImage(int index);
 
     // —— 图层面板 ——
@@ -110,6 +107,8 @@ public:
     POINT clientToArtPixel(POINT clientPos) const;
     D2D1_POINT_2F artPixelToClient(float ax, float ay) const;
     D2D1_RECT_F artPixelRect() const;           // (0,0,画板宽,画板高)
+    // 最近一次导入的图片在画板像素坐标中的矩形（用于把贴图标注一起搬过来）
+    D2D1_RECT_F lastImageArtRect() const;
 
     // 状态回调
     std::function<void()> onSelectionChanged;
@@ -312,7 +311,7 @@ private:
     Cell makeSubCell(const Cell& base, const std::vector<Pt>& piece) const;
     void pasteCells();
     void setCellImage(int index, const std::wstring& path, bool stretch = false);
-    void addImageBlock(const std::wstring& path, const Pt& at, bool useNaturalSize);
+    void addImageBlock(const std::wstring& path, const Pt& at);
     void notifyChanged(bool content = true);
 
     // 鼠标交互

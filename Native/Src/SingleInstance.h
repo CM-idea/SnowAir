@@ -19,4 +19,4 @@ struct InstanceDecision
 	bool ownHotkeys{ true };      // false = 热键归完整版，本进程不注册
 };
 
-InstanceDecision enforceSingleInstance(bool autoQuit);
+InstanceDecision enforceSingleInstance();

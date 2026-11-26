@@ -480,8 +480,12 @@ void WinSettingPlugins::refreshStatus()
 	std::vector<std::wstring> ocrBadges;
 	for (int i = 0; i < OcrPack::kCount; ++i) {
 		const auto v = OcrPack::clampVariant(i);
-		if (OcrModelManager::instance().isInstalled(v)
-			&& OcrRuntimeManager::instance().isInstalled(v))
+		const bool installed = OcrModelManager::instance().isInstalled(v)
+			&& OcrRuntimeManager::instance().isInstalled(v);
+		// 已装但发布号落后时 isInstalled 为 false；徽章不能因此消失，仍要显示"已安装"
+		const bool outdated = OcrModelManager::instance().hasOutdated(v)
+			|| OcrRuntimeManager::instance().hasOutdated(v);
+		if (installed || outdated)
 			ocrBadges.push_back(OcrPack::label(v));
 	}
 	setBadges(ocrBadgeRow, ocrBadges);
@@ -538,7 +542,30 @@ void WinSettingPlugins::refreshStatus()
 		cards[CardRack].installed = rackOk;
 		cards[CardRack].offer = !rackOk && !cards[CardRack].busy;
 		cards[CardGh].installed = false;   // 果核看图是外链，不提供删除
-		cards[CardOcr].offer = !ocrOk && !cards[CardOcr].busy;
+		// 离线识别：已装但发布号落后 → 删除钮位置改成绿色刷新钮，点击直接更新
+		const bool ocrUpdate = OcrRuntimeManager::instance().hasOutdated(ocrVariant)
+			|| OcrModelManager::instance().hasOutdated(ocrVariant);
+		cards[CardOcr].update = ocrUpdate;
+		cards[CardOcr].installed = ocrOk || ocrUpdate;
+		if (auto* del = cards[CardOcr].delBtn) {
+			del->setFontFamily(Icon::Family);
+			del->setFontSize(18.f);
+			if (ocrUpdate) {
+				del->setText(Icon::Refresh);
+				del->setBg(0x34C75933);
+				del->setHoverBg(0x34C75933);
+				del->setColor(0x34C759FF);
+				del->setHoverColor(0x34C759FF);
+			}
+			else {
+				del->setText(Icon::Remove);
+				del->setBg(0xFF383C33);
+				del->setHoverBg(0xFF383C33);
+				del->setColor(0xFF383CFF);
+				del->setHoverColor(0xFF383CFF);
+			}
+		}
+		cards[CardOcr].offer = !ocrOk && !ocrUpdate && !cards[CardOcr].busy;
 		cards[CardTr].offer = !trOk && !cards[CardTr].busy;
 		cards[CardGh].offer = true;      // 果核看图始终提供（外链）
 		for (auto& c : cards) {
@@ -606,7 +633,11 @@ void WinSettingPlugins::build()
 		}
 	}
 	ocr.dlBtn->onClick.add([this](Ling::Button*) { this->startOcrDownload(); });
-	ocr.delBtn->onClick.add([this](Ling::Button*) { this->deleteCard(CardOcr); });
+	ocr.delBtn->onClick.add([this](Ling::Button*) {
+		// 有更新时这个位置是绿色刷新钮：点击直接更新；否则仍是删除
+		if (cards.size() > CardOcr && cards[CardOcr].update) this->startOcrDownload();
+		else this->deleteCard(CardOcr);
+	});
 	cards.push_back({ ocr.card, ocr.dlBtn, ocr.delBtn, false, false, false });
 
 	// —— 离线翻译（标题行内嵌语言包下拉，选中项决定下载目标与安装态）——

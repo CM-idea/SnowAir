@@ -2,6 +2,7 @@
 #include "ImageEditCollage.h"
 #include "ImageEditAnnot.h"
 #include "ImageEditTheme.h"
+#include "WinImageEdit.h"
 #include "../Lang.h"
 #include "../Shape/AnnotCursor.h"
 #include "../Tool/IconCodes.h"
@@ -343,6 +344,15 @@ D2D1_RECT_F ImageEditCollage::artPixelRect() const
 {
     const auto art = artRect();
     return D2D1::RectF(0.f, 0.f, art.right - art.left, art.bottom - art.top);
+}
+
+D2D1_RECT_F ImageEditCollage::lastImageArtRect() const
+{
+    if (cells_.empty()) return D2D1::RectF(0.f, 0.f, 0.f, 0.f);
+    const auto b = boundsOf(cells_.back().poly);
+    const auto art = artRect();
+    return D2D1::RectF(b.left - art.left, b.top - art.top,
+        b.right - art.left, b.bottom - art.top);
 }
 
 D2D1_POINT_2F ImageEditCollage::screenPointOf(const Pt& world) const
@@ -1546,12 +1556,6 @@ void ImageEditCollage::createLayoutInRect(const D2D1_RECT_F& rect)
         initLayoutFractions(grp);
         layoutGroups_[gid] = grp;
         rebuildLayoutGroup(gid);
-        selected_ = members.front();
-        extraCells_.assign(members.begin() + 1, members.end());
-    }
-    else {
-        selected_ = members.empty() ? -1 : members.front();
-        extraCells_.clear();
     }
     // 画板不在这里"固定下来"：没锁定的轴就是自适应的，画板始终跟着内容长；
     // 只有用户在尺寸行手输过的那一轴才是真正固定的（manualW_/manualH_）。
@@ -3167,10 +3171,10 @@ void ImageEditCollage::setCellImage(int index, const std::wstring& path, bool st
     if (win) win->refresh();
 }
 
-void ImageEditCollage::addImageBlock(const std::wstring& path, const Pt& at, bool useNaturalSize)
+void ImageEditCollage::addImageBlock(const std::wstring& path, const Pt& at)
 {
     int iw = 0, ih = 0;
-    if (useNaturalSize) imageSizeOf(path, iw, ih);
+    imageSizeOf(path, iw, ih);
     if (iw <= 0 || ih <= 0) { iw = 240; ih = 180; }
 
     Cell cell;
@@ -3217,7 +3221,7 @@ void ImageEditCollage::pasteCells()
     if (win) win->refresh();
 }
 
-void ImageEditCollage::handleDrop(const std::vector<std::wstring>& paths, POINT clientPos)
+void ImageEditCollage::handleDrop(const std::vector<std::wstring>& paths, POINT clientPos, bool allowReplace)
 {
     std::vector<std::wstring> imgs;
     for (const auto& p : paths)
@@ -3227,8 +3231,10 @@ void ImageEditCollage::handleDrop(const std::vector<std::wstring>& paths, POINT 
     Pt wp;
     int index = -1;
     if (toWorldIfInside(clientPos, wp)) index = cellAt(wp);
-    if (index >= 0) {
-        // 拖到某个容器上：直接替换该容器的图片
+    if (index >= 0 && allowReplace) {
+        // 拖到某个容器上：直接替换该容器的图片。
+        // 粘贴（allowReplace=false）不走这条：多张图各自错开落点时会压在已有格子上，
+        // 按「替换」处理就会把前一张吃掉，只留最后一张。
         pushUndo();
         cells_[index].image = imgs.front();
         cells_[index].stretch = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -3253,7 +3259,7 @@ void ImageEditCollage::handleDrop(const std::vector<std::wstring>& paths, POINT 
         if (!sizeLockedW() && !sizeLockedH()) {
             float off = 0.f;
             for (const auto& p : imgs) {
-                addImageBlock(p, { off, off }, true);
+                addImageBlock(p, { off, off });
                 off += 24.f;
             }
         }
@@ -3323,7 +3329,7 @@ void ImageEditCollage::handleDrop(const std::vector<std::wstring>& paths, POINT 
             Pt at{ wp };
             if (lockW) at.x = std::min(std::max(wp.x, minX), maxX);
             if (lockH) at.y = std::min(std::max(wp.y, minY), maxY);
-            addImageBlock(p, at, true);
+            addImageBlock(p, at);
         }
         for (int i = startNew; i < (int)cells_.size(); ++i)
             snapCellToNeighbors(i);
@@ -3356,18 +3362,6 @@ void ImageEditCollage::replaceCellImage(int index)
     if (index < 0 || index >= (int)cells_.size()) return;
     auto path = pickImageFile();
     if (!path.empty()) setCellImage(index, path, false);
-}
-
-// ---------------- 素材条 ----------------
-
-std::vector<ImageEditCollage::Thumb> ImageEditCollage::thumbnails() const
-{
-    std::vector<Thumb> out;
-    for (int i = 0; i < (int)cells_.size(); ++i) {
-        if (cells_[i].image.empty()) continue;
-        out.push_back({ cells_[i].image, selected_ == i, i });
-    }
-    return out;
 }
 
 void ImageEditCollage::selectCell(int index)
@@ -4441,6 +4435,17 @@ void ImageEditCollage::onKeyDown(UINT key)
         return;
     }
 
+    // Ctrl+V：先贴编辑器里复制过的容器（那是刚刚 Ctrl+C 的东西），没有再贴系统剪贴板里的图片。
+    // 放在「标注工具激活就转发按键」之前：标注工具选着的时候也要能贴图；剪贴板里没有图片时
+    // 不拦截，按键照旧交给标注宿主（文字编辑里的粘贴）。
+    if (key == 'V' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+        if (!annotating() && !cellClipboard_.empty()) {
+            pasteCells();
+            return;
+        }
+        if (auto* w = WinImageEdit::get(); w && w->pasteFromClipboard()) return;
+    }
+
     // 标注工具：其余键盘（撤销/重做/退出文字编辑）交给标注宿主
     if (annotating()) {
         if (annot_) annot_->forwardKey(key);
@@ -4488,8 +4493,6 @@ void ImageEditCollage::onKeyDown(UINT key)
             c.group = -1;
             cellClipboard_.push_back(c);
         }
-    } else if (key == 'V' && (GetKeyState(VK_CONTROL) & 0x8000)) {
-        pasteCells();
     }
 }
 

@@ -11,6 +11,7 @@ namespace SettingUi { class Popup; class HoverTip; }
 class ImageEditCollage;
 class ImageEditMerge;
 class ImageEditAnnotHost;
+class ShapeBase;
 
 // 图片编辑窗口：左列画布 + 底部素材条（拼图模式）+ 右列模式胶囊/尺寸行/属性区/保存。
 // 画布与文档内容分别由 ImageEditCollage（拼图）与 ImageEditMerge（合并文档）承载，
@@ -30,7 +31,13 @@ public:
     void setMode(Mode mode);
     // 用指定图片新建一张编辑画布（供插件右键「图片编辑」使用）。
     void openImage(const std::wstring& path);
+    // 导入图片，并把贴图里已有的矢量标注一起搬进来（可在编辑器里继续选中/修改）。
+    // shapes 使用图片像素坐标；width/height 是图片像素尺寸。
+    void importImageWithShapes(const std::wstring& path,
+        std::vector<std::unique_ptr<ShapeBase>> shapes, int width, int height);
     bool hasContent() const;
+    // 当前是否处于「贴图导入 + 编辑器激活」的置顶状态（标注属性栏据此跟随）
+    bool pinAwareTopmostActive() const;
 
     // —— 标注（工具属性栏 / 画布标注）——
     // 客户区坐标 → 画板像素 / 画板像素 → 客户区（标注坐标 = 画板内像素）
@@ -45,6 +52,10 @@ public:
 
     // 文件拖放（WM_DROPFILES 子类化后转发到这里，clientPos 为窗口客户区坐标）
     void onFilesDropped(const std::vector<std::wstring>& paths, POINT clientPos);
+    // Ctrl+V：把系统剪贴板里的图片贴进画布（位图或资源管理器里复制的图片文件）。
+    // 内部会转成文件路径再走 onFilesDropped，和拖放/点击导入是同一条路。
+    // 返回 false = 剪贴板里没有图片（或当前正在输入文字，这次 Ctrl+V 归输入框）。
+    bool pasteFromClipboard();
 
 private:
     WinImageEdit();
@@ -142,6 +153,9 @@ private:
 
     void onSaveClicked();        // M1 先留空实现
     void onCancelClicked();      // 关闭窗口
+
+    // 贴图导入的编辑器要能盖住置顶贴图：激活时临时置顶，切走后恢复普通层
+    void applyPinAwareTopmost(bool active);
 
     static LRESULT CALLBACK dropWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -266,6 +280,8 @@ private:
     std::unique_ptr<SettingUi::Popup> formatPopup_;
 
     bool syncingSize_{ false };
+    // 由贴图「导入图片编辑」打开：激活期间临时置顶，才能盖住 WS_EX_TOPMOST 的贴图
+    bool keepAbovePins_{ false };
     // 尺寸单位：单击「PX」在容器/布局尺寸上切到 %（相对画板），画板尺寸恒为 PX
     bool sizePercent_{ false };
     bool unitShownPercent_{ false };

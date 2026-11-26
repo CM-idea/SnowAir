@@ -37,21 +37,30 @@ public:
 	// 自己算锚点的调用方（比如跟着鼠标走的滑块提示）也用它，免得两处数值不一样。
 	static constexpr float anchorInset{ 4.f };
 private:
-	// 真正把提示摆出来/更新掉，1 秒计时到点后才会走到这里
+	// 真正把提示摆出来/更新掉，1 秒计时到点后才会走到这里。
 	void showNow();
-	// 提示按当前文字要占多大（不需要提示已经显示出来）
-	SIZE measure();
-	// 用提示控件自己的字体量一段文字有多大（不含气泡的边框和内边距）
-	SIZE measureText(const std::wstring& str);
-	// 量出气泡的固定内边距，整个进程只需要量一次
-	void learnPadding();
+	// showAt 的内部实现：bottomY 是锚点所在控件的底边屏幕坐标，用于上方放不下时翻到下方
+	void showAtInternal(Ling::Node* owner, float screenX, float screenY, float bottomY,
+		const std::wstring& text);
+	// 按最终尺寸算左上角：默认贴锚点上方，上方不够翻到下方，再夹取到锚点所在显示器工作区
+	void place(int w, int h, int& outX, int& outY) const;
+	// 向控件要它自己按当前字体/文字排出来的气泡尺寸（TTM_GETBUBBLESIZE，失败回退窗口矩形）。
+	// 这是唯一可信的尺寸来源，不再用窗口当前可能还没定稿的矩形去推算。
+	SIZE bubbleSize();
+	// 按锚点所在显示器切换字体；dpi 没变则什么都不做
+	void applyDpiForPoint(float screenX, float screenY);
 private:
 	Ling::WinBase* win;
 	HWND tipHwnd{ nullptr };
+	// 当前字体是按哪块屏的缩放建的（0 = 还没建过）
+	float tipDpi_{ 0.f };
+	HFONT tipFont_{ nullptr };
 	// 当前提示的归属节点。只做指针比较，不解引用 —— 控件被销毁后这个指针可能是野的。
 	Ling::Node* owner{ nullptr };
 	std::wstring text;
 	float anchorX{ 0.f }, anchorY{ 0.f };
+	// 锚点所在控件的底边（showAt 的调用方没有控件时按锚点往下算一点）
+	float anchorBottomY{ 0.f };
 	// visible: 提示已经在屏上；否则要么没提示，要么正在等那 1 秒
 	bool visible{ false };
 	winrt::event_token timerTok{};

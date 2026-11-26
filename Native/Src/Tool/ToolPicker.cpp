@@ -9,6 +9,8 @@
 #include "ToolIconCompose.h"   // 复合图标（马赛克切模糊时叠两层）
 #include "ToolbarChrome.h"
 #include "ToolbarTheme.h"
+#include "DpiUtil.h"
+#include <cmath>
 
 using Microsoft::WRL::ComPtr;
 
@@ -39,6 +41,11 @@ ToolPicker::~ToolPicker()
 
 void ToolPicker::onCreated()
 {
+	const float actual = DpiUtil::dpiForWindow(hwnd);
+	if (std::fabs(actual - dpi) > 0.01f) {
+		dpi = actual;
+		body->applyDpiChange();
+	}
 	auto d2d = Ling::D2D::get();
 	d2d->deviceContext->CreateSolidColorBrush(
 		Ling::Color(ToolbarTheme::background).getD2DColor(), brushBg.GetAddressOf());
@@ -199,7 +206,28 @@ void ToolPicker::showFor(Ling::WinBase* bar, Ling::Button* anchorBtn, const std:
 	anchor = anchorBtn;
 	items = list;
 	selectedId = selected;
-	dpi = bar->dpi;
+
+	// 窗口刚建出来时默认在主屏（可能是 100%），而气泡要显示在锚点所在屏（可能是 300%）。
+	// 若直接按目标 dpi 算好物理尺寸再搬过去，系统会认为窗口是从旧 dpi 搬来的，
+	// 再按「建议矩形」乘一次缩放 —— 首次悬停气泡变成 N 倍大、第二次才恢复，就是这么来的。
+	// 顺序改成：先搬到锚点所在屏让 WM_DPICHANGED 落定，再用真实 dpi 重算尺寸。
+	POINT anchorScreen{ (LONG)(anchorBtn->x + anchorBtn->w * 0.5f),
+		(LONG)(anchorBtn->y + anchorBtn->h * 0.5f) };
+	if (bar->hwnd) ClientToScreen(bar->hwnd, &anchorScreen);
+	if (std::fabs(DpiUtil::dpiForPoint(anchorScreen) - dpi) > 0.01f) {
+		// 已经显示着跨屏换锚点：先藏起来，别让用户看到搬家过程
+		if (isVisible) Ling::WinBase::hide();
+		ToolbarChrome::settleDpiAt(this, anchorScreen.x, anchorScreen.y);
+	}
+
+	// 用锚点所在显示器的缩放排版。不能抄整个工具条窗口的 dpi：工具条横跨两屏时
+	// MonitorFromWindow 只按面积最大的那块算，气泡却贴着另一个屏上的按钮。
+	const float targetDpi = DpiUtil::dpiForPoint(anchorScreen);
+	if (std::fabs(targetDpi - dpi) > 0.01f) {
+		dpi = targetDpi;
+		// 只改成员 dpi 不会重推已经建好的 row / canvas 内边距，必须让 body 重排一次
+		body->applyDpiChange();
+	}
 	applyToolbarSize();
 	if (hwnd && bar->hwnd) {
 		SetWindowLongPtr(hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(bar->hwnd));

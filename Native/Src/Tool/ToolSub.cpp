@@ -21,6 +21,7 @@
 #include "PropSlider.h"
 #include "SerialEmoji.h"
 #include "../Shape/ShapeBase.h"
+#include "../Shape/ShapeLine.h"
 #include "../Shape/ShapeNumber.h"
 #include "../Shape/ShapeRect.h"
 #include "../History.h"
@@ -377,7 +378,6 @@ void ToolSub::beginTool(const std::wstring& id)
 	sizeExtraH = 0.f;
 	// 快照属性栏：切到别的工具时整套指针作废
 	snapRow = nullptr;
-	snapCreateBtn = nullptr;
 	snapDeleteBtn = nullptr;
 	snapSaveBtn = nullptr;
 	snapScroll = nullptr;
@@ -637,6 +637,25 @@ void ToolSub::pulseShapePreview()
 	if (win) win->pulseSizePreview(true);
 }
 
+void ToolSub::applyLiveHighlighterStyle()
+{
+	if (!win || win->shapeHover) return;
+	// 只补「刚画完、还没选中」的那条：让拖透明度时上一笔荧光笔当场跟着变（最直观的预览）。
+	// 有选中的标注时一律走 onToolStyleChanged，避免顺手改到旁边那条旧荧光笔。
+	auto* live = dynamic_cast<ShapeLine*>(win->liveStyleShape());
+	if (!live || !live->isHighlighter()) return;
+	live->applyStyle();
+}
+
+void ToolSub::setPenOpacityPreview(bool on)
+{
+	if (!win) return;
+	// 有本体（选中/刚画完的荧光笔）时，变化直接出现在本体上，不再叠一条独立的笔迹预览
+	auto* live = dynamic_cast<ShapeLine*>(win->liveStyleShape());
+	const bool liveHighlighter = live && live->isHighlighter();
+	win->setSizePreviewHold(on && !liveHighlighter, false);
+}
+
 void ToolSub::showArrowTools()
 {
 	beginTool(L"arrow");
@@ -717,17 +736,20 @@ void ToolSub::applyPenMarkerState(bool on)
 		isPenDash = false;
 		if (softBtn) applyToggleStyle(softBtn, false);
 		if (dashBtn) applyToggleStyle(dashBtn, false);
-		// 初始属性：荧光笔自己的默认不透明度 / 默认粗细
-		const int op = designInt(ToolKey::Marker, DesignKey::Opacity, -1);
-		if (op >= 0) penMarkerOpacity = std::clamp(op, 10, 100);
-		const int mw = designInt(ToolKey::Marker, DesignKey::Width, -1);
-		if (mw >= 0) {
-			sliderVal = std::clamp((float)mw, sliderMin, sliderMax);
-			updateSliderValueLabel();
-			if (slider) {
-				suppressSliderStyleNotify = true;
-				slider->setValue(sliderVal);
-				suppressSliderStyleNotify = false;
+		// 初始属性：荧光笔自己的默认不透明度 / 默认粗细。
+		// 正在展示选中荧光笔的属性时不能用初始属性顶掉它的值（否则会当场改掉那条标注）。
+		if (!stylePreviewActive_) {
+			const int op = designInt(ToolKey::Marker, DesignKey::Opacity, -1);
+			if (op >= 0) penMarkerOpacity = std::clamp(op, 10, 100);
+			const int mw = designInt(ToolKey::Marker, DesignKey::Width, -1);
+			if (mw >= 0) {
+				sliderVal = std::clamp((float)mw, sliderMin, sliderMax);
+				updateSliderValueLabel();
+				if (slider) {
+					suppressSliderStyleNotify = true;
+					slider->setValue(sliderVal);
+					suppressSliderStyleNotify = false;
+				}
 			}
 		}
 	}
@@ -854,7 +876,8 @@ void ToolSub::showPenTools()
 	}
 	// 渐隐画笔属性栏只有「颜色 + 粗细滑条 + 数值」；渐隐画笔是全屏画布的
 	// 专属工具，截图/贴图工具栏不再提供入口，所以画笔属性栏也不放渐隐开关。
-	initSize(isPenFade ? 0 : 3, true);
+	// 默认形态是荧光笔时，属性栏里仍保留它的形态按钮（透明度入口只属于荧光笔）。
+	initSize(isPenFade ? 0 : (defaultPen == 3 ? 4 : 3), true);
 
 	if (!isPenFade) {
 	auto refreshPenForms = [this]() {
@@ -862,10 +885,19 @@ void ToolSub::showPenTools()
 		if (markerBtn) applyToggleStyle(markerBtn, isPenMarker);
 		if (softBtn) applyToggleStyle(softBtn, isPenSoft);
 	};
-	// 形态顺序跟随「初始属性」；默认形态已在工具栏，属性栏里不再重复
-	for (const auto& c : orderedFormsFor(L"pen", defaultPen)) {
+	// 形态顺序跟随「初始属性」；默认形态已在工具栏，属性栏里不再重复。
+	// 荧光笔例外：它的「颜色透明度」入口就是它的形态按钮，默认形态是荧光笔时也要保留。
+	auto penForms = orderedFormsFor(L"pen", defaultPen);
+	if (defaultPen == 3) {
+		if (const auto* def = ToolInitial::find(L"pen"); def && def->forms) {
+			for (const auto& f : *def->forms) {
+				if (f.value == 3) { penForms.insert(penForms.begin(), f); break; }
+			}
+		}
+	}
+	for (const auto& c : penForms) {
 		if (c.value == 3) {
-			// 荧光笔：与普通画笔一致，只是更宽、半透明；单击打开「透明度」二级气泡（与水印角度同一套外壳）
+			// 荧光笔：与普通画笔一致，只是更宽、半透明；单击打开「颜色透明度」二级气泡
 			markerBtn = contentNode->makeChild<Ling::Button>();
 			markerBtn->setText(c.glyph ? c.glyph : Icon::Marker);
 			styleToolbarBtn(markerBtn);
@@ -874,11 +906,23 @@ void ToolSub::showPenTools()
 			applyToggleStyle(markerBtn, isPenMarker);
 			tip->bind(markerBtn, Lang::get(c.tipKey ? c.tipKey : L"tool.marker"));
 			markerBtn->onClick.add([this, refreshPenForms](Ling::Button* b) {
-				const bool next = !isPenMarker;
-				applyPenMarkerState(next);
+				const bool panelOn = nestedPanel && nestedPanel->isOpen()
+					&& nestedPanel->kind() == ToolNestedPanel::Kind::PenOpacity;
+				const bool colorOn = colorPanel && colorPanel->isOpen();
+				// 荧光笔已开启、透明度气泡正开着、上面没有颜色面板：再点一次 = 关闭荧光笔
+				if (isPenMarker && panelOn && !colorOn) {
+					applyPenMarkerState(false);
+					refreshPenForms();
+					updateDashAvailability();
+					win->onToolStyleChanged();
+					return;
+				}
+				// 其余情况：确保荧光笔开启，并打开（或保持）透明度气泡
+				if (!isPenMarker) applyPenMarkerState(true);
+				closeColorPopup();
 				refreshPenForms();
+				if (!panelOn) nestedPanel->openPenOpacity(workAreaRect(), b);
 				win->onToolStyleChanged();
-				if (next) nestedPanel->openPenOpacity(workAreaRect(), b);
 			});
 			registerStyleToggle([this] { return isPenMarker; }, [this] { applyPenMarkerState(false); });
 		}
@@ -1546,8 +1590,8 @@ void ToolSub::showDemoSnapshotTools()
 		tip->bind(b, Lang::get(tipKey));
 		return b;
 	};
-	snapCreateBtn = mk(Icon::CreateSnapshot, L"snapshot.create");
-	snapCreateBtn->onClick.add([this](Ling::Button*) {
+	auto* createBtn = mk(Icon::CreateSnapshot, L"snapshot.create");
+	createBtn->onClick.add([this](Ling::Button*) {
 		if (auto* c = dynamic_cast<WinCap*>(win)) c->createDemoSnapshot();
 	});
 	auto* spacer = row->makeChild<Ling::Node>();
@@ -2157,6 +2201,11 @@ void ToolSub::resetStyleToDefaults()
 	isPenDash = false;
 	isPenSoft = false;
 	isPenMarker = false;
+	// 荧光笔透明度也要回到「初始属性」，否则关闭工具再打开会沿用上一次的临时值
+	{
+		const int markerOp = designInt(ToolKey::Marker, DesignKey::Opacity, -1);
+		penMarkerOpacity = markerOp >= 0 ? std::clamp(markerOp, 10, 100) : 35;
+	}
 	const int tf = designInt(ToolKey::Text, DesignKey::Form, 0);
 	isTextBold = (tf & 1) != 0;
 	isTextItalic = (tf & 2) != 0;
@@ -2274,6 +2323,7 @@ ToolSub::StyleState ToolSub::captureStyleState() const
 	s.cornerRadius = cornerRadius;
 	s.lastCornerRadius = lastCornerRadius;
 	s.rectOpacity = rectOpacity;
+	s.penMarkerOpacity = penMarkerOpacity;
 	s.sliderVal = sliderVal;
 	s.sliderMin = sliderMin;
 	s.sliderMax = sliderMax;
@@ -2318,6 +2368,7 @@ void ToolSub::restoreStyleState(const StyleState& s)
 	cornerRadius = s.cornerRadius;
 	lastCornerRadius = s.lastCornerRadius;
 	rectOpacity = s.rectOpacity;
+	penMarkerOpacity = s.penMarkerOpacity;
 	sliderVal = s.sliderVal;
 	sliderMin = s.sliderMin;
 	sliderMax = s.sliderMax;
@@ -2503,6 +2554,7 @@ void ToolSub::applyUniformStyle(const StyleState& d)
 	if (!multiMixed_.numberNoTail) isNumberNoTail = d.isNumberNoTail;
 	if (!multiMixed_.corner) cornerRadius = d.cornerRadius;
 	rectOpacity = d.rectOpacity;
+	penMarkerOpacity = d.penMarkerOpacity;
 	if (!multiMixed_.sides) {
 		polygonSides = d.polygonSides;
 		starPoints = d.starPoints;
@@ -2986,9 +3038,7 @@ void ToolSub::makeNumberNoTailBtn()
 	noTailBtn->setFontFamily(Icon::Family);
 	noTailBtn->setFontSize(ToolbarTheme::iconSize);
 	applyToggleStyle(noTailBtn, isNumberNoTail);
-	auto tipText = Lang::get(L"tool.numberNoTail");
-	if (tipText.empty() || tipText == L"tool.numberNoTail") tipText = L"停用尾巴";
-	tip->bind(noTailBtn, tipText);
+	tip->bind(noTailBtn, Lang::get(L"tool.numberNoTail"));
 	noTailBtn->onClick.add([this](Ling::Button*) {
 		// 尾巴是属性、表情是工具：Emoji 形态下尾巴属性不可用
 		if (numberStyle == NumberEmoji) return;
@@ -3767,9 +3817,17 @@ void ToolSub::hideExtraHoverTips()
 	if (nestedPanel) nestedPanel->hideHoverTip();
 }
 
+void ToolSub::onDpiAdopted()
+{
+	refreshSize();
+}
+
 void ToolSub::updatePosition(const RECT& workArea)
 {
 	if (!hasTools) return;
+	// 属性栏同样按自己所在显示器的缩放重排：跟着主栏跨屏时，宿主的 dpi 可能来自另一块屏，
+	// 不换缩放就会"栏比主栏大一圈、尖角也对不准"。
+	adoptMonitorDpi();
 	AnnotHost::MainBarAnchor bar{};
 	if (!win->queryMainBarAnchor(bar)) return;
 	// 工作区按「主工具栏所在显示器」取：多屏时调用方传进来的往往是截图窗口 /

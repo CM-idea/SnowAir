@@ -12,6 +12,7 @@
 #include <mutex>
 #include <include/Ling.h>
 #include "CutMask.h"
+#include "../Tool/DpiUtil.h"
 #include "../Tool/ToolbarTheme.h"
 #include "../Tool/ToolbarChrome.h"
 #include "../Tool/IconCodes.h"
@@ -1286,9 +1287,9 @@ CutMask::CutMask(Ling::WinBase* win) :win{ win }
 		if (coarse) scheduleHoverRefine();
 		else stopHoverRefine();
 	});
-	strokeWidth = 2 * win->dpi;
-	paddingTop *= win->dpi;
-	paddingMargin *= win->dpi;
+	strokeWidth = 2.f * selectionDpi();
+	paddingTop *= selectionDpi();
+	paddingMargin *= selectionDpi();
 	auto d2d = Ling::D2D::get();
 	// 遮罩可能先于工具栏创建：先把已保存的主题色刷进运行时色板，避免第一张截图用默认绿
 	ToolbarTheme::refresh();
@@ -1505,6 +1506,28 @@ void CutMask::onHoverDwellTimer(UINT timerId)
 		win->hwnd, true);
 }
 
+float CutMask::selectionDpi() const
+{
+	if (!win) return 1.f;
+	// 没有选区时沿用宿主 dpi：与旧行为一致，也避免拿空矩形去猜显示器。
+	if (maskRect.right <= maskRect.left || maskRect.bottom <= maskRect.top)
+		return win->dpi;
+	const RECT scr{
+		(LONG)std::lround((float)win->x + maskRect.left),
+		(LONG)std::lround((float)win->y + maskRect.top),
+		(LONG)std::lround((float)win->x + maskRect.right),
+		(LONG)std::lround((float)win->y + maskRect.bottom)
+	};
+	if (dpiSelValid_
+		&& scr.left == dpiSelScreenRect_.left && scr.top == dpiSelScreenRect_.top
+		&& scr.right == dpiSelScreenRect_.right && scr.bottom == dpiSelScreenRect_.bottom)
+		return dpiSel_;
+	dpiSelScreenRect_ = scr;
+	dpiSel_ = DpiUtil::dpiForRect(scr);
+	dpiSelValid_ = true;
+	return dpiSel_;
+}
+
 ComPtr<IDWriteTextLayout> CutMask::makeIconLayout(const wchar_t* code, float slot)
 {
 	ComPtr<IDWriteTextLayout> out;
@@ -1513,7 +1536,7 @@ ComPtr<IDWriteTextLayout> CutMask::makeIconLayout(const wchar_t* code, float slo
 	auto* format = d2d->getTextFormat(Icon::Family);
 	d2d->dwriteFactory->CreateTextLayout(code, 1, format, slot, slot, out.GetAddressOf());
 	if (out) {
-		out->SetFontSize(Icon::SizeSm * win->dpi, { 0, 1 });
+		out->SetFontSize(Icon::SizeSm * selectionDpi(), { 0, 1 });
 		out->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
 		out->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 	}
@@ -1522,6 +1545,23 @@ ComPtr<IDWriteTextLayout> CutMask::makeIconLayout(const wchar_t* code, float slo
 
 void CutMask::makeLayout()
 {
+	const float dpiSel = selectionDpi();
+	// 选区换到另一块屏：所有按 dpi 建过的文本/图标 layout 都要作废重建。
+	if (std::fabs(dpiSel - labelDpi_) > 0.01f) {
+		labelDpi_ = dpiSel;
+		layoutPos.Reset();
+		layoutSize.Reset();
+		radiusValueLayout.Reset();
+		lockLayout.Reset();
+		unlockLayout.Reset();
+		radiusLayout.Reset();
+		shadowLayout.Reset();
+		labelIx_ = labelIy_ = labelIw_ = labelIh_ = -1;
+	}
+	// 边框 / 内缩也按选区所在屏实时重算（paintBorder 还会再兜一次）。
+	strokeWidth = 2.f * dpiSel;
+	paddingTop = 2.f * dpiSel;
+	paddingMargin = 3.f * dpiSel;
 	// 追赶动画中：尺寸文案用逻辑目标，避免 W×H 每帧跳变把信息栏撑抖。
 	// 其余时候必须读 maskRect —— hoverTarget_ 只是"上一次命中的元素框"，点选确认后
 	// 它会被 snapHoverTarget() 固定下来不再跟随；若一直优先取它，进入调整阶段后拖边
@@ -1531,24 +1571,24 @@ void CutMask::makeLayout()
 	const int iy = (int)std::lround(labelR.top);
 	const int iw = (int)std::lround(labelR.right - labelR.left);
 	const int ih = (int)std::lround(labelR.bottom - labelR.top);
-	const float gap = strokeWidth + 2.f * win->dpi;
-	const float barH = ToolbarTheme::infoHeight * win->dpi;
-	const float padX = ToolbarTheme::infoPadX * win->dpi;
-	const float iconSlot = ToolbarTheme::infoIconSlot * win->dpi;
-	const float iconGap = ToolbarTheme::infoIconGap * win->dpi;
-	const float sliderW = ToolbarTheme::sliderWidth * win->dpi;
-	const float valueW = ToolbarTheme::sliderValueWidth * win->dpi;
-	const float valueGap = ToolbarTheme::sliderValueGap * win->dpi; // 与 PropSlider 滑条↔数值间距一致
-	const float splitGap = ToolbarTheme::infoSplitterGap * win->dpi;
-	const float swatch = swatchSize * win->dpi;
-	const float swatchGap = ToolbarTheme::infoSwatchGap * win->dpi;
+	const float gap = strokeWidth + 2.f * selectionDpi();
+	const float barH = ToolbarTheme::infoHeight * selectionDpi();
+	const float padX = ToolbarTheme::infoPadX * selectionDpi();
+	const float iconSlot = ToolbarTheme::infoIconSlot * selectionDpi();
+	const float iconGap = ToolbarTheme::infoIconGap * selectionDpi();
+	const float sliderW = ToolbarTheme::sliderWidth * selectionDpi();
+	const float valueW = ToolbarTheme::sliderValueWidth * selectionDpi();
+	const float valueGap = ToolbarTheme::sliderValueGap * selectionDpi(); // 与 PropSlider 滑条↔数值间距一致
+	const float splitGap = ToolbarTheme::infoSplitterGap * selectionDpi();
+	const float swatch = swatchSize * selectionDpi();
+	const float swatchGap = ToolbarTheme::infoSwatchGap * selectionDpi();
 	const bool showRadiusSlider = selRadius_ > 0.f;
 	const bool showSwatch = selShadowW_ > 0;
 
 	auto placeBar = [&](float posW, float sizeW) {
 		// X Y | 锁 | W×H px | 分隔 | 圆角 [滑条+数值] | 阴影 [色块]
 		float content = posW + iconGap + iconSlot + iconGap + sizeW;
-		content += splitGap + 1.f * win->dpi + splitGap;
+		content += splitGap + 1.f * selectionDpi() + splitGap;
 		content += iconSlot;
 		if (showRadiusSlider) content += iconGap + sliderW + valueGap + valueW;
 		content += iconGap + iconSlot;
@@ -1576,8 +1616,8 @@ void CutMask::makeLayout()
 		x = lockBtnRect.right + iconGap;
 		sizeTextX_ = x;
 		x += sizeW + splitGap;
-		const float splitH = 16.f * win->dpi;
-		splitterRect = D2D1::RectF(x, layoutRect.top + (barH - splitH) * 0.5f, x + 1.f * win->dpi, layoutRect.top + (barH + splitH) * 0.5f);
+		const float splitH = 16.f * selectionDpi();
+		splitterRect = D2D1::RectF(x, layoutRect.top + (barH - splitH) * 0.5f, x + 1.f * selectionDpi(), layoutRect.top + (barH + splitH) * 0.5f);
 		x = splitterRect.right + splitGap;
 		radiusBtnRect = D2D1::RectF(x, y, x + iconSlot, y + iconSlot);
 		x = radiusBtnRect.right + iconGap;
@@ -1615,8 +1655,8 @@ void CutMask::makeLayout()
 	layoutPos.Reset();
 	layoutSize.Reset();
 	auto d2d = Ling::D2D::get();
-	layoutPos = d2d->makeTextLayout(wfmt(L"X:%d  Y:%d", (int)ix, (int)iy), ToolbarTheme::infoFontSize * win->dpi);
-	layoutSize = d2d->makeTextLayout(wfmt(L"%d×%d px", (int)iw, (int)ih), ToolbarTheme::infoFontSize * win->dpi);
+	layoutPos = d2d->makeTextLayout(wfmt(L"X:%d  Y:%d", (int)ix, (int)iy), ToolbarTheme::infoFontSize * selectionDpi());
+	layoutSize = d2d->makeTextLayout(wfmt(L"%d×%d px", (int)iw, (int)ih), ToolbarTheme::infoFontSize * selectionDpi());
 	if (!layoutPos || !layoutSize) return;
 	DWRITE_TEXT_METRICS pm{}, sm{};
 	layoutPos->GetMetrics(&pm);
@@ -1708,12 +1748,12 @@ void CutMask::rebuildRadiusValueLayout()
 	auto d2d = Ling::D2D::get();
 	radiusValueLayout = d2d->makeTextLayout(
 		wfmt(L"%d", static_cast<int>(std::round(selRadius_))),
-		ToolbarTheme::infoFontSize * win->dpi);
+		ToolbarTheme::infoFontSize * selectionDpi());
 	if (!radiusValueLayout) return;
 	DWRITE_TEXT_METRICS tm{};
 	radiusValueLayout->GetMetrics(&tm);
-	radiusValueLayout->SetMaxWidth(ToolbarTheme::sliderValueWidth * win->dpi);
-	radiusValueLayout->SetMaxHeight(ToolbarTheme::infoHeight * win->dpi);
+	radiusValueLayout->SetMaxWidth(ToolbarTheme::sliderValueWidth * selectionDpi());
+	radiusValueLayout->SetMaxHeight(ToolbarTheme::infoHeight * selectionDpi());
 	radiusValueLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
 	radiusValueLayout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 }
@@ -1722,7 +1762,7 @@ void CutMask::setRadiusFromSliderX(float x)
 {
 	if (radiusSliderRect.right <= radiusSliderRect.left) return;
 	// 与 Ling::Slider::posToValue 同一套：两端各留 thumbR
-	const float r = sliderThumbR * win->dpi;
+	const float r = sliderThumbR * selectionDpi();
 	const float len = (radiusSliderRect.right - radiusSliderRect.left) - 2.f * r;
 	if (len <= 0.f) return;
 	const float t = std::clamp((x - (radiusSliderRect.left + r)) / len, 0.f, 1.f);
@@ -1776,7 +1816,7 @@ bool CutMask::infoTipAnchor(InfoHit hit, float& screenX, float& screenY) const
 	}
 	if (!r || r->right <= r->left) return false;
 	screenX = (float)win->x + (r->left + r->right) * 0.5f;
-	screenY = (float)win->y + r->top + 4.f * win->dpi;
+	screenY = (float)win->y + r->top + 4.f * selectionDpi();
 	return true;
 }
 
@@ -1989,7 +2029,7 @@ bool CutMask::translateBy(float dx, float dy, const POINT* hostPoint)
 MaskHit CutMask::hitTest(POINT pos) const
 {
 	if (!hasRect()) return MaskHit::None;
-	const float band = hitBandLogical * win->dpi;
+	const float band = hitBandLogical * selectionDpi();
 	const auto& r = maskRect;
 	const float x = (float)pos.x, y = (float)pos.y;
 	const bool nearL = x >= r.left - band && x <= r.left + band;
@@ -2142,7 +2182,7 @@ void CutMask::paintDim(ID2D1DeviceContext* ctx) const
 	if (FAILED(factory->CreateRectangleGeometry(D2D1::RectF(0.f, 0.f, ww, hh), fullGeo.GetAddressOf())))
 		return;
 
-	const float rad = clampRadiusToRect(selRadius_ * win->dpi, holeW, holeH);
+	const float rad = clampRadiusToRect(selRadius_ * selectionDpi(), holeW, holeH);
 	if (rad > 0.5f) {
 		ComPtr<ID2D1RoundedRectangleGeometry> rr;
 		if (FAILED(factory->CreateRoundedRectangleGeometry(
@@ -2173,7 +2213,7 @@ void CutMask::paintSelShadow(ID2D1DeviceContext* ctx) const
 	const float sw = (float)selShadowW_;
 	const float w = maskRect.right - maskRect.left;
 	const float h = maskRect.bottom - maskRect.top;
-	const float rad = clampRadiusToRect(selRadius_ * win->dpi, w, h);
+	const float rad = clampRadiusToRect(selRadius_ * selectionDpi(), w, h);
 	const float dy = 1.5f; // 轻微下移，更像投影
 
 	auto factory = Ling::D2D::get()->d2dFactory;
@@ -2243,8 +2283,8 @@ void CutMask::paintInfoIcons(ID2D1DeviceContext* ctx)
 	if (selRadius_ > 0.f && radiusSliderRect.right > radiusSliderRect.left) {
 		const float w = radiusSliderRect.right - radiusSliderRect.left;
 		const float h = radiusSliderRect.bottom - radiusSliderRect.top;
-		const float r = sliderThumbR * win->dpi;
-		const float th = sliderTrackH * win->dpi;
+		const float r = sliderThumbR * selectionDpi();
+		const float th = sliderTrackH * selectionDpi();
 		const float len = w - 2.f * r;
 		if (len > 0.f) {
 			const float cy = radiusSliderRect.top + h * 0.5f;
@@ -2272,10 +2312,10 @@ void CutMask::paintInfoIcons(ID2D1DeviceContext* ctx)
 		// 色块用实色展示（alpha 另用于阴影羽化，色块上看不清）
 		Ling::Color c(selShadowColor_);
 		brushSelShadow->SetColor(D2D1::ColorF(c.r / 255.f, c.g / 255.f, c.b / 255.f, 1.f));
-		const float rr = 2.f * win->dpi;
+		const float rr = 2.f * selectionDpi();
 		ctx->FillRoundedRectangle(D2D1::RoundedRect(shadowSwatchRect, rr, rr), brushSelShadow.Get());
 		brushIcon->SetColor(D2D1::ColorF(1.f, 1.f, 1.f, 0.35f));
-		ctx->DrawRoundedRectangle(D2D1::RoundedRect(shadowSwatchRect, rr, rr), brushIcon.Get(), 1.f * win->dpi);
+		ctx->DrawRoundedRectangle(D2D1::RoundedRect(shadowSwatchRect, rr, rr), brushIcon.Get(), 1.f * selectionDpi());
 	}
 }
 
@@ -2312,7 +2352,7 @@ void CutMask::clearCodeBadges()
 int CutMask::hitCodeBadge(POINT pos) const
 {
 	// 角标本体以外再放宽 2 DIP：小按钮不好点，手一抖就点空
-	const float pad = 2.f * win->dpi;
+	const float pad = 2.f * selectionDpi();
 	for (size_t i = 0; i < codeBadges_.size(); ++i) {
 		const auto& r = codeBadges_[i].rect;
 		if ((float)pos.x >= r.left - pad && (float)pos.x < r.right + pad
@@ -2339,12 +2379,17 @@ void CutMask::paintCodeBadges(ID2D1DeviceContext* ctx)
 	ComPtr<ID2D1SolidColorBrush> ring;
 
 	// 字形容器固定 26 DIP（字号 21 DIP）—— 跟按钮尺寸解耦，换多大的底都不改字形观感
-	const float iconSlot = 26.f * win->dpi;
+	const float dpiSel = selectionDpi();
+	if (std::fabs(dpiSel - codeIconDpi_) > 0.01f) {
+		codeIconDpi_ = dpiSel;
+		codeIconLayout.Reset();
+	}
+	const float iconSlot = 26.f * dpiSel;
 	if (!codeIconLayout) {
 		d2d->dwriteFactory->CreateTextLayout(Icon::Qrcode, 1, iconFormat,
 			iconSlot, iconSlot, codeIconLayout.GetAddressOf());
 		if (codeIconLayout) {
-			codeIconLayout->SetFontSize(21.f * win->dpi, { 0, 1 });
+			codeIconLayout->SetFontSize(21.f * selectionDpi(), { 0, 1 });
 			codeIconLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
 			codeIconLayout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 		}
@@ -2356,7 +2401,7 @@ void CutMask::paintCodeBadges(ID2D1DeviceContext* ctx)
 		const float bh = badge.rect.bottom - badge.rect.top;
 		if (bw < 2.f || bh < 2.f) continue;
 		const bool hover = ((int)i == codeHover_);
-		const float radius = (std::min)(12.f * win->dpi, bw * 0.28f);
+		const float radius = (std::min)(12.f * selectionDpi(), bw * 0.28f);
 
 		if (!brush) {
 			if (FAILED(ctx->CreateSolidColorBrush(Ling::Color(hover ? kFillHot : kFill).getD2DColor(),
@@ -2368,7 +2413,7 @@ void CutMask::paintCodeBadges(ID2D1DeviceContext* ctx)
 		if (!shadow)
 			ctx->CreateSolidColorBrush(Ling::Color(0x00000059u).getD2DColor(), shadow.GetAddressOf());
 		if (shadow) {
-			const float s = 2.f * win->dpi;
+			const float s = 2.f * selectionDpi();
 			ctx->FillRoundedRectangle(
 				D2D1::RoundedRect(D2D1::RectF(badge.rect.left, badge.rect.top + s,
 					badge.rect.right, badge.rect.bottom + s), radius, radius), shadow.Get());
@@ -2381,7 +2426,7 @@ void CutMask::paintCodeBadges(ID2D1DeviceContext* ctx)
 		if (!ring)
 			ctx->CreateSolidColorBrush(Ling::Color(0xFFFFFFFFu).getD2DColor(), ring.GetAddressOf());
 		if (ring) {
-			const float sw = 2.f * win->dpi;
+			const float sw = 2.f * selectionDpi();
 			const float hw = sw * 0.5f;
 			const D2D1_RECT_F edge{
 				badge.rect.left + hw, badge.rect.top + hw, badge.rect.right - hw, badge.rect.bottom - hw };
@@ -2425,6 +2470,8 @@ void CutMask::paintBorderOverlay(ID2D1DeviceContext* ctx)
 void CutMask::paintBorder(ID2D1DeviceContext* ctx, bool outside)
 {
 	if (!hasRect()) return;
+	// 录制期的选框层只调 paintChrome/paintBorder，不走 makeLayout，这里兜一次。
+	strokeWidth = 2.f * selectionDpi();
 	// 描边贴着选区内沿画：线的外沿正好落在选区边界上，屏幕看到的框才和实际截到的像素一致。
 	// 之前是沿边界向外扩半线宽再画，整条线落在选区外 1~2px，单击确认时就显得"框和结果差了一点"。
 	const float half = strokeWidth * 0.5f;
@@ -2443,7 +2490,7 @@ void CutMask::paintBorder(ID2D1DeviceContext* ctx, bool outside)
 	if (box.right - box.left < 1.f || box.bottom - box.top < 1.f) box = maskRect;
 	const float ww = box.right - box.left, hh = box.bottom - box.top;
 	if (ww <= 0.f || hh <= 0.f) return;
-	const float rad = clampRadiusToRect(selRadius_ * win->dpi, ww, hh);
+	const float rad = clampRadiusToRect(selRadius_ * selectionDpi(), ww, hh);
 	if (rad > 0.5f)
 		ctx->DrawRoundedRectangle(D2D1::RoundedRect(box, rad, rad), brushBorder.Get(), strokeWidth);
 	else
@@ -2453,7 +2500,7 @@ void CutMask::paintBorder(ID2D1DeviceContext* ctx, bool outside)
 void CutMask::paintHandles(ID2D1DeviceContext* ctx)
 {
 	if (!hasRect()) return;
-	const float hs = handleLogical * win->dpi * 0.5f;
+	const float hs = handleLogical * selectionDpi() * 0.5f;
 	// 控点必须压在描边线的中心上：paintBorder 是贴内沿画的（线中心在边界内半个线宽），
 	// 直接拿 maskRect 边界放控点会整体偏出半个线宽，看起来“差一点点”。
 	const float half = strokeWidth * 0.5f;
@@ -2470,15 +2517,18 @@ void CutMask::paintHandles(ID2D1DeviceContext* ctx)
 	for (auto& p : pts) {
 		auto hr = D2D1::RectF(p.x - hs, p.y - hs, p.x + hs, p.y + hs);
 		ctx->FillRectangle(hr, brushHandleFill.Get());
-		ctx->DrawRectangle(hr, brushBorder.Get(), win->dpi);
+		ctx->DrawRectangle(hr, brushBorder.Get(), selectionDpi());
 	}
 }
 
 void CutMask::paintLabel(ID2D1DeviceContext* ctx)
 {
-	if (hideLabel || !layoutPos || !layoutSize) return;
-	const float padX = ToolbarTheme::infoPadX * win->dpi;
-	const float radius = ToolbarTheme::infoRadius * win->dpi;
+	if (hideLabel) return;
+	// 换屏后字号的 layout 会被 makeLayout 作废；若这一帧没赶上重排，这里补建一次。
+	if (std::fabs(selectionDpi() - labelDpi_) > 0.01f) makeLayout();
+	if (!layoutPos || !layoutSize) return;
+	const float padX = ToolbarTheme::infoPadX * selectionDpi();
+	const float radius = ToolbarTheme::infoRadius * selectionDpi();
 	ToolbarChrome::paintInfoBar(ctx, layoutRect, radius, brushInfoBg.Get());
 	DWRITE_TEXT_METRICS pm{}, sm{};
 	layoutPos->GetMetrics(&pm);

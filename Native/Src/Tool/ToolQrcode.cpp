@@ -5,6 +5,7 @@
 #include "IconCodes.h"
 #include "ToolbarChrome.h"
 #include "ToolbarTheme.h"
+#include "DpiUtil.h"
 #include <algorithm>
 
 using namespace Microsoft::WRL;
@@ -33,8 +34,19 @@ ToolQrcode::~ToolQrcode()
 
 void ToolQrcode::applyGeometry()
 {
-	const float d = (win_ && win_->dpi > 0.f) ? win_->dpi : 1.f;
-	dpi = d;
+	// 卡片挂在锚点旁，缩放要跟锚点所在显示器，而不是宿主窗口的 dpi。
+	float d = (win_ && win_->dpi > 0.f) ? win_->dpi : 1.f;
+	if (win_) {
+		const POINT anchorPt{
+			(LONG)std::lround(win_->x + (anchor_.left + anchor_.right) * 0.5f),
+			(LONG)std::lround(win_->y + anchor_.top)
+		};
+		d = DpiUtil::dpiForPoint(anchorPt);
+	}
+	if (std::fabs(d - dpi) > 0.01f) {
+		dpi = d;
+		if (body) body->applyDpiChange();
+	}
 	const float caret = ToolbarTheme::caretSize;
 	const float winW = cardW_ * d;
 	const float winH = (cardH_ + caret) * d;
@@ -63,6 +75,8 @@ void ToolQrcode::applyGeometry()
 
 void ToolQrcode::onCreated()
 {
+	// 构造时抄的是宿主 dpi；建窗后按锚点所在显示器校正一次。
+	applyGeometry();
 	// 整窗透明：气泡外壳由下面的 Canvas 画（与属性气泡同一套绘制）
 	body->setBg(0);
 	bubble_ = body->makeChild<Ling::Canvas>();

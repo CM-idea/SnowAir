@@ -46,6 +46,9 @@ class App
 	// 静默「重复截图」（全局热键）：按上次记住的选区（屏幕坐标）再抓一次 →
 	// 复制到剪贴板 + 记一条历史。没有记录时什么都不做。
 	void captureLastRegionSilent();
+	// 所有贴图 / 贴屏都关掉之后调用：延迟一小会儿把只服务它们的资源（OCR / 离线翻译
+	// 引擎、D2D 设备、已空闲的工作集）还给系统；这期间又贴了新东西就取消这次回收。
+	static void scheduleIdleRelease();
 private:
 		App();
 };

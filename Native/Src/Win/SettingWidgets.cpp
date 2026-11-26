@@ -574,6 +574,8 @@ constexpr float kTipPadX{ 12.f };   // 文本左右内边距（比系统 tooltip
 constexpr float kTipPadY{ 8.f };    // 文本上下内边距（比系统 tooltip 高）
 constexpr float kTipGap{ 4.f };     // 三角尖端到锚定控件边缘的间距
 constexpr float kTipProbeH{ 400.f };// 首次测量的探测高度（只为取折行后的文本高）
+// 锚点与气泡之间那一两个像素的缝：光标跨缝时按"已经在气泡上"算，才能移到气泡里
+constexpr float kTipJoinSlack{ 12.f };
 // 颜色按 RRGGBBAA 解析（Ling::Color 的约定）
 // 气泡配色随主题反转：浅色模式深底白字（更醒目），深色模式浅底深字（在暗背景上才跳出来）
 uint32_t tipBg() { return SettingTheme::isDark() ? 0xE5E5E5FF : 0x262626FF; }
@@ -585,10 +587,12 @@ HoverTip::HoverTip(Ling::WinBase* host) : Ling::WinBase(), host(host)
     if (host) {
         dpi = host->dpi;
         // 兜底：按钮 onLeave 偶发漏掉（快速移出/页面重建）时，宿主鼠标移动即可收掉气泡。
-        // 只订阅一次；anchor 在每次悬停时更新。
+        // 只订阅一次；anchor 在每次悬停时更新。光标已经在气泡上就留着（可以点里面的东西）。
         moveTok = host->onMouseMove.add([this](POINT pos) {
             if (!isVisible || !anchor) return;
-            if (pos.x == INT_MAX || !anchor->isPosIn(pos)) hideTip();
+            if (pos.x == INT_MAX || !anchor->isPosIn(pos)) {
+                if (!cursorOverTip(kTipJoinSlack)) hideTip();
+            }
         });
     }
     createNativeWindow(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, WS_POPUP);
@@ -603,6 +607,18 @@ HoverTip::~HoverTip()
 
 void HoverTip::onCreated()
 {
+    // 光标离开气泡窗口就立刻收（与工具栏的悬停气泡一致）：不依赖宿主收不收得到鼠标消息，
+    // 所以从气泡上移去别的窗口也会马上消失。刚弹出时的那次"离开"不算（光标还在外面）。
+    onMouseMove.add([this](POINT pos) {
+        if (pos.x == INT_MAX || pos.y == INT_MAX) {
+            if (enteredTip_) {
+                enteredTip_ = false;
+                hideTip();
+            }
+            return;
+        }
+        enteredTip_ = true;
+    });
     auto d2d = Ling::D2D::get();
     if (d2d && d2d->deviceContext) {
         d2d->deviceContext->CreateSolidColorBrush(
@@ -647,30 +663,50 @@ void HoverTip::bind(Ling::Button* btn, const std::wstring& t)
     btn->onLeave.add([this, btn](Ling::Button*) { hideFor(btn); });
 }
 
-void HoverTip::showFor(Ling::Node* owner, const std::wstring& t)
+void HoverTip::showFor(Ling::Node* owner, const std::wstring& t, bool noWrap)
 {
     if (!owner) return;
     anchor = owner;
     text = t;
+    noWrap_ = noWrap;
     showNow();
 }
 
 void HoverTip::hideFor(Ling::Node* owner)
 {
-    if (anchor == owner) hideTip();
+    if (anchor != owner) return;
+    // 光标正往气泡上挪（含跨过锚点与气泡之间那一两个像素的缝）：留着，
+    // 等真的离开气泡时由气泡自身的鼠标离开事件立刻收
+    if (cursorOverTip(kTipJoinSlack)) return;
+    hideTip();
+}
+
+bool HoverTip::cursorOverTip(float inflate) const
+{
+    if (!isVisible || !hwnd) return false;
+    POINT cur{};
+    if (!GetCursorPos(&cur)) return false;
+    RECT r{};
+    if (!GetWindowRect(hwnd, &r)) return false;
+    const LONG m = static_cast<LONG>(std::lround(inflate * dpi));
+    return cur.x >= r.left - m && cur.x < r.right + m
+        && cur.y >= r.top - m && cur.y < r.bottom + m;
 }
 
 void HoverTip::hideTip()
 {
     if (!isVisible) return;
+    enteredTip_ = false;
     hide();
     isVisible = false;
+    if (onHidden) onHidden();
 }
 
 void HoverTip::showNow()
 {
     if (!host || !anchor || !label || !hwnd) return;
     label->setText(text);
+    if (!isVisible) settleAtAnchor();
     const float d = dpi > 0.f ? dpi : 1.f;
     // 宽度自适应：先按"不限宽"测一次文本自然宽（物理像素 → 逻辑），
     //   · 自然宽 <= 内容区上限：不强制宽度，气泡贴合文字（含左右内边距）；
@@ -683,14 +719,69 @@ void HoverTip::showNow()
     }
     const float textW = std::max(1.f, naturalW);
     // +2 逻辑像素余量：测量与渲染存在亚像素差，贴边会让本该单行的文本被挤成两行。
-    const float boxW = textW > maxContentW ? kTipW : (textW + kTipPadX * 2.f + 2.f);
+    // noWrap：忽略 kTipW 上限，按自然宽度展开，保证文件名预览单行显示。
+    const float boxW = (noWrap_ || textW <= maxContentW)
+        ? (textW + kTipPadX * 2.f + 2.f)
+        : kTipW;
     setSize(boxW, kTipProbeH);
     layout();
     const float ch = std::max(1.f, label->h / d);
-    setSize(boxW, ch + kTipPadY * 2.f + ToolbarTheme::caretSize);
+    present(boxW, ch + kTipPadY * 2.f + ToolbarTheme::caretSize);
+}
+
+// 首次显示前先搬到锚点所在屏：气泡窗口默认建在主屏，宿主（设置页 / 图片编辑器）
+// 可能显示在另一块缩放不同的屏上。搬过去让 WM_DPICHANGED 落定，再按真实 dpi 量尺寸；
+// 反过来的话，系统会在搬家时按建议矩形把已经按目标 dpi 放大过的尺寸再乘一次，首次悬停就错位。
+void HoverTip::settleAtAnchor()
+{
+    if (!host || !anchor || !host->hwnd) return;
+    float scrollY = 0.f;
+    for (Ling::Node* p = anchor->parent; p; p = p->parent)
+        if (auto* sb = dynamic_cast<Ling::ScrollerBox*>(p)) scrollY += sb->getScrollY();
+    POINT anchorScreen{ static_cast<LONG>(anchor->x),
+                        static_cast<LONG>(anchor->y - scrollY) };
+    ClientToScreen(host->hwnd, &anchorScreen);
+    ToolbarChrome::settleDpiAt(this, anchorScreen.x, anchorScreen.y);
+}
+
+void HoverTip::showCustom(Ling::Node* owner, float contentW, float contentH,
+    std::function<void(Ling::Node*)> build)
+{
+    if (!host || !owner || !content || !hwnd) return;
+    anchor = owner;
+    custom_ = true;
+    gap_ = 0.f;   // 贴紧锚点：光标从锚点上移直接进气泡，不需要任何缓冲
+    if (!customBuilt_) {
+        if (label) label->hide();
+        if (build) build(content);
+        customBuilt_ = true;
+    }
+    applyCustomContentPad();
+    if (!isVisible) settleAtAnchor();
+    present(contentW + customPad_ * 2.f,
+        contentH + customPad_ * 2.f + ToolbarTheme::caretSize);
+}
+
+// 自定义内容：内容区四边离气泡边缘一样远（customPad_）。小三角是从气泡体下方伸出去的，
+// 那一侧多让一个 caret，视觉上才和其它三边齐平。
+void HoverTip::applyCustomContentPad()
+{
+    if (!content) return;
+    const float caret = ToolbarTheme::caretSize;
+    content->setPosition(Ling::Edge::Top, tipDown ? customPad_ : customPad_ + caret);
+    content->setPosition(Ling::Edge::Bottom, tipDown ? customPad_ + caret : customPad_);
+    content->setPadding(0.f, 0.f, 0.f, 0.f);
+}
+
+// 定尺寸 → 定位 → 显示。place() 定下三角位置后再绘一次，避免显示首帧三角错位。
+void HoverTip::present(float boxW, float boxH)
+{
+    setSize(boxW, boxH);
     layout();
     place();
-    layout();   // place() 定下三角位置后再绘一次，避免显示首帧三角错位
+    // place() 可能把气泡翻到锚点下方（tipDown 变了）：自定义内容的内边距要跟着重算
+    if (custom_) applyCustomContentPad();
+    layout();
     SetWindowPos(hwnd, HWND_TOPMOST, x, y, (int)w, (int)h,
                  SWP_SHOWWINDOW | SWP_NOACTIVATE);
     isVisible = true;
@@ -710,7 +801,7 @@ void HoverTip::place()
     const RECT ref{ tl.x, tl.y, br.x, br.y };
     const float ax = (float)(tl.x + br.x) * 0.5f;   // 锚定控件上缘中点（屏坐标）
     const auto p = ToolbarChrome::placeBubble(ToolbarChrome::workAreaNear(ref),
-        (float)tl.y, (float)br.y, w, h, kTipGap * dpi,
+        (float)tl.y, (float)br.y, w, h, gap_ * dpi,
         ax - w * 0.5f, ax, false, tipDown, arrowX, x, y);
     if (p.tipDown != tipDown) {
         tipDown = p.tipDown;
@@ -719,41 +810,6 @@ void HoverTip::place()
     arrowX = p.arrowX;
     if (p.moved) setPosition(p.x, p.y);
     refresh();
-}
-
-// ─── SettingUi::ScrollFollower：在 SettingUi 直接作用域定义（不可放匿名 namespace）──
-ScrollFollower::ScrollFollower(Ling::WinBase* w,
-    Ling::ScrollerBox* p,
-    std::function<std::pair<float, float>()> comp)
-    : win(w), popup(p), compute(std::move(comp))
-{
-    // 订阅顺序保证：内容 ScrollerBox 的滚轮处理在窗口构建时注册（先于我），
-    // 因此每次滚动时 scrollY 先被更新、再进入本回调重算 → 位置始终正确。
-    wheelTok = win->onMouseWheel.add([this](POINT, float) { place(); });
-    moveTok  = win->onMouseMove.add([this](POINT)        { place(); });
-}
-
-void ScrollFollower::place()
-{
-    if (!popup) return;
-    auto [l, t] = compute ? compute() : std::pair<float, float>{ 0.f, 0.f };
-    if (l == lastLeft && t == lastTop) return;   // 位置没变（如未滚动的纯鼠标移动），跳过重排
-    lastLeft = l; lastTop = t;
-    left = l; top = t;
-    popup->setPosition(Ling::Edge::Left, l);
-    popup->setPosition(Ling::Edge::Top,  t);
-    // setPosition 只写入 yoga 位置样式，不会触发重排；这里的 visual.Offset 只有在
-    // win->refresh() 引发的下一帧 layout() 时才会按新位置重算。若不 refresh，浮层坐标看着
-    // 改了实则停留在原地（"内容滚动但下拉菜单不动"的根因）。
-    win->refresh();
-}
-
-ScrollFollower::~ScrollFollower()
-{
-    if (win) {
-        win->onMouseWheel.remove(wheelTok);
-        win->onMouseMove.remove(moveTok);
-    }
 }
 
 // ============================================================================
@@ -767,18 +823,6 @@ void closePopup(Ling::WinBase* win)
 bool hasPopup()
 {
     return gPopup != nullptr;
-}
-
-std::pair<float, float> visiblePos(Ling::Node* node)
-{
-    // ScrollerBox 滚动只平移 content 视觉偏移、不改子节点布局坐标，node->x/y 是"未滚动"
-    // 的窗口坐标。沿 parent 链累加祖先 ScrollerBox 的 scrollY，换算回按钮当前显示位置。
-    float sy = 0.f;
-    for (Ling::Node* p = node->parent; p; p = p->parent) {
-        if (auto* sb = dynamic_cast<Ling::ScrollerBox*>(p)) sy += sb->getScrollY();
-    }
-    const float d = node->win->dpi;
-    return { node->x / d, (node->y - sy) / d };
 }
 
 // 等价于 makeChild<T>() 的后半段：手动挂接裸节点并转移所有权
@@ -831,12 +875,16 @@ Ling::Node* sectionHeader(Ling::Node* parent,
     auto* box = parent->makeChild<Ling::Node>();
     box->setFlexDirection(Ling::FlexDirection::Column);
     box->setMarginBottom(SettingTheme::sectionHeaderBottom);
+    box->id = L"__sectionHeader";   // 组标题据此使用"描述→组名 26"的间距
 
     // 标题行：[标题][?]（问号说明）
     auto* titleRow = box->makeChild<Ling::Node>();
     titleRow->setFlexDirection(Ling::FlexDirection::Row);
     titleRow->setAlignItems(Ling::Align::Center);
     titleRow->setWidthPercent(100.f);
+    // 标题行统一最小高度：有「恢复默认」按钮的页面行高是 ctrlH，没有按钮的页面
+    // （如插件集成）只有文字高度，会让描述和下方内容整体上移。固定最小高度后各页一致。
+    titleRow->setHeight(SettingTheme::ctrlH);
 
     auto* t = titleRow->makeChild<Ling::Label>();
     t->setText(title);
@@ -1045,6 +1093,8 @@ Ling::Label* groupLabel(Ling::Node* parent, const std::wstring& text, const std:
 {
     return makeGroupLabelRow(parent, text, tip.empty() ? optionTipFor(text) : tip);
 }
+
+
 
 // ============================================================================
 //  Separator：水平 1px zinc-200 分割线

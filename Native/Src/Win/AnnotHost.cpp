@@ -23,6 +23,8 @@
 #include "../Tool/SerialEmoji.h"
 #include "../Util.h"
 #include <imm.h>
+#include <d2d1effects.h>
+#pragma comment(lib, "dxguid.lib")   // 荧光笔混合用的 CLSID_D2D1Crop / ColorMatrix
 #include <cstdio>
 
 using namespace Microsoft::WRL;
@@ -887,7 +889,7 @@ std::wstring AnnotHost::toolIdOfShape(ShapeBase* s)
 	if (!s || s->isUndo || s->isViewportFilter()) return {};
 	if (dynamic_cast<ShapeRect*>(s) || dynamic_cast<ShapeEllipse*>(s)) return L"rect";
 	if (auto* line = dynamic_cast<ShapeLine*>(s))
-		return line->isHighlighter() ? std::wstring{} : L"arrow";   // 荧光笔不回填滑条，避免宽度按倍数叠加
+		return line->isHighlighter() ? L"pen" : L"arrow";   // 荧光笔是画笔形态：二次选中后走画笔属性栏改透明度
 	if (dynamic_cast<ShapeArrow*>(s)) return L"arrow";
 	if (dynamic_cast<ShapePen*>(s)) return L"pen";
 	if (auto* t = dynamic_cast<ShapeText*>(s))
@@ -1039,6 +1041,11 @@ void AnnotHost::paintShapes(ID2D1DeviceContext* ctx, bool withChrome)
 void AnnotHost::paintShapes(ID2D1DeviceContext* ctx, bool withChrome, bool skipEphemeral)
 {
 	if (!history) return;
+	// 每次重新绘制都重建混合效果：画布 ctx 可能来自每帧新建的离屏上下文，
+	// 缓存跨帧会留下已销毁上下文的效果对象
+	hiBlendCrop_.Reset();
+	hiBlendMatrix_.Reset();
+	hiBlendCtx_ = nullptr;
 	dropStaleEditingText();
 	pruneAnnotSelection();
 	std::vector<ShapeHighlight*> highlights;
@@ -1813,6 +1820,113 @@ namespace {
 	constexpr float kPiPrev = 3.14159265358979323846f;
 }
 
+namespace {
+	// 荧光笔固定用「滤色」：out = 1 - (1-bg)(1-c) = bg × (1-c) + c。
+	// ColorMatrix 的 5x4：out = [R G B A 1] × M，第 5 行是常量项。
+	D2D1_MATRIX_5X4_F highlighterScreenMatrix(const D2D1_COLOR_F& color)
+	{
+		const float r = std::clamp(color.r, 0.f, 1.f);
+		const float g = std::clamp(color.g, 0.f, 1.f);
+		const float b = std::clamp(color.b, 0.f, 1.f);
+		D2D1_MATRIX_5X4_F m{};
+		m._11 = 1.f - r;
+		m._22 = 1.f - g;
+		m._33 = 1.f - b;
+		m._44 = 1.f;
+		// 常量项乘 A：裁剪区外是透明黑（A=0），不能被加成一个"有颜色但透明"的像素
+		m._41 = r;
+		m._42 = g;
+		m._43 = b;
+		return m;
+	}
+}
+
+bool AnnotHost::paintHighlighterBlend(ID2D1DeviceContext* ctx, const D2D1_POINT_2F& a,
+	const D2D1_POINT_2F& b, float width, const D2D1_COLOR_F& color)
+{
+	if (!ctx) return false;
+	if (!annotBlendBackdropAvailable()) return false;
+	ID2D1Bitmap* bg = annotSampleBitmap();
+	if (!bg) return false;
+	// 效果输出按位图的 DPI 换算成 DIP：这里只支持 96 DPI 的 1:1 位图（截图/贴图/图片编辑都是），
+	// 其它 DPI 会整体缩放错位，宁可回退普通半透明笔迹。
+	float bgDpiX = 96.f, bgDpiY = 96.f;
+	bg->GetDpi(&bgDpiX, &bgDpiY);
+	if (std::fabs(bgDpiX - 96.f) > 0.5f || std::fabs(bgDpiY - 96.f) > 0.5f) return false;
+	auto* d2d = Ling::D2D::get();
+	if (!d2d || !d2d->deviceContext || !d2d->d2dFactory) return false;
+
+	const float dx = b.x - a.x, dy = b.y - a.y;
+	const float len = std::hypot(dx, dy);
+	if (!(len > 0.5f)) return false;
+	const float half = std::max(0.5f, width * 0.5f);
+	const float ux = dx / len, uy = dy / len;
+	const float nx = -uy * half, ny = ux * half;
+	const D2D1_POINT_2F quad[4]{
+		{ a.x + nx, a.y + ny },
+		{ b.x + nx, b.y + ny },
+		{ b.x - nx, b.y - ny },
+		{ a.x - nx, a.y - ny },
+	};
+	float l = quad[0].x, t = quad[0].y, r = quad[0].x, btm = quad[0].y;
+	for (int i = 1; i < 4; ++i) {
+		l = std::min(l, quad[i].x);
+		t = std::min(t, quad[i].y);
+		r = std::max(r, quad[i].x);
+		btm = std::max(btm, quad[i].y);
+	}
+	const D2D1_SIZE_U bgSize = bg->GetPixelSize();
+	const float cl = std::floor(std::max(0.f, l));
+	const float ct = std::floor(std::max(0.f, t));
+	const float cr = std::ceil(std::min((float)bgSize.width, r));
+	const float cb = std::ceil(std::min((float)bgSize.height, btm));
+	if (cr - cl < 1.f || cb - ct < 1.f) return false;
+
+	// 效果是设备级资源，用全局设备上下文创建一次（本次 paintShapes 内复用）；
+	// 画布 ctx 可能是每帧新建的离屏 target，绘制时仍用调用方的 ctx。
+	if (!hiBlendCrop_ || !hiBlendMatrix_ || hiBlendCtx_ != ctx) {
+		hiBlendCrop_.Reset();
+		hiBlendMatrix_.Reset();
+		hiBlendCtx_ = nullptr;
+		if (FAILED(d2d->deviceContext->CreateEffect(CLSID_D2D1Crop, hiBlendCrop_.GetAddressOf()))
+			|| !hiBlendCrop_) return false;
+		if (FAILED(d2d->deviceContext->CreateEffect(CLSID_D2D1ColorMatrix, hiBlendMatrix_.GetAddressOf()))
+			|| !hiBlendMatrix_) {
+			hiBlendCrop_.Reset();
+			return false;
+		}
+		hiBlendMatrix_->SetInputEffect(0, hiBlendCrop_.Get());
+		hiBlendCtx_ = ctx;
+	}
+	hiBlendCrop_->SetInput(0, bg);
+	if (FAILED(hiBlendCrop_->SetValue(D2D1_CROP_PROP_RECT, D2D1::Vector4F(cl, ct, cr, cb)))) return false;
+	if (FAILED(hiBlendMatrix_->SetValue(D2D1_COLORMATRIX_PROP_COLOR_MATRIX,
+			highlighterScreenMatrix(color)))) return false;
+
+	// 笔迹矩形做遮罩：荧光笔永远是两点直线、平头，四边形就是它的实际覆盖范围
+	Microsoft::WRL::ComPtr<ID2D1PathGeometry> mask;
+	if (FAILED(d2d->d2dFactory->CreatePathGeometry(mask.GetAddressOf())) || !mask) return false;
+	Microsoft::WRL::ComPtr<ID2D1GeometrySink> sink;
+	if (FAILED(mask->Open(sink.GetAddressOf())) || !sink) return false;
+	sink->BeginFigure(quad[0], D2D1_FIGURE_BEGIN_FILLED);
+	sink->AddLine(quad[1]);
+	sink->AddLine(quad[2]);
+	sink->AddLine(quad[3]);
+	sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+	if (FAILED(sink->Close())) return false;
+
+	const float opacity = std::clamp(color.a, 0.05f, 1.f);
+	D2D1_LAYER_PARAMETERS lp = D2D1::LayerParameters(
+		D2D1::InfiniteRect(), mask.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+		D2D1::IdentityMatrix(), opacity);
+	ctx->PushLayer(lp, nullptr);
+	// Crop 效果保留源图的坐标原点（裁剪区在哪，输出就在哪），直接在当前变换下画即可；
+	// 不要再用 targetOffset 平移，否则会叠成两次偏移。
+	ctx->DrawImage(hiBlendMatrix_.Get());
+	ctx->PopLayer();
+	return true;
+}
+
 void AnnotHost::paintSizePreview(ID2D1DeviceContext* ctx)
 {
 	if (!toolSub || !ctx) return;
@@ -1838,7 +1952,11 @@ void AnnotHost::paintSizePreview(ID2D1DeviceContext* ctx)
 			D2D1::IdentityMatrix(), 0.55f), layer.Get());
 	}
 	auto color = toolSub->getSelectedColor();
-	color.a = 1.f;
+	// 荧光笔预览要跟真实笔迹一样半透明：否则拖动「颜色透明度」时画面没有任何变化
+	const bool markerPreview = id == L"pen" && toolSub->isPenMarker;
+	color.a = markerPreview
+		? std::clamp(toolSub->penMarkerOpacity / 100.f, 0.05f, 1.f)
+		: 1.f;
 	ComPtr<ID2D1SolidColorBrush> brush;
 	Ling::D2D::get()->deviceContext->CreateSolidColorBrush(color, brush.GetAddressOf());
 
@@ -1913,8 +2031,9 @@ void AnnotHost::paintSizePreview(ID2D1DeviceContext* ctx)
 	bool soft = false;
 	if (id == L"pen") {
 		if (toolSub->isPenMarker) stroke *= ShapeLine::HighlighterWidthScale;
-		soft = toolSub->isPenSoft && !toolSub->isPenFade;
-		dash = toolSub->isPenDash;
+		// 荧光笔与软笔/虚线互斥：预览也按荧光笔的平头实线画
+		soft = toolSub->isPenSoft && !toolSub->isPenFade && !toolSub->isPenMarker;
+		dash = toolSub->isPenDash && !toolSub->isPenMarker;
 	}
 	else if (id == L"arrow") {
 		dash = toolSub->isArrowDash;
@@ -1922,8 +2041,9 @@ void AnnotHost::paintSizePreview(ID2D1DeviceContext* ctx)
 	else if (id == L"rect") {
 		dash = toolSub->isRectDash;
 	}
-	// 端头跟随实际工具：画笔本身是圆头，箭头/线段看「圆头」开关，闭合形状按平头
-	const bool roundCap = (id == L"pen") || (id == L"arrow" && toolSub->isArrowRound);
+	// 端头跟随实际工具：画笔本身是圆头（荧光笔是平头），箭头/线段看「圆头」开关，闭合形状按平头
+	const bool roundCap = (id == L"pen" && !toolSub->isPenMarker)
+		|| (id == L"arrow" && toolSub->isArrowRound);
 
 	// 幅度控制得小一些：跨度够长、起伏平缓，接近手写的一笔
 	const float amp = std::clamp(std::max(half * 0.18f, stroke * 0.6f), 6.f, half * 0.55f);
@@ -2692,7 +2812,101 @@ void AnnotHost::annotKey(UINT key)
 	else if (key == VK_ESCAPE) clearAnnotSelection();
 }
 
-bool AnnotHost::getAnnotPixels(std::vector<BYTE>& pixels, D2D1_SIZE_U& size, const D2D1_RECT_F* crop)
+namespace {
+	// 标注复制缓冲：应用内共享，不写系统剪贴板 —— 因此不会进剪贴板历史。
+	// 故意用 new 且不释放：进程退出时静态析构与 D2D 设备的销毁顺序不可控，
+	// 缓冲里的形状可能还挂着设备资源，交给进程退出统一回收。
+	std::vector<std::unique_ptr<ShapeBase>>* shapeClipboard()
+	{
+		static auto* v = new std::vector<std::unique_ptr<ShapeBase>>();
+		return v;
+	}
+	// 复制发生在哪个画布：同一个画布连续粘贴依次错开，跨画布则落到视口中央
+	AnnotHost* shapeClipboardOwner{ nullptr };
+	int shapeClipboardPastes{ 0 };
+}
+
+void AnnotHost::clearShapeClipboard()
+{
+	shapeClipboard()->clear();
+	shapeClipboardOwner = nullptr;
+	shapeClipboardPastes = 0;
+}
+
+bool AnnotHost::copySelectedShapes()
+{
+	if (!history) return false;
+	const auto targets = selectedShapes();
+	if (targets.empty()) return false;
+	auto* buf = shapeClipboard();
+	buf->clear();
+	for (auto& c : cloneShapesForHost(nullptr, targets)) {
+		// 视口滤镜（水印 / 包浆）铺满整张底图，不属于"某几条标注"，不跟着复制
+		if (c->isViewportFilter()) continue;
+		buf->push_back(std::move(c));
+	}
+	if (buf->empty()) return false;
+	shapeClipboardOwner = this;
+	shapeClipboardPastes = 0;
+	return true;
+}
+
+bool AnnotHost::pasteShapes()
+{
+	auto* buf = shapeClipboard();
+	if (!history || buf->empty()) return false;
+	auto clones = cloneShapesForHost(this, *buf);
+	if (clones.empty()) return false;
+
+	// 落点：同一个画布上粘贴 → 每次往右下错开 24，像"复制了一份"；
+	// 跨画布粘贴 → 放到当前视口中央，保证一定看得见
+	D2D1_RECT_F box{};
+	bool hasBox = false;
+	for (auto& c : clones) {
+		const auto b = c->bounds();
+		if (ShapeBase::rectEmpty(b)) continue;
+		box = hasBox ? ShapeBase::unionRect(box, b) : b;
+		hasBox = true;
+	}
+	if (hasBox) {
+		float dx = 0.f, dy = 0.f;
+		if (shapeClipboardOwner == this) {
+			++shapeClipboardPastes;
+			dx = dy = 24.f * (float)shapeClipboardPastes;
+		}
+		else {
+			D2D1_RECT_F view = annotContentRect();
+			if (ShapeBase::rectEmpty(view)) {
+				const float s = scale > 0.f ? scale : 1.f;
+				view = D2D1::RectF(0.f, 0.f, (float)w / s, (float)h / s);
+			}
+			dx = (view.left + view.right) * 0.5f - (box.left + box.right) * 0.5f;
+			dy = (view.top + view.bottom) * 0.5f - (box.top + box.bottom) * 0.5f;
+		}
+		if (dx != 0.f || dy != 0.f) {
+			for (auto& c : clones) c->translateBy(dx, dy);
+		}
+	}
+
+	clearAnnotSelection();
+	std::vector<ShapeBase*> added;
+	added.reserve(clones.size());
+	for (auto& c : clones) {
+		auto* raw = c.get();
+		history->shapes.push_back(std::move(c));
+		added.push_back(raw);
+	}
+	// 粘完直接选中整组，可以马上拖动 / 改样式
+	shapeHover = added.front();
+	for (size_t i = 1; i < added.size(); ++i) extraSelection_.push_back(added[i]);
+	syncGroupBoxFromSelection();
+	onHistoryChanged();
+	refresh();
+	return true;
+}
+
+bool AnnotHost::getAnnotPixels(std::vector<BYTE>& pixels, D2D1_SIZE_U& size,
+	const D2D1_RECT_F* crop, bool includeShapes)
 {
 	if (!screenImg) return false;
 	if (editingText) editingText->finishEdit();
@@ -2725,7 +2939,7 @@ bool AnnotHost::getAnnotPixels(std::vector<BYTE>& pixels, D2D1_SIZE_U& size, con
 	d2d->deviceContext->SetTransform(D2D1::Matrix3x2F::Translation(ox, oy));
 	d2d->deviceContext->DrawBitmap(screenImg.Get(),
 		D2D1::RectF(0, 0, (float)imgSize.width, (float)imgSize.height));
-	paintShapes(d2d->deviceContext.Get(), false, true);
+	if (includeShapes) paintShapes(d2d->deviceContext.Get(), false, true);
 	d2d->deviceContext->SetTransform(D2D1::Matrix3x2F::Identity());
 	if (FAILED(d2d->deviceContext->EndDraw())) {
 		d2d->deviceContext->SetTarget(nullptr);

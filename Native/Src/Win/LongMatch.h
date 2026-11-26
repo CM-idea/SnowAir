@@ -29,7 +29,6 @@ struct Step
 	int staticBottom{ 0 };
 	bool topIsBar{ false };  // 顶部静态带像固定栏（有纹理且内侧内容确实动过），不像整片空白
 	bool bottomIsBar{ false };
-	bool unchanged{ false }; // 两帧完全一样：页面没动
 	bool confident{ false };// shift 可信
 	bool outOfRange{ false };// 位移超出可信范围（只当预测不可用，不影响落点判定）
 };
@@ -40,7 +39,6 @@ struct Stitched
 	bool accepted{ false }; // 找到了落点（画布可能因此增长）
 	bool grew{ false };
 	bool fromTop{ false };
-	int rows{ 0 };
 	int shift{ 0 };         // 相对上一帧落点的位移
 	bool sawMotion{ false };// 位移估计确认画面在滚动（不代表一定拼上了）
 	bool tooLong{ false };
@@ -195,10 +193,7 @@ public:
 		}
 		rowBegin[(size_t)h] = (int)maskIdx.size();
 		const int maskedPixels = (int)maskIdx.size();
-		if (maskedPixels == 0) {
-			st.unchanged = true;
-			return st;
-		}
+		if (maskedPixels == 0) return st;
 		if (activeRows < std::max(12, h / 16) || maskedPixels < 400) return st;
 
 		st.topIsBar = edgeIsBar(cur, st.staticTop, true);
@@ -415,7 +410,6 @@ public:
 		if (!frame || w < 8 || h < 24) return false;
 		w_ = w;
 		h_ = h;
-		stride_ = stride;
 		rowBytes_ = (size_t)w * 4;
 		maxHeight_ = std::max(h, maxHeight);
 		maxBytes_ = std::max<size_t>((size_t)h * rowBytes_, maxBytes);
@@ -449,14 +443,12 @@ public:
 		lastShift_ = 0;
 		haveShift_ = false;
 		tooLong_ = false;
-		rejected_ = 0;
 		lostMotion_ = 0;
 	}
 
 	bool ready() const { return started_; }
 	int width() const { return w_; }
 	int height() const { return canvasH_; }
-	int viewportHeight() const { return h_; }
 	int viewportTop() const { return pos_; }
 	int contentTop() const { return fixedTop_; }
 	int contentBottom() const { return std::max(fixedTop_ + 8, h_ - fixedBottom_); }
@@ -504,12 +496,10 @@ public:
 		}
 		if (!placed.ok) {
 			// 这一帧不写，但预测与基准照常前进，下一次滚动仍然能接上。
-			++rejected_;
 			setBaseline(std::move(cur), frame, stride);
 			return out;
 		}
 		lostMotion_ = 0;
-		rejected_ = 0;
 		out.accepted = true;
 		const int oldPos = pos_;
 		pos_ = placed.top;
@@ -780,7 +770,6 @@ private:
 		canvasH_ += actual;
 		out.grew = true;
 		out.fromTop = false;
-		out.rows = actual - overlap;
 	}
 
 	void growUp(const Byte* frame, int stride, Stitched& out)
@@ -808,7 +797,6 @@ private:
 		pos_ += actual - overlap;
 		out.grew = true;
 		out.fromTop = true;
-		out.rows = actual - overlap;
 	}
 
 	void trimBottom(int rows)
@@ -874,7 +862,7 @@ private:
 	FrameProfile prev_;
 	std::vector<Byte> prevPixels_;
 	std::vector<Byte> canvas_;
-	int w_{ 0 }, h_{ 0 }, stride_{ 0 };
+	int w_{ 0 }, h_{ 0 };
 	size_t rowBytes_{ 0 };
 	int canvasH_{ 0 };
 	int pos_{ 0 };
@@ -889,7 +877,6 @@ private:
 	int topMiss_{ 0 }, bottomMiss_{ 0 };
 	int lastShift_{ 0 };
 	bool haveShift_{ false };
-	int rejected_{ 0 };    // 连续没找到落点的帧数（只用于诊断）
 	int lostMotion_{ 0 };  // 连续“在动但拼不上”的帧数：用来判断画布是否落后
 };
 

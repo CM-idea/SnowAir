@@ -1,5 +1,8 @@
 #include "pch.h"
 #include <dwmapi.h>
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include "App.h"
 #include "Setting.h"
 #include "Tray.h"
@@ -12,10 +15,55 @@
 #include "./Win/WinSetting.h"
 #include "./Win/WinImageEdit.h"
 #include "./Win/ScreenCapture.h"
+#include "./Win/ClipPin.h"
+#include "Ocr/LwPpOcrEngine.h"
+#include "Translate/BergamotEngine.h"
 #include "Plugin/PluginHost.h"
 #include "SingleInstance.h"
 
 std::unique_ptr<App> app;
+
+namespace {
+    // —— 贴图 / 贴屏全部关掉后的空闲资源回收 ——
+    constexpr int kIdleReleaseDelayMs = 1200;
+    // 每安排一次回收就 +1：延迟期间又贴了新东西时，旧的那次自动作废
+    std::atomic<unsigned> g_idleReleaseGen{ 0 };
+
+    void releaseIdleGraphicsNow()
+    {
+        // 期间又贴上了新的贴图 / 贴屏：这次不收了
+        if (WinPin::hasWindow() || ClipPin::hasAny()) return;
+        // 还有别的 Ling 窗口（截图 / 设置 / 工具条 / 菜单）开着：图形设备不能拆
+        auto* lingApp = Ling::App::get();
+        if (!lingApp || !lingApp->windows.empty()) return;
+        // 识别 / 翻译引擎常驻几十到几百 MB，只有贴图和截图会用，这里一并还回去
+        LwPpOcrEngine::release();
+        BergamotEngine::release();
+        // 标注复制缓冲里的形状可能还挂着设备资源，拆设备前先清掉
+        AnnotHost::clearShapeClipboard();
+        // 图形设备（D3D/D2D + 它内部的显存 / 内存分配池）：一个窗口都没有了就没有用处
+        Ling::D2D::dispose();
+        // 已释放的页还给系统，任务管理器里能直接看到内存回落
+        SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+    }
+}
+
+void App::scheduleIdleRelease()
+{
+    auto* lingApp = Ling::App::get();
+    if (!lingApp) return;
+    // 延迟一拍再收：关掉一张又马上贴下一张时不会反复重建 D3D 设备。
+    // 用工作线程等一拍再回 UI 线程执行（DispatcherQueue 可以从任意线程投递）。
+    const auto dq = lingApp->dq;
+    const unsigned myGen = ++g_idleReleaseGen;
+    std::thread([dq, myGen]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(kIdleReleaseDelayMs));
+        dq.TryEnqueue([myGen]() {
+            if (myGen != g_idleReleaseGen.load()) return;   // 期间又贴过：作废
+            releaseIdleGraphicsNow();
+        });
+    }).detach();
+}
 
 namespace {
     // 前台窗口是否占满整个显示器：其他程序的无边框全屏 / 独占全屏都算。
@@ -98,6 +146,8 @@ void App::dispose()
     WinPin::dispose();
     WinCap::dispose();
     WinSetting::dispose();
+    // 标注复制缓冲里的形状可能还挂着设备资源，Ling::dispose 拆设备前先清掉
+    AnnotHost::clearShapeClipboard();
     Lang::dispose();
     Setting::dispose();
     app.reset();
@@ -234,7 +284,7 @@ void App::captureFullScreenSilent()
 	else if (action == 2 && saved) Util::addFileToClipboardCut(path);
 	else Util::saveToClipboard(sw, sh, pixels.data());
 	st->setLastCaptureRect(sx, sy, sw, sh);
-	if (saved) st->addHistoryFile(path, sw, sh, L"fullscreen");
+	if (saved) st->addHistoryFile(path, sw, sh, L"fullscreen", &pixels);
 	// 静默截图没有窗口可反馈：托盘图标临时换成绿色的「成功」勾，1.2s 后自动恢复
 	TrayIcon::flashSuccess();
 }
@@ -298,7 +348,7 @@ void App::captureFocusedWindowSilent()
 	else if (Setting::get()->getCaptureFinishAction() == 2 && saved) Util::addFileToClipboardCut(path);
 	else Util::saveToClipboard(w, h, pixels.data());
 	Setting::get()->setLastCaptureRect(rc.left, rc.top, w, h);
-	if (saved) Setting::get()->addHistoryFile(path, w, h, L"focused");
+	if (saved) Setting::get()->addHistoryFile(path, w, h, L"focused", &pixels);
 	// 静默截图没有窗口可反馈：托盘图标临时换成绿色的「成功」勾，1.2s 后自动恢复
 	TrayIcon::flashSuccess();
 }
@@ -333,7 +383,7 @@ void App::captureLastRegionSilent()
 	if (!saved.empty() && action == 1) Util::addFileToClipboard(saved);
 	else if (!saved.empty() && action == 2) Util::addFileToClipboardCut(saved);
 	else Util::saveToClipboard(rw, rh, pixels.data());
-	if (!saved.empty()) Setting::get()->addHistoryFile(saved, rw, rh, L"capture");
+	if (!saved.empty()) Setting::get()->addHistoryFile(saved, rw, rh, L"capture", &pixels);
 	// 静默截图没有窗口可反馈：托盘图标临时换成绿色的「成功」勾，1.2s 后自动恢复
 	TrayIcon::flashSuccess();
 }
@@ -363,7 +413,7 @@ App::App()
     const bool autoQuit = autoQuitIt != app->args.end() && autoQuitIt->second == L"true";
     if (!autoQuit) {
         // 单实例 + 全局热键归属：完整版与 Lite 版可以并存，但热键只归完整版
-        const auto decision = enforceSingleInstance(autoQuit);
+        const auto decision = enforceSingleInstance();
         if (!decision.continueLaunch) {
             // 已经由同类实例接管：本进程必须真的退出（仅从 init 返回的话
             // wWinMain 会继续跑消息循环，进程会挂着不走）
@@ -387,12 +437,7 @@ App::App()
     // 以管理员身份运行：开局自举。配置开启、当前进程尚未提权、且本次启动不是提权进程时，
     // 用 runas 重启自身并退出，让"下一次打开软件"（限手工重开 / 开机自启等）都以管理员身份运行。
     if (Setting::get()->getRunAsAdmin() && !launchedElevated && !Util::isElevated()) {
-        std::wstring params;
-        for (const auto& [key, val] : app->args) {
-            params += L" " + key;
-            if (val != L"true") params += L"=" + val;
-        }
-        params += L" --elevated --wait-pid=" + std::to_wstring(GetCurrentProcessId());
+        const auto params = relaunchParams(true);
         if (Util::spawnElevated(params)) app->exit(0); // 提权进程已拉起，原进程退出
     }
 

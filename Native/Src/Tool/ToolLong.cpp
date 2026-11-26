@@ -4,6 +4,7 @@
 #include "../Tip.h"
 #include "../History.h"
 #include "ToolLong.h"
+#include "DpiUtil.h"
 #include "ToolbarChrome.h"
 #include "ToolbarTheme.h"
 
@@ -349,6 +350,9 @@ void ToolLong::buildBar()
 
 void ToolLong::onCreated()
 {
+	// 构造时只能拿宿主的 dpi；建窗后立即按本窗所在显示器校正一次，
+	// 否则直接建在 300% 副屏时窗口尺寸与内容都停在宿主缩放上。
+	adoptMonitorDpi();
 	body->setBg(0);
 	initChrome(ToolbarTheme::paddingLeft, contentPadRight(),
 		ToolbarTheme::shadowPad, ToolbarTheme::shadowPad, Ling::FlexDirection::Row);
@@ -358,6 +362,11 @@ void ToolLong::onCreated()
 	onMouseMove.add([this](POINT pos) { onDragMove(pos); });
 	onMouseUp.add([this](POINT pos, bool isRight) { onDragUp(pos, isRight); });
 	show();
+}
+
+void ToolLong::onDpiAdopted()
+{
+	refreshSize();
 }
 
 void ToolLong::drawChrome(ID2D1DeviceContext* ctx)
@@ -397,6 +406,8 @@ void ToolLong::onDragUp(POINT, bool)
 	draggingBar = false;
 	ReleaseCapture();
 	win->markMainToolUserPlaced();
+	// 跨屏松手：按落点那块屏的缩放重排尺寸。
+	adoptMonitorDpi();
 }
 
 void ToolLong::onClick(Ling::Button* btn)

@@ -88,6 +88,8 @@ private:
 	void applySelectedStyle(Ling::Button* btn);
 	void applyActionColors(Ling::Button* btn);
 	void refreshSize();
+	// 跨屏后按新显示器的缩放重算尺寸（ToolbarWindow::adoptMonitorDpi 的回调）
+	void onDpiAdopted() override;
 	void initDragHandle();
 	void onDragDown(POINT pos, bool isRight);
 	void onDragMove(POINT pos);

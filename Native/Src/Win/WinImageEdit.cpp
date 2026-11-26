@@ -14,9 +14,11 @@
 #include "ImageEditAnnot.h"
 #include "ImageEditMerge.h"
 #include "WinImageEdit.h"
+#include "../Shape/ShapeBase.h"
 #include "../Tool/IconCodes.h"
 #include "../Tool/ToolSub.h"
 #include <algorithm>
+#include <cwctype>
 #include <cmath>
 #include <commdlg.h>
 #include <shobjidl.h>
@@ -66,6 +68,16 @@ std::unique_ptr<WinImageEdit> winImageEdit;
 
 namespace {
     unsigned long long gImageEditUid = 0;   // 每建一个图片编辑窗 +1
+
+    // 窗口里有没有输入框正在编辑：有的话 Ctrl+V 是往框里粘文字，不要再往画布贴图
+    bool anyTextBoxFocused(Ling::Node* node)
+    {
+        if (!node) return false;
+        if (auto* box = dynamic_cast<Ling::TextBox*>(node); box && box->isFocused()) return true;
+        for (auto& child : node->children)
+            if (anyTextBoxFocused(child.get())) return true;
+        return false;
+    }
 
     // 本窗口配色取自 ImageEditTheme（跟随设置里的软件主题）
     // 背景预设色：无（0 表示透明）/ 白 / 黑 / 绿 / 蓝 / 黄
@@ -253,6 +265,19 @@ void WinImageEdit::onCreated()
     onChar.add([this](UINT ch) { if (annot_) annot_->forwardChar(ch); });
     // Delete / Backspace 都算删除：删除合并文档里框选/单击选中的图片卡片（标注模式下交给标注）
     onKeyDown.add([this](UINT key) {
+        // Ctrl+C / Ctrl+V：选中标注时复制、粘贴标注本身（应用内缓冲，不写系统剪贴板，
+        // 因此不进剪贴板历史）。拼图模式下 Ctrl+V 仍是"贴图片"，优先于标注粘贴。
+        if ((key == 'C' || key == 'V') && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            if (key == 'V' && mode_ == Mode::DocMerge) {
+                pasteFromClipboard();
+                return;
+            }
+            if (annot_) {
+                if (key == 'C') annot_->copySelectedShapes();
+                else annot_->pasteShapes();
+            }
+            return;
+        }
         if (key != VK_DELETE && key != VK_BACK) return;
         if (annot_ && annot_->annotating()) return;
         if (mode_ != Mode::DocMerge || !merge_) return;
@@ -2264,18 +2289,63 @@ void WinImageEdit::switchModeDeferred(Mode m)
     rebuildForMode();
 }
 
+void WinImageEdit::applyPinAwareTopmost(bool active)
+{
+    if (!hwnd) return;
+    // 贴图是 WS_EX_TOPMOST；普通窗口永远压在它下面。贴图导入的编辑会话在激活时
+    // 临时升到置顶组最前，切到别的窗口/应用就退回普通层，避免一直压着别的软件。
+    const bool onTop = keepAbovePins_ && active;
+    SetWindowPos(hwnd, onTop ? HWND_TOPMOST : HWND_NOTOPMOST,
+        0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    // 标注属性栏是编辑器的 owned 浮动窗，必须跟着进/出置顶组，否则会被编辑器盖住
+    if (annot_ && annot_->toolSub) annot_->toolSub->setTopmost(onTop);
+}
+
+bool WinImageEdit::pinAwareTopmostActive() const
+{
+    return keepAbovePins_ && hwnd && GetActiveWindow() == hwnd;
+}
+
 void WinImageEdit::openImage(const std::wstring& path)
 {
     if (path.empty()) return;
+    // 普通导入（插件/设置页）不需要压住贴图；上一次贴图导入的置顶状态在这里复位
+    if (keepAbovePins_) {
+        keepAbovePins_ = false;
+        applyPinAwareTopmost(false);
+    }
     if (mode_ != Mode::Collage) {
         mode_ = Mode::Collage;
         rebuildForMode();
     }
     if (!collage_) return;
+    // 新导入一张图 = 新文档：上一份标注不能留在画板上
+    if (annot_) annot_->clearAllShapesNow();
     collage_->clear();
     RECT rc{};
     GetClientRect(hwnd, &rc);
     onFilesDropped({ path }, POINT{ (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 });
+}
+
+void WinImageEdit::importImageWithShapes(const std::wstring& path,
+    std::vector<std::unique_ptr<ShapeBase>> shapes, int width, int height)
+{
+    openImage(path);
+    // 从贴图进来的编辑：让编辑器盖住置顶贴图，否则贴图会一直挡在编辑区域上面。
+    // 只有确实拿到前台才升置顶；没抢到前台就等下一次 WM_ACTIVATE，
+    // 否则窗口被系统拒绝激活时会一直压着别的软件。
+    keepAbovePins_ = true;
+    applyPinAwareTopmost(pinAwareTopmostActive());
+    if (!collage_ || !annot_ || shapes.empty()) return;
+    const D2D1_RECT_F imgRect = collage_->lastImageArtRect();
+    if (imgRect.right <= imgRect.left || imgRect.bottom <= imgRect.top) return;
+    const float sx = width > 0 ? (imgRect.right - imgRect.left) / (float)width : 1.f;
+    const float sy = height > 0 ? (imgRect.bottom - imgRect.top) / (float)height : 1.f;
+    // 图片按原比例放进容器：两轴倍率应当一致，取较小值兜底
+    const float scale = (std::min)(sx, sy);
+    annot_->adoptShapes(std::move(shapes), imgRect, scale);
+    updateEmptyState();
+    refresh();
 }
 
 void WinImageEdit::rebuildForMode()
@@ -2651,9 +2721,23 @@ void WinImageEdit::onSaveClicked()
             std::vector<BYTE> merged;
             if (annot_->composeAnnotOnImage(pixels.data(), w, h, merged)) pixels.swap(merged);
         }
-        // 拼图固定导出 PNG（无损）
-        const std::wstring path = Util::getSaveFilePath(hwnd, L"png", saveDefaultName(), Util::desktopDir().wstring());
+        // 「保存类型」下拉和截图 / 贴图一致：PNG / JPEG / WebP / BMP，默认选中设置里的截图保存格式
+        auto* st = Setting::get();
+        const std::wstring defExt = st ? Util::extensionFromSaveFormat(st->getSaveFormat()) : L"png";
+        const std::wstring path = Util::getImageSaveFilePath(hwnd, defExt, saveDefaultName(), Util::desktopDir().wstring());
         if (path.empty()) return;   // 用户取消
+        // 拼图画板允许透明，而 JPEG / BMP 没有可靠的 alpha：不铺底的话透明像素会编码成黑块。
+        // 导出像素是预乘 BGRA，按白底合成就是 c + (255 - a)。
+        std::wstring saveExt = std::filesystem::path(path).extension().wstring();
+        for (auto& c : saveExt) c = (wchar_t)towlower(c);
+        if (saveExt == L".jpg" || saveExt == L".jpeg" || saveExt == L".bmp") {
+            for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
+                const int add = 255 - (int)pixels[i + 3];
+                for (int ch = 0; ch < 3; ++ch)
+                    pixels[i + ch] = (BYTE)std::min(255, (int)pixels[i + ch] + add);
+                pixels[i + 3] = 255;
+            }
+        }
         if (!Util::saveToFile(path, w, h, pixels.data()))
             SettingUi::ConfirmDialog::ask(this, Lang::get(L"imageEdit.saveFail"), nullptr, L"", L"", true);
         return;
@@ -2752,6 +2836,57 @@ void WinImageEdit::onFilesDropped(const std::vector<std::wstring>& paths, POINT 
     refresh();
 }
 
+bool WinImageEdit::pasteFromClipboard()
+{
+    if (!hwnd) return false;
+    // 焦点在输入框里：这次 Ctrl+V 是往框里粘文字
+    if (anyTextBoxFocused(body.get())) return false;
+
+    std::vector<std::wstring> paths;
+    if (!Util::clipboardImagePaths(paths) || paths.empty()) return false;
+
+    // 贴在哪：优先鼠标位置（和拖放一致）；鼠标不在画布里（侧栏 / 窗口外）就贴到画布中心，
+    // 免得落点算到画板外面去
+    Ling::Node* canvas = (mode_ == Mode::Collage)
+        ? static_cast<Ling::Node*>(collage_) : static_cast<Ling::Node*>(merge_);
+    POINT pt{};
+    GetCursorPos(&pt);
+    ScreenToClient(hwnd, &pt);
+    const bool inside = canvas
+        && pt.x >= canvas->x && pt.x < canvas->x + canvas->w
+        && pt.y >= canvas->y && pt.y < canvas->y + canvas->h;
+    if (!inside) {
+        if (canvas) {
+            pt = POINT{ (LONG)std::lround(canvas->x + canvas->w * 0.5f),
+                        (LONG)std::lround(canvas->y + canvas->h * 0.5f) };
+        }
+        else {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            pt = POINT{ (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
+        }
+    }
+    // 拼图已有内容时，多张图各自错开 24px：拖放的「落点」对多选没有意义，
+    // 全部贴着同一个点会叠成一摞，只看得见最后一张。空画板仍交给拖放那套排版规则。
+    if (mode_ == Mode::Collage && canvas && collage_ && collage_->hasContent() && paths.size() > 1) {
+        const LONG maxX = (LONG)(canvas->x + canvas->w) - 2;
+        const LONG maxY = (LONG)(canvas->y + canvas->h) - 2;
+        for (size_t i = 0; i < paths.size(); ++i) {
+            POINT at{ pt.x + (LONG)(24 * i), pt.y + (LONG)(24 * i) };
+            at.x = (std::min)(at.x, maxX);   // 夹回画布里：落在画布外的点会被丢掉
+            at.y = (std::min)(at.y, maxY);
+            // 粘贴只新增、不替换：多张图错开落点会压到已有格子上，
+            // 按拖放的「落点替换」处理会把前面几张吃掉。
+            collage_->handleDrop({ paths[i] }, at, false);
+        }
+        updateEmptyState();
+        updateSizeRow();
+        refresh();
+        return true;
+    }
+    onFilesDropped(paths, pt);
+    return true;
+}
 LRESULT CALLBACK WinImageEdit::dropWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     if (s_instance && msg == WM_ACTIVATEAPP) {
@@ -2761,7 +2896,12 @@ LRESULT CALLBACK WinImageEdit::dropWndProc(HWND hwnd, UINT msg, WPARAM wParam, L
             if (wParam == FALSE) s_instance->annot_->suspendToolBar();
             else s_instance->annot_->resumeToolBar();
         }
+        // 贴图导入的会话：激活时压住置顶贴图，切到别的应用就退回普通层
+        if (s_instance->keepAbovePins_)
+            s_instance->applyPinAwareTopmost(wParam != FALSE);
     }
+    if (s_instance && msg == WM_ACTIVATE && s_instance->keepAbovePins_)
+        s_instance->applyPinAwareTopmost(LOWORD(wParam) != WA_INACTIVE);
     if (s_instance && msg == WM_DROPFILES) {
         HDROP hd = reinterpret_cast<HDROP>(wParam);
         POINT pt{ 0, 0 };

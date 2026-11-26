@@ -24,7 +24,8 @@ private:
 	std::wstring labelOf(const std::wstring& id) const;
 	// 构造一组：先加 groupLabel，再加若干行白底卡片录入按钮
 	void buildGroup(const std::wstring& grpTitle,
-		const std::vector<std::pair<std::wstring, std::wstring>>& items, Ling::Node* p);
+		const std::vector<std::pair<std::wstring, std::wstring>>& items, Ling::Node* p,
+		bool firstGroup = false);
 	// 「恢复默认」的置灰：键位都还是出厂值 → 灰字且点击不做事
 	void syncRestoreState();
 private:

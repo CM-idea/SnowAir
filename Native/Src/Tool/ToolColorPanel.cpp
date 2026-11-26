@@ -8,6 +8,7 @@
 #include "IconCodes.h"
 #include "ToolbarChrome.h"
 #include "ToolbarTheme.h"
+#include "DpiUtil.h"
 
 using namespace Microsoft::WRL;
 
@@ -230,11 +231,31 @@ void ToolColorPanel::rebuildBtns()
 		}
 		applyActiveStyle(i, i == selected);
 	}
+	refreshSize();
+}
+
+void ToolColorPanel::refreshSize()
+{
 	const float logicW = ToolbarTheme::propPad * 2.f
-		+ (ToolbarTheme::iconSize + ToolbarTheme::propGap) * static_cast<float>(colors.size())
+		+ (ToolbarTheme::iconSize + ToolbarTheme::propGap) * static_cast<float>(owner->colorPalette().size())
 		+ ToolbarTheme::shadowPad * 2.f;
 	const float logicH = ToolbarTheme::propBtnSize + marginTop + ToolbarTheme::shadowPad;
 	setSize(logicW, logicH);
+}
+
+void ToolColorPanel::applyOwnerDpi()
+{
+	// 以窗口当前所在显示器为准（settleDpiAt 已经把窗口搬到目标屏）；owner->dpi
+	// 在工具条跨屏时可能还没跟上，直接抄会覆盖掉刚落定的目标缩放。
+	float target = owner ? owner->dpi : dpi;
+	if (hwnd) {
+		if (HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST))
+			target = DpiUtil::dpiForMonitor(mon);
+	}
+	if (std::fabs(target - dpi) < 0.01f) return;
+	dpi = target;
+	body->applyDpiChange();
+	if (hwnd) refreshSize();
 }
 
 void ToolColorPanel::onSwatchClick(Ling::Button* btn)
@@ -258,10 +279,10 @@ void ToolColorPanel::refreshSelection()
 void ToolColorPanel::updatePosition(const RECT& workArea)
 {
 	if (!open_) return;
-	dpi = owner->dpi;
+	applyOwnerDpi();
 	float triggerCX = 0.f, triggerBottom = 0.f;
 	owner->getColorTriggerAnchor(triggerCX, triggerBottom);
-	const float subPad = ToolbarTheme::shadowPad * owner->dpi;
+	const float subPad = ToolbarTheme::shadowPad * dpi;
 	const float gap = ToolbarTheme::propBubbleGap;
 	// 颜色面板是三级弹窗：贴着所属二级栏的外侧展开；下方放不下就翻到上方，
 	// 不覆盖二级栏本身。
@@ -284,7 +305,14 @@ void ToolColorPanel::updatePosition(const RECT& workArea)
 
 void ToolColorPanel::open(const RECT& workArea)
 {
-	dpi = owner->dpi;
+	// 同 ToolPicker/ToolNestedPanel：先把窗口搬到颜色触发按钮所在屏让 DPI 落定，
+	// 再按真实 dpi 算尺寸。先量后搬会被系统的建议矩形再乘一次缩放，首次打开大 N 倍。
+	if (!open_ && hwnd && owner && owner->hwnd) {
+		float triggerCX = 0.f, triggerBottom = 0.f;
+		owner->getColorTriggerAnchor(triggerCX, triggerBottom);
+		ToolbarChrome::settleDpiAt(this, (int)triggerCX, (int)triggerBottom);
+	}
+	applyOwnerDpi();
 	rebuildBtns();
 	open_ = true;
 	updatePosition(workArea);

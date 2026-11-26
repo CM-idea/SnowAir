@@ -7,6 +7,7 @@
 #include "WinSetting.h"
 #include "WinSettingAppearance.h"
 #include "WinPin.h"                 // 贴图边框改完立即推给已开着的贴图
+#include "ClipPin.h"                // 贴屏卡片同理（「显示边框」走的是同一套贴图边框样式）
 #include "SettingTheme.h"
 #include "../Plugin/PluginHost.h"
 #include "../Ocr/PluginPaths.h"
@@ -647,6 +648,14 @@ void WinSettingAppearance::buildRackTab(Ling::Node* host)
             Setting::get()->setRackInt(L"rack.size", std::clamp(i, 0, 2));
             PluginHost::instance().onSettingChanged(L"rack.size");
         }, true);
+    SettingUi::selectRow(behaviorGrid, Lang::get(L"setting.rackMaxMode"), L"",
+        { Lang::get(L"setting.rackMaxModeAuto"),
+          Lang::get(L"setting.rackMaxModeUnlimited") },
+        std::clamp(s->getRackInt(L"rack.max_mode", 0), 0, 1),
+        [](int i, const std::wstring&) {
+            Setting::get()->setRackInt(L"rack.max_mode", std::clamp(i, 0, 1));
+            PluginHost::instance().onSettingChanged(L"rack.max_mode");
+        }, true);
     SettingUi::grid2Cells(behaviorGrid);
 }
 
@@ -870,6 +879,7 @@ void WinSettingAppearance::initPinBorderCtrls(Ling::Node* p)
         if (this->pinWidthVal) this->pinWidthVal->setText(std::to_wstring(iv) + L"px");
         this->refreshPinPreview();
         WinPin::refreshBorderAppearance();
+        ClipPin::refreshBorderAppearance();
         this->tbRefreshRestore();
         });
     rSlider->onValueChanged.add([this](Ling::Slider*, float v) {
@@ -878,6 +888,7 @@ void WinSettingAppearance::initPinBorderCtrls(Ling::Node* p)
         if (this->pinRadiusVal) this->pinRadiusVal->setText(std::to_wstring(iv) + L"px");
         this->refreshPinPreview();
         WinPin::refreshBorderAppearance();
+        ClipPin::refreshBorderAppearance();
         this->tbRefreshRestore();
         });
 
@@ -932,6 +943,7 @@ void WinSettingAppearance::pickPinColor()
     }
     refreshPinPreview();
     WinPin::refreshBorderAppearance();
+    ClipPin::refreshBorderAppearance();
     tbRefreshRestore();
 }
 
@@ -1403,6 +1415,7 @@ void WinSettingAppearance::tbRestoreDefaults()
         if (pinRadiusVal) pinRadiusVal->setText(L"6px");
         refreshPinPreview();
         WinPin::refreshBorderAppearance();
+        ClipPin::refreshBorderAppearance();
         if (trayEnableSw) SettingUi::styleToggle(trayEnableSw, true);
         TrayIcon::apply();
         refreshTrayRadios();

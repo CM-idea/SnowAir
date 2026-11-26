@@ -18,6 +18,9 @@ public:
 	void refreshSelection();
 	void updatePosition(const RECT& workArea);
 	void hideHoverTip() { if (tip) tip->hide(); }
+	// 按所属属性栏当前所在显示器校正缩放；窗口尺寸随后重算
+	void applyOwnerDpi();
+	void refreshSize();
 	// 图片编辑器等嵌入场景：气泡去掉外描边（与二级属性栏保持一致）
 	void setBorderless(bool on) { borderless_ = on; if (open_) refresh(); }
 private:

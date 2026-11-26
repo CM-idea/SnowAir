@@ -72,6 +72,11 @@ inline uint32_t success          { 0x5EC322FF };       // green-500
 inline uint32_t successBg        { 0xF0FDF4FF };       // green-50
 inline uint32_t successBorder    { 0x86EFACFF };       // green-300
 inline uint32_t successFg        { 0x14532DFF };       // green-900
+// 绿色胶囊按钮的悬停底：比 successBg 只深一档，不做明显的颜色跳变
+inline uint32_t successHover     { 0xE4F9ECFF };
+// 关于页绿色胶囊 / 「立即更新」按钮的统一绿色（与工具栏选中绿一致）
+inline uint32_t accentGreen      { 0x34C759FF };
+inline uint32_t accentGreenHover { 0x248A3DFF };
 inline uint32_t warningBg        { 0xFFFEF0FF };       // amber-50
 inline uint32_t warningBorder    { 0xFCD34DFF };       // amber-300
 inline uint32_t warningFg        { 0x713F12FF };       // amber-900
@@ -163,6 +168,9 @@ inline constexpr float cardHeaderPadY  {  12.f };  // Card header 上下内边�
 inline constexpr float sectionGap      {  24.f };
 inline constexpr float blockGap        {  16.f };
 inline constexpr float optionGap       {  12.f };  // 行与行间距（紧凑）
+// 组名顶部间距：描述文字到第一个组 24；其余组名之间 14
+inline constexpr float groupDescGap    {  24.f };
+inline constexpr float groupTopGap     {  14.f };
 inline constexpr float sectionHeaderBottom { 16.f };
 inline constexpr float titleDescGap    {   4.f };
 
@@ -223,6 +231,8 @@ inline void applyLight()
 	sidebarBorder = zinc200; sidebarRing = zinc950;
 	faintForeground = zinc400; disabledForeground = zinc400; placeholder = zinc500;
 	success = 0x5EC322FF; successBg = 0xF0FDF4FF; successBorder = 0x86EFACFF; successFg = 0x14532DFF;
+	successHover = 0xE4F9ECFF;
+	accentGreenHover = 0x248A3DFF;   // 浅色：悬停用更深的绿
 	warningBg = 0xFFFEF0FF; warningBorder = 0xFCD34DFF; warningFg = 0x713F12FF;
 	infoBg = 0xEFF6FFFF; infoBorder = 0x93C5FDFF; infoFg = 0x1E3A8AFF;
 	destructiveBg = 0xFEF2F2FF; destructiveBorder = 0xFECACAFF; destructiveFg = 0x7F1D1DFF;
@@ -268,6 +278,8 @@ inline void applyDark()
 	sidebarBorder = 0x333333FF; sidebarRing = 0xA3A3A3FF;
 	faintForeground = 0x737373FF; disabledForeground = 0x737373FF; placeholder = 0x737373FF;
 	success = 0x4ADE80FF; successBg = 0x14311FFF; successBorder = 0x1F6B3AFF; successFg = 0x86EFACFF;
+	successHover = 0x1B3F28FF;
+	accentGreenHover = 0x5BE37AFF;   // 深色：悬停反而加亮，深绿在暗底上看不清
 	warningBg = 0x3A2E12FF; warningBorder = 0x8A6D1FFF; warningFg = 0xFDE68AFF;
 	infoBg = 0x16233AFF; infoBorder = 0x2E4A73FF; infoFg = 0x93C5FDFF;
 	destructiveBg = 0x3A1A1AFF; destructiveBorder = 0x7F2A2AFF; destructiveFg = 0xFCA5A5FF;

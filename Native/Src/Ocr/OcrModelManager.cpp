@@ -11,7 +11,7 @@ namespace {
 	// lw.PPOCR.C 官方模型包（det + cls + rec + 字典），按档位取不同 zip。
 	// 固定到发布号，避免与运行时版本串味（其文档明确要求"一个发布号的整套一起用"）。
 	const std::wstring kPackBase =
-		L"https://github.com/lxw112190/lw.PPOCR.C/releases/download/v1.2.0/";
+		L"https://github.com/lxw112190/lw.PPOCR.C/releases/download/v1.2.2/";
 
 	// 装好后模型目录里应有的文件（从包内摊平到 ocr-models/<档位目录>/）
 	const wchar_t* const kFiles[] = { L"det.lwm", L"cls.lwm", L"rec.lwm", L"ppocr_keys.txt" };
@@ -58,6 +58,20 @@ bool OcrModelManager::isInstalled(OcrPackVariant v) const
 	while (!value.empty() && (value.back() == '\r' || value.back() == '\n' || value.back() == ' '))
 		value.pop_back();
 	return value == OcrPack::markerValue(v);
+}
+
+bool OcrModelManager::hasOutdated(OcrPackVariant v) const
+{
+	auto dir = PluginPaths::ocrModels() / OcrPack::folderName(v);
+	std::error_code ec;
+	if (!std::filesystem::is_directory(dir, ec)) return false;
+	// 四个模型文件都在，只是 pack.id 还是旧发布号 → 提示更新
+	for (const auto* name : kFiles) {
+		auto p = dir / name;
+		if (!std::filesystem::is_regular_file(p, ec) || std::filesystem::file_size(p, ec) == 0)
+			return false;
+	}
+	return !isInstalled(v);
 }
 
 void OcrModelManager::download(OcrPackVariant v,

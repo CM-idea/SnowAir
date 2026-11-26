@@ -1,8 +1,10 @@
 #include "pch.h"
 #include "ToolbarWindow.h"
+#include "DpiUtil.h"
 #include "ToolbarTheme.h"
 #include "Tip.h"
 #include "Win/WinCap.h"
+#include <cmath>
 
 namespace {
 	// 命中测试用：point（窗口客户区物理像素）是否落在本窗自己的可交互控件上。
@@ -83,4 +85,27 @@ void ToolbarWindow::hideHoverTip()
 {
 	if (tip) tip->hide();
 	hideExtraHoverTips();
+}
+
+bool ToolbarWindow::adoptMonitorDpi()
+{
+	if (!hwnd) return false;
+	return applyDpi(DpiUtil::dpiForWindow(hwnd));
+}
+
+bool ToolbarWindow::applyDpi(float scale)
+{
+	if (!hwnd || scale <= 0.f) return false;
+	// 只改 dpi 不重排，子节点还会按旧缩放画；applyDpiChange 会用缓存的逻辑值
+	// × 新 dpi 重推一遍样式并递归子节点（WinBase::dpiChange 走的就是这一条）。
+	if (std::fabs(scale - dpi) > 0.01f) {
+		dpi = scale;
+		body->applyDpiChange();
+	}
+	// 同一个缩放只重算一次窗口尺寸；跨屏后 WM_DPICHANGED 已经把 dpi 改掉了，
+	// 这里用 appliedDpi_ 才能知道“还没按新 dpi 重算过”。
+	if (std::fabs(scale - appliedDpi_) < 0.01f) return false;
+	appliedDpi_ = scale;
+	onDpiAdopted();
+	return true;
 }

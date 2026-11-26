@@ -25,6 +25,10 @@ public:
     bool canUndoAnnot() const;
     void undoAnnot();
     void clearAllShapesNow();
+    // 把外部（贴图）的矢量标注搬进来，继续可选中/编辑。
+    // shapes 用底图像素坐标；imageRect 是底图在画板像素坐标中的矩形，scale 是底图显示倍率。
+    void adoptShapes(std::vector<std::unique_ptr<ShapeBase>> shapes,
+        const D2D1_RECT_F& imageRect, float scale);
 
     // 输入转发：pos 是图片编辑窗口的客户区坐标
     bool forwardDown(POINT pos, bool right);

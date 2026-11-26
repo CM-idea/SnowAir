@@ -26,6 +26,8 @@ namespace LaserStroke
 	{
 		std::vector<Point> points;
 		float width{ 4.f };      // 笔迹直径（图像像素，已含 dpi）
+		// 寿命：最新点从全粗衰减到消失的时间。默认与演示画布一致；鼠标轨迹用一半长度。
+		int64_t lifeMs{ kLifeMs };
 		// 上一个原始落点，用于过滤原地重复采样
 		bool hasLast{ false };
 		float lastX{ 0.f };
@@ -38,6 +40,8 @@ namespace LaserStroke
 	void addPoint(Trail& trail, float x, float y, int64_t now);
 	// 是否仍有可见像素（点数不足或最新点已过期即为不可见）
 	bool visible(const Trail& trail, int64_t now);
-	// 按当前时刻一次填充整条轨迹（相邻段取并集）
-	void paint(ID2D1DeviceContext* ctx, ID2D1Brush* brush, const Trail& trail, int64_t now);
+	// 按当前时刻一次填充整条轨迹（相邻段取并集）。
+	// 用 ID2D1RenderTarget 而不是 DeviceContext：录制侧在采集线程上用 WIC 软件渲染目标
+	// 重画同一笔（保证屏幕/视频完全一致），那边拿不到设备上下文。
+	void paint(ID2D1RenderTarget* rt, ID2D1Brush* brush, const Trail& trail, int64_t now);
 }

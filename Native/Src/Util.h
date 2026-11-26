@@ -29,6 +29,12 @@ public:
 	// defaultDir 非空时作为对话框的初始目录（每次都强制从这里开始，不留用"上次保存过的目录"）
 	static std::wstring getSaveFilePath(HWND hwnd, const std::wstring& ext = L"png",
 		const std::wstring& defaultName = L"", const std::wstring& defaultDir = L"");
+	// 图片另存为：和 getSaveFilePath 同一个系统对话框，但「保存类型」下拉里列出全部
+	// 受支持的图片格式（PNG / JPEG / WebP / BMP，与设置里的「截图保存格式」一致），
+	// 初始选中 ext 对应的那一项（即用户设置的保存格式）。
+	// 换类型后写回的文件名扩展名跟着所选类型走，保证编码格式与后缀一致。
+	static std::wstring getImageSaveFilePath(HWND hwnd, const std::wstring& ext = L"png",
+		const std::wstring& defaultName = L"", const std::wstring& defaultDir = L"");
 	// 保存对话框的初始目录：首次用桌面，之后用这一类文件上次选过的目录（截图与录屏分开记）
 	static std::wstring lastSaveDir(bool video);
 	// 记住本次选定的目录，供下一次保存对话框使用
@@ -45,10 +51,26 @@ public:
 	static void addFileToClipboardCut(const std::wstring& filePath);
 	// 多文件版本（剪切板历史里的「N 个文件」条目复制回剪切板）
 	static void addFilesToClipboard(const std::vector<std::wstring>& paths, bool cut = false);
+	// 剪切板里能当图片用的内容 → 文件路径列表：
+	//   · 资源管理器里复制的图片文件 → 原路径（和拖放完全一样）；
+	//   · 位图（PNG / CF_DIBV5 / CF_DIB / CF_BITMAP）→ 落到 %TEMP%\SnowAir 下的 PNG。
+	// 图片编辑器的 Ctrl+V 用它，拿到路径后走和拖放同一条路。剪贴板里没有图片时返回 false。
+	static bool clipboardImagePaths(std::vector<std::wstring>& paths);
 	// WIC 从文件解码成 BGRA、top-down、行紧凑（步长 = w*4）；失败返回 {0,0,空}
 	static std::tuple<int, int, std::vector<BYTE>> loadImagePixels(const std::wstring& path);
 	// 只读图片头拿像素尺寸（不解码像素；失败返回 {0,0}）—— 停悬大图预览按宽高比定窗口用
 	static std::pair<int, int> imageSize(const std::wstring& path);
+	// 字节数 → "12.3 MB"（<1 KB 给 "512 B"）。文件大小为 0 时给 "0 B"。
+	static std::wstring formatFileSize(uintmax_t bytes);
+	// 视频元信息：宽 / 高（像素）与时长（秒）。走 Windows 属性系统，和资源管理器「详细信息」
+	// 同源；读不到的字段留 0。结果按路径缓存，同一个文件不会问第二次。
+	struct MediaInfo { int width{ 0 }; int height{ 0 }; int durationSec{ 0 }; };
+	static MediaInfo mediaInfo(const std::wstring& path);
+	// 文件夹的直接子项数量（不递归）：数到 cap 就停并返回 cap，避免大目录拖慢贴屏。
+	static int folderItemCount(const std::wstring& path, int cap = 1000);
+	// 系统「文件类型图标」：按「文件夹 / 扩展名」向 Shell 取一次图标，转成 PNG 缓存到数据目录，
+	// 返回缓存文件路径（失败返回空）。同一类型只取一次，不逐个文件问 Shell。
+	static std::wstring typeIconPng(const std::wstring& path, bool isDir);
 	// 剪切板文本是不是一段 SVG 代码（<svg …>…</svg>）
 	static bool isSvgText(const std::wstring& text);
 	// 用 Direct2D 的 SVG 能力把代码渲染成 BGRA、top-down、行紧凑（步长 = w*4）；
@@ -59,7 +81,7 @@ public:
 	static std::wstring svgPreviewPath(const std::wstring& id, const std::wstring& text);
 	// —— History 操作 —— 根据条目 id 找到 Setting 的历史条目，然后执行对应动作
 	static void copyHistoryFileToClipboard(const std::wstring& historyId);
-	static void pinHistoryFile(const std::wstring& historyId);
+	static bool pinHistoryFile(const std::wstring& historyId);
 	// 把图存成缓存文件，再交给外部插件 ImageReader.exe 做文字识别。插件先在本 exe
 	// 同目录找，再找 %appdata%\SnowAir\plugin，都找不到就用默认浏览器打开它的
 	// release 页面让用户自己下。缓存图由插件读完后自己删。

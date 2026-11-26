@@ -128,6 +128,9 @@ public:
 	// 按下/退出时立刻撤销查询状态（驻留重查、在途结果作废）；查询本身从不改动遮罩样式或鼠标捕获
 	void cancelHoverQuery();
 private:
+	// 选区 chrome 的唯一 DPI 来源：选区矩形实际落在哪块显示器就取哪块。
+	// 没框出选区时退回宿主 dpi（与旧行为一致）。
+	float selectionDpi() const;
 	void makeLayout();
 	// 把选区夹进"该归属的那块屏"（录制期用）：hostPoint 非空时以该点定屏（框选按起点、
 	// 鼠标跟随传光标、整体拖动传光标），为空则以选区中心定屏。真的改了 r 返回 true。
@@ -208,6 +211,13 @@ private:
 	static constexpr float sliderThumbR{ ToolbarTheme::sliderThumbR };
 	static constexpr float swatchSize{ ToolbarTheme::swatchSize };
 	int labelIx_{ -1 }, labelIy_{ -1 }, labelIw_{ -1 }, labelIh_{ -1 };
+	// 文本 layout / 图标 layout 的缓存键必须包含 dpi，否则换屏后字号不重建。
+	float labelDpi_{ -1.f };
+	float codeIconDpi_{ -1.f };
+	// selectionDpi() 的缓存：选区屏幕矩形不变就不重复查询显示器。
+	mutable float dpiSel_{ 0.f };
+	mutable RECT dpiSelScreenRect_{};
+	mutable bool dpiSelValid_{ false };
 	float lockRatio_{ 0.f }; // h/w；0 = 未锁定
 	float selRadius_{ 0.f };
 	float lastSelRadius_{ 20.f };

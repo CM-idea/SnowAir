@@ -23,6 +23,7 @@ public:
 	float getBtnCenterX() const;
 private:
 	void onCreated() override;
+	void onDpiAdopted() override;
 	void drawChrome(ID2D1DeviceContext* ctx) override;
 	void refreshSize();
 	void buildBar();

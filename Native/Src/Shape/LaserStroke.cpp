@@ -27,8 +27,9 @@ struct Vertex
 Vertex vertexAt(const Trail& trail, size_t i, int64_t now)
 {
 	const Point& p = trail.points[i];
+	const int64_t life = std::max<int64_t>(1, trail.lifeMs);
 	const int64_t age = std::max<int64_t>(0, now - p.t);
-	const float elapsed = (float)std::min<int64_t>(age, kLifeMs) / (float)kLifeMs;
+	const float elapsed = (float)std::min<int64_t>(age, life) / (float)life;
 	// 半径只随时间衰减：拖尾长度等于寿命内的位移，与采样率无关
 	const float base = std::max(1.f, trail.width) * 0.5f;
 	return { p.x, p.y, base * (1.f - elapsed * elapsed) };
@@ -129,9 +130,10 @@ std::vector<D2D1_POINT_2F> buildOutline(const std::vector<Vertex>& vs)
 void addPoint(Trail& trail, float x, float y, int64_t now)
 {
 	auto& ps = trail.points;
+	const int64_t life = std::max<int64_t>(1, trail.lifeMs);
 	// 淘汰过期点，保留一个用于尾部收细
-	while (ps.size() > 1 && now - ps[1].t >= kLifeMs) ps.erase(ps.begin());
-	if (!ps.empty() && now - ps.back().t >= kLifeMs) ps.clear();
+	while (ps.size() > 1 && now - ps[1].t >= life) ps.erase(ps.begin());
+	if (!ps.empty() && now - ps.back().t >= life) ps.clear();
 
 	// 原地重复的采样不刷新寿命，静止时轨迹自然淡出
 	if (trail.hasLast && trail.lastX == x && trail.lastY == y) return;
@@ -153,13 +155,13 @@ bool visible(const Trail& trail, int64_t now)
 {
 	if (trail.points.size() < 2) return false;
 	// 最新点过期即整段不可见
-	return now - trail.points.back().t < kLifeMs;
+	return now - trail.points.back().t < std::max<int64_t>(1, trail.lifeMs);
 }
 
-void paint(ID2D1DeviceContext* ctx, ID2D1Brush* brush, const Trail& trail, int64_t now)
+void paint(ID2D1RenderTarget* rt, ID2D1Brush* brush, const Trail& trail, int64_t now)
 {
 	const int n = trail.pointCount();
-	if (!ctx || !brush || n < 2) return;
+	if (!rt || !brush || n < 2) return;
 
 	// 等距抽稀：只影响绘制精度，不改变轨迹长度
 	const int stride = std::max(1, (n + kMaxDrawSamples - 1) / kMaxDrawSamples);
@@ -182,11 +184,11 @@ void paint(ID2D1DeviceContext* ctx, ID2D1Brush* brush, const Trail& trail, int64
 	}
 
 	ComPtr<ID2D1Factory> factory;
-	ctx->GetFactory(factory.GetAddressOf());
+	rt->GetFactory(factory.GetAddressOf());
 	if (!factory) return;
 	auto geo = smoothPath(factory.Get(), buildOutline(sm));
 	if (!geo) return;
-	ctx->FillGeometry(geo.Get(), brush);
+	rt->FillGeometry(geo.Get(), brush);
 }
 
 } // namespace LaserStroke

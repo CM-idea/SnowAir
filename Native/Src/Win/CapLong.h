@@ -41,6 +41,10 @@ public:
 	void startCapture();             // 自动滚动
 	void startManualScroll(float wheelSpace); // 用户滚轮：切手动并把这下滚轮转给页面
 	void setPaused(bool on);
+	// 鼠标停在右侧预览窗 = 临时暂停（手/自动滚动通用）：停滚动、停抓帧拼接，
+	// 恢复遮罩在选区里显示大图预览；离开时原样接续。
+	void enterPreviewHold();
+	void exitPreviewHold();
 	bool capturing() const { return isCapturing; }
 	bool canAdjustSelection() const { return !isCapturing && !isFinish; }
 	bool hitPreview(POINT clientPos) const;
@@ -107,6 +111,9 @@ private:
 	void paintStartHint(ID2D1DeviceContext* ctx);
 	void paintTooFastHint(ID2D1DeviceContext* ctx); // 滚太快、这一帧拼不上时的临时提示
 	void paintHintBadge(ID2D1DeviceContext* ctx, IDWriteTextLayout* layout);
+	// 选区所在显示器的缩放：长截图遮罩铺满所有屏，提示文字必须按选区落点那块屏排版，
+	// 不能用窗口自身的 dpi（那只代表其中一块屏）。
+	float selDpi() const;
 	bool makeImgPreview();
 	void updatePreviewLayout();
 	float previewFrameH() const;              // 绿框在缩略图里的高度（与选区高度同比）
@@ -157,7 +164,6 @@ private:
 	bool timerResRaised{ false };
 	bool manualMagActive{ false }; // 抓帧线程当前是否走放大镜（决定能否恢复窗口）
 	int capPipeline{ -1 };         // 抓帧管线：-1 未定，0 放大镜，1 DXGI，2 GDI
-	std::atomic<int> lastShift{ 0 };
 	HHOOK mouseHook{ nullptr };
 	// 自动滚动：匀速。按拍投递很小的滚轮量，投递量/投递频率按“画布实际滚过的像素”闭环校准。
 	double autoUnitsPerPulse{ 3.0 };    // 每个滚轮事件携带的滚轮单位（120 = 一个 notch）
@@ -215,6 +221,8 @@ private:
 	bool previewFollowBottom{ true };
 	bool previewFollowTop{ false };
 	bool previewHot{ false };
+	// 悬停预览触发的临时暂停（独立于用户主动暂停 isPaused）
+	bool previewHold{ false };
 	bool previewPanning{ false };
 	bool selViewportPanning{ false };
 	POINT selPanLast{};

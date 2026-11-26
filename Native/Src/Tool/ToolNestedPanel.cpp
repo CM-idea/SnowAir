@@ -7,6 +7,7 @@
 #include "IconCodes.h"
 #include "ToolbarChrome.h"
 #include "ToolbarTheme.h"
+#include "DpiUtil.h"
 #include "PropSlider.h"
 #include "SerialEmoji.h"
 
@@ -60,6 +61,11 @@ void ToolNestedPanel::onCreated()
 		if (kind_ == Kind::ShapeSides && onSlider != sidesHover_) {
 			sidesHover_ = onSlider;
 			owner->setShapePreviewHold(onSlider);
+		}
+		// 荧光笔透明度：滑条悬停/拖动时显示半透明笔迹预览（有本体时直接看本体）
+		if (kind_ == Kind::PenOpacity && onSlider != opacityHover_) {
+			opacityHover_ = onSlider;
+			owner->setPenOpacityPreview(onSlider);
 		}
 	});
 }
@@ -147,9 +153,37 @@ PropSlider::Pair ToolNestedPanel::addSlider(float minV, float maxV, float val, s
 	return pair;
 }
 
+void ToolNestedPanel::applyOwnerDpi()
+{
+	// 以窗口当前所在显示器为准：settleDpiAt() 已经把窗口搬到目标屏上了。
+	// 直接抄 owner->dpi 有风险 —— 工具条跨屏时宿主的 dpi 可能还没跟上，
+	// 会把刚落定的目标缩放又覆盖回旧值（首次打开放大 N 倍的另一条路径）。
+	float target = owner ? owner->dpi : dpi;
+	if (hwnd) {
+		if (HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST))
+			target = DpiUtil::dpiForMonitor(mon);
+	}
+	if (std::fabs(target - dpi) < 0.01f) return;
+	dpi = target;
+	body->applyDpiChange();
+	if (hwnd && logicW_ > 0.f && logicH_ > 0.f) setSize(logicW_, logicH_);
+}
+
 void ToolNestedPanel::finishOpen(const RECT& workArea, Ling::Button* anchor, float logicW, float logicH)
 {
 	if (logicH <= 0.f) logicH = ToolbarTheme::propBtnSize + marginTop + ToolbarTheme::shadowPad;
+	// 面板窗口建出来时默认在主屏（100%），而它多半要显示在工具条所在屏（可能 300%）。
+	// 先搬到锚点所在屏，让系统把窗口 DPI 切过去，再按真实 dpi 算尺寸；否则
+	// 「按目标 dpi 先放大一次 + WM_DPICHANGED 建议矩形再放大一次」= 首次打开大 N 倍。
+	if (!open_ && hwnd && owner && owner->hwnd && anchor) {
+		const POINT anchorScreen{
+			(LONG)((float)owner->x + anchor->x + anchor->w * 0.5f),
+			(LONG)((float)owner->y + anchor->y + anchor->h * 0.5f) };
+		ToolbarChrome::settleDpiAt(this, anchorScreen.x, anchorScreen.y);
+	}
+	applyOwnerDpi();
+	logicW_ = logicW;
+	logicH_ = logicH;
 	setSize(logicW, logicH);
 	anchorBtn = anchor;
 	workArea_ = workArea;
@@ -161,13 +195,13 @@ void ToolNestedPanel::finishOpen(const RECT& workArea, Ling::Button* anchor, flo
 
 void ToolNestedPanel::place(const RECT& workArea, Ling::Button* anchor)
 {
-	dpi = owner->dpi;
+	applyOwnerDpi();
 	float ax = (float)owner->x + (float)owner->w * 0.5f;
 	if (anchor) {
 		// 与色板一致：节点坐标已是窗口客户区物理像素，勿再 *dpi
 		ax = (float)owner->x + (anchor->x + anchor->w * 0.5f);
 	}
-	const float subPad = ToolbarTheme::shadowPad * owner->dpi;
+	const float subPad = ToolbarTheme::shadowPad * dpi;
 	const float gap = ToolbarTheme::propBubbleGap;
 	// 与颜色面板同一口径：先去掉父气泡的箭头本体，再按 shadowPad 收进内容区，
 	// 否则二级栏相对属性栏会多/少一个 caret 的间距（翻到上方时尤其明显）。
@@ -202,6 +236,10 @@ void ToolNestedPanel::updatePosition(const RECT& workArea)
 
 void ToolNestedPanel::closePanel()
 {
+	if (kind_ == Kind::PenOpacity) {
+		opacityHover_ = false;
+		if (owner) owner->setPenOpacityPreview(false);
+	}
 	if (sidesHover_) {
 		sidesHover_ = false;
 		owner->setShapePreviewHold(false);
@@ -379,15 +417,25 @@ void ToolNestedPanel::openBoardOpacity(const RECT& workArea, Ling::Button* ancho
 
 void ToolNestedPanel::openPenOpacity(const RECT& workArea, Ling::Button* anchor)
 {
+	// 点同一个按钮 = 收起（与矩形/水印透明度同一套交互）
+	if (open_ && kind_ == Kind::PenOpacity) {
+		closePanel();
+		owner->refreshNestedTrigger();
+		return;
+	}
 	closePanel();
 	owner->closeColorPopup();
 	kind_ = Kind::PenOpacity;
+	opacityHover_ = false;
 	clearContent();
 	prepareContentRow();
 	sliderTip_ = Lang::get(L"tool.markerOpacity");
 	addSlider(10.f, 100.f, (float)owner->penMarkerOpacity, [this](float nv) {
 		owner->penMarkerOpacity = (int)std::lround(nv);
+		// 选中/刚画完的荧光笔本体立即跟着变；没有本体时由下面的 hold 画一条半透明笔迹预览
+		owner->applyLiveHighlighterStyle();
 		owner->notifyStyleChanged();
+		owner->setPenOpacityPreview(true);
 	});
 	finishOpen(workArea, anchor,
 		ToolbarTheme::propPad * 2.f + PropSlider::rowLogicW() + ToolbarTheme::shadowPad * 2.f);

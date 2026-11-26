@@ -5,6 +5,7 @@
 #include "../Lang.h"
 #include "../Tip.h"
 #include "ToolVideo.h"
+#include "DpiUtil.h"
 #include <climits>
 #include "ToolSub.h"
 #include "IconCodes.h"
@@ -118,6 +119,8 @@ float ToolVideo::getBtnCenterX() const
 
 void ToolVideo::onCreated()
 {
+	// 同 ToolLong：构造时只有宿主 dpi，建窗后按本窗所在显示器校正。
+	adoptMonitorDpi();
 	body->setBg(0);
 	initChrome(ToolbarTheme::paddingLeft, contentPadRight(),
 		ToolbarTheme::shadowPad, ToolbarTheme::shadowPad, Ling::FlexDirection::Row);
@@ -128,6 +131,11 @@ void ToolVideo::onCreated()
 	onMouseUp.add([this](POINT pos, bool isRight) { onDragUp(pos, isRight); });
 	show();
 	updateUndoEnabled();
+}
+
+void ToolVideo::onDpiAdopted()
+{
+	refreshSize();
 }
 
 void ToolVideo::drawChrome(ID2D1DeviceContext* ctx)
@@ -403,6 +411,8 @@ void ToolVideo::onDragUp(POINT, bool)
 	draggingBar = false;
 	ReleaseCapture();
 	win->markMainToolUserPlaced();
+	// 跨屏松手：按落点那块屏的缩放重排尺寸，再做贴边判定。
+	adoptMonitorDpi();
 	peekEdge_ = PeekEdge::None;
 	peekHidden_ = false;
 	// 「贴边隐藏」只认**手动拖动**：松手时工具栏边缘贴住屏幕的上/下沿（8px 内）才缩进。

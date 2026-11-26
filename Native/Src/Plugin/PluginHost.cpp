@@ -50,12 +50,15 @@ void showMenu(void*, const SnowAirMenuItem* items, int count, int x, int y,
     for (int i = 0; i < count; ++i) {
         menu.push_back(build(items[i]));
     }
-    PinMenu::popup(std::move(menu), POINT{x, y});
+    PinMenu::popup(std::move(menu), POINT{x, y}, true);
 }
 
 int menuOpen(void*)
 {
-    return PinMenu::isOpen() ? 1 : 0;
+    // 只算插件（晾衣架）自己通过 show_menu / open_clipboard_panel 打开的菜单。
+    // 贴图 / 贴屏的右键菜单不在此列：晾衣架收到 1 会展开自己，右键贴图时就会
+    // 跟着弹出来。插件自己的菜单仍保持 true，原有菜单交互不变。
+    return PinMenu::isPluginMenuOpen() ? 1 : 0;
 }
 
 void closeMenu(void*)
@@ -759,7 +762,7 @@ void openClipboardPanel(void*, int x, int y)
         entry.submenu = makeSubmenu(filter.type);
         menu.push_back(std::move(entry));
     }
-    PinMenu::popup(std::move(menu), POINT{x, y});
+    PinMenu::popup(std::move(menu), POINT{x, y}, true);
 }
 
 int captureRect(void*, int* x, int* y, int* w, int* h)
@@ -1194,38 +1197,11 @@ void PluginHost::quickHang()
 }
 
 /* 插件可调用：把图片按 SnowAir 的贴图形态贴到桌面（带原生落下动效）。
-   同一张图重复贴图时不再新建，而是让已有贴图抖动提示。
+   同一张图重复贴图时 WinPin::initFromData 会把已有贴图抬到最前并抖动，不会新建。
    导出符号给插件用 GetProcAddress 查找，旧宿主没有这个符号时插件自行降级。 */
-static std::map<std::wstring, HWND> g_rackPinnedImages;
-
-static std::wstring lowerKey(const std::wstring& text)
-{
-    std::wstring key = text;
-    for (auto& ch : key) ch = static_cast<wchar_t>(towlower(ch));
-    return key;
-}
-
 extern "C" __declspec(dllexport) void SnowAirPinImageFile(const wchar_t* path)
 {
     if (!path || !*path) return;
-    const std::wstring key = lowerKey(path);
-    auto it = g_rackPinnedImages.find(key);
-    if (it != g_rackPinnedImages.end()) {
-        if (IsWindow(it->second)) {
-            RECT rc{};
-            GetWindowRect(it->second, &rc);
-            for (int i = 0; i < 8; ++i) {
-                const int offset = (i % 2 == 0) ? 7 : -7;
-                SetWindowPos(it->second, nullptr, rc.left + offset, rc.top, 0, 0,
-                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-                Sleep(26);
-            }
-            SetWindowPos(it->second, nullptr, rc.left, rc.top, 0, 0,
-                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-            return;
-        }
-        g_rackPinnedImages.erase(it);
-    }
     auto [w, h, px] = Util::loadImagePixels(path);
     if (w <= 0 || h <= 0 || px.empty()) return;
     RECT rc{};
@@ -1234,9 +1210,7 @@ extern "C" __declspec(dllexport) void SnowAirPinImageFile(const wchar_t* path)
     const int areaH = static_cast<int>(rc.bottom - rc.top);
     const int x = static_cast<int>(rc.left) + (std::max)(0, (areaW - w) / 2);
     const int y = static_cast<int>(rc.top) + (std::max)(0, (areaH - h) / 2);
-    if (WinPin* pin = WinPin::initFromData(x, y, w, h, px)) {
-        if (pin->hwnd) g_rackPinnedImages[key] = pin->hwnd;
-    }
+    WinPin::initFromData(x, y, w, h, px, path);
 }
 
 /* 指定锚点（卡片正下方）：centerX 为卡片中心，topY 为卡片底边。
@@ -1245,24 +1219,6 @@ extern "C" __declspec(dllexport) void SnowAirPinImageFileAt(const wchar_t* path,
                                                            int topY)
 {
     if (!path || !*path) return;
-    const std::wstring key = lowerKey(path);
-    auto it = g_rackPinnedImages.find(key);
-    if (it != g_rackPinnedImages.end()) {
-        if (IsWindow(it->second)) {
-            RECT rc{};
-            GetWindowRect(it->second, &rc);
-            for (int i = 0; i < 8; ++i) {
-                const int offset = (i % 2 == 0) ? 7 : -7;
-                SetWindowPos(it->second, nullptr, rc.left + offset, rc.top, 0, 0,
-                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-                Sleep(26);
-            }
-            SetWindowPos(it->second, nullptr, rc.left, rc.top, 0, 0,
-                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-            return;
-        }
-        g_rackPinnedImages.erase(it);
-    }
     auto [w, h, px] = Util::loadImagePixels(path);
     if (w <= 0 || h <= 0 || px.empty()) return;
     RECT work{};
@@ -1273,9 +1229,7 @@ extern "C" __declspec(dllexport) void SnowAirPinImageFileAt(const wchar_t* path,
     const int maxY = (std::max)(minY, static_cast<int>(work.bottom) - h);
     const int x = std::clamp(centerX - w / 2, minX, maxX);
     const int y = std::clamp(topY, minY, maxY);
-    if (WinPin* pin = WinPin::initFromData(x, y, w, h, px)) {
-        if (pin->hwnd) g_rackPinnedImages[key] = pin->hwnd;
-    }
+    WinPin::initFromData(x, y, w, h, px, path);
 }
 
 extern "C" __declspec(dllexport) void SnowAirPinTextAt(const wchar_t* text, int centerX, int topY)

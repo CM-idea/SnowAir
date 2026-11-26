@@ -112,15 +112,18 @@ namespace
 		// GIF / 系统音量 / 麦克风**不是**，默认也不配键位 —— 它们只在工具栏有焦点时用得到，
 		// 设成全局键或给默认值，只会白白占掉用户自己的 `G` `]` `\`。
 		// 演示画布内也能录屏 → 掩码同时含 Fullscreen，参与和演示组之间的冲突判定。
+		// 鼠标穿透同样是**临时全局键**：它本身就是把焦点交给别的窗，没有全局键切不回来。
+		// 掩码含录屏 → 录屏会话期间也一并镜像。系统按键页把它放在录屏组第一个。
+		{ L"cmd_mouse_through",       kGrpRecord, L"cmdkey.mouseThrough",       Scope::Global,  Scene::None, kRecord | kFullscreen, true, false, L"`" },
 		{ L"cmd_record_toggle",       kGrpRecord, L"cmdkey.recordToggle",       Scope::Global,  Scene::Record, kRecord | kFullscreen, true, false, L"F2" },
-		{ L"cmd_toggle_gif",          kGrpRecord, L"cmdkey.toggleGif",          Scope::Session, Scene::Record, kRecord | kFullscreen, true, false, L"" },
+		// 顺序按用户要求：局部放大 → 系统音量 → 动图录制 → 麦克风
+		// allowModifierOnly：允许绑成 Ctrl/Alt/Shift，由 HotkeyHook 做"连按两次"判定
+		{ L"cmd_toggle_magnifier",    kGrpRecord, L"cmdkey.localMagnifier",     Scope::Global,  Scene::None, kRecord | kFullscreen, true, false, L"", true },
 		{ L"cmd_toggle_system_audio", kGrpRecord, L"cmdkey.toggleSystemAudio",  Scope::Session, Scene::Record, kRecord | kFullscreen, true, false, L"" },
+		{ L"cmd_toggle_gif",          kGrpRecord, L"cmdkey.toggleGif",          Scope::Session, Scene::Record, kRecord | kFullscreen, true, false, L"" },
 		{ L"cmd_toggle_mic",          kGrpRecord, L"cmdkey.toggleMic",          Scope::Session, Scene::Record, kRecord | kFullscreen, true, false, L"" },
 
 		// ——— 全屏画布（窗口内）———
-		// 鼠标穿透同样是**临时全局键**：它本身就是把焦点交给别的窗，没有全局键切不回来。
-		// 掩码含录屏 → 录屏会话期间也一并镜像。
-		{ L"cmd_mouse_through",  kGrpCanvas, L"cmdkey.mouseThrough",  Scope::Global, Scene::Fullscreen, kRecord | kFullscreen, true, false, L"`" },
 		// 工具栏上没有"隐藏/显示工具栏"这颗按钮：纯命令键（演示画布时收起整条工具栏）。
 		// 它同样是**临时全局键** —— 穿透/收起之后焦点已经不在本软件上，窗口内收不到。
 		{ L"cmd_toggle_toolbar", kGrpCanvas, L"cmdkey.toggleToolbar", Scope::Global, Scene::Fullscreen, kFullscreen, true, false, L"F1" },
@@ -344,17 +347,48 @@ bool boundToOther(const std::wstring& chord, const std::wstring& forId,
 	if (chord.empty()) return false;
 	const unsigned mine = surfaceMaskForId(forId);
 	if (mine == 0) return false;
+	// 录制按固定顺序写（Win 最前）；旧配置 / 手改的写法可能不同，判定要按规范化后的形态比
+	const std::wstring target = canonicalChord(chord);
 	for (const auto& e : kEntries) {
 		if (forId == e.id) continue;
 		if (!e.reserveChord) continue;                          // 纯展示行不占键
 		if (stageDisjoint(e.id, forId)) continue;                // 分属不同阶段，允许同键共存
 		if ((e.surfaces & mine) == 0) continue;                 // 跨界面（无交集）不算冲突
-		if (_wcsicmp(binding(e.id).c_str(), chord.c_str()) != 0) continue;
+		if (_wcsicmp(canonicalChord(binding(e.id)).c_str(), target.c_str()) != 0) continue;
 		if (otherLabelKey) *otherLabelKey = e.label;
 		if (otherId) *otherId = e.id;
 		return true;
 	}
 	return false;
+}
+
+std::wstring canonicalChord(const std::wstring& chord)
+{
+	if (chord.empty()) return chord;
+	unsigned mods = 0;
+	std::wstring mainKey;   // 主键 / 鼠标键名：只挪位置，不改写法
+	for (auto& part : Ling::Util::splitStr(chord, L'+')) {
+		if (part.empty()) continue;
+		std::wstring lower = part;
+		std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+		if (lower == L"ctrl") mods |= MOD_CONTROL;
+		else if (lower == L"alt") mods |= MOD_ALT;
+		else if (lower == L"shift") mods |= MOD_SHIFT;
+		else if (lower == L"win" || lower == L"lwin" || lower == L"rwin") mods |= MOD_WIN;
+		else if (mainKey.empty()) mainKey = part;
+		else return chord;   // 形态不认识（多个主键）：不规范化，按原样参与比较
+	}
+	std::wstring out;
+	auto add = [&out](const std::wstring& name) {
+		if (!out.empty()) out += L'+';
+		out += name;
+	};
+	if (mods & MOD_WIN) add(L"Win");
+	if (mods & MOD_CONTROL) add(L"Ctrl");
+	if (mods & MOD_ALT) add(L"Alt");
+	if (mods & MOD_SHIFT) add(L"Shift");
+	if (!mainKey.empty()) add(mainKey);
+	return out;
 }
 
 bool validChord(const std::wstring& chord)
@@ -399,11 +433,13 @@ bool keyHits(const std::wstring& id, unsigned vk)
 bool reservedChord(const std::wstring& chord, std::wstring* ownerLabelKey, const std::wstring& forId)
 {
 	if (chord.empty()) return false;
+	const std::wstring target = canonicalChord(chord);
 	for (const auto& e : kEntries) {
 		if (!e.readOnly) continue;
 		if (!e.reserveChord) continue;   // 「强制落笔」这类纯展示行只是说明，不占键
+		if (e.id == forId) continue;     // 同一行：录到的就是它自己的固定键，不算被占用
 		if (stageDisjoint(e.id, forId)) continue;   // 分属不同阶段，允许共用（切换色值 Tab）
-		if (_wcsicmp(binding(e.id).c_str(), chord.c_str()) != 0) continue;
+		if (_wcsicmp(canonicalChord(binding(e.id)).c_str(), target.c_str()) != 0) continue;
 		if (ownerLabelKey) *ownerLabelKey = e.label;
 		return true;
 	}

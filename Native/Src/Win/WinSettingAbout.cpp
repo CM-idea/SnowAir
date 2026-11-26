@@ -13,6 +13,9 @@
 #include "../App.h"
 #include "../Lang.h"
 #include "../Setting.h"
+#include "../Ocr/OcrPackVariant.h"
+#include "../Ocr/OcrRuntimeManager.h"
+#include "../Ocr/OcrModelManager.h"
 #include "../Tool/IconCodes.h"
 #include "../Update.h"
 #include "../Util.h"
@@ -45,24 +48,42 @@ constexpr float kArtTopClip{ 14.f };
 // 每个 +1 = 标题上移 1px（压得更深）。
 constexpr float kArtOverlap{ 62.f };
 
-// 内嵌的配图是 RCDATA，而 Ling::Image 只认文件路径（内部会整块读进内存再解码）。
+// 彩蛋气泡：左边二维码 88×88，右边两段文字（标题 + 说明、标题 + 群号）。
+// 文本列宽/块高按内容实测（见 showEggTip），四周留白由 HoverTip 统一按 12 算，四边才一致。
+constexpr float kEggQr{ 88.f };
+constexpr float kEggGap{ 12.f };       // 二维码与文字的间距
+constexpr float kEggTextWMax{ 240.f }; // 文本列宽兜底（实测失败时用）
+constexpr const wchar_t* kEggDesc{ L"欢迎加入频道反馈问题和建议。" };
+// 行高按字号估：13px 标题 ≈ 18，12px 正文 ≈ 16（只用来定气泡高度）
+constexpr float kEggTitleH{ 18.f };
+constexpr float kEggNumberH{ 16.f };
+constexpr float kEggTitleGap{ 2.f };    // 标题与它下面那行
+constexpr float kEggSectionGap{ 14.f };  // 两段之间
+constexpr float kEggBodySize{ 12.f };   // 正文（说明句 / 群号）字号
+
+// 内嵌的图片是 RCDATA，而 Ling::Image 只认文件路径（内部会整块读进内存再解码）。
 // 所以先落到 %TEMP%，加载完立刻删掉 —— 不在用户配置目录里留垃圾。
 // 返回路径；调用方用完负责删除（loadImg 是同步的，返回后即可删）。
-std::wstring writeArtToTemp()
+std::wstring writeResToTemp(const wchar_t* resName, const wchar_t* fileName)
 {
-	auto [data, size] = Ling::Util::getRes(L"about");
+	auto [data, size] = Ling::Util::getRes(resName);
 	if (data == nullptr || size == 0) return {};
 
 	wchar_t tmp[MAX_PATH]{};
 	if (GetTempPathW(MAX_PATH, tmp) == 0) return {};
 
-	auto file = std::filesystem::path{ tmp } / L"SnowAir-about-art.png";
+	auto file = std::filesystem::path{ tmp } / fileName;
 	std::ofstream out(file, std::ios::binary | std::ios::trunc);
 	if (!out) return {};
 	out.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
 	out.close();
 	if (!out) return {};
 	return file.wstring();
+}
+
+std::wstring writeArtToTemp()
+{
+	return writeResToTemp(L"about", L"SnowAir-about-art.png");
 }
 
 // 旧版本会把图留在配置目录里，此处一并清理
@@ -124,7 +145,7 @@ Ling::Node* badge(Ling::Node* parent, const std::wstring& text, bool accent)
 	auto* label = box->makeChild<Ling::Label>();
 	label->setText(text);
 	label->setFontSize(11.5f);
-	label->setColor(accent ? SettingTheme::successFg : SettingTheme::textSecondary);
+	label->setColor(accent ? SettingTheme::accentGreen : SettingTheme::textSecondary);
 	return box;
 }
 
@@ -278,6 +299,20 @@ winrt::fire_and_forget fetchLatestTag(std::weak_ptr<bool> weak, WinSettingAbout*
 	}
 }
 
+// 晾衣架检查请求失败时不会触发 onRackUpdateChanged：主程序结果回来后兜底收尾，
+// 避免状态行永远停在「检查中…」。1.5 秒足够正常请求回来了。
+void scheduleRackFallback(std::weak_ptr<bool> weak, WinSettingAbout* page, int seq)
+{
+	winrt::Windows::System::Threading::ThreadPoolTimer::CreateTimer(
+		[weak, page, seq](const winrt::Windows::System::Threading::ThreadPoolTimer&) {
+			if (auto app = Ling::App::get()) {
+				app->dq.TryEnqueue([weak, page, seq]() {
+					if (weak.lock()) page->onRackCheckFallback(seq);
+				});
+			}
+		}, std::chrono::milliseconds(1500));
+}
+
 } // namespace
 
 WinSettingAbout::WinSettingAbout(Ling::WinBase* parent) : Ling::Node(parent)
@@ -285,6 +320,20 @@ WinSettingAbout::WinSettingAbout(Ling::WinBase* parent) : Ling::Node(parent)
 	setFlexDirection(Ling::FlexDirection::Column);
 	setWidthPercent(100.f);
 	YGNodeStyleSetMinWidth(node, 0.f);
+
+	// 彩蛋的进度计时器：悬停时每 tick 点亮一个字符，点满才弹气泡
+	if (win) {
+		eggTimerTok_ = win->onTimer.add([this](UINT id) {
+			if (id != kEggProgressTimerId) return;
+			if (eggLit_ < (int)authorChars_.size()) {
+				authorChars_[(size_t)eggLit_]->setColor(SettingTheme::textPrimary);
+				++eggLit_;
+			}
+			if (eggLit_ < (int)authorChars_.size()) return;
+			win->killTimer(kEggProgressTimerId);
+			if (cursorOverAuthor()) this->showEggTipNow();
+		});
+	}
 
 	// ① 配图不参与排版：绝对定位、最后创建（后加的子节点画在上面），位置在 layout() 里算。
 	//    标题用 marginTop 让出图的高度，上沿落进图纸里 → 「图压字」。
@@ -321,8 +370,17 @@ WinSettingAbout::WinSettingAbout(Ling::WinBase* parent) : Ling::Node(parent)
 
 	SpinLabel* checkIcon = nullptr;
 	checkBtn_ = iconButton(actions, Icon::Refresh, Lang::get(L"about.checkUpdate"), true,
-		[this]() { startCheck(); }, &checkLabel_, &checkIcon);
+		[this]() { onCheckButton(); }, &checkLabel_, &checkIcon);
 	checkBtn_->setMarginRight(10.f);
+	checkIconLabel_ = checkIcon;
+	checkBtn_->onEnter.add([this](Ling::Button*) {
+		checkHovered_ = true;
+		updateCheckTextColor();
+	});
+	checkBtn_->onLeave.add([this](Ling::Button*) {
+		checkHovered_ = false;
+		updateCheckTextColor();
+	});
 	if (checkIcon) {
 		spinIcon_ = [checkIcon](bool on) {
 			if (on) checkIcon->startSpin();
@@ -392,10 +450,14 @@ WinSettingAbout::WinSettingAbout(Ling::WinBase* parent) : Ling::Node(parent)
 		}
 	}
 
-	// 每日后台检查如果已经发现新版本，进来就直接显示出来
-	if (const auto pending = Update::pendingVersion(); !pending.empty()) {
-		setStatus(Lang::get(L"about.newVersion") + L" " + pending, L"", SettingTheme::success);
-	}
+	// 晾衣架检查结果回来后刷新（只服务本轮手动检查；进页面时保持「尚未检查」）
+	rackChangedTok_ = Update::onRackUpdateChanged().add([this]() {
+		rackChecked_ = true;
+		rackUpdate_ = Update::rackUpdateAvailable();
+		if (!appChecked_) return;
+		if (checking_) finishCheck();
+		else renderCheckResult();
+	});
 
 	// ⑥ 分隔线 + 底部信息（导入配置 / 导出配置 / 打开配置目录 / 版权 / 更新日志）
 	// 上下各 18：状态行上方 18、下方到分隔线也是 18，视觉上对称
@@ -496,10 +558,34 @@ WinSettingAbout::WinSettingAbout(Ling::WinBase* parent) : Ling::Node(parent)
 	crRow->setAlignItems(Ling::Align::Center);
 	crRow->setMarginTop(10.f);
 
-	auto* author = crRow->makeChild<Ling::Label>();
-	author->setText(L"© 城迷 · Liuyiran");
-	author->setFontSize(11.5f);
-	author->setColor(SettingTheme::textTertiary);
+	// 「© 城迷 · 」是普通文字：彩蛋只在停在 Liuyiran 上时触发
+	auto* copyright = crRow->makeChild<Ling::Label>();
+	copyright->setText(L"© 城迷 · ");
+	copyright->setFontSize(11.5f);
+	copyright->setColor(SettingTheme::textTertiary);
+
+	auto* author = crRow->makeChild<Ling::Button>();
+	author->setBg(0);
+	author->setBorder(0.f, 0);
+	author->setHoverBg(0);
+	author->setPadding(0.f, 0.f, 0.f, 0.f);
+	author->setFlexDirection(Ling::FlexDirection::Row);
+	author->setAlignItems(Ling::Align::Center);
+
+	// 彩蛋：Liuyiran 拆成逐个字符，悬停时像进度条一样从左到右点亮，
+	// 点满才弹出二维码气泡（直接弹出就不像彩蛋了）
+	authorChars_.clear();
+	for (const wchar_t* p = L"Liuyiran"; *p; ++p) {
+		auto* ch = author->makeChild<Ling::Label>();
+		ch->setText(std::wstring(1, *p));
+		ch->setFontSize(11.5f);
+		ch->setColor(SettingTheme::textTertiary);
+		ch->setFlexShrink(0.f);
+		authorChars_.push_back(ch);
+	}
+	authorBtn_ = author;
+	author->onEnter.add([this](Ling::Button*) { this->startEggProgress(); });
+	author->onLeave.add([this](Ling::Button*) { this->stopEggProgress(); });
 
 	auto* dot = crRow->makeChild<Ling::Label>();
 	dot->setText(L"·");
@@ -565,6 +651,151 @@ WinSettingAbout::WinSettingAbout(Ling::WinBase* parent) : Ling::Node(parent)
 
 WinSettingAbout::~WinSettingAbout()
 {
+	// 页面会被「切页」销毁：把挂在宿主窗口上的进度计时器和订阅一起撤掉，
+	// 否则定时器回调会打到已经释放的 this 上（切到别的页就崩）
+	if (win) {
+		win->killTimer(kEggProgressTimerId);
+		if (eggTimerTok_.value) win->onTimer.remove(eggTimerTok_);
+	}
+	if (rackChangedTok_.value) Update::onRackUpdateChanged().remove(rackChangedTok_);
+}
+
+// 彩蛋的第一步：悬停时把 Liuyiran 当进度条，从第一个字符开始逐个点亮。
+// 点满（kEggLitStepMs × 字数）才弹气泡；中途移走就整行复位、气泡也不弹。
+void WinSettingAbout::startEggProgress()
+{
+	if (!win) return;
+	resetEggChars();
+	win->setTimer(kEggLitStepMs, kEggProgressTimerId);
+}
+
+// 整行熄灭：只在气泡不显示时才做（气泡还在时文字要保持点亮，不能先熄）
+void WinSettingAbout::resetEggChars()
+{
+	eggLit_ = 0;
+	for (auto* ch : authorChars_) ch->setColor(SettingTheme::textTertiary);
+}
+
+void WinSettingAbout::showEggTipNow()
+{
+	if (!authorBtn_ || !win) return;
+	if (!eggTip_) {
+		eggTip_ = std::make_unique<SettingUi::HoverTip>(win);
+		// 气泡不管从哪条路收掉，都把进度条熄灭
+		eggTip_->onHidden = [this]() { resetEggChars(); };
+	}
+	// 文本列宽按说明句实测、块高按文字实测（说明句是两行），气泡就紧贴内容，不留空白
+	float textW = kEggTextWMax, textH = 0.f;
+	if (auto lay = Ling::D2D::makeTextLayout(kEggDesc, kEggBodySize * win->dpi)) {
+		DWRITE_TEXT_METRICS m{};
+		if (SUCCEEDED(lay->GetMetrics(&m))) {
+			textW = std::ceil(m.width / win->dpi) + 1.f;
+			textH = m.height / win->dpi;
+		}
+	}
+	// 块高 = 标题 + 2 + 说明 + 8 + 群名 + 2 + 群号；和二维码取大者
+	const float blockH = kEggTitleH + kEggTitleGap + textH + kEggSectionGap
+		+ kEggTitleH + kEggTitleGap + kEggNumberH;
+	const float contentH = std::max(kEggQr, blockH);
+	eggTip_->showCustom(authorBtn_, kEggQr + kEggGap + textW, contentH, [this, textW](Ling::Node* content) {
+		// 气泡配色跟着主题反着来（HoverTip 的 tipBg/tipFg）：深色主题给浅底 + 黑码，
+		// 浅色主题给深底 + 白码，两种主题下二维码都清晰
+		const bool dark = SettingTheme::isDark();
+		const uint32_t textMain = dark ? 0x262626FFu : 0xFFFFFFFFu;
+		const uint32_t textSub = dark ? 0x6A6A6AFFu : 0xB5B5B5FFu;
+
+		auto* row = content->makeChild<Ling::Node>();
+		row->setFlexDirection(Ling::FlexDirection::Row);
+		row->setAlignItems(Ling::Align::FlexStart);   // 文字列与二维码顶部对齐
+
+		auto* qr = row->makeChild<Ling::ImageBox>();
+		qr->setSize(kEggQr, kEggQr);
+		qr->setFlexShrink(0.f);
+		if (const auto path = writeResToTemp(dark ? L"qrcode_black" : L"qrcode_white",
+			dark ? L"SnowAir-qrcode-black.png" : L"SnowAir-qrcode-white.png"); !path.empty()) {
+			qr->loadImg(path, kEggQr * win->dpi, kEggQr * win->dpi);
+			std::error_code ec;
+			std::filesystem::remove(path, ec);
+		}
+
+		auto* col = row->makeChild<Ling::Node>();
+		// 不给固定宽度：让文字自己撑开，行宽由内容决定，气泡里多出来的几像素会被
+		// content 的水平居中均分到左右两侧，不会出现"右边比左边宽"
+		col->setFlexShrink(0.f);
+		col->setMarginLeft(kEggGap);
+		col->setFlexDirection(Ling::FlexDirection::Column);
+		col->setJustifyContent(Ling::Justify::Center);
+
+		// 文字颜色跟着气泡底色走：深色主题是浅底深字，浅色主题是深底浅字
+		auto* title = col->makeChild<Ling::Label>();
+		title->setText(L"扫码加入腾讯频道");
+		title->setFontSize(13.f);
+		title->setFontWeight(600);
+		title->setColor(textMain);
+		title->setFlexShrink(0.f);
+
+		auto* desc = col->makeChild<Ling::Label>();
+		desc->setText(kEggDesc);
+		desc->setFontSize(kEggBodySize);
+		desc->setColor(textSub);
+		desc->setMarginTop(kEggTitleGap);
+
+		// 群名也是标题（与上面同字号同字重），只是隔开一小段
+		auto* group = col->makeChild<Ling::Label>();
+		group->setText(L"用户交流群");
+		group->setFontSize(13.f);
+		group->setFontWeight(600);
+		group->setColor(textMain);
+		group->setMarginTop(kEggSectionGap);
+		group->setFlexShrink(0.f);
+
+		// 群号可点：跳到频道 / 群的加入页。字号与颜色跟说明文字一致，只靠手型光标提示可点
+		auto* number = col->makeChild<Ling::Button>();
+		number->setBg(0);
+		number->setBorder(0.f, 0);
+		number->setHoverBg(0);
+		number->setPadding(0.f, 0.f, 0.f, 0.f);
+		number->setMarginTop(kEggTitleGap);   // 群名也是标题：标题跟它下面一行同样只隔 2
+		number->setFlexDirection(Ling::FlexDirection::Row);
+		number->setAlignItems(Ling::Align::Center);
+		number->setJustifyContent(Ling::Justify::Start);   // 与上面两行左对齐（按钮默认居中）
+
+		auto* numberText = number->makeChild<Ling::Label>();
+		numberText->setText(L"191023631");
+		numberText->setFontSize(kEggBodySize);
+		numberText->setColor(textSub);
+		// 悬停变主题绿（= SettingTheme::brand），离开复原
+		number->onEnter.add([numberText](Ling::Button*) { numberText->setColor(SettingTheme::brand); });
+		number->onLeave.add([numberText, textSub](Ling::Button*) { numberText->setColor(textSub); });
+		number->onClick.add([this](Ling::Button*) {
+			// 点群号：气泡此刻正处于"光标在气泡上"的状态，必须无条件收，否则会压在新开的页面前
+			if (eggTip_) eggTip_->hideTip();
+			ShellExecuteW(nullptr, L"open", L"https://qm.qq.com/q/XtZoOTO1KU", nullptr, nullptr, SW_SHOWNORMAL);
+			});
+		});
+}
+
+void WinSettingAbout::stopEggProgress()
+{
+	if (win) win->killTimer(kEggProgressTimerId);
+	// 气泡还在显示（进度已点满、光标正往气泡上挪）：文字保持点亮，不能先熄；
+	// 气泡真正收掉时由 onHidden 回调复位
+	if (eggTip_ && eggTip_->isShown()) {
+		if (authorBtn_) eggTip_->hideFor(authorBtn_);
+		return;
+	}
+	resetEggChars();
+	// 悬停离开走 hideFor：光标已经在气泡上就不收，让人能移进去点群号
+	if (eggTip_ && authorBtn_) eggTip_->hideFor(authorBtn_);
+}
+
+bool WinSettingAbout::cursorOverAuthor() const
+{
+	if (!win || !win->hwnd || !authorBtn_) return false;
+	POINT cur{};
+	if (!GetCursorPos(&cur)) return false;
+	ScreenToClient(win->hwnd, &cur);
+	return authorBtn_->isPosIn(cur);
 }
 
 void WinSettingAbout::layout()
@@ -580,7 +811,26 @@ void WinSettingAbout::startCheck()
 {
 	// 不限制点击次数：每点一次就重开一轮，旧请求的结果按 seq 丢弃
 	const int seq = ++checkSeq_;
-	// 图标转起来、文字切成「检查中…」（和网页预览版一致）
+	checking_ = true;
+	appChecked_ = false;
+	appOk_ = false;
+	appUpdate_ = false;
+	// 上次检查已经查到的插件版本先当作本轮结果；新结果回来后会再刷新
+	rackChecked_ = !Update::rackLatestVersion().empty();
+	rackUpdate_ = rackChecked_ && Update::rackUpdateAvailable();
+	ocrUpdate_ = false;
+	for (int i = 0; i < OcrPack::kCount; ++i) {
+		const auto v = OcrPack::clampVariant(i);
+		if (OcrRuntimeManager::instance().hasOutdated(v) ||
+			OcrModelManager::instance().hasOutdated(v)) {
+			ocrUpdate_ = true;
+			break;
+		}
+	}
+	updateAction_ = false;
+	actionIsDownload_ = false;
+	// 先恢复成默认的刷新图标/「检查更新」，再切成「检查中…」
+	applyCheckButton();
 	if (spinIcon_) spinIcon_(true);
 	if (checkLabel_) checkLabel_->setText(Lang::get(L"about.checkingBtn"));
 	setStatus(Lang::get(L"about.checking"), L"", SettingTheme::textTertiary);
@@ -588,6 +838,75 @@ void WinSettingAbout::startCheck()
 	Update::checkRackUpdate(true);
 	// 网络请求在后台线程跑，回来经 dq 落到 onCheckFinished（内部用 weak 守卫页面存活）
 	fetchLatestTag(getWeakThis(), this, seq);
+}
+
+void WinSettingAbout::onCheckButton()
+{
+	if (!updateAction_) {
+		startCheck();
+		return;
+	}
+	// 有更新：点这一次就执行跳转/下载，然后把按钮恢复成「检查更新」；
+	// 再点一次才是重新检查。
+	const bool download = actionIsDownload_;
+	updateAction_ = false;
+	actionIsDownload_ = false;
+	applyCheckButton();
+	if (download) {
+		ShellExecuteW(nullptr, L"open", L"https://github.com/CM-idea/SnowAir/releases",
+			nullptr, nullptr, SW_SHOWNORMAL);
+	}
+	else if (auto app = Ling::App::get()) {
+		// 切页会析构当前关于页（含这个按钮）：推到下一轮 UI 队列，别在回调里切
+		app->dq.TryEnqueue([]() { WinSetting::init(6); });
+	}
+}
+
+void WinSettingAbout::applyCheckButton()
+{
+	if (!checkBtn_ || !checkLabel_ || !checkIconLabel_) return;
+	if (updateAction_) {
+		checkLabel_->setText(Lang::get(L"about.updateNowBtn"));
+		checkIconLabel_->setText(Icon::Download);
+		// 与版本号旁的「Lite beta」胶囊同一套配色：保留绿色描边；
+		// 悬停只轻微加深底色，不改变描边、不做明显的颜色跳变
+		checkBtn_->setBorder(1.f, SettingTheme::successBorder);
+		// 检查结果回来时鼠标通常还停在按钮上；Button 在 hover 态会忽略 setBorder，
+		// 所以必须同步 hover 边框色，否则浅色模式下会残留默认的深色描边
+		checkBtn_->setHoverBorderColor(SettingTheme::successBorder);
+		checkBtn_->setBg(SettingTheme::successBg);
+		checkBtn_->setHoverBg(SettingTheme::successHover);
+		checkBtn_->setBorderRadius(8.f);
+	}
+	else {
+		checkLabel_->setText(Lang::get(L"about.checkUpdate"));
+		checkIconLabel_->setText(Icon::Refresh);
+		checkBtn_->setBorder(1.f, SettingTheme::primary);
+		checkBtn_->setHoverBorderColor(SettingTheme::primary);
+		checkBtn_->setBg(SettingTheme::primary);
+		checkBtn_->setHoverBg(SettingTheme::primaryHover);
+		checkBtn_->setBorderRadius(8.f);
+	}
+	updateCheckTextColor();
+}
+
+void WinSettingAbout::updateCheckTextColor()
+{
+	if (!checkLabel_ || !checkIconLabel_) return;
+	const uint32_t fg = updateAction_
+		? (checkHovered_ ? SettingTheme::accentGreenHover : SettingTheme::accentGreen)
+		: SettingTheme::primaryForeground;
+	checkIconLabel_->setColor(fg);
+	checkLabel_->setColor(fg);
+}
+
+void WinSettingAbout::resetCheckButton()
+{
+	// 正在检查时别把「检查中…」改回默认
+	if (checking_) return;
+	updateAction_ = false;
+	actionIsDownload_ = false;
+	applyCheckButton();
 }
 
 void WinSettingAbout::setStatus(const std::wstring& text, const std::wstring& time, uint32_t dotColor)
@@ -600,24 +919,71 @@ void WinSettingAbout::setStatus(const std::wstring& text, const std::wstring& ti
 void WinSettingAbout::onCheckFinished(int seq, bool ok, const std::wstring& remoteTag)
 {
 	if (seq != checkSeq_) return;   // 又点了一次：这次结果已过期，丢弃
+
+	appChecked_ = true;
+	appOk_ = ok;
+	appUpdate_ = false;
+	if (ok) {
+		const auto remote = parseVersionTag(remoteTag);
+		const auto local = Util::getAppVersion();
+		appUpdate_ = remote > local;
+	}
+	if (rackChecked_) finishCheck();
+	else scheduleRackFallback(getWeakThis(), this, seq);
+}
+
+void WinSettingAbout::onRackCheckFallback(int seq)
+{
+	// 晾衣架请求超时/失败不会发事件：主程序结果回来后按缓存收尾
+	if (seq != checkSeq_ || !checking_ || !appChecked_ || rackChecked_) return;
+	rackChecked_ = true;
+	rackUpdate_ = Update::rackUpdateAvailable();
+	finishCheck();
+}
+
+void WinSettingAbout::finishCheck()
+{
+	if (!checking_ || !appChecked_) return;
+	checking_ = false;
+	renderCheckResult();
+}
+
+void WinSettingAbout::renderCheckResult()
+{
 	if (spinIcon_) spinIcon_(false);
-	if (checkLabel_) checkLabel_->setText(Lang::get(L"about.checkUpdate"));
+	updateAction_ = false;
+	actionIsDownload_ = false;
 
-	if (!ok) {
+	if (rackUpdate_ && appUpdate_) {
+		setStatus(Lang::get(L"about.rackAndAppUpdate"), Lang::get(L"about.justNow"), SettingTheme::success);
+		updateAction_ = true;
+		actionIsDownload_ = true;   // 两者都有：优先打开主程序下载页
+	}
+	else if (appUpdate_) {
+		setStatus(Lang::get(L"about.appUpdate"), Lang::get(L"about.justNow"), SettingTheme::success);
+		updateAction_ = true;
+		actionIsDownload_ = true;
+	}
+	else if (rackUpdate_ && ocrUpdate_) {
+		setStatus(Lang::get(L"about.componentUpdate"), Lang::get(L"about.justNow"), SettingTheme::success);
+		updateAction_ = true;       // 跳插件集成，由用户在插件页更新
+	}
+	else if (ocrUpdate_) {
+		setStatus(Lang::get(L"about.ocrUpdate"), Lang::get(L"about.justNow"), SettingTheme::success);
+		updateAction_ = true;
+	}
+	else if (rackUpdate_) {
+		setStatus(Lang::get(L"about.rackUpdate"), Lang::get(L"about.justNow"), SettingTheme::success);
+		updateAction_ = true;       // 只跳插件集成，仍由用户在插件页点更新
+	}
+	else if (appChecked_ && !appOk_) {
 		setStatus(Lang::get(L"about.checkFailed"), L"", SettingTheme::destructive);
-		return;
 	}
-
-	const auto remote = parseVersionTag(remoteTag);
-	const auto local = Util::getAppVersion();
-	if (remote > local) {
-		const auto verStr = wfmt(L"%d.%d.%d", remote[0], remote[1], remote[2]);
-		setStatus(Lang::get(L"about.newVersion") + L" " + verStr, L"", SettingTheme::success);
-		// 有新版本：直接打开 releases 页面（原本按钮就是这个行为）
-		ShellExecuteW(nullptr, L"open", L"https://github.com/CM-idea/SnowAir/releases",
-			nullptr, nullptr, SW_SHOWNORMAL);
-	}
-	else {
+	else if (appChecked_) {
 		setStatus(Lang::get(L"about.upToDate"), Lang::get(L"about.justNow"), SettingTheme::success);
 	}
+	else {
+		setStatus(Lang::get(L"about.notChecked"), L"", SettingTheme::textTertiary);
+	}
+	applyCheckButton();
 }

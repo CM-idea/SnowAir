@@ -493,7 +493,7 @@ void ShapeNumber::mouseMove(const float x, const float y)
 		// 与矩形一致：角/边缩放优先；角外一圈旋转
 		float lx, ly;
 		toLocal(x, y, lx, ly);
-		const float band = std::max(8.f * win->dpi, 6.f * win->dpi);
+		const float band = 8.f * win->dpi;
 		const int edge = hitBoxEdgeOrCorner(lx, ly, rect, band);
 		if (edge >= 0) {
 			hoverDraggerIndex = edge;

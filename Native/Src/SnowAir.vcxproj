@@ -102,7 +102,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(RepoRoot)$(Platform)\$(Configuration);$(RepoRoot)deps\zxing-cpp-311\build\core\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>dwmapi.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;libwebp.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>dwmapi.lib;shcore.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;libwebp.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -132,7 +132,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(RepoRoot)$(Platform)\$(Configuration);$(RepoRoot)deps\zxing-cpp-311\build\core\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>dwmapi.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;libwebp.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>dwmapi.lib;shcore.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;libwebp.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -163,7 +163,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(RepoRoot)$(Platform)\$(Configuration);$(RepoRoot)deps\zxing-cpp-311\build\core\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>dwmapi.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;libwebp.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>dwmapi.lib;shcore.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;libwebp.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OptimizeReferences>true</OptimizeReferences>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
@@ -197,7 +197,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(RepoRoot)$(Platform)\$(Configuration);$(RepoRoot)deps\zxing-cpp-311\build\core\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>dwmapi.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;libwebp.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>dwmapi.lib;shcore.lib;uxtheme.lib;windowsapp.lib;comctl32.lib;comdlg32.lib;windowscodecs.lib;imm32.lib;version.lib;mf.lib;mfreadwrite.lib;mfplat.lib;mfuuid.lib;ntdll.lib;userenv.lib;uiautomationcore.lib;oleacc.lib;libwebp.lib;ZXing.lib;Yoga.lib;Ling.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OptimizeReferences>true</OptimizeReferences>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
@@ -424,6 +424,7 @@
     <ClInclude Include="Win\PixLens.h" />
     <ClInclude Include="Win\CursorImage.h" />
     <ClInclude Include="Win\ClipPin.h" />
+    <ClInclude Include="Win\PinShake.h" />
     <ClInclude Include="Win\WinPin.h" />
     <ClInclude Include="Win\PinMenu.h" />
     <ClInclude Include="Win\MenuTheme.h" />
@@ -470,6 +471,17 @@
     <Copy SourceFiles="$(ProjectDir)..\..\images\About.png"
           DestinationFiles="$(ProjectDir)Res\About.png"
           SkipUnchangedFiles="true" />
+    <!-- 关于页彩蛋：悬停作者行时气泡里的二维码，源图在仓库根目录 images/。
+         深色主题的气泡是浅底，浅色主题的气泡是深底，所以两种配色各打一张。
+         源图不在时跳过拷贝（Res/ 下已有打包好的副本），免得整个构建因为缺图失败。 -->
+    <Copy SourceFiles="$(ProjectDir)..\..\images\黑色二维码.png"
+          DestinationFiles="$(ProjectDir)Res\QRCodeBlack.png"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(ProjectDir)..\..\images\黑色二维码.png')" />
+    <Copy SourceFiles="$(ProjectDir)..\..\images\白色二维码.png"
+          DestinationFiles="$(ProjectDir)Res\QRCodeWhite.png"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(ProjectDir)..\..\images\白色二维码.png')" />
   </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

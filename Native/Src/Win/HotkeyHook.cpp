@@ -16,6 +16,10 @@ namespace
 		UINT key{ 0 };
 		bool keyDown{ false };    // 主键已按下：长按只触发一次
 		bool swallowUp{ false };  // 这一次抬起也需要消费
+		// 纯修饰键绑定：连续按两次才触发（不吞键，避免破坏 Ctrl+C 等组合）
+		bool doubleTap{ false };
+		bool tapArmed{ false };
+		ULONGLONG lastTap{ 0 };
 	};
 
 	HWND g_wnd{ nullptr };            // UI 线程上的隐藏窗口：钩子线程 Post 到这里，回调在 UI 线程跑
@@ -59,7 +63,8 @@ namespace
 			else if (part == L"win" || part == L"lwin" || part == L"rwin") mods |= MOD_WIN;
 			else key = Ling::Util::strToKey(part);
 		}
-		return key != 0;
+		// 纯修饰键（Ctrl / Alt / Shift）也允许：作为"连按两次"的观察式绑定
+		return key != 0 || mods != 0;
 	}
 
 	UINT modBit(DWORD vk)
@@ -115,7 +120,31 @@ namespace
 		if (const UINT bit = modBit(kb->vkCode)) {
 			if (up) g_liveMods &= ~bit;
 			else g_liveMods |= bit;
+			// 纯修饰键双击绑定：只观察，不吞键。任何普通键按下都会清掉"第一下"，
+			// 这样 Ctrl+C、Ctrl+V 这类组合不会误判成双击 Ctrl。
+			const unsigned gen = t_gen;
+			for (size_t i = 0; i < g_bindings.size(); ++i) {
+				auto& b = g_bindings[i];
+				if (!b.doubleTap || b.mods != bit) continue;
+				if (up) { b.keyDown = false; continue; }
+				if (b.keyDown) continue;   // 长按重复
+				b.keyDown = true;
+				const ULONGLONG now = GetTickCount64();
+				if (b.tapArmed && now - b.lastTap <= 450) {
+					b.tapArmed = false;
+					if (g_wnd && PostMessageW(g_wnd, kMsgFire, (WPARAM)i, (LPARAM)gen))
+						b.tapArmed = false;
+				}
+				else {
+					b.tapArmed = true;
+					b.lastTap = now;
+				}
+			}
 			return CallNextHookEx(nullptr, code, wp, lp);
+		}
+		// 普通键打断"双击修饰键"的第一下
+		if (!up) {
+			for (auto& b : g_bindings) if (b.doubleTap) b.tapArmed = false;
 		}
 		// 代号取本线程装钩子那一刻的快照。读全局的话，一个没退干净的旧线程会冒充成
 		// 新一代去派发，动作就串了（按 F1 却去录音、按贴图却去截图）。
@@ -268,6 +297,8 @@ namespace
 			for (const auto& b : src) {
 				HookBinding hb;
 				if (!parseChord(b.chord, hb.mods, hb.key)) continue;
+				hb.doubleTap = hb.key == 0
+					&& (hb.mods == MOD_CONTROL || hb.mods == MOD_ALT || hb.mods == MOD_SHIFT);
 				parsed.push_back(hb);
 				callbacks.push_back(b.onFire);
 			}

@@ -29,6 +29,7 @@ public:
 	const std::wstring& curAnnotId() const { return curAnnotId_; }
 private:
 	void onCreated() override;
+	void onDpiAdopted() override;
 	void drawChrome(ID2D1DeviceContext* ctx) override;
 	void buildBar();
 	void makeSlot(const std::wstring& id);          // 按槽位 id 建一个控件（分隔符走 makeSpliter）

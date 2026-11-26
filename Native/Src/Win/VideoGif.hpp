@@ -3,11 +3,18 @@
 #include <cstdio>
 #include <cstring>
 #include <atomic>
+#include <mutex>
+#include <algorithm>
+#include <cmath>
 #include "pch.h"
 #include "Util.h"
 #include "Image/WebpCodec.h"
 #include <wincodec.h>
 #include "cgif/cgif.h"
+#include "MagnifierDraw.h"
+#include "CursorDraw.h"
+#include "LensSceneTap.h"
+#include "MouseFxDraw.h"
 
 namespace VideoGif {
 
@@ -29,24 +36,29 @@ namespace VideoGif {
         UINT fps{16};
         // 「动图格式」：0 = GIF（cgif），1 = WebP（动画封装的静态帧），2 = APNG
         int format{ 0 };
+        // 「光标放大 / 光标波纹组合」：采集线程自己轮询按键并写入倍率
+        std::atomic<float> cursorZoom{ 1.f };
+        std::atomic<bool> cursorZoomOn{ false };
+        // 放大动画期间由覆盖层接管光标，采集侧不画，避免视频里出现两个光标
+        std::atomic<bool> cursorHidden{ false };
+        // 局部放大：在抓到的帧里画圆形放大镜（屏幕上的镜头窗被排除在捕获之外）
+        std::atomic<bool> localMagnifierOn{ false };
+        std::atomic<int> localMagnifierSize{ 150 };
+        std::atomic<float> localMagnifierZoom{ 1.5f };
+        // 屏幕预览的取景源：采集线程每帧把干净帧里的一小块交给镜头（见 LensSceneTap.h）
+        std::shared_ptr<LensScene::Tap> lensTap;
+        std::mutex clickOverlayMutex;
+        MagnifierDraw::ClickOverlayFrame clickOverlay;
+        // 高亮提醒 / 线条跟随（排除捕获层，采集线程在镜头之后重画）
+        std::mutex mouseFxMutex;
+        MouseFxDraw::Frame mouseFx;
+        ULONGLONG zoomClickAt{ 0 };
+        bool zoomPrevBtn{ false };
+        bool zoomReady{ false };
     };
 
-    inline void drawCursor(HDC hMemDC, GifParam* param) {
-        CURSORINFO cursorInfo = { sizeof(CURSORINFO) };
-        GetCursorInfo(&cursorInfo);
-        if (cursorInfo.flags == CURSOR_SHOWING) {
-            ICONINFO iconInfo;
-            GetIconInfo(cursorInfo.hCursor, &iconInfo);
-            int localX = cursorInfo.ptScreenPos.x - (param->x + param->followX.load()) - iconInfo.xHotspot;
-            int localY = cursorInfo.ptScreenPos.y - (param->y + param->followY.load()) - iconInfo.yHotspot;
-            if (iconInfo.hbmMask) DeleteObject(iconInfo.hbmMask);
-            if (iconInfo.hbmColor) DeleteObject(iconInfo.hbmColor);
-            if (localX >= 0 && localX < param->w  && localY >= 0 && localY < param->h) {
-                DrawIconEx(hMemDC, localX, localY, cursorInfo.hCursor, 0, 0, 0, nullptr, DI_NORMAL | DI_DEFAULTSIZE);
-            }
-            DestroyIcon(cursorInfo.hCursor);
-        }
-    }
+    // 光标不在这里画：统一由 grabFrame 在镜头之后用 CursorDraw 叠加，
+    // 这样 GIF / MP4 只有一份光标画法（单色光标反色像素也不会消失）。
 
     // BGRA(sw×sh) → RGB(dw×dh)。尺寸相同则逐像素转换，否则面积平均缩小。
     inline void bgraToRgbScaled(const unsigned char* bgra, int sw, int sh,
@@ -97,8 +109,96 @@ namespace VideoGif {
         // 录制中拖动选区：抓取区域整体平移（同上，尺寸不变）
         BitBlt(hMemDC, 0, 0, param->w, param->h, hScreenDC,
             param->x + param->followX.load(), param->y + param->followY.load(), SRCCOPY);
-        drawCursor(hMemDC, param);
+        // 光标放大：采集线程自己按帧轮询按键，不依赖 UI 的钩子/定时器
+        if (param->cursorZoomOn.load(std::memory_order_relaxed)) {
+            const bool down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0
+                || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0
+                || (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
+            if (!param->zoomReady) {
+                param->zoomPrevBtn = down;
+                param->zoomReady = true;
+            }
+            else {
+                if (down && !param->zoomPrevBtn) param->zoomClickAt = GetTickCount64();
+                param->zoomPrevBtn = down;
+                const ULONGLONG age = GetTickCount64() - param->zoomClickAt;
+                float zoom = 1.f;
+                if (age < 320) {
+                    const float k = (float)age / 320.f;
+                    zoom = 1.f + 0.8f * std::sin(k * 3.14159265f);
+                }
+                param->cursorZoom.store(zoom);
+            }
+        }
+        else {
+            param->cursorZoom.store(1.f);
+        }
         GetDIBits(hMemDC, hBitmap, 0, param->h, (void*)bgra_buffer.data(), &bmi, DIB_RGB_COLORS);
+        const int originX = param->x + param->followX.load();
+        const int originY = param->y + param->followY.load();
+
+        // 一帧只取一次光标快照：镜头圆心和光标叠加都用它，帧内不再二次查询。
+        // 单击放大藏起光标时沿用上一次的本体偏移（镜头不跟着放大动画移位）。
+        static thread_local CursorDraw::Tracker cursorTracker;
+        static const CursorDraw::Snapshot kNoCursor;
+        const bool cursorHidden = param->cursorHidden.load(std::memory_order_relaxed);
+        const CursorDraw::Snapshot* shot = cursorHidden ? nullptr : cursorTracker.update(false);
+        const CursorDraw::Snapshot& cursorShot = shot ? *shot : kNoCursor;
+        POINT cursorPos{};
+        if (!GetCursorPos(&cursorPos)) cursorPos = POINT{};
+        // 屏幕预览的镜头从这里取景（干净帧：还没叠光标/镜头/单击层）
+        if (param->lensTap)
+            param->lensTap->publish(bgra_buffer.data(), param->w, param->h,
+                originX, originY, false);
+
+        if (param->localMagnifierOn.load(std::memory_order_relaxed)) {
+            const POINT anchor = cursorShot.valid ? cursorShot.pos : cursorPos;
+            float ox = 0.f, oy = 0.f;
+            cursorTracker.bodyOffset(ox, oy);   // 藏光标期间沿用同一偏移，镜头不跟着单击放大移位
+            MagnifierDraw::Spec lens{};
+            lens.center = POINT{ anchor.x + (LONG)ox, anchor.y + (LONG)oy };
+            lens.sizePx = (std::max)(32, param->localMagnifierSize.load(std::memory_order_relaxed));
+            lens.zoom = param->localMagnifierZoom.load(std::memory_order_relaxed);
+            // 负 biHeight 的 GetDIBits 输出是 top-down，不能沿用 MP4 的 bottom-up 寻址。
+            MagnifierDraw::draw(bgra_buffer, param->w, param->h, originX, originY, lens, false);
+        }
+        // 高亮提醒 / 线条跟随：镜头之后、光标之前（与屏幕层级一致）
+        {
+            MouseFxDraw::Frame mfx;
+            {
+                std::lock_guard<std::mutex> lock(param->mouseFxMutex);
+                mfx = param->mouseFx;
+            }
+            // 和这一帧里的光标对齐（原因同 MP4：UI 同步过来的圆心可能比帧时刻旧）
+            if (mfx.highlight) {
+                const POINT anchor = cursorShot.valid ? cursorShot.pos : cursorPos;
+                float ox = 0.f, oy = 0.f;
+                cursorTracker.bodyOffset(ox, oy);
+                mfx.highlightCenter = POINT{ anchor.x + (LONG)ox, anchor.y + (LONG)oy };
+            }
+            if (mfx.enabled && (mfx.trail || mfx.highlight)) {
+                std::vector<BYTE> fx;
+                int fxX = 0, fxY = 0, fxW = 0, fxH = 0;
+                if (MouseFxDraw::render(fx, fxX, fxY, fxW, fxH, mfx, (int64_t)GetTickCount64())) {
+                    MouseFxDraw::blend(bgra_buffer, param->w, param->h, false, originX, originY,
+                        fx.data(), fxX - originX, fxY - originY, fxW, fxH);
+                }
+            }
+        }
+        // 光标在镜头之后按 1:1 补画，与 MP4 / 屏幕保持同一层级。
+        if (!cursorHidden && cursorShot.visible && cursorShot.valid) {
+            CursorDraw::blend(bgra_buffer, param->w, param->h, originX, originY, false,
+                cursorShot.pos, cursorShot,
+                (std::max)(1.f, param->cursorZoom.load(std::memory_order_relaxed)));
+        }
+        // 独立单击层不进抓帧源；最后在镜头之上补画，波纹和放大光标都不会被二次放大。
+        MagnifierDraw::ClickOverlayFrame clickOverlay;
+        {
+            std::lock_guard<std::mutex> lock(param->clickOverlayMutex);
+            clickOverlay = param->clickOverlay;
+        }
+        MagnifierDraw::drawClickOverlay(bgra_buffer, param->w, param->h,
+            originX, originY, clickOverlay, false);
         bgraToRgbScaled(bgra_buffer.data(), param->w, param->h, rgb_buffer.data(), ow, oh);
     }
 

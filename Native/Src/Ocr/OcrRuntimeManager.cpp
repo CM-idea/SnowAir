@@ -4,13 +4,16 @@
 #include "OcrPackFetch.h"
 #include "PluginPaths.h"
 #include "LwPpOcrEngine.h"
+#include <fstream>
 #include <thread>
 
 namespace {
 	// lw.PPOCR.C 原生运行时包（与模型包同一个发布号）
 	const std::wstring kNativeUrl =
-		L"https://github.com/lxw112190/lw.PPOCR.C/releases/download/v1.2.0/"
-		L"lw.PPOCR.C-1.2.0-windows-x64-msvc.zip";
+		L"https://github.com/lxw112190/lw.PPOCR.C/releases/download/v1.2.2/"
+		L"lw.PPOCR.C-1.2.2-windows-x64-msvc.zip";
+	constexpr const char* kRuntimeVersion = "1.2.2";
+	constexpr const wchar_t* kRuntimeMarker = L"runtime.id";
 
 	// 主 DLL 必须装成；其余是它依赖的 VC 运行库（包里自带，取不到就跳过，系统多半也有）。
 	// ucrtbase.dll / api-ms-win-* 不在复制之列：Win10 自带，放一份到插件目录反而会和系统那份打架。
@@ -41,8 +44,24 @@ bool OcrRuntimeManager::isInstalled(OcrPackVariant v) const
 {
 	std::error_code ec;
 	auto dll = PluginPaths::ocrRuntime(v) / L"lw_ppocr_c.dll";
-	return std::filesystem::is_regular_file(dll, ec)
-		&& std::filesystem::file_size(dll, ec) > 100 * 1024;
+	if (!std::filesystem::is_regular_file(dll, ec) || std::filesystem::file_size(dll, ec) <= 100 * 1024)
+		return false;
+	// 运行时也带发布号：旧版 1.2.0 的 DLL 不满足 1.2.2，需重新下载覆盖
+	std::ifstream marker(PluginPaths::ocrRuntime(v) / kRuntimeMarker, std::ios::binary);
+	std::string value;
+	std::getline(marker, value);
+	while (!value.empty() && (value.back() == '\r' || value.back() == '\n' || value.back() == ' '))
+		value.pop_back();
+	return value == kRuntimeVersion;
+}
+
+bool OcrRuntimeManager::hasOutdated(OcrPackVariant v) const
+{
+	std::error_code ec;
+	auto dll = PluginPaths::ocrRuntime(v) / L"lw_ppocr_c.dll";
+	if (!std::filesystem::is_regular_file(dll, ec) || std::filesystem::file_size(dll, ec) <= 100 * 1024)
+		return false;
+	return !isInstalled(v);   // 有 DLL，但 marker 不是当前版本
 }
 
 void OcrRuntimeManager::download(OcrPackVariant v,
@@ -99,6 +118,15 @@ void OcrRuntimeManager::download(OcrPackVariant v,
 		if (!gotMain) {
 			if (done) done(false, L"lw_ppocr_c.dll 复制失败");
 			return;
+		}
+		// 标记最后写：下次 isInstalled 才会认这个版本
+		{
+			std::ofstream marker(dir / kRuntimeMarker, std::ios::binary | std::ios::trunc);
+			marker << kRuntimeVersion;
+			if (!marker) {
+				if (done) done(false, L"运行时标记写入失败");
+				return;
+			}
 		}
 		if (progress) progress(1.f);
 		if (done) done(true, {});

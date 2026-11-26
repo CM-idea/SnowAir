@@ -7,6 +7,8 @@ class OcrRuntimeManager {
 public:
 	static OcrRuntimeManager& instance();
 	bool isInstalled(OcrPackVariant v) const;
+	// 已装但发布号不是当前内置版本（需要重新下载覆盖）
+	bool hasOutdated(OcrPackVariant v) const;
 	void download(OcrPackVariant v,
 		std::function<void(float)> progress,
 		std::function<void(bool ok, std::wstring err)> done);

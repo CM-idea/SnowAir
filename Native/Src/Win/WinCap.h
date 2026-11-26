@@ -1,9 +1,12 @@
 #pragma once
 #include "AnnotHost.h"
 #include "CutMask.h"
+#include "../Shape/LaserStroke.h"
+#include "MouseFxParams.h"
 
 class CapLong;
 class CapVideo;
+class ToolbarWindow;
 class ToolOcr;
 class ToolQrcode;
 // 录制期的选框层：独立的透明置顶窗，只画选框描边/控点/标签，并用 WDA_EXCLUDEFROMCAPTURE
@@ -83,7 +86,6 @@ public:
 	// 点工具栏「快照」：展开/收起快照属性栏
 	void toggleDemoSnapshotBar();
 	void closeDemoSnapBar();
-	bool demoSnapBarOpen() const { return demoSnapBarOpen_; }
 	void createDemoSnapshot();       // 把当前画面 + 标注固化为一个新快照
 	void deleteDemoSnapshot();       // 删除当前选中的快照
 	void saveDemoSnapshots();        // 按顺序批量导出为 base-1、base-2…
@@ -102,7 +104,7 @@ public:
 	// 退出演示的统一入口：有未保存快照时先弹确认，避免 ✕ / Esc 误触把快照一起清掉
 	void requestExitDemoCanvas();
 	Microsoft::WRL::ComPtr<ID2D1Bitmap1> getCutImg();
-	void layoutTool(Ling::WinBase* tool);
+	void layoutTool(ToolbarWindow* tool);
 	void layoutTools() override;
 	void onHistoryChanged() override;
 	bool queryMainBarAnchor(MainBarAnchor& out) const override;
@@ -113,6 +115,8 @@ public:
 	const std::wstring& focusAppName() const { return focusAppName_; }
 	// 「录制中显示按键」：全局键盘钩子把按键组合写进来（钩子回调在 UI 线程，可直接调用）
 	void onGlobalKeyCombo(const std::wstring& text);
+	// 「鼠标单击效果」：全局鼠标钩子把左/右/中键按下写进来（同样在 UI 线程）
+	void onGlobalMouseDown(WPARAM msg, POINT screenPt);
 	// 「显示光标」工具按钮：截图/导出时把会话开始那一刻的系统光标一起拍进去
 	void toggleShowCursor();
 	// 「系统按键」派发：按键 → 命令表 → 与工具栏点击**同一批**入口。true = 已处理
@@ -193,7 +197,16 @@ public:
 	bool handleLayerCancel(bool fromToolbar = false);
 public:
 	std::unique_ptr<CutMask> cutMask;
+	// 局部放大滚轮调倍率（全局鼠标钩子需要调用）
+	bool magnifierActive() const;
+	// 「局部放大」是否开启：设置里选的就是它，或本次录制中用快捷键临时叠加（override）
+	bool localMagnifierOn() const;
+	// 设置页改了「鼠标轨迹效果」：临时叠加状态作废，按新选择来
+	void onTrailEffectChanged();
+	bool adjustMagnifierZoom(int wheelDelta);
 private:
+	friend class SelectionChrome;
+	friend class CapVideo;
 	WinCap();
 	void onCreated() override;
 	void layout() override;
@@ -220,6 +233,11 @@ private:
 	// Ctrl+C 复制用的色值文本：RGB 模式下补全成 rgb(255,0,0)
 	std::wstring pixColorCopyText() const;
 	void onKey(UINT key);
+	// 中文输入法激活时，字符键会被投递成 WM_KEYDOWN + VK_PROCESSKEY（真实按键只剩在
+	// lParam 的扫描码里）。这里在 Ling 派发 onKeyDown 之前还原，否则「系统按键」里所有
+	// 不带修饰键的键（`、W/Q/F、1~9）在中文状态下都命中不了。
+	static LRESULT CALLBACK keySubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+		UINT_PTR id, DWORD_PTR ref);
 	// 录屏中（未穿透）按 Esc：先弹确认框，确认才结束并放弃本次录制
 	void confirmExitRecording();
 	void onWheel(POINT pos, float space);
@@ -265,6 +283,8 @@ private:
 	bool nudgeSelectionByOutsideWheel(POINT pos, int dir);
 	bool nudgeSelectionByArrow(int dx, int dy);
 	bool sizePreviewOrigin(float& cx, float& cy, float& halfSpan) const override;
+	// 荧光笔混合的 backdrop：长图预览底图与标注坐标不是 1:1，暂不做混合
+	bool annotBlendBackdropAvailable() const override;
 	POINT toImgPos(const POINT& pos) const override;
 	D2D1_POINT_2F annotToClientPt(float ax, float ay) const override;
 	D2D1_POINT_2F clientToAnnotPt(float cx, float cy) const override;
@@ -298,12 +318,16 @@ private:
 	std::unique_ptr<SelectionChrome> chrome_;
 	Ling::Canvas* canvas{ nullptr };
 	POINT pixPos{}, pixFocus{};
+	// 取景放大镜的唯一缩放来源：取样点所在显示器。setPixPosAt 写入，paintPix 复用，
+	// 保证外壳、内容倍率、十字与字号永远由同一个 dpi 推导。
+	float pixLensDpi_{ 0.f };
 	// 放大镜画面区的圆角裁切缓存：几何/图层按「设备上下文 + dpi」复用，
 	// 拖动时每帧只 Push/Pop，不重建几何（不拖慢跟手感）。
 	Microsoft::WRL::ComPtr<ID2D1RoundedRectangleGeometry> pixClipGeom_;
 	Microsoft::WRL::ComPtr<ID2D1Layer> pixClipLayer_;
 	ID2D1DeviceContext* pixClipCtx_{ nullptr };
 	float pixClipRadius_{ 0.f };
+	float pixClipDpi_{ 0.f };
 	bool isPress{ false }, isClosed{ false }, isMouseTransparent{ false };
 	// 「隐藏/显示工具栏」的当前状态（系统按键 F1，只有命令键能触发）。随会话重建，不落盘
 	bool toolHidden{ false };
@@ -381,8 +405,6 @@ private:
 	bool demoSnapsDirty_{ false };
 	bool snapshotCapturing_{ false }; // 抓冻结画面时跳过标注/光标/高亮/按键层
 	Microsoft::WRL::ComPtr<ID2D1Bitmap1> grabDemoSnapshotBg();
-	std::vector<std::unique_ptr<ShapeBase>> cloneVisibleShapes(
-		const std::vector<std::unique_ptr<ShapeBase>>& src);
 	void demoSnapshotReturnToLive();   // 选中快照 → 实时（标注各回各家）
 	void demoSnapshotDetachSelection(); // 切换前断开裸指针
 	void endDemoSnapshotSession();     // 退出演示时清空快照
@@ -427,8 +449,10 @@ private:
 	void restoreTemporaryLaser();              // 白板属性栏收起时还原临时取消的渐隐画笔
 	// 视频录制期间的光标覆盖物。穿透后本窗口收不到鼠标移动事件，故统一用定时器轮询光标：
 	//   · 「选框鼠标跟随」：录制中且处于穿透态时，光标贴近选区边缘自动平移选区
-	//   · 「鼠标高亮提醒」：光标下垫一个半透明圆形色块，便于在录屏里找到光标
+	//   · 「鼠标轨迹效果」：高亮圆 / 会变短渐隐的跟随线条
+	//   · 「鼠标单击效果」：单击波纹 / 光标放大（单击由全局鼠标钩子写进来）
 	static constexpr UINT recCursorTimerId{ 0x5302 };
+	static constexpr UINT demoMagnifierTimerId{ 0x5303 };
 	// 还没框选时 Ctrl+C 只取色：成功提示显示一会儿后自动退出截图
 	static constexpr UINT colorCopyCloseTimerId{ 0x5501 };
 	// 框选定格后的自动扫码去抖：只有「拖边/挪选区」这种连续动作才需要，定格那一下直接扫
@@ -446,14 +470,48 @@ private:
 	// 跟随平移的平滑参数：每帧只走剩余越界距离的 ease 倍，并限制单帧最大位移
 	static constexpr float selFollowEase{ 0.35f };
 	static constexpr float selFollowMaxStep{ 24.f };  // 逻辑像素/帧
-	static constexpr float mouseHlRadius{ 21.f };     // 高亮圆半径（逻辑像素，直径 42）
-	static constexpr float kMouseHlAlpha{ 0.35f };    // 高亮圆的透明度（固定）
+	static constexpr float mouseHlRadius{ MouseFx::highlightRadius };  // 逻辑像素（直径 50）
+	static constexpr float kMouseHlAlpha{ MouseFx::highlightAlpha };   // 高亮圆的透明度（固定）
+	// 「线条跟随」：一段会变短、渐隐的画笔轨迹（复用演示画布的 LaserStroke，
+	// 笔宽随点龄收细、队尾锥形收尖）
+	static constexpr float mouseTrailWidth{ 5.f };        // 笔迹直径（逻辑像素）
+	// 「鼠标单击效果」：波纹 / 光标放大
+	static constexpr ULONGLONG clickRippleLifeMs{ MouseFx::rippleLifeMs };
+	static constexpr ULONGLONG clickZoomLifeMs{ 320 };
+	static constexpr float clickZoomScale{ 1.8f };        // 放大峰值倍率
 	void updateSelFollowCursor();
-	void updateMouseHighlight();
+	void updateMouseFx();                             // 高亮/轨迹/单击效果统一轮询（原 updateMouseHighlight）
+	// 高亮/线条的状态推进：普通录屏与演示画布录制共用（lineAllowed=false 时让位给渐隐画笔）
+	bool updateTrailFx(POINT screenCur, bool haveCursor, int trailMode, bool lineAllowed, int64_t nowMs);
 	void paintMouseHighlight(ID2D1DeviceContext* ctx);
+	void updateDemoMagnifier();
+	void updateDemoClickFx();
+	bool magnifierModifierDown() const;
+	void paintMouseTrail(ID2D1DeviceContext* ctx);
+	void paintClickRipple(ID2D1DeviceContext* ctx);
+	void paintZoomCursor(ID2D1DeviceContext* ctx);   // 放大动画期间由覆盖层画实时光标
+	ID2D1Bitmap1* ensureCursorBitmap();               // 延迟建光标位图（paintCursor / 单击放大共用）
+	ID2D1SolidColorBrush* ensureMouseFxBrush();       // 轨迹/波纹共用笔刷（颜色变了才重建）
+	struct MouseClickFx { POINT pt; ULONGLONG t; };
+	LaserStroke::Trail mouseTrail_;
+	std::vector<MouseClickFx> mouseClicks_;
+	// 鼠标按键沿检测（左/右/中）：16ms 轮询，不依赖全局鼠标钩子是否安装成功
+	bool mouseBtnDown_[3]{ false, false, false };
+	bool zoomCursorHidden_{ false };
+	// 演示画布里用快捷键临时开关局部放大（不改设置；录制时设置开了也会自动显示）
+	bool demoMagnifierTemp_{ false };
+	// 录屏中按「局部放大」快捷键：-1 跟随设置、0 本次会话强制关、1 临时叠加（线条/高亮照常画）
+	int magnifierOverride_{ -1 };
+	bool lensAboveOverlay_{ true };
+	float magnifierZoom_{ 1.5f };
+	// 镜头圆心相对光标热点的偏移（光标本体中心）：只在光标可见时更新。
+	// 单击放大动画会把系统光标临时藏起来，此时不能重新取偏移，否则镜头会跟着放大动画移位。
+	POINT magBodyOffset_{ 0, 0 };
 	POINT mouseHlPos_{ -1, -1 };   // 上次画高亮时的圆心（客户区，已含光标本体偏移）；没动就不重画
 	UINT32 mouseHlColor_{ 0 };     // 笔刷对应的色号（颜色改了要重建笔刷）
 	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> mouseHlBrush_;
+	UINT32 mouseFxColor_{ 0 };
+	Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> mouseFxBrush_;
 	ULONGLONG lastDownTime{ 0 };
 	POINT lastDownPos{ 0, 0 };
 	bool hideScreenImg{ false };

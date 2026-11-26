@@ -28,7 +28,7 @@ ShapeLine::ShapeLine(AnnotHost* win, bool highlighter, int kind) : ShapeBase(win
 	auto toolSub = win->toolSub.get();
 	auto color = toolSub->getSelectedColor();
 	if (highlighter) {
-		// 荧光笔：与画笔共用滑条（显示 4 = 实际 20）+ 透明 + 平头 + 不虚线
+		// 荧光笔：与画笔共用滑条（显示 4 = 实际 28）+ 透明 + 平头 + 不虚线
 		this->highlighter = true;
 		color.a = std::max(0.1f, std::min(1.f, toolSub->penMarkerOpacity / 100.f));
 		strokeWidth = toolSub->getSliderVal() * HighlighterWidthScale;
@@ -96,11 +96,24 @@ void ShapeLine::penClearPreview()
 	poly.penPreview = false;
 }
 
-// 二次选中后修改样式时，仅应用线宽 / 虚线 / 圆头（荧光笔的宽度与透明度不属于箭头属性栏，跳过）。
+// 二次选中后修改样式：
+//  - 荧光笔：透明度 / 宽度（滑条逻辑值 × 倍数）/ 颜色一起实时作用，拖动透明度的预览就来自这里
+//  - 箭头/线段：仅应用线宽 / 虚线 / 圆头
 void ShapeLine::applyStyle()
 {
 	auto* ts = win->toolSub.get();
-	if (!ts || highlighter) return;
+	if (!ts) return;
+	if (highlighter) {
+		// 渐隐画笔（laser）属性栏不是荧光笔的编辑界面：不要顺手改到选中的荧光笔
+		if (ts->isPenFade) return;
+		auto color = ts->getSelectedColor();
+		color.a = std::clamp(ts->penMarkerOpacity / 100.f, 0.05f, 1.f);
+		strokeWidth = std::max(1.f, ts->getSliderVal() * HighlighterWidthScale);
+		brush->SetColor(color);
+		ensureStrokeStyle();
+		win->refresh();
+		return;
+	}
 	strokeWidth = std::max(1.f, ts->getSliderVal());
 	isDash = ts->isArrowDash;
 	isRound = ts->isArrowRound;
@@ -110,10 +123,24 @@ void ShapeLine::applyStyle()
 }
 
 // 反向同步：把本形状的属性写回工具状态，供重新打开该标注的工具时展示。
+// 荧光笔走「画笔」属性栏：形态、透明度、宽度（换算回画笔滑条的逻辑值）都要回填，
+// 这样二次选中荧光笔标注后，透明度气泡打开的就是它自己的值。
 void ShapeLine::syncToolFromShape() const
 {
 	auto* ts = win->toolSub.get();
-	if (!ts || highlighter) return;
+	if (!ts) return;
+	if (highlighter) {
+		if (ts->isPenFade) return;   // 渐隐画笔栏不承载荧光笔属性
+		ts->isPenMarker = true;
+		ts->isPenSoft = false;
+		ts->isPenDash = false;
+		ts->isPenFade = false;
+		D2D1_COLOR_F c{};
+		if (brush) c = brush->GetColor();
+		ts->penMarkerOpacity = std::clamp((int)std::lround(c.a * 100.f), 10, 100);
+		ts->setShapeSliderVal(L"pen", strokeWidth / HighlighterWidthScale);
+		return;
+	}
 	ts->isLine = true;
 	ts->isArrowDash = isDash;
 	ts->isArrowRound = isRound;
@@ -124,6 +151,9 @@ UINT32 ShapeLine::styleColorValue() const
 {
 	D2D1_COLOR_F c{};
 	if (brush) c = brush->GetColor();
+	// 荧光笔的透明度由 penMarkerOpacity 单独表达：色板只认 RGB，
+	// 否则会把半透明色当成自定义色写进色板（自定义色块也跟着变透）
+	if (highlighter) c.a = 1.f;
 	return ShapeBase::packColor(c);
 }
 
@@ -322,6 +352,16 @@ void ShapeLine::paint(ID2D1DeviceContext* ctx)
 		return;
 	}
 	auto factory = Ling::D2D::get()->d2dFactory.Get();
+	// 荧光笔：以截图位图做 backdrop 做「滤色」混合，文字不会被盖掉；
+	// 宿主没有 1:1 底图或效果创建失败时返回 false，继续走普通半透明笔迹。
+	if (highlighter && poly.pts.size() >= 2) {
+		D2D1_COLOR_F color = brush ? brush->GetColor() : D2D1::ColorF(D2D1::ColorF::Yellow);
+		if (win->paintHighlighterBlend(ctx, poly.pts.front(), poly.pts.back(),
+				strokeWidth, color)) {
+			popMask();
+			return;
+		}
+	}
 	if (kind_ == Wave) {
 		auto wave = buildWavePath();
 		if (wave) ctx->DrawGeometry(wave.Get(), brush.Get(), strokeWidth, strokeStyle.Get());
@@ -476,7 +516,8 @@ D2D1_RECT_F ShapeLine::bounds() const
 		l = (std::min)(l, p.x); t = (std::min)(t, p.y);
 		r = (std::max)(r, p.x); b = (std::max)(b, p.y);
 	}
-	const float pad = strokeWidth * (highlighter ? HighlighterWidthScale : 1.f) + 6.f * win->dpi;
+	// strokeWidth 已经是实际绘制宽度（荧光笔在构造时已经乘过倍数），这里不能再乘一次
+	const float pad = strokeWidth + 6.f * win->dpi;
 	return D2D1::RectF(l - pad, t - pad, r + pad, b + pad);
 }
 
@@ -662,10 +703,20 @@ void ShapeLine::mouseMove(const float x, const float y)
 void ShapeLine::mouseWheel(const float x, const float y, const short delta)
 {
 	(void)x; (void)y;
-	auto next = strokeWidth + (delta < 0 ? -win->dpi : win->dpi);
-	auto applied = win->toolSub->setShapeSliderVal(L"arrow", next);
-	if (applied == strokeWidth) return;
-	strokeWidth = applied;
+	if (highlighter) {
+		// 荧光笔：滑条一档 = 1 个逻辑单位，实际宽度还要乘倍数，滚轮也按同一口径走
+		const float next = strokeWidth + (delta < 0 ? -1.f : 1.f) * HighlighterWidthScale * win->dpi;
+		const auto applied = win->toolSub->setShapeSliderVal(L"pen", next / HighlighterWidthScale);
+		const float newWidth = applied * HighlighterWidthScale;
+		if (newWidth == strokeWidth) return;
+		strokeWidth = newWidth;
+	}
+	else {
+		const auto next = strokeWidth + (delta < 0 ? -win->dpi : win->dpi);
+		const auto applied = win->toolSub->setShapeSliderVal(L"arrow", next);
+		if (applied == strokeWidth) return;
+		strokeWidth = applied;
+	}
 	ensureStrokeStyle();
 	win->refresh();
 }

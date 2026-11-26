@@ -26,8 +26,8 @@ public:
 	// 角度数字的字号（逻辑像素）：比普通线上文字大一点，读数更清楚
 	static constexpr float AngleLabelFontSize{ 18.f };
 	float angleLabelFontPx() const { return AngleLabelFontSize * win->dpi; }
-	// 荧光笔宽度 = 画笔滑条值 × 该倍数（滑条显示 4 时实际 20）
-	static constexpr float HighlighterWidthScale{ 5.f };
+	// 荧光笔宽度 = 画笔滑条值 × 该倍数（滑条显示 4 时实际 28）
+	static constexpr float HighlighterWidthScale{ 7.f };
 	bool isHighlighter() const { return highlighter; }
 	~ShapeLine();
 	std::unique_ptr<ShapeBase> clone(AnnotHost* host) const override

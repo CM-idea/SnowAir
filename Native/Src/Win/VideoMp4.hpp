@@ -14,6 +14,10 @@
 #include <functional>
 #include "../compat/CComPtr.h"
 #include "ScreenCapture.h"   // 竖屏旋转映射（与截图共用同一份实现）
+#include "MagnifierDraw.h"
+#include "CursorDraw.h"
+#include "LensSceneTap.h"
+#include "MouseFxDraw.h"
 #include <codecapi.h>
 #include <mfidl.h>
 #include <mfapi.h>
@@ -388,34 +392,14 @@ public:
         return true;
     }
 
-    // 抓一帧（deskRect 是桌面坐标）并合成光标。CAPTUREBLT 把分层窗口也带上 ——
-    // 鼠标穿透时本程序的标注层就是分层窗口，不带它录出来会缺标注。
-    bool GrabGdi(bool withCursor, const RECT& deskRect)
+    // 抓一帧（deskRect 是桌面坐标）。光标不在这里画：它统一由采集出口的
+    // CursorDraw 在镜头之后按 1:1 叠加，SDR/HDR/GIF 三条路只有一份光标的画法。
+    bool GrabGdi(const RECT& deskRect)
     {
         if (!gdiScreen || !gdiMem || !gdiBits) return false;
         if (!BitBlt(gdiMem, 0, 0, gdiW, gdiH, gdiScreen, deskRect.left, deskRect.top,
                 SRCCOPY | CAPTUREBLT))
             return false;
-        if (withCursor)
-        {
-            CURSORINFO ci{ sizeof(ci) };
-            if (GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING))
-            {
-                ICONINFO info{};
-                // GetIconInfo 失败时 hot spot 是栈上垃圾，下面不能拿它定位
-                if (GetIconInfo(ci.hCursor, &info))
-                {
-                    const int cx = ci.ptScreenPos.x - deskRect.left - (int)info.xHotspot;
-                    const int cy = ci.ptScreenPos.y - deskRect.top - (int)info.yHotspot;
-                    if (cx > -64 && cy > -64 && cx < gdiW && cy < gdiH)
-                        DrawIconEx(gdiMem, cx, cy, ci.hCursor, 0, 0, 0, nullptr,
-                            DI_NORMAL | DI_DEFAULTSIZE);
-                }
-                if (info.hbmMask) DeleteObject(info.hbmMask);
-                if (info.hbmColor) DeleteObject(info.hbmColor);
-                // 光标句柄是系统共享的，不能 DestroyIcon
-            }
-        }
         const size_t need = (size_t)gdiW * (size_t)gdiH * 4;
         if (buf.size() != need) buf.resize(need);
         memcpy(buf.data(), gdiBits, need);
@@ -482,142 +466,15 @@ public:
         return true;
     }
 
-    // —— HDR 光标叠加 ——
-    // FP16 复制表面没有 GDI 兼容位，光标不能像 SDR 那样用 DrawIconEx 直接画进 GPU 纹理。
-    // 这里把光标图形渲染成一张 32 位位图（老式光标按掩码补 alpha），再按 alpha 混到
-    // 色调映射后的 BGRA8 画面上；混合放在 CPU 侧，是因为这时的画面已经是普通内存里的
-    // 紧凑 BGRA 缓冲，不需要再为光标建一张 GPU 纹理。
-    struct CURSORSHOT
-    {
-        HCURSOR cur = nullptr;
-        int w = 0, h = 0, hotX = 0, hotY = 0;
-        std::vector<BYTE> pix;   // top-down BGRA
-    };
-    CURSORSHOT cursorShot;
+    // 光标 / 镜头统一在采集出口按「先镜头、后光标」合成（见 CursorDraw.h、MagnifierDraw.h）。
 
-    bool ensureCursorShot(HCURSOR cur)
-    {
-        if (cursorShot.cur == cur && !cursorShot.pix.empty()) return true;
-        ICONINFO ii{};
-        if (!cur || !GetIconInfo(cur, &ii)) return false;
-        auto cleanup = [&] {
-            if (ii.hbmColor) DeleteObject(ii.hbmColor);
-            if (ii.hbmMask) DeleteObject(ii.hbmMask);
-        };
-
-        int width = 32, height = 32;
-        if (ii.hbmColor) {
-            BITMAP bm{};
-            if (GetObject(ii.hbmColor, sizeof(bm), &bm)) { width = bm.bmWidth; height = bm.bmHeight; }
-        }
-        else if (ii.hbmMask) {
-            BITMAP bm{};
-            if (GetObject(ii.hbmMask, sizeof(bm), &bm)) { width = bm.bmWidth; height = bm.bmHeight / 2; }
-        }
-        width = width < 1 ? 1 : (width > 256 ? 256 : width);
-        height = height < 1 ? 1 : (height > 256 ? 256 : height);
-
-        HDC screen = GetDC(nullptr);
-        HDC mem = screen ? CreateCompatibleDC(screen) : nullptr;
-        BITMAPINFO bmi{};
-        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = width;
-        bmi.bmiHeader.biHeight = -height;   // top-down：与热点坐标一致
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-        void* bits = nullptr;
-        HBITMAP dib = mem ? CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
-        bool ok = false;
-        if (dib && bits)
-        {
-            HGDIOBJ old = SelectObject(mem, dib);
-            memset(bits, 0, (size_t)width * (size_t)height * 4);
-            DrawIconEx(mem, 0, 0, cur, width, height, 0, nullptr, DI_NORMAL);
-
-            cursorShot.pix.assign((size_t)width * (size_t)height * 4, 0);
-            memcpy(cursorShot.pix.data(), bits, cursorShot.pix.size());
-
-            // 老式光标只有 AND/XOR 掩码、没有 alpha：DrawIconEx 之后 alpha 仍全 0，按掩码补
-            bool anyAlpha = false;
-            for (size_t i = 3; i < cursorShot.pix.size(); i += 4) {
-                if (cursorShot.pix[i]) { anyAlpha = true; break; }
-            }
-            BITMAP bmMask{};
-            if (!anyAlpha && ii.hbmMask && GetObject(ii.hbmMask, sizeof(bmMask), &bmMask)
-                && bmMask.bmWidth >= width && bmMask.bmHeight >= height)
-            {
-                BITMAPINFO mi{};
-                mi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-                mi.bmiHeader.biWidth = bmMask.bmWidth;
-                mi.bmiHeader.biHeight = -bmMask.bmHeight;   // top-down
-                mi.bmiHeader.biPlanes = 1;
-                mi.bmiHeader.biBitCount = 1;
-                mi.bmiHeader.biCompression = BI_RGB;
-                const int stride = ((bmMask.bmWidth + 31) / 32) * 4;
-                std::vector<BYTE> maskBits((size_t)stride * bmMask.bmHeight, 0);
-                if (GetDIBits(mem, ii.hbmMask, 0, bmMask.bmHeight, maskBits.data(), &mi, DIB_RGB_COLORS) != 0)
-                {
-                    for (int y = 0; y < height; ++y) {
-                        const BYTE* row = maskBits.data() + (size_t)y * stride;
-                        BYTE* line = cursorShot.pix.data() + (size_t)y * width * 4;
-                        for (int x = 0; x < width; ++x) {
-                            const bool transparent = (row[x >> 3] >> (7 - (x & 7))) & 1;
-                            line[x * 4 + 3] = transparent ? 0 : 255;
-                        }
-                    }
-                }
-            }
-            SelectObject(mem, old);
-            cursorShot.cur = cur;
-            cursorShot.w = width;
-            cursorShot.h = height;
-            cursorShot.hotX = (int)ii.xHotspot;
-            cursorShot.hotY = (int)ii.yHotspot;
-            ok = true;
-        }
-        if (dib) DeleteObject(dib);
-        if (mem) DeleteDC(mem);
-        if (screen) ReleaseDC(nullptr, screen);
-        cleanup();
-        return ok;
-    }
-
-    // dst 是自下而上的 BGRA8；originX/originY 是裁剪区左上角在虚拟桌面中的坐标
-    void blendCursor(std::vector<BYTE>& dst, int w, int h, int originX, int originY)
-    {
-        if (w <= 0 || h <= 0 || dst.empty()) return;
-        CURSORINFO ci{ sizeof(ci) };
-        if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING) || !ci.hCursor) return;
-        if (!ensureCursorShot(ci.hCursor)) return;
-        const int cx = (int)ci.ptScreenPos.x - originX - cursorShot.hotX;
-        const int cy = (int)ci.ptScreenPos.y - originY - cursorShot.hotY;
-        const BYTE* src = cursorShot.pix.data();
-        for (int y = 0; y < cursorShot.h; ++y) {
-            const int dy = cy + y;
-            if (dy < 0 || dy >= h) continue;
-            BYTE* drow = dst.data() + (size_t)(h - 1 - dy) * (size_t)w * 4;
-            for (int x = 0; x < cursorShot.w; ++x) {
-                const int dx = cx + x;
-                if (dx < 0 || dx >= w) continue;
-                const BYTE* s = src + ((size_t)y * (size_t)cursorShot.w + (size_t)x) * 4;
-                const unsigned a = s[3];
-                if (!a) continue;
-                BYTE* d = drow + (size_t)dx * 4;
-                if (a == 255) {
-                    d[0] = s[0]; d[1] = s[1]; d[2] = s[2];
-                }
-                else {
-                    d[0] = (BYTE)((s[0] * a + d[0] * (255 - a)) / 255);
-                    d[1] = (BYTE)((s[1] * a + d[1] * (255 - a)) / 255);
-                    d[2] = (BYTE)((s[2] * a + d[2] * (255 - a)) / 255);
-                }
-                d[3] = 255;
-            }
-        }
-    }
     // —— GDI 兜底（见 DESKTOPCAPTUREPARAMS::GdiFallback）——
     bool gdiMode = false;
+    // 由采集循环每帧更新（1 = 原始大小）
+    float CursorZoom = 1.f;
+    ULONGLONG zoomClickAt = 0;   // 最近一次按下左/右/中键的时刻
+    bool zoomPrevBtn = false;
+    bool zoomReady = false;      // 首帧只记录按键状态，避免把"点开始录制"当成单击
     HDC gdiScreen = nullptr;
     HDC gdiMem = nullptr;
     HBITMAP gdiBmp = nullptr;
@@ -683,7 +540,6 @@ public:
     CComPtr<ID3D11Device> device;
     CComPtr<ID3D11DeviceContext> context;
     CComPtr<IDXGIOutputDuplication> lDeskDupl;
-    CComPtr<ID3D11Texture2D> lGDIImage;
     CComPtr<ID3D11Texture2D> lDestImage;
     DXGI_OUTDUPL_DESC lOutputDuplDesc = {};
     // 当前采集目标那块屏在虚拟桌面里的矩形（Prepare 时记下）：换屏跟随要拿它判断"是否换屏"
@@ -743,7 +599,53 @@ public:
         return;
     }
 
-    bool Get(IDXGIResource* lDesktopResource,bool Curs,RECT* rcx = 0)
+    // 屏幕上的圆形镜头预览：从**整块屏**的复制表面直接取景。
+    // 注意和上面按裁剪区拷贝的区别：镜头跟着光标走，光标移到选框外时仍然需要画面；
+    // 用整屏表面就不必再回落 GDI 抓屏（GDI 读屏一次十几毫秒，是拖动时抖动的来源）。
+    // 只拷贝镜头请求的那一小块，并在这里完成 HDR 色调映射 / 竖屏旋转的坐标换算。
+    void publishLensTap(LensScene::Tap* tap, const D3D11_MAPPED_SUBRESOURCE& res, int multi)
+    {
+        if (!tap) return;
+        RECT want{};
+        if (!tap->wanted(want)) return;
+        RECT r{
+            (std::max)(want.left, monRect.left),
+            (std::max)(want.top, monRect.top),
+            (std::min)(want.right, monRect.right),
+            (std::min)(want.bottom, monRect.bottom) };
+        if (r.right <= r.left || r.bottom <= r.top) return;
+        const int w = (int)(r.right - r.left);
+        const int h = (int)(r.bottom - r.top);
+        const bool half = InHDR == DXGI_FORMAT_R16G16B16A16_FLOAT;
+        if (half) ensureSrgbLut();
+        std::vector<BYTE> out((size_t)w * h * 4, 0);
+        const BYTE* base = reinterpret_cast<const BYTE*>(res.pData);
+        const int left = (int)(r.left - monRect.left);
+        const int top = (int)(r.top - monRect.top);
+        for (int y = 0; y < h; ++y) {
+            BYTE* d = out.data() + (size_t)y * w * 4;
+            for (int x = 0; x < w; ++x, d += 4) {
+                int sx = left + x, sy = top + y;
+                if (IsRotated())
+                    ScreenCaptureSurfacePoint(rotation, left + x, top + y, surfaceW, surfaceH, sx, sy);
+                if ((unsigned)sx >= (unsigned)surfaceW || (unsigned)sy >= (unsigned)surfaceH) continue;
+                const BYTE* s = base + (size_t)sy * res.RowPitch + (size_t)sx * multi;
+                if (half) {
+                    const unsigned short* p = reinterpret_cast<const unsigned short*>(s);
+                    d[0] = srgbLut[p[2]];
+                    d[1] = srgbLut[p[1]];
+                    d[2] = srgbLut[p[0]];
+                }
+                else {
+                    d[0] = s[0]; d[1] = s[1]; d[2] = s[2];
+                }
+                d[3] = 255;
+            }
+        }
+        tap->publishTopDown(r, std::move(out));
+    }
+
+    bool Get(IDXGIResource* lDesktopResource, RECT* rcx = 0, LensScene::Tap* lensTap = 0)
     {
         // 取到的帧资源只有当它是 2D 纹理时才能拷进本设备的纹理
         CComPtr<ID3D11Texture2D> lAcquiredDesktopImage;
@@ -770,70 +672,9 @@ public:
             }
         }
 
-        // 旋转屏的光标不能再让 GDI 画在未旋转的表面上（位置和方向都会错），
-        // 改由采集出口的 blendCursor 按桌面坐标叠加（与 HDR 同一条 CPU 混合路径）。
-        const bool gdiCursor = (InHDR == DXGI_FORMAT_UNKNOWN && Curs != 0 && !IsRotated());
-
-
-        if (!gdiCursor)
-        {
-            // HDR 帧没有 GDI 兼容位，光标改在色调映射后由 blendCursor 叠加；
-            // 不录光标 / 旋转屏更省一步，直接拷进暂存纹理
-            context->CopyResource(lDestImage, lAcquiredDesktopImage);
-        }
-        else
-        {
-            // SDR 且要录光标：先拷到 GDI 兼容纹理，GDI 才能把光标画上去
-            context->CopyResource(lGDIImage, lAcquiredDesktopImage);
-
-            // 把光标画进这张 GDI 兼容纹理
-            CComPtr<IDXGISurface1> lIDXGISurface1;
-
-            lIDXGISurface1 = lGDIImage;
-
-            if (!lIDXGISurface1)
-                return 0;
-
-            CURSORINFO lCursorInfo = { 0 };
-            lCursorInfo.cbSize = sizeof(lCursorInfo);
-            auto lBoolres = GetCursorInfo(&lCursorInfo);
-            if (lBoolres == TRUE)
-            {
-                if (lCursorInfo.flags == CURSOR_SHOWING && Curs)
-                {
-                    // GetIconInfo 和 GetDC 都可能失败（自绘光标、远程桌面、GDI 被挂钩），
-                    // 失败时 iconInfo 和 lHDC 还是栈上的垃圾，照着往下用就是拿野句柄喂 GDI。
-                    ICONINFO iconInfo{};
-                    auto lGotIcon = GetIconInfo(lCursorInfo.hCursor, &iconInfo);
-                    if (iconInfo.hbmMask) DeleteObject(iconInfo.hbmMask);
-                    if (iconInfo.hbmColor) DeleteObject(iconInfo.hbmColor);
-                    HDC  lHDC = nullptr;
-                    if (lGotIcon && SUCCEEDED(lIDXGISurface1->GetDC(FALSE, &lHDC)) && lHDC)
-                    {
-                        // 纹理只覆盖单块显示器，光标坐标却是虚拟桌面坐标：
-                        // 必须减去本屏原点，否则副屏（非 0,0）上光标会被画到纹理外
-                        const int cx = (int)lCursorInfo.ptScreenPos.x - monRect.left - (int)iconInfo.xHotspot;
-                        const int cy = (int)lCursorInfo.ptScreenPos.y - monRect.top - (int)iconInfo.yHotspot;
-                        DrawIconEx(
-                            lHDC,
-                            cx,
-                            cy,
-                            lCursorInfo.hCursor,
-                            0,
-                            0,
-                            0,
-                            0,
-                            DI_NORMAL | DI_DEFAULTSIZE);
-                        // ReleaseDC 只在 GetDC 拿到了 DC 时调
-                        lIDXGISurface1->ReleaseDC(nullptr);
-                    }
-                }
-            }
-
-            // 画好光标后再拷到 CPU 可读的暂存纹理
-            context->CopyResource(lDestImage, lGDIImage);
-        }
-
+        // 帧保持干净：光标和镜头统一在采集出口按桌面坐标 CPU 合成，
+        // 这样 SDR / HDR / 竖屏 / GDI 兜底只有一套绘制顺序（镜头 → 光标 → 单击层）。
+        context->CopyResource(lDestImage, lAcquiredDesktopImage);
 
         // 从暂存纹理映射到内存，按裁剪区拷成紧凑位图
         D3D11_MAPPED_SUBRESOURCE resource;
@@ -845,6 +686,9 @@ public:
         int multi = 4;
         if (InHDR == DXGI_FORMAT_R16G16B16A16_FLOAT)
             multi = 8; // FP16 每像素 8 字节
+
+        // 屏幕镜头预览取景（整屏，含选框外）：必须在 Unmap 之前从映射表面读
+        publishLensTap(lensTap, resource, multi);
 
         // 输出的是"桌面方向"的裁剪块（宽高与 ModeDesc 一致，与表面宽高无关）
         const int outW = rcx ? (rcx->right - rcx->left) : deskW;
@@ -983,7 +827,7 @@ public:
         lDxgiOutput5 = 0;
         lDxgiOutput1 = 0;
 
-        // 建 GPU 侧纹理：SDR 屏要靠它获得 GDI 兼容表面来画光标，HDR 屏只做拷贝中转
+        // 建 CPU 可读暂存纹理：帧本身保持干净（不含光标/镜头），合成统一在采集出口做
         lDeskDupl->GetDesc(&lOutputDuplDesc);
         // 只列了 BGRA8 一个，拿到的帧就只可能是它 —— 别听 GetDesc 报的显示模式格式，
         // 那个在 HDR 屏上仍是 FP16，照它建纹理会让下面的 CopyResource 拿不到画面
@@ -1003,41 +847,27 @@ public:
         return CreateTextures(surfW, surfH, lOutputDuplDesc.ModeDesc.Format) ? 1 : 0;
     }
 
-    // 按"复制表面"的尺寸建两张纹理：GDI 兼容位（画光标用）与 CPU 可读暂存位。
-    // 竖屏时表面尺寸与桌面尺寸不同，所以不能在别处写死 ModeDesc。
+    // 只需一张 CPU 可读暂存位：光标/镜头统一在采集出口按 CPU 合成，
+    // 不再需要 GDI 兼容纹理来 DrawIconEx。
     bool CreateTextures(int w, int h, DXGI_FORMAT fmt)
     {
         if (!device || w <= 0 || h <= 0)
             return false;
+
+        InHDR = (fmt == DXGI_FORMAT_R16G16B16A16_FLOAT) ? fmt : DXGI_FORMAT_UNKNOWN;
 
         D3D11_TEXTURE2D_DESC desc = {};
         desc.Width = (UINT)w;
         desc.Height = (UINT)h;
         desc.Format = fmt;
         desc.ArraySize = 1;
-        desc.BindFlags = D3D11_BIND_FLAG::D3D11_BIND_RENDER_TARGET;
-        InHDR = DXGI_FORMAT_UNKNOWN;
-        if (fmt == DXGI_FORMAT_R16G16B16A16_FLOAT)
-        {
-            // FP16 表面没有 GDI 兼容位，光标只能另走 CPU 混合（见 blendCursor）
-            InHDR = fmt;
-        }
-        else
-            desc.MiscFlags = D3D11_RESOURCE_MISC_GDI_COMPATIBLE;
-        desc.SampleDesc.Count = 1;
-        desc.SampleDesc.Quality = 0;
-        desc.MipLevels = 1;
-        desc.CPUAccessFlags = 0;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        lGDIImage = 0;
-        if (FAILED(device->CreateTexture2D(&desc, NULL, &lGDIImage)))
-            return false;
-
-        // 再建一张 CPU 可读的暂存纹理，映射后就是内存里的紧凑位图
         desc.BindFlags = 0;
         desc.MiscFlags = 0;
         desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE;
         desc.Usage = D3D11_USAGE_STAGING;
+        desc.SampleDesc.Count = 1;
+        desc.SampleDesc.Quality = 0;
+        desc.MipLevels = 1;
         lDestImage = 0;
         if (FAILED(device->CreateTexture2D(&desc, NULL, &lDestImage)))
             return false;
@@ -1079,6 +909,25 @@ struct DESKTOPCAPTUREPARAMS
     int SR = 44100;
     int ABR = 192;
     bool Cursor = true;
+    // 单击放大光标：采集侧把真实光标按该倍率绘制（1 = 原始大小）。
+    // 采集线程自己轮询按键并驱动 320ms 的放大动画，不依赖 UI 的钩子/定时器。
+    std::atomic<float> CursorZoom{ 1.f };
+    std::atomic<bool> CursorZoomOn{ false };
+    // 放大动画期间由覆盖层接管光标绘制：采集侧暂时不画光标，避免视频里出现两个光标
+    std::atomic<bool> CursorHidden{ false };
+    // 「鼠标轨迹效果 → 局部放大」：采集侧在画面里画圆形放大镜（覆盖层那个镜头被排除在录制外）
+    std::atomic<bool> LocalMagnifierOn{ false };
+    std::atomic<int> LocalMagnifierSize{ 150 };
+    std::atomic<float> LocalMagnifierZoom{ 1.5f };
+    // 屏幕上圆形镜头的取景源：采集线程每帧把"干净帧"里镜头需要的一小块交给预览，
+    // 预览因此不用再 BitBlt 屏幕，也就不会把镜头自己读进取景源（见 LensSceneTap.h）。
+    std::shared_ptr<LensScene::Tap> lensTap;
+    // 单击层在桌面捕获之外，最终帧里由采集线程后合成，避免被局部放大二次采样
+    std::mutex clickOverlayMutex;
+    MagnifierDraw::ClickOverlayFrame clickOverlay;
+    // 高亮提醒 / 线条跟随也在排除捕获的层里画，采集线程按同一时间戳在镜头之后重画
+    std::mutex mouseFxMutex;
+    MouseFxDraw::Frame mouseFx;
     // 是否允许 SinkWriter 使用硬件 MFT（编码器）。关掉即只走软件编码
     bool HwTransforms = true;
     RECT rx = { 0,0,0,0 };
@@ -1948,6 +1797,7 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
     std::vector<char> AudioData;
     std::vector<std::vector<float>> v(dp.NCH);
     std::vector<MIXBUFFER<float>> mixv(dp.NCH);
+    CursorDraw::Tracker cursorTracker;   // 形状不变时不重复解析光标位图
     for (;;)
     {
         if (!dp.HasAudio && !dp.Framer)
@@ -2080,6 +1930,34 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
         if (dp.Pause)
             continue;
 
+        // 「光标放大 / 光标波纹组合」：采集线程自己按帧轮询按键并驱动放大动画。
+        // 不依赖 UI 的全局钩子或定时器 —— 那些在权限/远程桌面/多实例环境下不一定可用。
+        cap.CursorZoom = 1.f;
+        if (dp.CursorZoomOn.load(std::memory_order_relaxed)) {
+            const bool down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0
+                || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0
+                || (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
+            if (!cap.zoomReady) {
+                cap.zoomPrevBtn = down;
+                cap.zoomReady = true;
+            }
+            else {
+                if (down && !cap.zoomPrevBtn) cap.zoomClickAt = GetTickCount64();
+                cap.zoomPrevBtn = down;
+                const ULONGLONG age = GetTickCount64() - cap.zoomClickAt;
+                if (age < 320) {
+                    const float k = (float)age / 320.f;
+                    cap.CursorZoom = 1.f + 0.8f * std::sin(k * 3.14159265f);
+                }
+            }
+        }
+        // UI 侧如果也在驱动（钩子/轮询任一可用），取两者较大的倍率：
+        // 采集侧轮询可能刚好错过很短的点击，UI 侧可以作为兜底。
+        {
+            const float uiZoom = dp.CursorZoom.load(std::memory_order_relaxed);
+            if (uiZoom > cap.CursorZoom) cap.CursorZoom = uiZoom;
+        }
+
         CComPtr<IDXGIResource> lDesktopResource;
         DXGI_OUTDUPL_FRAME_INFO lFrameInfo;
 
@@ -2112,7 +1990,7 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
                         cap.gdiRect = { l, t, l + followCropW, t + followCropH };
                     }
                 }
-                if (!cap.GrabGdi(dp.Cursor, cap.gdiRect))
+                if (!cap.GrabGdi(cap.gdiRect))
                     break;
             }
             else
@@ -2204,9 +2082,22 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
 
 
                 // 抓帧并拷进内存；有裁剪区时只拷选区那一块
-                if (lDesktopResource && !cap.Get(lDesktopResource, dp.Cursor, dp.rx.right && dp.rx.bottom ? &dp.rx : 0))
+                if (lDesktopResource
+                    && !cap.Get(lDesktopResource, dp.rx.right && dp.rx.bottom ? &dp.rx : 0,
+                        dp.lensTap.get()))
                     break;
             }
+
+            // 一帧只取一次光标快照：镜头圆心、光标叠加、单击层都用同一时刻的状态，
+            // 避免"帧里光标在这儿、镜头已经跟到下一处"的帧内错位。
+            // 单击放大把光标临时藏起来时不更新快照：本体偏移沿用上一次可见时的值，
+            // 否则镜头圆心会跟着放大动画跳到热点（表现为"放大镜随着光标放大移位"）。
+            const bool cursorHidden = dp.CursorHidden.load(std::memory_order_relaxed);
+            const CursorDraw::Snapshot* shot = cursorHidden ? nullptr : cursorTracker.update(false);
+            const CursorDraw::Snapshot emptyShot;
+            const CursorDraw::Snapshot& cursorShot = shot ? *shot : emptyShot;
+            POINT cursorPos{};
+            if (!GetCursorPos(&cursorPos)) cursorPos = POINT{};
 
             if (isFirstFrame)
             {
@@ -2238,17 +2129,76 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
 
             // 采集出口已经统一成 BGRA8：HDR 帧先按当前 SDR 白点做色调映射，
             // 再和普通帧一样缩放/拷贝——编码器只认这一种格式。
+            const bool localMagnifier = dp.LocalMagnifierOn.load(std::memory_order_relaxed);
+            const int frameOriginX = cap.gdiMode ? cap.gdiRect.left
+                : cap.monRect.left + ((dp.rx.right && dp.rx.bottom) ? dp.rx.left : 0);
+            const int frameOriginY = cap.gdiMode ? cap.gdiRect.top
+                : cap.monRect.top + ((dp.rx.right && dp.rx.bottom) ? dp.rx.top : 0);
+            const bool drawCursor = dp.Cursor && !cursorHidden && cursorShot.visible && cursorShot.valid;
+            // 只取一次快照，保证 HDR/SDR 出口使用同一批单击位置和时间戳。
+            MagnifierDraw::ClickOverlayFrame clickOverlay;
+            {
+                std::lock_guard<std::mutex> lock(dp.clickOverlayMutex);
+                clickOverlay = dp.clickOverlay;
+            }
+            // 高亮提醒 / 线条跟随：同样来自排除捕获层，镜头之后、光标之前重画
+            MouseFxDraw::Frame mouseFxFrame;
+            {
+                std::lock_guard<std::mutex> lock(dp.mouseFxMutex);
+                mouseFxFrame = dp.mouseFx;
+            }
+            // 高亮圆必须和**这一帧里的光标**同位置：UI 侧同步过来的是最近一次 16ms 轮询的
+            // 光标，比帧时刻晚一点；快速挥动时视频里的高亮会明显落在光标后面。
+            if (mouseFxFrame.highlight) {
+                const POINT anchor = cursorShot.valid ? cursorShot.pos : cursorPos;
+                float ox = 0.f, oy = 0.f;
+                cursorTracker.bodyOffset(ox, oy);
+                mouseFxFrame.highlightCenter = POINT{ anchor.x + (LONG)ox, anchor.y + (LONG)oy };
+            }
+            const auto drawMouseFx = [&](std::vector<BYTE>& buf) {
+                if (!mouseFxFrame.enabled || (!mouseFxFrame.trail && !mouseFxFrame.highlight))
+                    return;
+                std::vector<BYTE> fx;
+                int fxX = 0, fxY = 0, fxW = 0, fxH = 0;
+                if (!MouseFxDraw::render(fx, fxX, fxY, fxW, fxH, mouseFxFrame,
+                        (int64_t)GetTickCount64()))
+                    return;
+                MouseFxDraw::blend(buf, wi, he, true, frameOriginX, frameOriginY,
+                    fx.data(), fxX - frameOriginX, fxY - frameOriginY, fxW, fxH);
+            };
+            // 镜头：圆心取光标本体中心（不是热点尖角），尺寸/倍率由 UI 侧实时给。
+            MagnifierDraw::Spec lens{};
+            if (localMagnifier) {
+                const POINT anchor = cursorShot.valid ? cursorShot.pos : cursorPos;
+                float ox = 0.f, oy = 0.f;
+                // 用采集线程缓存的「本体中心相对热点」偏移：单击放大把系统光标临时藏起来时
+                // 这个值不会变，镜头圆心就不会跟着放大动画移位。
+                cursorTracker.bodyOffset(ox, oy);
+                lens.center = POINT{ anchor.x + (LONG)ox, anchor.y + (LONG)oy };
+                lens.sizePx = (std::max)(32, dp.LocalMagnifierSize.load(std::memory_order_relaxed));
+                lens.zoom = dp.LocalMagnifierZoom.load(std::memory_order_relaxed);
+            }
+            const float cursorZoom = (std::max)(1.f, cap.CursorZoom);
             if (cap.InHDR != DXGI_FORMAT_UNKNOWN)
             {
                 if (!cap.toneMapHdrToBgra(wi, he))
                     break;
-                // HDR 帧没有 GDI 兼容表面，光标改叠在色调映射后的画面上
-                if (dp.Cursor)
-                {
-                    const int ox = cap.monRect.left + ((dp.rx.right && dp.rx.bottom) ? dp.rx.left : 0);
-                    const int oy = cap.monRect.top + ((dp.rx.right && dp.rx.bottom) ? dp.rx.top : 0);
-                    cap.blendCursor(cap.sdrBuf, wi, he, ox, oy);
-                }
+                // 屏幕上那个圆形镜头也从这帧干净画面取景（见 LensSceneTap.h），
+                // 它必须发生在叠光标/镜头之前，否则预览里会出现"镜头套镜头"。
+                // 桌面复制那条已经在 Get 里按整屏取景；只有 GDI 兜底还只有裁剪块。
+                if (cap.gdiMode && dp.lensTap)
+                    dp.lensTap->publish(cap.sdrBuf.data(), wi, he, frameOriginX, frameOriginY, true);
+                if (localMagnifier)
+                    MagnifierDraw::draw(cap.sdrBuf, wi, he, frameOriginX, frameOriginY, lens, true);
+                // 高亮/线条在镜头之上、光标之下（与屏幕上的层级一致）
+                drawMouseFx(cap.sdrBuf);
+                // 光标在镜头之后按 1:1 补画：屏幕上是系统光标、视频里是这一份，两边一致。
+                if (drawCursor)
+                    CursorDraw::blend(cap.sdrBuf, wi, he, frameOriginX, frameOriginY, true,
+                        cursorShot.pos, cursorShot, cursorZoom);
+                // 单击层被排除在桌面捕获外，必须最后补画；旧系统回退时 enabled=false，不会重画。
+                MagnifierDraw::drawClickOverlay(cap.sdrBuf, wi, he,
+                    frameOriginX, frameOriginY, clickOverlay, true);
                 if (encW != wi || encH != he)
                     scaleBGRABox(cap.sdrBuf.data(), wi, he, (BYTE*)pData, encW, encH);
                 else
@@ -2256,14 +2206,17 @@ inline int DesktopCapture(DESKTOPCAPTUREPARAMS& dp)
             }
             else
             {
-                // 旋转屏的 SDR 帧：光标没被画进位图（表面是未旋转的，画进去位置/方向都会错），
-                // 在这里按桌面坐标叠上去 —— 与 HDR 同一条 CPU 混合路径
-                if (dp.Cursor && cap.IsRotated())
-                {
-                    const int ox = cap.monRect.left + ((dp.rx.right && dp.rx.bottom) ? dp.rx.left : 0);
-                    const int oy = cap.monRect.top + ((dp.rx.right && dp.rx.bottom) ? dp.rx.top : 0);
-                    cap.blendCursor(cap.buf, wi, he, ox, oy);
-                }
+                // 桌面复制那条已在 Get 里按整屏取景；GDI 兜底没有整屏表面，只能给裁剪块。
+                if (cap.gdiMode && dp.lensTap)
+                    dp.lensTap->publish(cap.buf.data(), wi, he, frameOriginX, frameOriginY, true);
+                if (localMagnifier)
+                    MagnifierDraw::draw(cap.buf, wi, he, frameOriginX, frameOriginY, lens, true);
+                drawMouseFx(cap.buf);
+                if (drawCursor)
+                    CursorDraw::blend(cap.buf, wi, he, frameOriginX, frameOriginY, true,
+                        cursorShot.pos, cursorShot, cursorZoom);
+                MagnifierDraw::drawClickOverlay(cap.buf, wi, he,
+                    frameOriginX, frameOriginY, clickOverlay, true);
                 if (encW != wi || encH != he)
                 {
                     // 「视频质量」缩到目标分辨率后再交给编码器

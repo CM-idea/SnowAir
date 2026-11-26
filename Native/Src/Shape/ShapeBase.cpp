@@ -4,6 +4,7 @@
 #include "ShapeBase.h"
 #include "AnnotCursor.h"
 #include <cmath>
+#include <unordered_map>
 
 ShapeBase::ShapeBase(AnnotHost* win) :win{ win },
 	// 内圆直径 8、命中约 12
@@ -19,12 +20,6 @@ ShapeBase::ShapeBase(AnnotHost* win) :win{ win },
 
 ShapeBase::~ShapeBase()
 {}
-
-bool ShapeBase::isInRect(const D2D1_RECT_F rect, const float x, const float y)
-{
-	return (x > rect.left - hitPad && x < rect.right + hitPad
-		&& y > rect.top - hitPad && y < rect.bottom + hitPad);
-}
 
 // 选中框统一使用虚线（所有形状共享一份资源）。
 // 必须按当前 D2D 工厂缓存：工厂重建后旧 StrokeStyle 属于失效工厂，引用它的绘制批次会整体失败。
@@ -376,4 +371,34 @@ bool ShapeBase::applyUnselectedHoverCursor()
 	// 未选中标注上提示可点选二次编辑
 	SetCursor(LoadCursor(nullptr, IDC_HAND));
 	return true;
+}
+
+std::vector<std::unique_ptr<ShapeBase>> cloneShapesForHost(
+	AnnotHost* host, const std::vector<ShapeBase*>& src)
+{
+	std::vector<std::unique_ptr<ShapeBase>> out;
+	std::unordered_map<ShapeBase*, ShapeBase*> map;
+	for (auto* s : src) {
+		if (!s || s->isUndo || s->isEphemeral()) continue;
+		auto c = s->clone(host);
+		if (!c) continue;   // 撤销辅助项等没有画面，也没有 clone
+		map[s] = c.get();
+		out.push_back(std::move(c));
+	}
+	for (auto& c : out) {
+		c->remapCloneRefs([&map](ShapeBase* p) -> ShapeBase* {
+			auto it = map.find(p);
+			return it == map.end() ? nullptr : it->second;
+			});
+	}
+	return out;
+}
+
+std::vector<std::unique_ptr<ShapeBase>> cloneShapesForHost(
+	AnnotHost* host, const std::vector<std::unique_ptr<ShapeBase>>& src)
+{
+	std::vector<ShapeBase*> raws;
+	raws.reserve(src.size());
+	for (const auto& s : src) raws.push_back(s.get());
+	return cloneShapesForHost(host, raws);
 }

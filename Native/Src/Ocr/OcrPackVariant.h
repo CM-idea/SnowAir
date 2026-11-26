@@ -41,13 +41,13 @@ namespace OcrPack {
 	// 安装标记：档位 + 发布号。手册要求"同一发布号的整套模型一起用"，混档会初始化失败。
 	inline const char* markerValue(OcrPackVariant v)
 	{
-		return v == OcrPackVariant::Small ? "ppocrv6-small-1.2.0" : "ppocrv6-tiny-1.2.0";
+		return v == OcrPackVariant::Small ? "ppocrv6-small-1.2.2" : "ppocrv6-tiny-1.2.2";
 	}
 
 	inline const wchar_t* packFile(OcrPackVariant v)
 	{
 		return v == OcrPackVariant::Small
-			? L"lw.PPOCR.C-1.2.0-ppocrv6-small-runtime.zip"
-			: L"lw.PPOCR.C-1.2.0-ppocrv6-tiny-runtime.zip";
+			? L"lw.PPOCR.C-1.2.2-ppocrv6-small-runtime.zip"
+			: L"lw.PPOCR.C-1.2.2-ppocrv6-tiny-runtime.zip";
 	}
 }

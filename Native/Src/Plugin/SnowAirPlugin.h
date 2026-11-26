@@ -160,7 +160,9 @@ typedef struct SnowAirHost {
                       int screen_x, int screen_y, void* plugin_user,
                       SnowAirMenuSelect on_select);
 
-    /* True while a SnowAir popup menu (including one opened for the rack) is up. */
+    /* True while a popup menu opened by a plugin (including the rack's own
+       menu) is up. Host-owned menus such as pin/clipboard context menus are
+       deliberately excluded, so plugins must not use this to react to them. */
     int (*menu_open)(void* user);
 
     /* Close any host popup menu (and remove its low-level mouse hook). */

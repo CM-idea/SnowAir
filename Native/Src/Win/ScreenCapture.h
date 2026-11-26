@@ -15,6 +15,11 @@ namespace ScreenCapture
 
 	// 截图入口用：先尝试 DXGI（HDR 友好），失败再退回原来的 GDI 抓屏。
 	std::vector<BYTE> captureOrGdi(int x, int y, int w, int h);
+
+	// 丢掉所有缓存会话里“上一帧”的暂存结果，强制下一次 capture 等一帧新画面。
+	// 用在遮罩刚挖洞 / 刚改变可见性之后：此时桌面复制可能还没有新帧，
+	// 不回退到旧暂存帧才能保证抓到的是“变化后”的画面。
+	void dropCachedFrames();
 }
 
 // —— 桌面复制的旋转（截图与录屏共用同一份实现） ——

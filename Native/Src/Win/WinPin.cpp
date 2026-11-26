@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <set>
 #include "../Tool/ToolCap.h"
 #include "../Tool/ToolSub.h"
 #include "../Tool/IconCodes.h"
@@ -11,10 +12,12 @@
 #include "WinCap.h"
 #include "ClipPin.h"
 #include "PinMenu.h"
+#include "WinImageEdit.h"
 #include "../Tool/ToolOcr.h"
 #include "../Ocr/OcrService.h"
 #include "../Ocr/LwPpOcrEngine.h"
 #include "../Translate/BergamotEngine.h"
+#include "../App.h"                 // 贴图全关后回收空闲资源
 #include "../Lang.h"
 #include "../App.h"
 #include "../Setting.h"
@@ -27,6 +30,11 @@ namespace {
 	std::vector<std::unique_ptr<WinPin>> winPins;
 	// 「隐藏/显示贴图」的临时态：只影响当前这些窗口，不落盘
 	bool pinsHidden{ false };
+
+	// 「恢复历史贴图」的本次会话进度：已经恢复过的历史条目（id + createdAt）。
+	// 只存索引，不存图片像素 —— 恢复时按「历史记录 > 贴图」重新读文件贴出来。
+	// 用 id+createdAt 做键：同一张图重新贴会沿用 id 但刷新 createdAt，仍可再次恢复。
+	std::set<std::wstring> restoredPinKeys;
 
 	int clampPos(float val, float size, int min, int max)
 	{
@@ -41,6 +49,32 @@ namespace {
 	bool ptInRect(const D2D1_RECT_F& r, POINT pos)
 	{
 		return pos.x >= r.left && pos.x < r.right && pos.y >= r.top && pos.y < r.bottom;
+	}
+
+	// 底图像素指纹：尺寸 + 全部像素，用来判断「是不是同一张图又贴了一次」。
+	// 按 8 字节混一次，4K 截图（约 33MB）也只要几毫秒，不拖慢贴图落下。
+	uint64_t hashPixels(int w, int h, const BYTE* data, size_t size)
+	{
+		uint64_t hsh = 1469598103934665603ull;
+		auto mix = [&hsh](uint64_t v) {
+			hsh ^= v + 0x9E3779B97F4A7C15ull + (hsh << 6) + (hsh >> 2);
+			hsh *= 1099511628211ull;
+			hsh ^= hsh >> 32;
+			};
+		mix((uint64_t)(uint32_t)w);
+		mix((uint64_t)(uint32_t)h);
+		size_t i = 0;
+		for (; i + 8 <= size; i += 8) {
+			uint64_t v{};
+			memcpy(&v, data + i, 8);
+			mix(v);
+		}
+		if (i < size) {
+			uint64_t v{};
+			memcpy(&v, data + i, size - i);
+			mix(v);
+		}
+		return hsh;
 	}
 }
 
@@ -102,6 +136,12 @@ WinPin::WinPin(int x, int y, int w, int h, const std::vector<BYTE>* data, const 
 	onMouseDown.add([this](POINT pos, BOOL isRight) { this->onDown(pos, isRight); });
 	onMouseMove.add([this](POINT pos) { this->onMove(pos); });
 	onMouseUp.add([this](POINT pos, BOOL isRight) { this->onUp(pos, isRight); });
+	onCaptureLost.add([this]() {
+		// 捕获被系统对话框等抢走：不会再有 mouseup，复位拖动状态
+		annotMouseDown = false;
+		hasDragged = false;
+		edgeResize = 0;
+	});
 	onMouseWheel.add([this](POINT pos, float space) {
 		if (locked || thumbnail) return;
 		if (GetKeyState(VK_CONTROL) & 0x8000) {
@@ -186,6 +226,8 @@ void WinPin::onClosed()
 			else {
 				Update::checkLater();
 			}
+			// 一张贴图都不剩了：稍后把贴图/贴屏专用的资源（引擎、图形设备）还回去
+			App::scheduleIdleRelease();
 		}
 	});
 }
@@ -200,6 +242,30 @@ void WinPin::dispose()
 	// 同 WinSetting::dispose：~WinBase 不销毁 HWND，退出前把还开着的贴图窗逐个真正关掉
 	for (auto& p : winPins) { if (p && p->hwnd) p->close(); }
 	winPins.clear();
+}
+
+// 恢复历史贴图：以「历史记录 > 贴图」为准，按列表顺序（新的在前）每次贴下一条。
+// 只记索引、不缓存像素：恢复时重新读历史文件贴出来；记录被删 / 文件不在了 /
+// 这张图现在还贴在桌面上，都跳过。贴完当前历史为止，重复按不会回到已恢复过的条目。
+void WinPin::restoreLastClosed()
+{
+	auto* setting = Setting::get();
+	if (!setting) return;
+	for (const auto& it : setting->getHistoryItems()) {
+		if (it.source != L"pin") continue;
+		// 用 id + createdAt 做键：同一张图重新贴时会沿用 id 但刷新 createdAt，仍可再次恢复
+		const std::wstring key = it.id + L"@" + std::to_wstring(it.createdAt);
+		if (restoredPinKeys.count(key)) continue;
+		// 这张图现在就贴在桌面上（可能还没关）：不重复贴，留给下一次
+		bool alreadyOpen = false;
+		for (const auto& p : winPins) {
+			if (p && !p->isClosed && p->pinHistoryId == it.id) { alreadyOpen = true; break; }
+		}
+		if (alreadyOpen) continue;
+		if (!Util::pinHistoryFile(it.id)) continue;   // 文件丢失 / 解码失败：跳过
+		restoredPinKeys.insert(key);
+		return;
+	}
 }
 
 // 全局热键「隐藏/显示贴图」：一次把所有贴图藏起来，再按一次全部放回来。
@@ -483,15 +549,61 @@ void WinPin::init(int x, int y, int w, int h, const std::wstring& initialTool, s
 	winPins.push_back(std::move(winPin));
 }
 
-WinPin* WinPin::initFromData(int x, int y, int w, int h, std::vector<BYTE>& data)
+WinPin* WinPin::findDuplicate(int w, int h, uint64_t hash)
 {
+	if (hash == 0) return nullptr;
+	for (auto& p : winPins) {
+		if (!p || p->isClosed || !p->hwnd || !IsWindow(p->hwnd)) continue;
+		if (p->contentHash == 0 || p->contentHash != hash) continue;
+		const auto sz = p->getImgSize();
+		if ((int)sz.width != w || (int)sz.height != h) continue;
+		// 已经画上标注的贴图不算「同一张」：用户可能正拿它当画板，
+		// 这时重新贴原图应该另开一张，而不是把他正在编辑的东西抖出来。
+		bool annotated = false;
+		if (p->history) {
+			for (auto& s : p->history->shapes) {
+				// 渐隐笔迹不算改动过这张图（它自己会消失）
+				if (s && !s->isUndo && !s->isEphemeral()) { annotated = true; break; }
+			}
+		}
+		if (annotated) continue;
+		return p.get();
+	}
+	return nullptr;
+}
+
+// 重复贴图：把已有那张抬到最前并抖一下（不新建窗口）。
+// 贴图可能被「隐藏/显示贴图」热键或专注模式收起过：先放出来，否则抖了也看不见。
+void WinPin::pulseDuplicate()
+{
+	if (!hwnd || isClosed) return;
+	hiddenByFocus = false;
+	if (!IsWindowVisible(hwnd)) show();
+	PinShake::start(shakeState, hwnd, topMost);
+	// 贴图被抬到置顶组最前会把识别浮层压在下面：立刻把浮层抬回来
+	raiseOcrPanel();
+}
+
+WinPin* WinPin::initFromData(int x, int y, int w, int h, std::vector<BYTE>& data,
+	const std::wstring& sourcePath)
+{
+	// 同一张图重复贴：不新建，抬到顶部抖一下提示（返回已有贴图给插件等调用方）
+	const uint64_t hash = hashPixels(w, h, data.data(), data.size());
+	if (WinPin* dup = findDuplicate(w, h, hash)) {
+		dup->pulseDuplicate();
+		return dup;
+	}
 	auto ptr = new WinPin(x, y, w, h, &data);
+	ptr->contentHash = hash;
 	std::unique_ptr<WinPin> winPin{ ptr };
 	ptr->createNativeWindow(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_POPUP);
 	if (ptr->editing) {
 		ptr->bindToolChrome();
 		ptr->raiseToolChrome();
 	}
+	// 贴图历史：有源文件就引用；没有源文件（截图直接贴图）在 PinHistory 里按内容去重存一份
+	if (Setting::get())
+		ptr->pinHistoryId = Setting::get()->addPinHistory(sourcePath, w, h, data);
 	winPins.push_back(std::move(winPin));
 	return ptr;
 }
@@ -630,14 +742,46 @@ D2D1_RECT_F WinPin::editBtnRect() const
 	return D2D1::RectF(close.left - gap - s, close.top, close.left - gap, close.bottom);
 }
 
+bool WinPin::hidesHoverChrome() const
+{
+	// 太小的贴图上三个 32px 控件会互相压住（还会盖掉半张图），索性全部收起；
+	// 右键菜单仍走 showContextMenu，功能不会被小尺寸锁住。
+	// 阈值乘 dpi：控件本身按 dpi 放大，判断标准也跟着走，逻辑尺寸始终是 50。
+	return w < kChromeMinSide * dpi || h < kChromeMinSide * dpi;
+}
+
 WinPin::HoverBtn WinPin::hitHoverBtn(POINT pos) const
 {
 	if (editing || thumbnail || !isMouseIn) return HoverBtn::None;
 	return hitHoverBtnAt(pos);
 }
 
+// 悬停控件显隐的唯一入口：命中 / 显隐没变就什么也不做，变了才重绘。
+// 识别浮层开着时控件画在浮层里，必须让浮层也重画，否则看起来就是"三个控件没了"。
+void WinPin::syncHoverChrome(POINT pos)
+{
+	const auto hit = hitHoverBtn(pos);
+	const bool show = isMouseIn;
+	if (hit == hoverBtn && show == hoverChromeVisible) return;
+	hoverBtn = hit;
+	hoverChromeVisible = show;
+	refresh();
+	if (toolOcr && toolOcr->hwnd) toolOcr->repaintChrome();
+}
+
+void WinPin::hideHoverChrome()
+{
+	if (hoverBtn == HoverBtn::None && !hoverChromeVisible) return;
+	hoverBtn = HoverBtn::None;
+	hoverChromeVisible = false;
+	refresh();
+	if (toolOcr && toolOcr->hwnd) toolOcr->repaintChrome();
+}
+
 WinPin::HoverBtn WinPin::hitHoverBtnAt(POINT pos) const
 {
+	// 小尺寸贴图不画控件，也不能点中看不见的按钮（右键要能落到菜单上）
+	if (hidesHoverChrome()) return HoverBtn::None;
 	if (ptInRect(lockBtnRect(), pos)) return HoverBtn::Lock;
 	if (!locked) {
 		if (ptInRect(editBtnRect(), pos)) return HoverBtn::Edit;
@@ -702,6 +846,8 @@ void WinPin::paintHoverBtn(ID2D1DeviceContext* ctx, const D2D1_RECT_F& r, IDWrit
 void WinPin::paintHoverChrome(ID2D1DeviceContext* ctx)
 {
 	if (editing || !hoverChromeVisible) return;
+	// 小尺寸贴图不画悬停控件（锁/编辑/关闭）：三个圆圈会把小图整块盖住
+	if (hidesHoverChrome()) return;
 	paintHoverBtn(ctx, lockBtnRect(), locked ? iconLock.Get() : iconUnlock.Get(),
 		locked ? Icon::ColorActive : 0xFFFFFFFFu, hoverBtn == HoverBtn::Lock);
 	if (!locked) {
@@ -846,6 +992,8 @@ void WinPin::onDown(POINT pos, BOOL isRight)
 {
 	// 另存为对话框关闭后的一小段内吞掉鼠标按下：取消点击可能被系统回放到贴图上
 	if (GetTickCount64() < suppressMouseUntil) return;
+	// 用户已经动手了：结束「重复贴图」抖动并回到底座位置，别和拖动抢窗口坐标
+	PinShake::cancel(shakeState, hwnd);
 	// 识别浮层开着时，任何一次点击（可能把本窗抬到最前）之后都要把它抬回来
 	raiseOcrPanel();
 	const auto hit = hitHoverBtn(pos);
@@ -903,6 +1051,9 @@ void WinPin::onDown(POINT pos, BOOL isRight)
 		annotPressPos = pos;
 		hasDragged = false;
 		annotMouseDown = true;
+		// 50×50 缩略图时鼠标一下就会移出窗口；不捕获就收不到后续 mousemove，
+		// 贴图会停在原地。捕获后即使移出客户区也能继续按屏幕位移移动。
+		SetCapture(hwnd);
 		return;
 	}
 	annotDown(pos, isRight);
@@ -925,9 +1076,7 @@ void WinPin::onMove(POINT pos)
 		// 识别浮层开着：悬停态由浮层的轮询统一维护（光标移到浮层上会先收到这里的 MOUSELEAVE）
 		if (toolOcr && toolOcr->hwnd && !thumbnail) return;
 		if (hoverBtn != HoverBtn::None || hoverChromeVisible) {
-			hoverBtn = HoverBtn::None;
-			hoverChromeVisible = false;
-			refresh();
+			this->hideHoverChrome();
 		}
 		else {
 			refresh();   // 悬停原图 → 移开恢复设定不透明度
@@ -955,20 +1104,17 @@ void WinPin::onMove(POINT pos)
 		return;
 	}
 	if (!editing) {
-		const auto hit = hitHoverBtn(pos);
-		const bool show = isMouseIn;
-		if (hit != hoverBtn || show != hoverChromeVisible) {
-			hoverBtn = hit;
-			hoverChromeVisible = show;
-			refresh();
-			// 识别浮层开着时控件画在浮层里，这里必须显式让浮层重画，
-			// 否则悬停状态变了、贴图自己又不画控件，看起来就是"三个控件没了"。
-			if (toolOcr && toolOcr->hwnd) toolOcr->repaintChrome();
-		}
+		// 正在拖动贴图：先把悬停控件（锁 / 编辑 / 关闭）收起来，拖的时候画面干净、也不会误触；
+		// 拖动期间不再更新悬停态，松手后由 onUp 按光标位置恢复
 		if (annotMouseDown && !locked) {
-			hasDragged = true;
+			if (!hasDragged) {
+				hasDragged = true;
+				this->hideHoverChrome();
+			}
 			setPosition(x + pos.x - annotPressPos.x, y + pos.y - annotPressPos.y);
+			return;
 		}
+		this->syncHoverChrome(pos);
 		return;
 	}
 	annotMove(pos);
@@ -982,8 +1128,12 @@ void WinPin::onUp(POINT pos, BOOL isRight)
 		return;
 	}
 	if (!editing) {
+		const bool wasDragging = hasDragged;
 		annotMouseDown = false;
 		hasDragged = false;
+		if (GetCapture() == hwnd) ReleaseCapture();
+		// 拖动期间控件是收起的：松手后按当前光标位置重新决定显隐，不用等下一次移动
+		if (wasDragging && pos.x != INT_MAX && pos.y != INT_MAX) this->syncHoverChrome(pos);
 		return;
 	}
 	annotUp(pos, isRight);
@@ -996,14 +1146,20 @@ bool WinPin::annotRightClick()
 		setEditing(true);
 		return true;
 	}
-	if (!toolCap->hwnd || !IsWindowVisible(toolCap->hwnd)) {
-		layoutTools();
-		toolCap->show();
+	// 右键 = 逐层退出，不是「收起 / 展开工具栏」：
+	// 先取消选中的标注，再取消当前标注工具，最后退出编辑回到贴图层（标注保留）。
+	if (hasAnyAnnotSelection()) {
+		clearAnnotSelectionPublic();
+		refresh();
 		return true;
 	}
-	toolCap->cancelSelect();
-	toolCap->hide();
-	toolSub->hideTools();
+	if (!getCurToolId().empty()) {
+		// false：退出编辑时视口滤镜（水印 / 包浆）留在画面上，与 finishEditing 的处理一致
+		if (toolCap) toolCap->cancelSelect(false);
+		refresh();
+		return true;
+	}
+	finishEditing(true);
 	return true;
 }
 
@@ -1030,6 +1186,10 @@ void WinPin::annotAfterEmptyToolUp()
 
 void WinPin::onTimerCB(UINT id)
 {
+	if (id == PinShake::kTimerId) {
+		PinShake::tick(shakeState, hwnd);
+		return;
+	}
 	if (id == 101) {
 		killTimer(101);
 		scaleTip = nullptr;
@@ -1098,7 +1258,13 @@ void WinPin::onKey(UINT key)
 			if (cursorInPin()) toolOcr->copyText();
 			return;
 		}
+		// 选中了标注：复制标注本身（应用内缓冲，不进剪贴板历史）；没选中才是复制整张贴图
+		if (copySelectedShapes()) return;
 		copyToClipboard();
+	}
+	else if (ctrl && key == 'V') {
+		// 粘贴标注：缓冲里有东西才吃掉这个键
+		if (pasteShapes()) return;
 	}
 	else if (ctrl && key == 'S') {
 		saveToFile();
@@ -1122,12 +1288,42 @@ void WinPin::copyToClipboard()
 	// 复制不再关闭贴图（用户确认）
 }
 
-void WinPin::saveToFile()
+// 右键「导入图片编辑」：底图导出成临时 PNG，贴图上的标注克隆成矢量对象一起交给编辑器。
+// 编辑器的入口只认文件路径，所以底图需要一个落盘文件；文件留在 %TEMP%。
+void WinPin::importToImageEditor()
 {
-	auto foregroundBeforeDialog = GetForegroundWindow();
+	// 缩略图态只是显示用的缩略尺寸；导入的应该是完整贴图
+	if (thumbnail) exitThumbnail();
+	// 正在编辑：先把这一轮标注确认下来，保证导入的是屏幕上看到的内容
+	if (editing) finishEditing(true);
+
+	// 贴图上的矢量标注：全部克隆一份交给图片编辑器继续编辑
+	std::vector<std::unique_ptr<ShapeBase>> shapes;
+	if (history) shapes = cloneShapesForHost(nullptr, history->shapes);
+
+	std::vector<BYTE> pixels;
+	D2D1_SIZE_U size{};
+	// 标注以矢量搬过去，底图不能再把标注画进去，否则编辑器里会叠两层
+	if (!getAnnotPixels(pixels, size, nullptr, false)) return;
+	if (size.width == 0 || size.height == 0) return;
+
+	wchar_t tempDir[MAX_PATH]{};
+	if (GetTempPathW(MAX_PATH, tempDir) == 0) return;
+	const std::wstring path = std::wstring(tempDir)
+		+ wfmt(L"SnowAir-pin-edit-%lu-%llu.png", GetCurrentProcessId(), GetTickCount64());
+	if (!Util::saveToFile(path, (int)size.width, (int)size.height, pixels.data())) return;
+
+	WinImageEdit::init();
+	auto* editor = WinImageEdit::get();
+	if (!editor) return;
+	editor->importImageWithShapes(path, std::move(shapes), (int)size.width, (int)size.height);
+}
+
+void WinPin::saveToFile()
+{	auto foregroundBeforeDialog = GetForegroundWindow();
 	// 保存前后把窗口摆回原处：系统对话框可能带来 DPI / 焦点变化，避免贴图"移位"
 	const RECT before{ x, y, x + (LONG)std::lround(w), y + (LONG)std::lround(h) };
-	// 「保存格式」决定扩展名；文件名默认给「手动保存文件名格式」的末段；起始目录固定「桌面」
+	// 「保存格式」决定对话框里默认选中的类型；文件名默认给「手动保存文件名格式」的末段；起始目录固定「桌面」
 	const std::wstring saveExt = Util::extensionFromSaveFormat(Setting::get()->getSaveFormat());
 	std::wstring defName = Util::previewFileName(
 		Setting::get()->getManualSaveFormat(), Setting::defaultManualSaveFormat(), L"");
@@ -1138,7 +1334,7 @@ void WinPin::saveToFile()
 	hasDragged = false;
 	edgeResize = 0;
 	if (GetCapture() == hwnd) ReleaseCapture();
-	auto path = Util::getSaveFilePath(hwnd, saveExt, defName, Util::desktopDir().wstring());
+	auto path = Util::getImageSaveFilePath(hwnd, saveExt, defName, Util::desktopDir().wstring());
 	// 取消对话框的 Esc 有时会随后落到贴图上：收尾这一小段吞掉 Esc / 回车与鼠标按下
 	suppressKeysUntil = GetTickCount64() + 400;
 	suppressMouseUntil = GetTickCount64() + 300;
@@ -1151,6 +1347,18 @@ void WinPin::saveToFile()
 	if (!getAnnotPixels(pixels, size)) {
 		restoreWindowState(foregroundBeforeDialog, before);
 		return;
+	}
+	// 贴图可能带透明区域，而 JPEG / BMP 没有可靠的 alpha：不铺底的话透明像素会编码成黑块。
+	// 导出像素是预乘 BGRA，按白底合成就是 c + (255 - a)。
+	std::wstring outExt = std::filesystem::path(path).extension().wstring();
+	for (auto& c : outExt) c = (wchar_t)towlower(c);
+	if (outExt == L".jpg" || outExt == L".jpeg" || outExt == L".bmp") {
+		for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
+			const int add = 255 - (int)pixels[i + 3];
+			for (int ch = 0; ch < 3; ++ch)
+				pixels[i + ch] = (BYTE)std::min(255, (int)pixels[i + ch] + add);
+			pixels[i + 3] = 255;
+		}
 	}
 	Util::saveToFile(path, (int)size.width, (int)size.height, pixels.data());
 	// 另存为不关闭贴图（与复制一致）：保存完把窗口状态与属性栏复位，留在原位
@@ -1361,6 +1569,8 @@ void WinPin::applyImageTransform(int quarterTurns, bool flipH)
 	Ling::D2D::get()->deviceContext->CreateBitmap(D2D1::SizeU(W, H), px.data(), W * 4, &props, bmp.GetAddressOf());
 	if (!bmp) return;
 	screenImg = bmp;
+	// 底图已经旋/翻过了：指纹跟着新像素走，之后贴原图（未旋转的）不会被误判成重复
+	contentHash = hashPixels(W, H, px.data(), px.size());
 	clearAllShapes();   // 标注已烘焙进底图，清掉矢量层
 
 	// 保持中心，按原比例重排窗口
@@ -1478,6 +1688,7 @@ void WinPin::showContextMenu(POINT screenPt)
 	// 缩略图态不提供识别结果（窗口只有 50px，叠加层没有意义）：整项置灰、不可点
 	items.back().enabled = !thumbnail;
 	sep();
+	add(Lang::get(L"pin.menuImportEdit"), [this]() { importToImageEditor(); });
 	add(Lang::get(L"pin.menuEdit"), [this]() { if (thumbnail) exitThumbnail(); setEditing(true); });
 	addSub(Lang::get(L"pin.menuTransform"), {
 		sub(Lang::get(L"pin.menuRotateL"), [this]() { rotateImage90(false); }),

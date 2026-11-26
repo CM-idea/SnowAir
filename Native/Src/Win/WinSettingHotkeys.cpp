@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "../Lang.h"
 #include "../Setting.h"
+#include "../CommandKeys.h"
 #include "../Plugin/PluginHost.h"
 #include "WinSetting.h"
 #include "WinSettingHotkeys.h"
@@ -35,10 +36,15 @@ namespace {
         static const std::vector<std::wstring> common{
             L"Ctrl+C", L"Ctrl+V", L"Ctrl+X", L"Ctrl+Z", L"Ctrl+Y", L"Ctrl+A", L"Ctrl+S",
         };
-        if (std::find(system.begin(), system.end(), shortcut) != system.end())
-            return ShortcutReserved::System;
-        if (std::find(common.begin(), common.end(), shortcut) != common.end())
-            return ShortcutReserved::Common;
+        // 录制按固定顺序（Win 最前）写；旧配置或手改过的写法可能顺序不同，
+        // 与上面这两张固定表比较前先规范化，否则换个写法就绕过保留键判定。
+        const std::wstring chord = CommandKeys::canonicalChord(shortcut);
+        auto listed = [&chord](const std::vector<std::wstring>& table) {
+            for (const auto& s : table) if (_wcsicmp(s.c_str(), chord.c_str()) == 0) return true;
+            return false;
+        };
+        if (listed(system)) return ShortcutReserved::System;
+        if (listed(common)) return ShortcutReserved::Common;
         return ShortcutReserved::None;
     }
 
@@ -174,12 +180,13 @@ WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
         {Lang::get(L"setting.hotkeyGrpTranslate"),{
             { L"quick_translate",       Lang::get(L"shortcut.quick_translate") },
         }},
-        // 3 其他组 5 项
+        // 3 其他组 6 项
         {Lang::get(L"setting.hotkeyGrpOther"),{
             { L"show_main",             Lang::get(L"shortcut.show_main") },
             { L"make_collage",          Lang::get(L"shortcut.make_collage") + L" Beta" },
             { L"open_screenshot_dir",   Lang::get(L"shortcut.open_screenshot_dir") },
             { L"open_history",          Lang::get(L"shortcut.open_history") },
+            { L"restore_pin",           Lang::get(L"shortcut.restore_pin") },
             { L"toggle_pins",           Lang::get(L"shortcut.toggle_pins") },
         }},
     };
@@ -191,13 +198,15 @@ WinSettingHotkeys::WinSettingHotkeys(Ling::WinBase* parent) :Ling::Node(parent)
     }
 
     // 「停用截图历史」开启时，隐藏「打开截图历史」这一行的键位设置
+    bool firstGroup = true;
     for (const auto& g : groups) {
         std::vector<std::pair<std::wstring, std::wstring>> items;
         for (const auto& it : g.items) {
             if (it.first == L"open_history" && Setting::get()->getDisableCaptureHistory()) continue;
             items.push_back(it);
         }
-        buildGroup(g.title, items, this);
+        buildGroup(g.title, items, this, firstGroup);
+        firstGroup = false;
     }
 
     // 内容区只有外层 content 提供底部留白(20)：清掉末尾 optionRow 的 marginBottom，
@@ -262,10 +271,12 @@ void WinSettingHotkeys::syncRestoreState()
 }
 
 void WinSettingHotkeys::buildGroup(const std::wstring& grpTitle,
-    const std::vector<std::pair<std::wstring, std::wstring>>& items, Ling::Node* p)
+    const std::vector<std::pair<std::wstring, std::wstring>>& items, Ling::Node* p,
+    bool firstGroup)
 {
-    // 分组标题：独立加粗文本（无卡片背景）
-    SettingUi::groupLabel(p, grpTitle);
+    // 分组标题：第一个组保留默认 sp3（和系统按键第一组一致），后续组归零（靠上一行 12）。
+    auto* grpLab = SettingUi::groupLabel(p, grpTitle);
+    if (!firstGroup && grpLab && grpLab->parent) grpLab->parent->setMarginTop(0.f);
 
     // 每个选项为独立的浅灰圆角卡片行，行间由 optionGap 自然留出间距
     for (size_t i = 0; i < items.size(); i++) {

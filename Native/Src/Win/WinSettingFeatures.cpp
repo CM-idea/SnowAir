@@ -16,8 +16,11 @@
 #include "WinCap.h"
 #include "WinSetting.h"
 #include "CapVideo.h"
+#include "CursorImage.h"
+#include "MagLens.h"
 #include <shobjidl.h>
 #include <commdlg.h>
+#include <cmath>
 
 namespace {
 	// 半栏布局：整行 100%，列固定 50% − 半个列距；落单时也保持半宽
@@ -50,24 +53,6 @@ namespace {
 		case 4:  return s->functionOtherAtDefaults();
 		default: return s->functionScreenshotAtDefaults();
 		}
-	}
-
-	// 色号文本（#RRGGBB）：高亮色块旁显示用
-	std::wstring colorCode(UINT32 rgba)
-	{
-		return wfmt(L"#%02X%02X%02X",
-			(rgba >> 24) & 0xFFu, (rgba >> 16) & 0xFFu, (rgba >> 8) & 0xFFu);
-	}
-
-	// 解析键入的色号：接受 #RRGGBB / RRGGBB（忽略空白）；非法则返回 fallback
-	UINT32 parseColorCode(const std::wstring& text, UINT32 fallback)
-	{
-		std::wstring s;
-		for (wchar_t c : text) if (!iswspace(c)) s += c;
-		if (!s.empty() && s[0] == L'#') s.erase(0, 1);
-		if (s.size() != 6) return fallback;
-		for (wchar_t c : s) if (!iswxdigit(c)) return fallback;
-		return ((UINT32)wcstoul(s.c_str(), nullptr, 16) & 0xFFFFFFu) << 8 | 0xFFu;
 	}
 
 	// 文件夹选择
@@ -104,12 +89,59 @@ namespace {
 	}
 
 	// 文件输出页标签列固定宽，使各输入框左缘整齐
-	constexpr float kOutputLabelW{ 150.f };
+	// 「文件输出」标题列宽：按当前语言实际文字宽度算（见 buildOutput），中文比英文短，
+	// 输入框能多占一点；所有行仍按同一宽度左缘对齐。
+	float gOutputLabelW{ 150.f };
 
 	// 「删除 / 重置」类（垃圾桶图标）按钮：红底（20% 红）+ 红图标
 	constexpr uint32_t kDangerRedBg{ 0xFF383C33 };   // #FF383C @ 20%
 	constexpr uint32_t kDangerRed{ 0xFF383CFF };     // #FF383C
 	bool isTrashGlyph(const wchar_t* glyph) { return glyph && _wcsicmp(glyph, Icon::Remove) == 0; }
+
+	// 「鼠标轨迹效果」下拉的显示顺序：高亮 / 线条 / 局部放大 / 无。
+	int trailEffectFromIndex(int i)
+	{
+		static const int kOrder[]{ Setting::kMouseTrailHighlight, Setting::kMouseTrailLine,
+			Setting::kMouseTrailMagnifier, Setting::kMouseTrailNone };
+		return kOrder[std::clamp(i, 0, 3)];
+	}
+	int trailIndexFromEffect(int effect)
+	{
+		static const int kOrder[]{ Setting::kMouseTrailHighlight, Setting::kMouseTrailLine,
+			Setting::kMouseTrailMagnifier, Setting::kMouseTrailNone };
+		for (int i = 0; i < 4; ++i)
+			if (kOrder[i] == effect) return i;
+		return 3;
+	}
+
+	// 「鼠标单击效果」下拉的显示顺序：波纹 / 放大 / 组合 / 无。
+	// 存储值保持 0/1/2（无）/3（组合），不能直接拿下标当配置值（旧配置 2 = 无）。
+	int clickEffectFromIndex(int i)
+	{
+		static const int kOrder[]{ Setting::kMouseClickRipple, Setting::kMouseClickZoom,
+			Setting::kMouseClickCombo, Setting::kMouseClickNone };
+		return kOrder[std::clamp(i, 0, 3)];
+	}
+	int clickIndexFromEffect(int effect)
+	{
+		static const int kOrder[]{ Setting::kMouseClickRipple, Setting::kMouseClickZoom,
+			Setting::kMouseClickCombo, Setting::kMouseClickNone };
+		for (int i = 0; i < 4; ++i)
+			if (kOrder[i] == effect) return i;
+		return 3;
+	}
+
+	// 取色色块：浅色（含白色）在深色卡片上补一圈描边，其余颜色不描边（避免圆角灰锯齿）
+	void styleColorSwatch(Ling::Button* b, UINT32 v)
+	{
+		if (!b) return;
+		const float lum = (0.299f * ((v >> 24) & 0xFF) + 0.587f * ((v >> 16) & 0xFF)
+			+ 0.114f * ((v >> 8) & 0xFF)) / 255.f;
+		if (lum > 0.82f) b->setBorder(1.f, SettingTheme::input);
+		else b->setBorder(0.f, 0);
+		b->setBg(v);
+		b->setHoverBg(v);   // 悬停不改底色（否则会盖掉颜色本身）
+	}
 
 	// 「文件输出」行右侧辅助按钮（方形图标按钮，与输入框同高）
 	// 样式对齐「插件集成 → 下载按钮」：平铺浅灰(#F5F4F4)、无描边、无停悬变化；
@@ -145,7 +177,9 @@ namespace {
 	//   · 失焦：自动填入的默认值原样收回成灰占位符（不写设置），手打的值才提交。
 	Ling::TextBox* outputRow(Ling::Node* p, const std::wstring& label,
 		const std::wstring& storedValue, const std::wstring& defaultValue, OutputRowKind kind,
-		std::function<void(const std::wstring&)> onCommit)
+		std::function<void(const std::wstring&)> onCommit,
+		const wchar_t* tipKey = L"setting.outputDirTip",
+		const wchar_t* helpKey = nullptr)
 	{
 		auto* row = p->makeChild<Ling::Node>();
 		row->setFlexDirection(Ling::FlexDirection::Row);
@@ -161,12 +195,19 @@ namespace {
 		YGNodeStyleSetMinWidth(row->node, 0.f);
 		YGNodeStyleSetMinHeight(row->node, 0.f);
 
-		auto* lab = row->makeChild<Ling::Label>();
+		// 标题 + 可选「?」：固定宽度保证各行输入框左缘对齐，问号紧跟标题文字
+		auto* titleRow = row->makeChild<Ling::Node>();
+		titleRow->setWidth(gOutputLabelW);
+		titleRow->setFlexShrink(0.f);
+		titleRow->setFlexDirection(Ling::FlexDirection::Row);
+		titleRow->setAlignItems(Ling::Align::Center);
+
+		auto* lab = titleRow->makeChild<Ling::Label>();
 		lab->setText(label);
 		lab->setFontSize(SettingTheme::fontBase);
 		lab->setColor(SettingTheme::textPrimary);
-		lab->setWidth(kOutputLabelW);
 		lab->setFlexShrink(0.f);
+		if (helpKey) SettingUi::helpTipButton(titleRow, Lang::get(helpKey));
 
 		// 空 / 恰等于默认值 = 没改过 → 显示成灰占位符
 		const bool isDefault = storedValue.empty() ||
@@ -189,6 +230,7 @@ namespace {
 		box->setPlaceholder(defaultValue);
 		box->setPlaceholderColor(SettingTheme::placeholder);
 		box->setText(isDefault ? L"" : storedValue);
+		box->setScrollBarVisible(false);   // 高度不够时靠加高，不出现滚动条
 
 		// 顺序：选择文件夹在前、重置在后（浏览 → 垃圾桶）
 		auto* browseBtn = (kind == OutputRowKind::Dir)               // 选择文件夹
@@ -220,6 +262,7 @@ namespace {
 					*autoFilled = false;
 				}
 				syncButtons();
+				box->fitHeightToText(SettingTheme::ctrlH * 3.5f, SettingTheme::ctrlH);   // 长路径折行显示，不加滚动条
 				return;
 			}
 			// 失焦：自动填入的默认值原样收回（不落盘）→ 回到灰占位符
@@ -235,11 +278,13 @@ namespace {
 				doCommit = false;
 			}
 			syncButtons();
+			box->setHeightAndReflow(SettingTheme::ctrlH);   // 失焦收回单行高度
 			if (doCommit && onCommit) onCommit(box->getText());
 		});
-		box->onTextChanged.add([autoFilled, syncButtons](Ling::TextBox*, const std::wstring&) {
+		box->onTextChanged.add([box, autoFilled, syncButtons](Ling::TextBox*, const std::wstring&) {
 			*autoFilled = false;   // 内容被改过 → 不再是"自动填入的默认值"
 			syncButtons();
+			if (box->isFocused()) box->fitHeightToText(SettingTheme::ctrlH * 3.5f, SettingTheme::ctrlH);
 		});
 
 		resetBtn->onClick.add([box, autoFilled, syncButtons, onCommit](Ling::Button*) {
@@ -274,12 +319,12 @@ namespace {
 					const std::wstring fmt = box->getText().empty() ? defaultValue : box->getText();
 					const std::wstring name = Util::previewFileName(fmt, defaultValue, L"");
 					if (name.empty()) return;
-					tip->showFor(box, Lang::get(L"setting.previewPrefix") + name);
+					tip->showFor(box, Lang::get(L"setting.previewPrefix") + name, true);
 				});
 			}
-			else {
-				box->onEnter.add([box, tip](Ling::TextBox*) {
-					tip->showFor(box, Lang::get(L"setting.outputDirTip"));
+			else if (tipKey && *tipKey) {
+				box->onEnter.add([box, tip, tipKey](Ling::TextBox*) {
+					tip->showFor(box, Lang::get(tipKey));
 				});
 			}
 			box->onLeave.add([box, tip](Ling::TextBox*) { tip->hideFor(box); });
@@ -293,51 +338,437 @@ WinSettingFeatures::WinSettingFeatures(Ling::WinBase* parent) : Ling::Node(paren
 {
 	setFlexDirection(Ling::FlexDirection::Column);
 	build();
-	// 悬停预览只在窗口级鼠标移动里更新（页面重建不影响订阅）
+	initPreviewOverlay();
+	// 预览只在窗口级鼠标事件里更新（页面重建不影响订阅）
 	mouseMoveTok = win->onMouseMove.add([this](POINT pos) {
-		updateMouseHlPreview(pos);
+		updatePreviewOnMouseMove(pos);
 		// 各行的改动不触发本页重建，「恢复默认」的置灰借这个高频回调同步：
 		// 值没变时 setColor 会被 Text 内部的相等判断吃掉，不产生多余重绘
 		syncRestoreState();
+	});
+	mouseDownTok_ = win->onMouseDown.add([this](POINT pos, bool isRight) {
+		if (!isRight) updatePreviewOnMouseDown(pos);
+	});
+	timerTok_ = win->onTimer.add([this](UINT id) {
+		if (id == kPreviewTimerId) updatePreviewFrame();
 	});
 }
 
 WinSettingFeatures::~WinSettingFeatures()
 {
 	SettingUi::closePopup(win);
+	MagLens::get().hide();
+	restorePreviewCursor();
+	if (!win) return;
 	win->onMouseMove.remove(mouseMoveTok);
-	if (mouseHlPreview) {
-		if (win && win->body) win->body->removeChild(mouseHlPreview);
-		mouseHlPreview = nullptr;
+	win->onMouseDown.remove(mouseDownTok_);
+	win->onTimer.remove(timerTok_);
+	win->killTimer(kPreviewTimerId);
+	if (previewCanvas_) {
+		if (win->body) win->body->removeChild(previewCanvas_);
+		previewCanvas_ = nullptr;
 	}
 }
 
-// 「鼠标高亮提醒」的悬停预览：命中该行时把圆跟着光标走，离开就收起。
-// 尺寸与透明度取与实际绘制相同的值（见 WinCap::mouseHlRadius / kMouseHlAlpha）。
-void WinSettingFeatures::updateMouseHlPreview(const POINT& pos)
+// 预览层：盖在设置页最上面的透明 Canvas。几何与 WinCap 里的录制绘制保持一致，
+// 所以停悬/单击看到的就是录进视频里的样子。
+void WinSettingFeatures::initPreviewOverlay()
 {
-	if (!mouseHlPreview) return;
-	// 只在「视频录制」Tab 的卡片中部空白处触发：标题文本、色块/色号/开关都不算
-	//（其它 Tab 下该行是隐藏的，坐标判定不可靠，故一并排除）
-	const bool inArea = mouseHlArea && mouseHlArea->isPosIn(pos)
-		&& !(mouseHlLabel && mouseHlLabel->isPosIn(pos));
-	if (tabIndex != 1 || !inArea) {
-		mouseHlPreview->hide();
+	if (!win || !win->body || previewCanvas_) return;
+	previewCanvas_ = win->body->makeChild<Ling::Canvas>();
+	previewCanvas_->setPositionType(Ling::Position::Absolute);
+	previewCanvas_->setPosition(Ling::Edge::Left, 0.f);
+	previewCanvas_->setPosition(Ling::Edge::Top, 0.f);
+	previewCanvas_->setPosition(Ling::Edge::Right, 0.f);
+	previewCanvas_->setPosition(Ling::Edge::Bottom, 0.f);
+}
+
+// 悬停轨迹行：
+//   高亮提醒 → 圆跟着光标走（同色同径，与录制时一致）
+//   线条跟随 → 记录最近一段光标位置，画一条会变短、渐隐的笔迹
+void WinSettingFeatures::updatePreviewOnMouseMove(const POINT& pos)
+{
+	// 鼠标离开窗口：如果正在「光标放大」预览，立刻把系统光标放回来，
+	// 否则用户移出窗口后会有最多 320ms 看不到光标。
+	if (pos.x == INT_MAX || pos.y == INT_MAX) {
+		restorePreviewCursor();
+		// 放大镜是置顶窗，鼠标进入它时卡片可能收到 WM_MOUSELEAVE；
+		// 此时真实光标还在卡片上，不能 hide，否则会 hide→show→leave 疯狂闪烁。
+		bool cursorInCard = false;
+		POINT cur{};
+		if (GetCursorPos(&cur)) {
+			if (win && win->hwnd) ScreenToClient(win->hwnd, &cur);
+			cursorInCard = trailPreviewArea_ && trailPreviewArea_->isPosIn(cur);
+		}
+		if (!cursorInCard) MagLens::get().hide();
+		previewHoverOn_ = false;
+		previewTrail_ = {};
+		previewClicks_.clear();
+		paintPreview();
 		return;
 	}
-	constexpr float kD = 42.f;   // 直径 = 半径 21 逻辑像素 × 2
-	// 事件坐标是物理像素，而 setPosition 收的是逻辑像素（内部 ×dpi）；圆心同样取光标本体中心
-	const float k = (win && win->dpi > 0.f) ? win->dpi : 1.f;
-	float ox = 0.f, oy = 0.f;
-	Util::cursorBodyOffset(ox, oy);
-	mouseHlPreview->setPosition(Ling::Edge::Left, ((float)pos.x + ox) / k - kD * 0.5f);
-	mouseHlPreview->setPosition(Ling::Edge::Top, ((float)pos.y + oy) / k - kD * 0.5f);
-	mouseHlPreview->show();
+
+	auto* s = Setting::get();
+	if (!s || tabIndex != 1) {
+		const bool wasActive = previewHoverOn_ || !previewTrail_.points.empty()
+			|| !previewClicks_.empty();
+		previewHoverOn_ = false;
+		previewTrail_ = {};
+		MagLens::get().hide();
+		if (wasActive) paintPreview();
+		return;
+	}
+
+	const bool wasActive = previewHoverOn_ || !previewTrail_.points.empty()
+		|| !previewClicks_.empty();
+	const bool inArea = trailPreviewArea_ && trailPreviewArea_->isPosIn(pos);
+	const int trailMode = s->getMouseTrailEffect();
+
+	// 局部放大用独立的圆形放大镜窗口预览（实时放大卡片本身），不在 Canvas 上画
+	if (inArea && trailMode == Setting::kMouseTrailMagnifier) {
+		POINT p = pos;
+		if (win && win->hwnd) ClientToScreen(win->hwnd, &p);
+		// 与录制一致：镜头圆心取光标本体中心，不是热点尖角
+		float ox = 0.f, oy = 0.f;
+		Util::cursorBodyOffset(ox, oy);
+		p.x += (LONG)ox;
+		p.y += (LONG)oy;
+		// 设置页预览：镜头盖在下拉菜单/悬停气泡上面
+		MagLens::get().raiseTop();
+		MagLens::get().showAt(p, win ? win->dpi : 1.f);
+		previewHoverOn_ = false;
+		previewTrail_ = {};
+		paintPreview();
+		return;
+	}
+	MagLens::get().hide();
+
+	if (inArea && trailMode != Setting::kMouseTrailNone) {
+		previewHoverOn_ = true;
+		previewHoverPt_ = pos;
+		if (trailMode == Setting::kMouseTrailLine) {
+			// 与录制时同一套渐隐画笔：点带时间戳，笔宽随点龄收细；
+			// 寿命取一半，预览里看到的长度也和录制一致。
+			previewTrail_.width = 5.f * (win && win->dpi > 0.f ? win->dpi : 1.f);
+			previewTrail_.lifeMs = 240;   // 与录制一致
+			LaserStroke::addPoint(previewTrail_, (float)pos.x, (float)pos.y,
+				(int64_t)GetTickCount64());
+			startPreviewTimer();
+		}
+	}
+	else {
+		previewHoverOn_ = false;
+	}
+	// 切回高亮/无时把上一次的线条清掉
+	if (trailMode != Setting::kMouseTrailLine) previewTrail_ = {};
+
+	const bool isActive = previewHoverOn_ || !previewTrail_.points.empty()
+		|| !previewClicks_.empty();
+	if (isActive || wasActive) paintPreview();
+}
+
+// 单击「鼠标单击效果」行左侧（标题/空白处）直接预览该效果；点右侧下拉只是选值。
+void WinSettingFeatures::updatePreviewOnMouseDown(const POINT& pos)
+{
+	auto* s = Setting::get();
+	if (!s || tabIndex != 1) return;
+	if (!clickPreviewArea_ || !clickPreviewArea_->isPosIn(pos)) return;
+	const int mode = s->getMouseClickEffect();
+	if (mode == Setting::kMouseClickNone) return;
+	if (mode == Setting::kMouseClickZoom || mode == Setting::kMouseClickCombo) {
+		// 每次单击都重新抓一次"当前"系统光标，不能一直用第一次缓存下来的样子：
+		// 箭头 / 手型 / 工字 / 自定义光标会随控件变化，预览必须跟当前样式一致。
+		if (previewCursorHidden_) restorePreviewCursor();   // 隐藏状态下 GetCursorInfo 抓不到光标
+		previewCursorBmp_.Reset();
+		previewCursorTried_ = false;
+		// 先抓光标再藏，否则抓到的是"正在被我们藏掉"的空光标；
+		// 抓不到就干脆不藏，免得光标消失却没有放大的光标顶上。
+		if (!ensurePreviewCursorBitmap()) return;
+		if (!previewCursorHidden_) {
+			ShowCursor(FALSE);
+			previewCursorHidden_ = true;
+		}
+	}
+	previewClicks_.push_back({ pos, GetTickCount64() });
+	if (previewClicks_.size() > 6) previewClicks_.erase(previewClicks_.begin());
+	startPreviewTimer();
+	paintPreview();
+}
+
+void WinSettingFeatures::pickMouseFxColor()
+{
+	auto* s = Setting::get();
+	if (!s) return;
+	const UINT32 cur = s->getMouseHighlightColor();
+	static COLORREF cust[16]{};
+	CHOOSECOLORW cc{};
+	cc.lStructSize = sizeof(cc);
+	cc.hwndOwner = win ? win->hwnd : nullptr;   // 调色板以设置窗为宿主，避免落到设置窗背后
+	cc.lpCustColors = cust;
+	cc.rgbResult = RGB((cur >> 24) & 0xFFu, (cur >> 16) & 0xFFu, (cur >> 8) & 0xFFu);
+	cc.Flags = CC_FULLOPEN | CC_RGBINIT | CC_ANYCOLOR;
+	if (!ChooseColorW(&cc)) return;
+	s->setMouseHighlightColor(((UINT32)GetRValue(cc.rgbResult) << 24)
+		| ((UINT32)GetGValue(cc.rgbResult) << 16)
+		| ((UINT32)GetBValue(cc.rgbResult) << 8) | 0xFFu);
+	syncColorSwatches();
+	paintPreview();   // 颜色变了立刻重画预览（笔刷按新色号重建）
+}
+
+void WinSettingFeatures::syncColorSwatches()
+{
+	auto* s = Setting::get();
+	if (!s) return;
+	const UINT32 v = s->getMouseHighlightColor();
+	styleColorSwatch(trailSwatch_, v);
+	styleColorSwatch(clickSwatch_, v);
+}
+
+// 色块只在对应效果真的用色时出现：
+//   轨迹：高亮提醒 / 线条跟随；单击：仅单色波纹（光标放大没有颜色可调）
+void WinSettingFeatures::updateSwatchVisibility()
+{
+	auto* s = Setting::get();
+	if (!s) return;
+	const int trail = s->getMouseTrailEffect();
+	const bool useTrailColor = trail == Setting::kMouseTrailHighlight
+		|| trail == Setting::kMouseTrailLine;
+	if (trailSwatch_) {
+		if (useTrailColor) trailSwatch_->show();
+		else trailSwatch_->hide();
+	}
+	const int clickMode = s->getMouseClickEffect();
+	const bool useClickColor = clickMode == Setting::kMouseClickRipple
+		|| clickMode == Setting::kMouseClickCombo;
+	if (clickSwatch_) {
+		if (useClickColor) clickSwatch_->show();
+		else clickSwatch_->hide();
+	}
+}
+
+void WinSettingFeatures::restorePreviewCursor()
+{
+	if (!previewCursorHidden_) return;
+	// ShowCursor 是计数式的：隐藏一次就恢复一次
+	ShowCursor(TRUE);
+	previewCursorHidden_ = false;
+}
+
+void WinSettingFeatures::startPreviewTimer()
+{
+	if (!win || previewTimerOn_) return;
+	win->setTimer(kPreviewTickMs, kPreviewTimerId);
+	previewTimerOn_ = true;
+}
+
+void WinSettingFeatures::stopPreviewTimerIfIdle()
+{
+	if (!win || !previewTimerOn_ || !previewTrail_.points.empty()
+		|| !previewClicks_.empty()) return;
+	win->killTimer(kPreviewTimerId);
+	previewTimerOn_ = false;
+}
+
+void WinSettingFeatures::updatePreviewFrame()
+{
+	const ULONGLONG now = GetTickCount64();
+	const int64_t nowMs = (int64_t)now;
+	// 只在整条轨迹过期时清空：刚采到 1 个点时 visible 仍是 false，
+	// 若按 visible 清掉就永远攒不到第 2 个点。
+	const int64_t life = std::max<int64_t>(1, previewTrail_.lifeMs);
+	if (!previewTrail_.points.empty() && nowMs - previewTrail_.points.back().t >= life)
+		previewTrail_ = {};
+	while (!previewClicks_.empty() && now - previewClicks_.front().t > 520)
+		previewClicks_.erase(previewClicks_.begin());
+	// 放大动画（320ms）结束就恢复系统光标；不能等 click 记录 520ms 清掉
+	bool zoomActive = false;
+	const int clickMode = Setting::get() ? Setting::get()->getMouseClickEffect()
+		: Setting::kMouseClickNone;
+	if (clickMode == Setting::kMouseClickZoom || clickMode == Setting::kMouseClickCombo) {
+		for (const auto& fx : previewClicks_)
+			if (now - fx.t < 320) { zoomActive = true; break; }
+	}
+	if (!zoomActive) restorePreviewCursor();
+	paintPreview();
+	stopPreviewTimerIfIdle();
+}
+
+ID2D1SolidColorBrush* WinSettingFeatures::ensurePreviewBrush()
+{
+	auto* s = Setting::get();
+	if (!s) return nullptr;
+	const UINT32 rgba = s->getMouseHighlightColor();
+	if (!previewBrush_ || previewBrushColor_ != rgba) {
+		previewBrush_.Reset();
+		auto* d2d = Ling::D2D::get();
+		if (!d2d || !d2d->deviceContext) return nullptr;
+		d2d->deviceContext->CreateSolidColorBrush(
+			D2D1::ColorF(((rgba >> 24) & 0xFFu) / 255.f, ((rgba >> 16) & 0xFFu) / 255.f,
+				((rgba >> 8) & 0xFFu) / 255.f, 1.f),
+			previewBrush_.GetAddressOf());
+		previewBrushColor_ = rgba;
+	}
+	return previewBrush_.Get();
+}
+
+// 抓一次当前系统光标，供「光标放大」预览使用。抓不到（远程桌面/隐藏光标）就只显示波纹兜底。
+bool WinSettingFeatures::ensurePreviewCursorBitmap()
+{
+	if (previewCursorBmp_) return true;
+	if (previewCursorTried_) return false;
+	previewCursorTried_ = true;
+	// 失败时允许下一次单击再试（远程桌面/光标暂时隐藏都可能第一次抓不到）
+	auto fail = [this]() { previewCursorTried_ = false; return false; };
+
+	CURSORINFO ci{ sizeof(CURSORINFO) };
+	if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING) || !ci.hCursor) return fail();
+	ICONINFO ii{};
+	if (!GetIconInfo(ci.hCursor, &ii)) return fail();
+	int width = 0, height = 0;
+	auto cleanup = [&] {
+		if (ii.hbmColor) DeleteObject(ii.hbmColor);
+		if (ii.hbmMask) DeleteObject(ii.hbmMask);
+		ii.hbmColor = ii.hbmMask = nullptr;
+	};
+	if (!CursorImage::ChooseSize(ii, &width, &height)) {
+		cleanup();
+		previewCursorTried_ = false;
+		return false;
+	}
+	previewCursorHotspot_ = POINT{ (LONG)ii.xHotspot, (LONG)ii.yHotspot };
+
+	HDC screenDc = GetDC(nullptr);
+	HDC memDc = screenDc ? CreateCompatibleDC(screenDc) : nullptr;
+	std::vector<BYTE> px, xorMask;
+	const bool got = memDc && CursorImage::Extract(memDc, ii, width, height, px, &xorMask)
+		&& px.size() == (size_t)width * height * 4;
+	if (memDc) DeleteDC(memDc);
+	if (screenDc) ReleaseDC(nullptr, screenDc);
+	cleanup();
+	if (!got) {
+		previewCursorTried_ = false;
+		return false;
+	}
+	// 单色光标的"反色"像素按白色给出，预览卡片是浅色底也能看见
+	std::vector<BYTE> pm(px.size());
+	for (size_t i = 0; i + 3 < pm.size(); i += 4) {
+		const BYTE a = px[i + 3];
+		pm[i] = (BYTE)(px[i] * a / 255);
+		pm[i + 1] = (BYTE)(px[i + 1] * a / 255);
+		pm[i + 2] = (BYTE)(px[i + 2] * a / 255);
+		pm[i + 3] = a;
+	}
+	auto* d2d = Ling::D2D::get();
+	if (!d2d || !d2d->deviceContext) return false;
+	D2D1_BITMAP_PROPERTIES1 prop{
+		.pixelFormat{ DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED },
+		.dpiX{ 96.0f }, .dpiY{ 96.0f },
+		.bitmapOptions{ D2D1_BITMAP_OPTIONS_NONE }
+	};
+	if (FAILED(d2d->deviceContext->CreateBitmap(
+		D2D1::SizeU((UINT32)width, (UINT32)height), pm.data(),
+		(UINT32)width * 4, &prop, previewCursorBmp_.GetAddressOf()))) {
+		previewCursorTried_ = false;
+		return false;
+	}
+	previewCursorW_ = width;
+	previewCursorH_ = height;
+	return true;
+}
+
+void WinSettingFeatures::paintPreview()
+{
+	if (!previewCanvas_ || !win) return;
+	if (previewCanvas_->w <= 0.f || previewCanvas_->h <= 0.f) return;
+	auto* s = Setting::get();
+	if (!s) return;
+	ID2D1DeviceContext* ctx = previewCanvas_->startPaint();
+	if (!ctx) return;
+	ctx->Clear(0);
+
+	const float d = win->dpi > 0.f ? win->dpi : 1.f;
+	auto* brush = ensurePreviewBrush();
+	if (!brush) {
+		previewCanvas_->finishPaint();
+		return;
+	}
+
+	// 悬停预览：高亮圆 / 跟随线条
+	const int trailMode = s->getMouseTrailEffect();
+	if (trailMode == Setting::kMouseTrailHighlight && previewHoverOn_) {
+		float ox = 0.f, oy = 0.f;
+		Util::cursorBodyOffset(ox, oy);
+		const float r = MouseFx::highlightRadius * d;   // 与录制/屏幕一致（直径 50）
+		brush->SetOpacity(MouseFx::highlightAlpha);    // 与录制/屏幕一致
+		ctx->FillEllipse(D2D1::Ellipse(D2D1::Point2F((float)previewHoverPt_.x + ox,
+			(float)previewHoverPt_.y + oy), r, r), brush);
+	}
+	else if (trailMode == Setting::kMouseTrailLine) {
+		const int64_t nowMs = (int64_t)GetTickCount64();
+		if (LaserStroke::visible(previewTrail_, nowMs)) {
+			brush->SetOpacity(0.5f);   // 与录制时一致：半透明
+			LaserStroke::paint(ctx, brush, previewTrail_, nowMs);
+		}
+	}
+
+	// 单击预览：单色波纹 / 光标放大
+	const int clickMode = s->getMouseClickEffect();
+	if (clickMode == Setting::kMouseClickRipple || clickMode == Setting::kMouseClickCombo) {
+		const ULONGLONG now = GetTickCount64();
+		for (const auto& fx : previewClicks_) {
+			const ULONGLONG age = now - fx.t;
+			if (age >= MouseFx::rippleLifeMs) continue;
+			const float k = (float)age / (float)MouseFx::rippleLifeMs;
+			const float r = MouseFx::rippleRadius(k) * d;
+			brush->SetOpacity(MouseFx::rippleAlpha(k));
+			ctx->DrawEllipse(D2D1::Ellipse(D2D1::Point2F((float)fx.pt.x, (float)fx.pt.y), r, r),
+				brush, MouseFx::rippleWidth(k) * d);
+		}
+	}
+	if ((clickMode == Setting::kMouseClickZoom || clickMode == Setting::kMouseClickCombo)
+		&& previewCursorBmp_ && win && win->hwnd) {
+		const ULONGLONG now = GetTickCount64();
+		const PreviewClickFx* latest = nullptr;
+		for (const auto& fx : previewClicks_)
+			if (now - fx.t < 320) latest = &fx;
+		if (latest) {
+			// 跟着鼠标实时位置画，不把光标钉在点击点：动效期间鼠标仍可自由移动。
+			POINT p{};
+			if (GetCursorPos(&p)) {
+				ScreenToClient(win->hwnd, &p);
+				RECT rc{};
+				GetClientRect(win->hwnd, &rc);
+				if (p.x >= 0 && p.y >= 0 && p.x < rc.right && p.y < rc.bottom) {
+					const float k = (float)(now - latest->t) / 320.f;
+					const float grow = std::sin(k * 3.14159265f);
+					const float scale = 1.f + 0.8f * grow;   // 与 WinCap::clickZoomScale 一致
+					// 系统光标在这段时间被藏起来了，所以这里画实心光标，不能再用半透明叠层
+					const float l = (float)p.x - previewCursorHotspot_.x * scale;
+					const float t = (float)p.y - previewCursorHotspot_.y * scale;
+					ctx->DrawBitmap(previewCursorBmp_.Get(),
+						D2D1::RectF(l, t, l + previewCursorW_ * scale, t + previewCursorH_ * scale),
+						1.f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+				}
+			}
+		}
+	}
+
+	brush->SetOpacity(1.f);
+	previewCanvas_->finishPaint();
 }
 
 void WinSettingFeatures::showTab(int index)
 {
 	if (index < 0 || index > 4) return;
+	// 切页时收起上一个 Tab 的预览（尤其线条/波纹还没走完的动画）
+	MagLens::get().hide();
+	restorePreviewCursor();
+	previewHoverOn_ = false;
+	previewHoverPt_ = POINT{ -1, -1 };
+	previewTrail_ = {};
+	previewClicks_.clear();
+	stopPreviewTimerIfIdle();
+	paintPreview();
 	tabIndex = index;
 	// 同步胶囊选中态（不触发 onChange，避免点击后递归）
 	segPills.select(index);
@@ -363,6 +794,18 @@ void WinSettingFeatures::syncRestoreState()
 void WinSettingFeatures::rebuildTab(int index)
 {
 	if (index < 0 || index > 4 || !tabs[index]) return;
+	// 重建会销毁行节点：预览触发区/动画先全部收掉，避免旧指针和新状态残留
+	MagLens::get().hide();
+	restorePreviewCursor();
+	previewHoverOn_ = false;
+	previewHoverPt_ = POINT{ -1, -1 };
+	previewTrail_ = {};
+	previewClicks_.clear();
+	trailPreviewArea_ = nullptr;
+	clickPreviewArea_ = nullptr;
+	trailSwatch_ = clickSwatch_ = nullptr;
+	stopPreviewTimerIfIdle();
+	paintPreview();
 	tabs[index]->removeAllChildren();
 	if (index == 0) buildBasic(tabs[index]);
 	else if (index == 1) buildRecord(tabs[index]);
@@ -393,7 +836,7 @@ void WinSettingFeatures::build()
 	tabRow->setFlexDirection(Ling::FlexDirection::Row);
 	tabRow->setWidthPercent(100.f);
 	tabRow->setAlignItems(Ling::Align::Center);
-	tabRow->setMarginBottom(SettingTheme::blockGap);
+	tabRow->setMarginBottom(SettingTheme::sp3);
 	segPills = SettingUi::segmentedPills(tabRow, labels, 0,
 		[this](int i) { showTab(i); });
 	// 胶囊自适应宽度 + 中间弹性空白，把右侧「恢复默认」推到最右
@@ -615,126 +1058,70 @@ void WinSettingFeatures::buildRecord(Ling::Node* p)
 	SettingUi::toggleRow(g, Lang::get(L"setting.fnRecSelFollowMouse"), L"", s->getSelFollowMouse(),
 		[](bool on) { Setting::get()->setSelFollowMouse(on); }, true,
 		Lang::get(L"setting.fnRecSelFollowMouseTip"));
-	// 行为见 WinCap::paintMouseHighlight；色块 + 色号点击弹系统调色板（与「托盘自定义颜色」同款）
+	// 「鼠标轨迹效果」：高亮提醒（原来的鼠标高亮）/ 线条跟随（变短渐隐的画笔）/ 无（默认）。
+	// 选中效果后整张卡片都生效：悬停卡片即在预览层里跟着光标画出来（见 WinCap::paintMouseTrail）。
+	// 色块在下拉左侧，只在用色时出现：高亮提醒 / 线条跟随；点开是系统调色板。
 	{
-		auto r = SettingUi::optionRow(g, Lang::get(L"setting.fnRecMouseHighlight"), L"", true, SettingUi::kToggleH);
-		// 操作提示排在标题右侧的空白处，与标题同一行（不占标题下方、不动 label 区布局）：
-		// 挂到标题行上，吞掉剩余宽度并在其中居中。Label 内部是纵向容器，横向居中要用 alignItems
-		//（justifyContent 管的是纵向主轴，对单行文本无效果）。
-		{
-			auto* hint = r.labRow->makeChild<Ling::Label>();
-			hint->setText(Lang::get(L"setting.fnRecMouseHighlightHint"));
-			hint->setFontSize(SettingTheme::fontSm);
-			hint->setColor(SettingTheme::border);   // 与卡片描边同色：能看见即可，不抢主体
-			hint->setFlexGrow(1.f);
-			hint->setFlexShrink(1.f);
-			YGNodeStyleSetMinWidth(hint->node, 0.f);
-			hint->setAlignItems(Ling::Align::Center);
-		}
-		// 悬停预览圆：挂在 win->body 上（窗口坐标），跟着光标走；重建本页时先撤旧的
-		if (mouseHlPreview && win && win->body) {
-			win->body->removeChild(mouseHlPreview);
-			mouseHlPreview = nullptr;
-		}
-		auto* hl = win->body->makeChild<Ling::Node>();
-		hl->setPositionType(Ling::Position::Absolute);
-		hl->setSize(42.f, 42.f);
-		hl->setBorderRadius(21.f);
-		hl->setBg((s->getMouseHighlightColor() & 0xFFFFFF00u) | 0x59u);   // 与绘制同透明度
-		hl->hide();
-		mouseHlPreview = hl;
-		mouseHlArea = r.labelBox;   // 中部空白（标题右侧到控件之间）才算触发区
-		mouseHlLabel = r.label;     // 标题文本本身不算
+		auto r = SettingUi::optionRow(g, Lang::get(L"setting.fnRecMouseTrail"), L"", true,
+			SettingTheme::ctrlH, Lang::get(L"setting.fnRecMouseTrailTip"));
 
-		// 色块（点击弹系统调色板）与色号输入框各自独立：色号可直接键入。
-		// 不画描边：圆角描边和 20px 色块的圆角裁剪对不齐，外圈会有一圈灰锯齿；
-		// 只有浅色/白色才补一圈，免得在浅色卡片上看不见。
 		auto* swatch = r.ctrlBox->makeChild<Ling::Button>();
 		swatch->setSize(20.f, 20.f);
 		swatch->setBorderRadius(4.f);
-		// 浅色（含白色）在深色卡片上要有边界，其余颜色不描边，避免圆角处的灰锯齿
-		auto applySwatchBorder = [swatch](UINT32 v) {
-			const float lum = (0.299f * ((v >> 24) & 0xFF) + 0.587f * ((v >> 16) & 0xFF)
-				+ 0.114f * ((v >> 8) & 0xFF)) / 255.f;
-			if (lum > 0.82f) swatch->setBorder(1.f, SettingTheme::input);
-			else swatch->setBorder(0.f, 0);
-		};
-		applySwatchBorder(s->getMouseHighlightColor());
-		swatch->setBg(s->getMouseHighlightColor());
-		swatch->setHoverBg(s->getMouseHighlightColor());   // 悬停不改底色（否则会盖掉颜色本身）
-		swatch->setText(L"");
 		swatch->setMarginRight(6.f);
+		swatch->setText(L"");
+		swatch->onClick.add([this](Ling::Button*) { pickMouseFxColor(); });
+		trailSwatch_ = swatch;
 
-		auto* code = r.ctrlBox->makeChild<Ling::TextBox>();
-		code->setWidth(84.f);
-		code->setHeight(SettingTheme::ctrlH);
-		code->setBorderRadius(SettingTheme::radiusCtl);
-		code->setBg(SettingTheme::inputBg);
-		code->setPadding(SettingTheme::sp2, SettingTheme::sp1, SettingTheme::sp2, SettingTheme::sp1);
-		code->setFontSize(SettingTheme::fontSm);
-		code->setVerticalCenter(true);
-		code->setPlaceholder(L"#RRGGBB");
-		code->setPlaceholderColor(SettingTheme::placeholder);
-		code->setText(colorCode(s->getMouseHighlightColor()));
-		code->setMarginRight(SettingTheme::sp3);
-
-		// 常态不描边、文字走灰；悬停或编辑中才出现描边并把文字提亮
-		auto hovered = std::make_shared<bool>(false);
-		auto styleCodeBox = [code, hovered](bool focused) {
-			const bool framed = *hovered || focused;
-			code->setBorder(framed ? 1.f : 0.f, framed ? SettingTheme::input : 0u);
-			code->setColor(framed ? SettingTheme::textPrimary : SettingTheme::textMuted);
-		};
-		styleCodeBox(code->isFocused());
-		code->onEnter.add([code, styleCodeBox, hovered](Ling::TextBox*) {
-			*hovered = true; styleCodeBox(code->isFocused());
-		});
-		code->onLeave.add([code, styleCodeBox, hovered](Ling::TextBox*) {
-			*hovered = false; styleCodeBox(code->isFocused());
-		});
-
-		// 两处入口共用同一段落值逻辑：色块选色、色号键入（回车或失焦提交）
-		auto applyColor = [this, swatch, code, applySwatchBorder](UINT32 v) {
-			Setting::get()->setMouseHighlightColor(v);
-			swatch->setBg(v);
-			applySwatchBorder(v);
-			code->setText(colorCode(v));
-			if (mouseHlPreview) mouseHlPreview->setBg((v & 0xFFFFFF00u) | 0x59u);
-		};
-		const HWND owner = win ? win->hwnd : nullptr;   // 调色板以设置窗为宿主，避免落到设置窗背后
-		swatch->onClick.add([applyColor, owner](Ling::Button*) {
-			const UINT32 cur = Setting::get()->getMouseHighlightColor();
-			static COLORREF cust[16]{};
-			CHOOSECOLORW cc{};
-			cc.lStructSize = sizeof(cc);
-			cc.hwndOwner = owner;
-			cc.lpCustColors = cust;
-			cc.rgbResult = RGB((cur >> 24) & 0xFFu, (cur >> 16) & 0xFFu, (cur >> 8) & 0xFFu);
-			cc.Flags = CC_FULLOPEN | CC_RGBINIT | CC_ANYCOLOR;
-			if (!ChooseColorW(&cc)) return;
-			applyColor(((UINT32)GetRValue(cc.rgbResult) << 24)
-				| ((UINT32)GetGValue(cc.rgbResult) << 16)
-				| ((UINT32)GetBValue(cc.rgbResult) << 8) | 0xFFu);
-		});
-		code->onEnter.add([applyColor, code](Ling::TextBox*) {
-			applyColor(parseColorCode(code->getText(), Setting::get()->getMouseHighlightColor()));
-		});
-		code->onFocusChanged.add([applyColor, styleCodeBox](Ling::TextBox* tb, bool focused) {
-			styleCodeBox(focused);
-			if (focused) return;
-			// 失焦：非法输入回落到当前值（applyColor 会把文本改回规范写法）
-			applyColor(parseColorCode(tb->getText(), Setting::get()->getMouseHighlightColor()));
-		});
-
-		auto* sw = r.ctrlBox->makeChild<Ling::Button>();
-		SettingUi::styleToggle(sw, s->getMouseHighlight());
-		bool on0 = s->getMouseHighlight();
-		sw->onClick.add([sw, on0](Ling::Button*) mutable {
-			on0 = !on0;
-			SettingUi::styleToggle(sw, on0);
-			Setting::get()->setMouseHighlight(on0);
-		});
+		auto* ddl = SettingUi::selectDdl(r.ctrlBox,
+			{ Lang::get(L"setting.fnRecMouseTrailHighlight"),
+			  Lang::get(L"setting.fnRecMouseTrailLine"),
+			  Lang::get(L"setting.fnRecMouseTrailMagnifier"),
+			  Lang::get(L"setting.fnRecMouseTrailNone") },
+			trailIndexFromEffect(s->getMouseTrailEffect()),
+			[this](int i, const std::wstring&) {
+				Setting::get()->setMouseTrailEffect(trailEffectFromIndex(i));
+				// 录制中用快捷键临时叠加的镜头：下拉一改就作废，按新选择来
+				if (auto* cap = WinCap::get()) cap->onTrailEffectChanged();
+				updateSwatchVisibility();
+				MagLens::get().hide();
+			});
+		// 这一行还要放色块：下拉比通用宽稍窄（124），否则半栏里标题会被挤到换行
+		ddl->setWidth(124.f);
+		ddl->setFlexShrink(0.f);
+		trailPreviewArea_ = r.row;
 	}
+	// 「鼠标单击效果」：单色波纹 / 光标放大 / 无（默认）。单击卡片任意位置直接预览。
+	// 单色波纹用色，色块在下拉左侧；光标放大只是把光标短暂放大，没有颜色可调，故不显示色块。
+	{
+		auto r = SettingUi::optionRow(g, Lang::get(L"setting.fnRecMouseClick"), L"", true,
+			SettingTheme::ctrlH, Lang::get(L"setting.fnRecMouseClickTip"));
+
+		auto* swatch = r.ctrlBox->makeChild<Ling::Button>();
+		swatch->setSize(20.f, 20.f);
+		swatch->setBorderRadius(4.f);
+		swatch->setMarginRight(6.f);
+		swatch->setText(L"");
+		swatch->onClick.add([this](Ling::Button*) { pickMouseFxColor(); });
+		clickSwatch_ = swatch;
+
+		auto* ddl = SettingUi::selectDdl(r.ctrlBox,
+			{ Lang::get(L"setting.fnRecMouseClickRipple"),
+			  Lang::get(L"setting.fnRecMouseClickZoom"),
+			  Lang::get(L"setting.fnRecMouseClickCombo"),
+			  Lang::get(L"setting.fnRecMouseClickNone") },
+			clickIndexFromEffect(s->getMouseClickEffect()),
+			[this](int i, const std::wstring&) {
+				Setting::get()->setMouseClickEffect(clickEffectFromIndex(i));
+				updateSwatchVisibility();
+				restorePreviewCursor();   // 换成非「光标放大/组合」时立刻把系统光标放回来
+			});
+		ddl->setWidth(124.f);
+		ddl->setFlexShrink(0.f);
+		clickPreviewArea_ = r.row;
+	}
+	syncColorSwatches();
+	updateSwatchVisibility();
 	SettingUi::grid2Cells(g);
 }
 
@@ -742,6 +1129,28 @@ void WinSettingFeatures::buildOutput(Ling::Node* p)
 {
 	auto* s = Setting::get();
 	const std::wstring defDir = Util::defaultOutputDir().wstring();
+
+	// 标题列宽按当前语言的实际文字宽度算：中文标题比英文短，输入框能多占一点；
+	// 上限 170，避免英文长标题把输入框挤得太窄。
+	{
+		float labelW = 110.f;
+		float dpi = win->dpi > 0.f ? win->dpi : 1.f;
+		auto measure = [&](const wchar_t* key) {
+			const std::wstring text = Lang::get(key);
+			if (auto layout = Ling::D2D::get()->makeTextLayout(text, SettingTheme::fontBase * dpi)) {
+				DWRITE_TEXT_METRICS m{};
+				if (SUCCEEDED(layout->GetMetrics(&m)))
+					labelW = (std::max)(labelW, m.width / dpi);
+			}
+		};
+		measure(L"setting.manualSaveFmt");
+		measure(L"setting.autoSaveFmt");
+		measure(L"setting.videoRecordFmt");
+		measure(L"setting.fnScreenshotDir");
+		measure(L"setting.fnRecordDir");
+		measure(L"setting.cachePath");
+		gOutputLabelW = (std::min)(labelW + 10.f, 170.f);
+	}
 
 	// 顶部：历史相关——文件保留天数 / 停用截图历史
 	{
@@ -772,34 +1181,39 @@ void WinSettingFeatures::buildOutput(Ling::Node* p)
 		SettingUi::grid2Cells(g);
 	}
 
-	// 截图输出组：手动/自动 文件名格式 + 截图文件路径
-	SettingUi::groupLabel(p, Lang::get(L"setting.screenshotOutput"), Lang::get(L"setting.outputSectionTip"));
+	// 格式与路径合并成一组
+	SettingUi::groupLabel(p, Lang::get(L"setting.formatAndPath"), Lang::get(L"setting.outputSectionTip"));
 	outputRow(p, Lang::get(L"setting.manualSaveFmt"),
 		s->getManualSaveFormat(), Setting::defaultManualSaveFormat(), OutputRowKind::Format,
 		[](const std::wstring& v) { Setting::get()->setManualSaveFormat(v); });
 	outputRow(p, Lang::get(L"setting.autoSaveFmt"),
 		s->getAutoSaveFormat(), Setting::defaultAutoSaveFormat(), OutputRowKind::Format,
 		[](const std::wstring& v) { Setting::get()->setAutoSaveFormat(v); });
-	outputRow(p, Lang::get(L"setting.fnScreenshotDir"), s->getScreenshotDir(), defDir,
-		OutputRowKind::Dir,
-		[](const std::wstring& v) { Setting::get()->setScreenshotDir(v); });
-
-	// 视频输出组：视频录制文件名格式 + 录屏文件路径
-	SettingUi::groupLabel(p, Lang::get(L"setting.videoOutput"), Lang::get(L"setting.outputSectionTip"));
 	outputRow(p, Lang::get(L"setting.videoRecordFmt"),
 		s->getVideoRecordFormat(), Setting::defaultVideoRecordFormat(), OutputRowKind::Format,
 		[](const std::wstring& v) { Setting::get()->setVideoRecordFormat(v); });
+	outputRow(p, Lang::get(L"setting.fnScreenshotDir"), s->getScreenshotDir(), defDir,
+		OutputRowKind::Dir,
+		[](const std::wstring& v) { Setting::get()->setScreenshotDir(v); }, L"");
 	outputRow(p, Lang::get(L"setting.fnRecordDir"), s->getRecordDir(), defDir,
 		OutputRowKind::Dir,
-		[](const std::wstring& v) { Setting::get()->setRecordDir(v); });
+		[](const std::wstring& v) { Setting::get()->setRecordDir(v); }, L"");
+	// 缓存文件路径：默认 LocalAppData\SnowAir\Cache，可自定义
+	outputRow(p, Lang::get(L"setting.cachePath"), s->getCacheDir(), s->getDefaultCacheRoot().wstring(),
+		OutputRowKind::Dir,
+		[](const std::wstring& v) { Setting::get()->setCacheDir(v); },
+		L"", L"setting.cacheDirTip");   // 只保留标题后的「?」提示，输入框不再重复
 }
 
 // 识别模型：一页两组 —— 文字识别 / 翻译模型（沿用各自原有的控件与回调）
 void WinSettingFeatures::buildRecognize(Ling::Node* p)
 {
-	SettingUi::groupLabel(p, Lang::get(L"setting.fnTabOcr"));
+	// 同页两组统一 12：Tab 条 / OCR 行自带 12，组标题不再叠加。
+	auto* ocrLab = SettingUi::groupLabel(p, Lang::get(L"setting.fnTabOcr"));
+	if (ocrLab && ocrLab->parent) ocrLab->parent->setMarginTop(0.f);
 	buildOcr(p);
-	SettingUi::groupLabel(p, Lang::get(L"setting.fnTabTrans"));
+	auto* transLab = SettingUi::groupLabel(p, Lang::get(L"setting.fnTabTrans"));
+	if (transLab && transLab->parent) transLab->parent->setMarginTop(0.f);
 	buildTranslate(p);
 }
 

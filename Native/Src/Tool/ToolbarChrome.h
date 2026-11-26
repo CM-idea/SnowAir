@@ -3,10 +3,18 @@
 #include <cmath>
 #include "ToolbarTheme.h"
 
-namespace Ling { class Node; }
+namespace Ling { class Node; class WinBase; }
 
 namespace ToolbarChrome
 {
+	// 气泡 / 浮层第一次显示前，先在目标屏幕坐标把窗口搬过去，等 WM_DPICHANGED 落定。
+	//
+	// 新建的弹层窗口默认落在主屏；若它要显示在另一块缩放不同的屏上，直接按目标 dpi
+	// 算好物理尺寸再搬过去，系统会认为「窗口从旧 dpi 搬来了」，再按建议矩形乘一次缩放：
+	// 首次悬停气泡就是这样变成 N 倍大的（多屏 + 高缩放必现，第二次因为窗口已在目标屏上
+	// 不再触发 WM_DPICHANGED 就正常了）。所以顺序必须是「先搬 -> dpi 落定 -> 再量尺寸」。
+	// 只应在窗口不可见（或马上要隐藏）时调用，它会移动窗口。
+	void settleDpiAt(Ling::WinBase* win, int screenX, int screenY);
 	// 圆角栏：抗锯齿填充 + 内收描边（2× 超采样柔化，无投影、不改间距）
 	void paintRoundBar(ID2D1DeviceContext* ctx, const D2D1_RECT_F& bar, float radiusPx,
 		ID2D1Brush* bg, float borderWidthPx);

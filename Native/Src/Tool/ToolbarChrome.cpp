@@ -16,6 +16,16 @@ void applyPropBubbleContentPad(Ling::Node* contentNode, bool tipDown)
 	contentNode->setPosition(Ling::Edge::Bottom, pad.bottom);
 }
 
+void settleDpiAt(Ling::WinBase* win, int screenX, int screenY)
+{
+	if (!win || !win->hwnd) return;
+	// 只搬位置、保持尺寸：跨到另一块缩放不同的显示器时，系统会同步发 WM_DPICHANGED，
+	// WinBase 在那里更新 dpi 并套用一次「建议矩形」（尺寸可能被临时改掉，没关系，
+	// 调用方随后会用正确的 dpi 重新 setSize 并定位）。此时窗口还没 show，看不到这次搬家。
+	SetWindowPos(win->hwnd, nullptr, screenX, screenY, 0, 0,
+		SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 namespace {
 
 constexpr float kAaPad{ 1.f };     // 窗内留 1px 给 AA，不改布局间距

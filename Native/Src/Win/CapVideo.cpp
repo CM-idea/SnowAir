@@ -2,6 +2,8 @@
 #include <include/Ling.h>
 #include "CapVideo.h"
 #include "WinCap.h"
+#include "MagLens.h"
+#include "LensSceneTap.h"
 #include "CutMask.h"
 #include "../Tool/ToolVideo.h"
 #include "../App.h"
@@ -166,6 +168,110 @@ void CapVideo::setPaused(bool on)
 	paused = on;
 	if (mp4Param) mp4Param->Pause = on;
 	if (gifParam) gifParam->isPaused = on;
+	// 暂停时不采帧，预览镜头不能继续拿着暂停前那一刻的旧画面：
+	// 先摘掉取景源，镜头回落到抓屏兜底；恢复后下一帧采集再自动接回来。
+	if (lensTap_) lensTap_->setLive(!on);
+}
+
+void CapVideo::setCursorZoom(float scale)
+{
+	// 上限与 UI 侧的 clickZoomScale 一致，避免异常值把光标画得过大
+	const float v = std::clamp(scale, 1.f, 1.8f);
+	if (mp4Param) mp4Param->CursorZoom.store(v, std::memory_order_relaxed);
+	if (gifParam) gifParam->cursorZoom.store(v, std::memory_order_relaxed);
+}
+
+void CapVideo::setCursorHidden(bool hidden)
+{
+	if (mp4Param) mp4Param->CursorHidden.store(hidden, std::memory_order_relaxed);
+	if (gifParam) gifParam->cursorHidden.store(hidden, std::memory_order_relaxed);
+}
+
+void CapVideo::setLocalMagnifier(bool on)
+{
+	if (mp4Param) mp4Param->LocalMagnifierOn.store(on, std::memory_order_relaxed);
+	if (gifParam) gifParam->localMagnifierOn.store(on, std::memory_order_relaxed);
+}
+
+void CapVideo::setLocalMagnifierZoom(float zoom)
+{
+	const float z = std::clamp(zoom, 1.2f, 4.f);
+	if (mp4Param) mp4Param->LocalMagnifierZoom.store(z, std::memory_order_relaxed);
+	if (gifParam) gifParam->localMagnifierZoom.store(z, std::memory_order_relaxed);
+}
+
+void CapVideo::syncClickOverlay()
+{
+	if (!win || (!mp4Param && !gifParam)) return;
+	auto* st = Setting::get();
+	const int mode = st ? st->getMouseClickEffect() : Setting::kMouseClickNone;
+	MagnifierDraw::ClickOverlayFrame frame;
+	frame.enabled = win->chrome_ && App::supportsCaptureExclusion();
+	frame.ripple = mode == Setting::kMouseClickRipple || mode == Setting::kMouseClickCombo;
+	frame.zoom = win->zoomCursorHidden_
+		&& (mode == Setting::kMouseClickZoom || mode == Setting::kMouseClickCombo);
+	frame.color = st ? st->getMouseHighlightColor() : 0;
+	frame.dpi = win->dpi > 0.f ? win->dpi : 1.f;
+	frame.clicks.reserve(win->mouseClicks_.size());
+	for (const auto& fx : win->mouseClicks_) {
+		POINT p = fx.pt;
+		ClientToScreen(win->hwnd, &p);
+		frame.clicks.push_back({ p, fx.t });
+	}
+	GetCursorPos(&frame.cursorPos);
+	if (frame.zoom && win->cursorValid) {
+		frame.cursorValid = true;
+		frame.cursorHotspot = win->cursorHotspot;
+		frame.cursorW = win->cursorW;
+		frame.cursorH = win->cursorH;
+		frame.cursorPix = win->cursorPix;
+	}
+	if (mp4Param) {
+		std::lock_guard<std::mutex> lock(mp4Param->clickOverlayMutex);
+		mp4Param->clickOverlay = frame;
+	}
+	if (gifParam) {
+		std::lock_guard<std::mutex> lock(gifParam->clickOverlayMutex);
+		gifParam->clickOverlay = frame;
+	}
+
+	// 高亮提醒 / 线条跟随：和单击层一样画在"排除捕获"的层里（镜头下面、光标上面），
+	// 采集线程再按同一份点/时间戳在镜头之后重画 —— 屏幕与视频的顺序/大小完全一致。
+	MouseFxDraw::Frame mfx;
+	mfx.enabled = frame.enabled;
+	const int trailMode = st ? st->getMouseTrailEffect() : Setting::kMouseTrailNone;
+	mfx.highlight = trailMode == Setting::kMouseTrailHighlight;
+	mfx.trail = trailMode == Setting::kMouseTrailLine;
+	mfx.color = frame.color;
+	mfx.dpi = frame.dpi;
+	if (mfx.highlight) {
+		POINT p{};
+		if (GetCursorPos(&p)) {
+			float ox = 0.f, oy = 0.f;
+			Util::cursorBodyOffset(ox, oy);
+			mfx.highlightCenter = POINT{ p.x + (LONG)ox, p.y + (LONG)oy };
+		}
+	}
+	if (mfx.trail && win->mouseTrail_.points.size() >= 2
+		&& LaserStroke::visible(win->mouseTrail_, (int64_t)GetTickCount64())) {
+		mfx.trailData = win->mouseTrail_;
+		// 轨迹点存的是主窗客户区坐标，换成虚拟桌面坐标给采集线程
+		for (auto& p : mfx.trailData.points) {
+			p.x += (float)win->x;
+			p.y += (float)win->y;
+		}
+	}
+	else {
+		mfx.trail = false;   // 已经淡出：不必让采集线程白建一张效果层
+	}
+	if (mp4Param) {
+		std::lock_guard<std::mutex> lock(mp4Param->mouseFxMutex);
+		mp4Param->mouseFx = mfx;
+	}
+	if (gifParam) {
+		std::lock_guard<std::mutex> lock(gifParam->mouseFxMutex);
+		gifParam->mouseFx = mfx;
+	}
 }
 
 void CapVideo::notifyHistoryChanged()
@@ -270,6 +376,25 @@ void CapVideo::startMp4(bool useSpeaker, bool useMic)
     auto& cutMask = win->cutMask;
     auto* st = Setting::get();
     mp4Param = std::make_unique<VideoMp4::DESKTOPCAPTUREPARAMS>();
+    // 「局部放大」是否开启由 UI 侧统一判定（设置里的「局部放大」或录制中快捷键临时叠加）
+    {
+        mp4Param->LocalMagnifierOn.store(win && win->localMagnifierOn());
+        mp4Param->LocalMagnifierZoom.store(win && win->magnifierZoom_ > 0.f ? win->magnifierZoom_ : 1.5f);
+        const float d = win && win->dpi > 0.f ? win->dpi : 1.f;
+        mp4Param->LocalMagnifierSize.store((std::max)(32, (int)std::lround(230.f * d)));
+    }
+    syncClickOverlay();
+    // 屏幕上的圆形镜头改从采集线程的干净帧取景（不再 BitBlt 屏幕）：
+    // 预览与录制共用同一帧、同一套放大算法，也彻底避开"镜头把上一帧自己读进来"的拖影。
+    if (!lensTap_) lensTap_ = std::make_shared<LensScene::Tap>();
+    lensTap_->setLive(true);
+    mp4Param->lensTap = lensTap_;
+    {
+        auto tap = lensTap_;
+        MagLens::get().setSceneProvider([tap](const RECT& need, int& x, int& y, std::vector<BYTE>& out) {
+            return tap->sample(need, x, y, out);
+        });
+    }
     // 录制中选区可整体拖动：记下开录时的原点，之后每帧按位移平移裁剪框（见 syncCaptureMove）
     capBaseX = (int)std::lround((float)win->x + cutMask->maskRect.left);
     capBaseY = (int)std::lround((float)win->y + cutMask->maskRect.top);
@@ -446,6 +571,24 @@ void CapVideo::startGif()
 {
     auto& cutMask = win->cutMask;
     gifParam = std::make_unique<VideoGif::GifParam>();
+    // 同 MP4：由 UI 侧统一判定（设置里的「局部放大」或录制中快捷键临时叠加）
+    {
+        gifParam->localMagnifierOn.store(win && win->localMagnifierOn());
+        gifParam->localMagnifierZoom.store(win && win->magnifierZoom_ > 0.f ? win->magnifierZoom_ : 1.5f);
+        const float d = win && win->dpi > 0.f ? win->dpi : 1.f;
+        gifParam->localMagnifierSize.store((std::max)(32, (int)std::lround(230.f * d)));
+    }
+    syncClickOverlay();
+    // 与 MP4 同一条预览取景链路（见 startMp4）
+    if (!lensTap_) lensTap_ = std::make_shared<LensScene::Tap>();
+    lensTap_->setLive(true);
+    gifParam->lensTap = lensTap_;
+    {
+        auto tap = lensTap_;
+        MagLens::get().setSceneProvider([tap](const RECT& need, int& x, int& y, std::vector<BYTE>& out) {
+            return tap->sample(need, x, y, out);
+        });
+    }
     // 同 MP4：记下开录时的原点，录制中整体拖动时按位移平移抓取区域
     capBaseX = (int)std::lround((float)win->x + cutMask->maskRect.left);
     capBaseY = (int)std::lround((float)win->y + cutMask->maskRect.top);
@@ -510,6 +653,10 @@ bool CapVideo::onSaveKey(bool toClipboard)
 std::wstring CapVideo::stop(bool hideHost, bool userAbort)
 {
     if (!mp4Param && !gifParam) return L"";
+    // 先摘掉预览取景源（会等镜头线程正在取景的那一次返回），再停采集线程：
+    // 之后镜头回落到自己的抓屏兜底，不会去读一个正在销毁的采集帧。
+    MagLens::get().setSceneProvider(nullptr);
+    if (lensTap_) lensTap_->setLive(false);
     // 遮罩也别留在屏幕上，录完这一帧就该收工了（演示画布内录屏时不能隐藏宿主）
     if (hideHost) win->hide();
     std::wstring filePath;

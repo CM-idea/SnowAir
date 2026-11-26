@@ -1,9 +1,12 @@
 #include "pch.h"
 #include <include/Ling.h>
+#include <cmath>
 #include "../Tool/DesignKeys.h"
+#include "../Tool/DpiUtil.h"
 #include "WinCap.h"
 #include "PixLens.h"
 #include "CursorImage.h"
+#include "MagLens.h"
 #include "WinPin.h"
 #include "CutMask.h"
 #include "../App.h"
@@ -43,9 +46,10 @@
 #include "../Translate/TranslateTypes.h"
 #include <sstream>
 #include <algorithm>
+#include <commctrl.h>
+#include <imm.h>
 #include <filesystem>
 #include <thread>
-#include <unordered_map>
 #include <dwmapi.h>
 #include <wincodec.h>
 #include <shobjidl.h>
@@ -75,7 +79,8 @@ static D2D1_RECT_U pixelAlignedRect(const D2D1_RECT_F& r)
 class SelectionChrome : public Ling::WinBase
 {
 public:
-	explicit SelectionChrome(WinCap* owner) : owner_(owner)
+	explicit SelectionChrome(WinCap* owner, bool drawChrome = true)
+		: owner_(owner), drawChrome_(drawChrome)
 	{
 		dpi = (owner && owner->dpi > 0.f) ? owner->dpi : 1.f;
 		// 和演示画布的穿透同一套：WS_EX_LAYERED + WS_EX_TRANSPARENT + 分层 alpha 255，
@@ -107,8 +112,8 @@ protected:
 	{
 		body->setBg(0);
 		canvas_ = body->makeChild<Ling::Canvas>();
-		// 不建 swap chain：这层每秒只重画几次（选框移动时），单缓冲足够；
-		// 全屏 swap chain 会多吃一整套全屏缓冲（4K 下约 30MB+），对录制内存不划算。
+		// 单击波纹/光标动画也在这一层：必须双缓冲提交，避免高频重画被合成器读到中间态。
+		canvas_->enableSwapChain();
 		canvas_->setSizePercent(100.f, 100.f);
 	}
 	void layout() override
@@ -118,12 +123,21 @@ protected:
 		auto ctx = canvas_->startPaint();
 		if (!ctx) return;
 		ctx->Clear(0);
-		owner_->cutMask->paintChrome(ctx, true);   // 描边画在选区外侧，避免被录进视频
+		if (drawChrome_) owner_->cutMask->paintChrome(ctx, true);   // 描边画在选区外侧，避免被录进视频
+		// 鼠标轨迹效果（高亮/线条）和单击层都必须位于放大镜之上、且不进放大源；
+		// 采集侧会在镜头之后按同一时间戳补画同一批效果。
+		if (App::supportsCaptureExclusion()) {
+			owner_->paintMouseHighlight(ctx);
+			owner_->paintMouseTrail(ctx);
+			owner_->paintClickRipple(ctx);
+			owner_->paintZoomCursor(ctx);
+		}
 		canvas_->finishPaint();
 	}
 private:
 	WinCap* owner_{ nullptr };
 	Ling::Canvas* canvas_{ nullptr };
+	bool drawChrome_{ true };
 };
 
 namespace
@@ -291,11 +305,39 @@ namespace
 	// 「录制中显示按键」也要能反映鼠标操作（做教程时点按比键盘更需要被看见）
 	HHOOK g_mouseHook{ nullptr };
 
+	// 局部放大：修饰键 + 滚轮临时改倍率。单独一个鼠标钩子，避免和按键浮层的钩子互相影响。
+	HHOOK g_magHook{ nullptr };
+	LRESULT CALLBACK magHookProc(int code, WPARAM wp, LPARAM lp)
+	{
+		if (code == HC_ACTION && wp == WM_MOUSEWHEEL) {
+			auto* ms = reinterpret_cast<MSLLHOOKSTRUCT*>(lp);
+			if (ms && !(ms->flags & LLMHF_INJECTED)) {
+				auto* cap = WinCap::get();
+				if (cap && cap->adjustMagnifierZoom((short)HIWORD(ms->mouseData)))
+					return 1;   // 调倍率时吞掉滚轮，别让下层页面跟着滚
+			}
+		}
+		return CallNextHookEx(g_magHook, code, wp, lp);
+	}
+	void ensureMagHook(bool on)
+	{
+		if (on && !g_magHook)
+			g_magHook = SetWindowsHookExW(WH_MOUSE_LL, magHookProc, GetModuleHandleW(nullptr), 0);
+		else if (!on && g_magHook) {
+			UnhookWindowsHookEx(g_magHook);
+			g_magHook = nullptr;
+		}
+	}
+
 	LRESULT CALLBACK mouseHookProc(int code, WPARAM wp, LPARAM lp)
 	{
 		if (code == HC_ACTION) {
 			auto* ms = reinterpret_cast<MSLLHOOKSTRUCT*>(lp);
 			if (ms && !(ms->flags & LLMHF_INJECTED)) {
+				auto* cap = WinCap::get();
+				// 「鼠标单击效果」改成由 WinCap::updateMouseFx 轮询按键沿，
+				// 不再依赖这个全局钩子是否安装成功。
+				// 下面这段是「录制中显示按键」里的鼠标操作
 				const wchar_t* t = nullptr;
 				switch (wp) {
 				case WM_LBUTTONDOWN: t = L"鼠标左键"; break;
@@ -304,11 +346,9 @@ namespace
 				case WM_MOUSEWHEEL:  t = ((short)HIWORD(ms->mouseData) > 0) ? L"滚轮 ↑" : L"滚轮 ↓"; break;
 				default: break;
 				}
-				if (t) {
-					// 鼠标穿透后点击才是操作被录程序；点本软件工具栏/选区不计入
-					if (auto* cap = WinCap::get(); cap && cap->mouseTransparent())
-						cap->onGlobalKeyCombo(t);
-				}
+				if (t && cap && cap->mouseTransparent()
+					&& Setting::get()->getKeyOverlayPos() != Setting::kKeyOverlayNone)
+					cap->onGlobalKeyCombo(t);
 			}
 		}
 		return CallNextHookEx(g_mouseHook, code, wp, lp);
@@ -355,7 +395,8 @@ WinCap::WinCap() : AnnotHost()
 		if (cutMask) cutMask->onHoverDwellTimer(id);
 		if (cutMask) cutMask->onHoverAnimTick(id);
 		if (id == keyOverlayTimerId) onKeyOverlayTimer();
-		if (id == recCursorTimerId) { updateSelFollowCursor(); updateMouseHighlight(); }
+		if (id == recCursorTimerId) { updateSelFollowCursor(); updateMouseFx(); }
+		if (id == demoMagnifierTimerId) updateDemoMagnifier();
 		if (id == boardPierceTimerId) demoBoardApplyPierce();
 		if (id == demoRecTickTimerId) {
 			if (demoRecRunning_ && !demoRecPaused_) {
@@ -502,10 +543,16 @@ void WinCap::initNow(StartMode mode, std::shared_ptr<std::vector<BYTE>> grab,
     ptr->createNativeWindow(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, WS_POPUP);
     if (mode == StartMode::Demo) {
         ptr->refresh();
+        // 演示画布：局部放大用独立的 16ms 定时器跟随光标（快捷键临时开关 / 录制时按设置显示）
+        ptr->setTimer(16, demoMagnifierTimerId);
         ptr->makeDemoToolCap();
         // 「功能设置 → 演示 → 默认工具」：0 渐隐画笔（默认）/ 1 画笔 / 2 无
         const int tool = Setting::get()->getDemoDefaultTool();
-        if (tool != 2) ptr->startPenSlot(tool == 0);
+        if (tool != 2) {
+            ptr->startPenSlot(tool == 0);
+            // 默认工具只选中、不展开属性栏：点一下工具才打开属性栏，再点一下才关闭画笔
+            if (ptr->toolSub) ptr->toolSub->hideTools();
+        }
         // 画布起来后把「鼠标穿透」「隐藏/显示工具栏」挂到全局钩子上（穿透之后焦点就不在本软件了）。
         // 必须在这里（会话真正建立之后）同步：beginDemoCanvas() 中的 init() 会命中"会话已开"
         //   会直接 return，同步却照做，会把手上那个会话的临时全局键换成演示画布这一组。
@@ -781,29 +828,6 @@ void WinCap::demoSnapshotDetachSelection()
 	extraSelection_.clear();
 }
 
-std::vector<std::unique_ptr<ShapeBase>> WinCap::cloneVisibleShapes(
-	const std::vector<std::unique_ptr<ShapeBase>>& src)
-{
-	std::vector<std::unique_ptr<ShapeBase>> out;
-	std::unordered_map<ShapeBase*, ShapeBase*> map;
-	for (const auto& s : src) {
-		if (!s || s->isUndo) continue;
-		if (s->isEphemeral()) continue;         // 渐隐笔迹属于临时层，不进快照
-		auto c = s->clone(this);
-		if (!c) continue;                        // 撤销辅助项等不支持克隆
-		map[s.get()] = c.get();
-		out.push_back(std::move(c));
-	}
-	// 克隆是逐项拷贝，内部引用（线上文字宿主、连线目标）还指着旧对象，统一重绑
-	for (auto& c : out) {
-		c->remapCloneRefs([&map](ShapeBase* p) -> ShapeBase* {
-			auto it = map.find(p);
-			return it == map.end() ? nullptr : it->second;
-		});
-	}
-	return out;
-}
-
 ComPtr<ID2D1Bitmap1> WinCap::grabDemoSnapshotBg()
 {
 	ComPtr<ID2D1Bitmap1> bmp;
@@ -849,7 +873,7 @@ void WinCap::createDemoSnapshot()
 		snap->bg = grabDemoSnapshotBg();
 	}
 	if (!snap->bg) return;
-	snap->shapes = cloneVisibleShapes(history->shapes);
+	snap->shapes = cloneShapesForHost(this, history->shapes);
 	demoSnaps_.push_back(std::move(snap));
 	demoSnapsDirty_ = true;
 	// 不自动选中：实时画布保持原样
@@ -947,6 +971,15 @@ ID2D1Bitmap* WinCap::annotSampleBitmap() const
 	return screenImg.Get();
 }
 
+bool WinCap::annotBlendBackdropAvailable() const
+{
+	// 长图：预览底图是"当前一屏"的缩放位图，与标注的长图像素坐标不是 1:1；
+	// 演示画布：标注画在白板上，底图不是 screenImg；录屏：screenImg 已释放。
+	// 这几种情况都回退普通半透明笔迹。
+	if (stage == CapStage::Long || demoMode) return false;
+	return annotSampleBitmap() != nullptr;
+}
+
 bool WinCap::renderDemoSnapshot(int index, std::vector<BYTE>& out, int& outW, int& outH)
 {
 	if (index < 0 || index >= (int)demoSnaps_.size()) return false;
@@ -1018,7 +1051,7 @@ void WinCap::saveDemoSnapshots()
 		st->getManualSaveFormat(), Setting::defaultManualSaveFormat(), focusAppName_);
 	if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos)
 		defName = defName.substr(slash + 1);
-	const std::wstring first = Util::getSaveFilePath(hwnd, ext, defName, Util::lastSaveDir(false));
+	const std::wstring first = Util::getImageSaveFilePath(hwnd, ext, defName, Util::lastSaveDir(false));
 	if (first.empty()) return;
 	// 用户给的是基础名：实际落盘为 base-1、base-2…（序号与缩略图顺序一致）
 	std::filesystem::path base(first);
@@ -1071,11 +1104,28 @@ void WinCap::startDemoRecording()
 	// 工具栏/属性栏是独立顶层窗：不排除的话会被录进画面
 	if (toolCap) App::excludeFromCapture(toolCap->hwnd);
 	if (toolSub) App::excludeFromCapture(toolSub->hwnd);
+	// 演示录制与普通录屏共用独立单击层：只画特效，不画选框。
+	if (!chrome_) chrome_ = std::make_unique<SelectionChrome>(this, false);
+	chrome_->place(x, y, (int)w, (int)h);
+	App::excludeFromCapture(chrome_->hwnd);
+	SetWindowPos(chrome_->hwnd, hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 	cutMask->hideLabel = true;
 	if (demoRecGif_) capVideo->startGif();
 	else capVideo->startMp4(demoRecAudio_, demoRecMic_);
-	if (Setting::get()->getKeyOverlayPos() != Setting::kKeyOverlayNone) startKeyOverlay();
+	if (Setting::get()->getKeyOverlayPos() != Setting::kKeyOverlayNone)
+		startKeyOverlay();
+	// 单击效果：先记下当前按键，避免「开始录制」这一下被当成第一次点击
+	mouseClicks_.clear();
+	mouseTrail_ = {};
+	mouseHlPos_ = POINT{ -1, -1 };
+	{
+		const int vks[3]{ VK_LBUTTON, VK_RBUTTON, VK_MBUTTON };
+		for (int i = 0; i < 3; ++i)
+			mouseBtnDown_[i] = (GetAsyncKeyState(vks[i]) & 0x8000) != 0;
+	}
 	demoRecRunning_ = true;
+	// 开始录制这一刻才按「设置 / 临时开关」决定录制画面里要不要镜头
+	if (capVideo) capVideo->setLocalMagnifier(localMagnifierOn());
 	demoRecPaused_ = false;
 	demoRecElapsed_ = 0;
 	setTimer(1000, demoRecTickTimerId);
@@ -1091,9 +1141,15 @@ std::wstring WinCap::stopDemoRecording(bool deleteFile)
 	stopKeyOverlay();
 	// hideHost=false：停止采集后画布必须留在屏幕上（演示模式不能跟着一起隐藏）
 	std::wstring path = capVideo ? capVideo->stop(false) : L"";
+	if (chrome_) chrome_->hide();
 	demoRecRunning_ = false;
 	demoRecPaused_ = false;
 	demoRecElapsed_ = 0;
+	mouseClicks_.clear();
+	mouseTrail_ = {};
+	mouseHlPos_ = POINT{ -1, -1 };
+	if (zoomCursorHidden_) { ShowCursor(TRUE); zoomCursorHidden_ = false; }
+	if (capVideo) capVideo->setCursorHidden(false);
 	App::clearCaptureExclusion(toolCap ? toolCap->hwnd : nullptr);
 	App::clearCaptureExclusion(toolSub ? toolSub->hwnd : nullptr);
 	// 录制中若被别的工具顶掉属性栏，停止后按钮不该再显示选中态
@@ -2052,6 +2108,8 @@ void WinCap::dispose()
 
 void WinCap::onCreated()
 {
+    // 输入法会把字符键标记成 VK_PROCESSKEY；子类化后在 Ling 派发前还原成真实按键。
+    SetWindowSubclass(hwnd, &WinCap::keySubclassProc, 1, reinterpret_cast<DWORD_PTR>(this));
     // 新一次截图会话：底图换了，OCR / 译文临时缓存一并作废
     g_ocrCacheValid = false;
     g_trCacheValid = false;
@@ -2172,8 +2230,21 @@ void WinCap::layout()
     // 抓快照这一帧只留桌面和白板：光标/高亮/按键提示都不进冻结画面
     if (!snapshotCapturing_) {
         paintPix(ctx);
-        paintMouseHighlight(ctx);
-        paintCursor(ctx);
+        // 支持排除捕获时，鼠标轨迹效果（高亮/线条）与单击效果都改在 SelectionChrome 绘制：
+        // 它们不会进入镜头源帧，采集侧在镜头之后按同一时间戳补画，层级是「镜头 < 效果 < 光标」。
+        const bool separateMouseFx = chrome_ && App::supportsCaptureExclusion();
+        if (!separateMouseFx) {
+            paintMouseHighlight(ctx);
+            paintMouseTrail(ctx);
+        }
+        if (!separateMouseFx) paintClickRipple(ctx);
+        // 放大动画期间系统光标被临时藏起，改由覆盖层画放大的实时光标。
+        // 录制中光标只由采集线程画（镜头之后、1:1）：覆盖层再画一份会变成两个光标；
+        // 屏幕上的实时预览用的是系统光标本身，不需要这里补。非录制状态才画快照光标。
+        const bool recordingSurface = (stage == CapStage::Video && capVideo && capVideo->isRecording())
+            || (demoMode && demoRecRunning_);
+        if (!zoomCursorHidden_ && !recordingSurface) paintCursor(ctx);
+        if (!separateMouseFx) paintZoomCursor(ctx);
         paintKeyOverlay(ctx);
     }
     canvas->finishPaint();
@@ -2232,10 +2303,10 @@ bool WinCap::beginMaskResize(POINT pos)
 	const auto hit = cutMask->hitTest(pos);
 	if (hit == MaskHit::None) return false;
 
-	// 画幅已锁定（录屏开录 / 长图滚动）时：一律不许拖边、拖角。
-	// 长图连整体挪动也禁止；录屏保留整体挪动，但要求未开鼠标穿透。
+	// 画幅已锁定（录屏开录 / 长图滚动）时：一律不许拖边、拖角；
+	// 录屏开录后连整体挪动也禁止（见 maskMoveLocked），鼠标事件留给标注层。
 	const bool sizeLocked = maskSizeLocked();
-	// 锁定画幅时拖边框没有"缩放"语义，录屏里按整体挪动处理（从边框起拖也能挪选区）
+	// 锁定画幅时拖边框没有"缩放"语义；长图未滚动/录屏未开录不会走到这里
 	bool moveFromBorder = false;
 	if (sizeLocked) {
 		if (maskMoveLocked()) return false;
@@ -2557,13 +2628,18 @@ void WinCap::setPixPosAt(POINT pos, POINT focus)
 	// 夹的边界可能是另一块屏 —— 表现就是「放大镜跑出屏幕了」。
 	// 现在改成：右下放不下就在 左下 / 右上 / 左上 里挑第一个放得下的，能放下就立刻回右下
 	//（只避让、不记忆）；四个都放不下（显示器比外壳还小）才退回右下并夹进该显示器。
-	const float gap = kCursorGap * dpi;
-	const float shellW = kShellW * dpi;
-	const float shellH = kShellH * dpi;
-
-	// 光标所在显示器（屏幕坐标）→ 客户区坐标；再夹一层窗口范围，防止窗口本身比显示器小
 	POINT sp{ pos.x, pos.y };
 	ClientToScreen(hwnd, &sp);
+	// 放大镜按取样点（拖边时是边上的点）所在显示器取缩放，而不是宿主窗口的 dpi。
+	POINT fsp{ focus.x, focus.y };
+	if (!ClientToScreen(hwnd, &fsp)) fsp = sp;
+	const float dpiLens = DpiUtil::dpiForPoint(fsp);
+	pixLensDpi_ = dpiLens;
+	const float gap = kCursorGap * dpiLens;
+	const float shellW = kShellW * dpiLens;
+	const float shellH = kShellH * dpiLens;
+
+	// 光标所在显示器（屏幕坐标）→ 客户区坐标；再夹一层窗口范围，防止窗口本身比显示器小
 	MONITORINFO mi{ sizeof(MONITORINFO) };
 	float areaL = 0.f, areaT = 0.f, areaR = w, areaB = h;
 	if (GetMonitorInfoW(MonitorFromPoint(sp, MONITOR_DEFAULTTONEAREST), &mi)) {
@@ -2653,25 +2729,33 @@ bool WinCap::magnifierVisible() const
 void WinCap::paintPix(ID2D1DeviceContext* ctx)
 {
 	if (!magnifierVisible()) return;
-	const float pad = kPad * dpi;
-	const float canvas = kCanvas * dpi;
-	const float shellW = kShellW * dpi;
-	const float shellH = kShellH * dpi;
+	// 与 setPixPosAt 共用同一个 dpiLens：外壳尺寸、内容倍率、十字和字号必须同源。
+	float dpiLens = pixLensDpi_;
+	if (dpiLens <= 0.f) {
+		POINT p{ pixFocus.x, pixFocus.y };
+		dpiLens = ClientToScreen(hwnd, &p) ? DpiUtil::dpiForPoint(p) : dpi;
+	}
+	const float pad = kPad * dpiLens;
+	const float canvas = kCanvas * dpiLens;
+	const float shellW = kShellW * dpiLens;
+	const float shellH = kShellH * dpiLens;
 	const float x0 = (float)pixPos.x, y0 = (float)pixPos.y;
-	const float radius = 6.f * dpi;
+	const float radius = 6.f * dpiLens;
 
-	ctx->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x0, y0 + dpi, x0 + shellW, y0 + shellH + dpi), radius, radius), brushShadow.Get());
+	ctx->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x0, y0 + dpiLens, x0 + shellW, y0 + shellH + dpiLens), radius, radius), brushShadow.Get());
 	ctx->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x0, y0, x0 + shellW, y0 + shellH), radius, radius), brushBg.Get());
 
 	const D2D1_RECT_F canvasRect{ x0 + pad, y0 + pad, x0 + pad + canvas, y0 + pad + canvas };
 	// 画面区四角给一点点圆角（与外壳同心：外壳半径 6、内缩 pad=4 → 内圆角 2）。
 	// 几何/图层缓存复用：只有设备上下文或 dpi 变了才重建，拖动时每帧只是 Push/Pop。
 	const float innerRadius = (std::max)(1.f, radius - pad);
-	if (!pixClipGeom_ || pixClipCtx_ != ctx || pixClipRadius_ != innerRadius) {
+	if (!pixClipGeom_ || pixClipCtx_ != ctx || pixClipRadius_ != innerRadius
+		|| pixClipDpi_ != dpiLens) {
 		pixClipGeom_.Reset();
 		pixClipLayer_.Reset();
 		pixClipCtx_ = nullptr;
 		pixClipRadius_ = 0.f;
+		pixClipDpi_ = 0.f;
 		auto* d2d = Ling::D2D::get();
 		if (d2d && d2d->d2dFactory) {
 			const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(
@@ -2684,6 +2768,7 @@ void WinCap::paintPix(ID2D1DeviceContext* ctx)
 				pixClipLayer_ = layer;
 				pixClipCtx_ = ctx;
 				pixClipRadius_ = innerRadius;
+				pixClipDpi_ = dpiLens;
 			}
 		}
 	}
@@ -2715,7 +2800,7 @@ void WinCap::paintPix(ID2D1DeviceContext* ctx)
 
 	const float cx = canvasRect.left + canvas * 0.5f;
 	const float cy = canvasRect.top + canvas * 0.5f;
-	const float stroke = 1.5f * dpi;
+	const float stroke = 1.5f * dpiLens;
 	ctx->DrawLine(D2D1::Point2F(cx, canvasRect.top), D2D1::Point2F(cx, canvasRect.bottom), crossBrush.Get(), stroke);
 	ctx->DrawLine(D2D1::Point2F(canvasRect.left, cy), D2D1::Point2F(canvasRect.right, cy), crossBrush.Get(), stroke);
 	if (rounded) ctx->PopLayer();
@@ -2726,12 +2811,12 @@ void WinCap::paintPix(ID2D1DeviceContext* ctx)
 	const auto colorText = pixColorText();
 	const auto posText = wfmt(L"%ld, %ld", pixFocus.x, pixFocus.y);
 
-	const float metaLeft = x0 + pad + 2.f * dpi;
-	const float metaW = canvas - 4.f * dpi;
-	const float rowH = kRowH * dpi;
-	const float fontSize = 12.f * dpi;
-	const float hintSize = 11.f * dpi;
-	float metaY = y0 + pad + canvas + kMetaGap * dpi;
+	const float metaLeft = x0 + pad + 2.f * dpiLens;
+	const float metaW = canvas - 4.f * dpiLens;
+	const float rowH = kRowH * dpiLens;
+	const float fontSize = 12.f * dpiLens;
+	const float hintSize = 11.f * dpiLens;
+	float metaY = y0 + pad + canvas + kMetaGap * dpiLens;
 	auto d2d = Ling::D2D::get();
 
 	auto drawRow = [&](float y, const wchar_t* label, const std::wstring& value, ID2D1SolidColorBrush* valueBrush) {
@@ -2751,16 +2836,16 @@ void WinCap::paintPix(ID2D1DeviceContext* ctx)
 		}
 	};
 	drawRow(metaY, L"坐标", posText, brushText.Get());
-	metaY += rowH + 2.f * dpi;
+	metaY += rowH + 2.f * dpiLens;
 	// 行的标签就是色值口径：Hex 模式写「色值」，RGB 模式写「RGB」，值里不再带前缀
 	drawRow(metaY, pixColorRgb_ ? L"RGB" : L"色值", colorText, brushText.Get());
-	metaY += rowH + 2.f * dpi;
+	metaY += rowH + 2.f * dpiLens;
 
 	// 复制成功后提示行临时变绿显示「色值复制成功！」，1.5s 后自动恢复
 	const bool copied = GetTickCount64() < pixCopiedUntil_;
 	const wchar_t* hintStr = copied ? L"色值复制成功！" : L"按 Ctrl+C 复制色值";
 	ComPtr<IDWriteTextLayout> hint;
-	d2d->dwriteFactory->CreateTextLayout(hintStr, (UINT32)wcslen(hintStr), d2d->baseTextFormat.Get(), metaW, kHintH * dpi, hint.GetAddressOf());
+	d2d->dwriteFactory->CreateTextLayout(hintStr, (UINT32)wcslen(hintStr), d2d->baseTextFormat.Get(), metaW, kHintH * dpiLens, hint.GetAddressOf());
 	if (hint) {
 		hint->SetFontSize(hintSize, { 0, UINT32_MAX });
 		hint->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -2905,6 +2990,30 @@ bool WinCap::runCommand(const std::wstring& id)
 	// —— 录屏组的四条：动作在录屏工具条上（与点按钮同一段实现）——
 	// （它们同时是临时全局键，焦点不在本软件时由全局钩子那侧派发，见 HotkeyHook）
 	// 演示画布内也能录屏：同一组命令在演示会话里改走 demoRec* 入口
+	if (id == L"cmd_toggle_magnifier") {
+		auto* s = Setting::get();
+		if (!s) return false;
+		if (demoMode) {
+			// 演示画布：只临时开关，不改设置；设置默认开了「局部放大」时也能临时取消
+			magnifierOverride_ = localMagnifierOn() ? 0 : 1;
+			if (capVideo && demoRecRunning_) capVideo->setLocalMagnifier(localMagnifierOn());
+			updateDemoMagnifier();
+			return true;
+		}
+		// 录屏：局部放大是**独立叠加**，不改「鼠标轨迹效果」下拉的选择。
+		// 选的是线条/高亮时，按快捷键只是把镜头加进来（镜头在它们下面）；
+		// 选的是「局部放大」时，按快捷键就是本次会话临时关掉。
+		if (s->getMouseTrailEffect() == Setting::kMouseTrailMagnifier) {
+			// 下拉本身就是"只有镜头"：保持旧语义，快捷键在 开/关 之间切设置
+			s->setMouseTrailEffect(Setting::kMouseTrailNone);
+			magnifierOverride_ = -1;
+		}
+		else {
+			magnifierOverride_ = localMagnifierOn() ? 0 : 1;
+		}
+		if (capVideo && capVideo->isRecording()) capVideo->setLocalMagnifier(localMagnifierOn());
+		return true;
+	}
 	if (demoMode) {
 		if (id == L"cmd_record_toggle") { demoRecToggle(); return true; }
 		if (id == L"cmd_toggle_gif") { demoRecToggleGif(); return true; }
@@ -2979,6 +3088,33 @@ void WinCap::syncGlobalCommandKeys(unsigned surface, bool includeLongScroll)
 		}
 	}
 	HotkeyHook::setSessionBindings(std::move(list));
+}
+
+// 中文输入法激活时，字符键会先被输入法处理：窗口收到的是 WM_KEYDOWN + VK_PROCESSKEY，
+// 真实按键只剩 lParam 里的扫描码。不还原的话，「系统按键」里所有不带修饰键的键
+// （`、W/Q/F、1~9）在中文状态下都命中不了 —— 表现为"快捷键能录进去、按了没反应"
+//（录制走的是低级键盘钩子，输入法还没介入就能看到真实按键）。
+// 正在编辑标注文字时不还原：那一层必须把按键交给输入法组字，字符仍从 WM_CHAR 回来。
+// 还原后顺手取消输入法刚开的组字框，避免候选框残留在截图窗口上。
+LRESULT CALLBACK WinCap::keySubclassProc(HWND h, UINT msg, WPARAM wp, LPARAM lp,
+	UINT_PTR id, DWORD_PTR ref)
+{
+	auto* self = reinterpret_cast<WinCap*>(ref);
+	(void)id;
+	if (self && (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wp == VK_PROCESSKEY
+		&& !self->editingText) {
+		const UINT scan = ((UINT)lp >> 16) & 0xFFu;
+		const UINT ext = (((UINT)lp >> 24) & 1u) ? 0xE000u : 0u;
+		const UINT vk = MapVirtualKeyW(scan | ext, MAPVK_VSC_TO_VK_EX);
+		if (vk != 0 && vk != VK_PROCESSKEY) {
+			wp = vk;
+			if (HIMC himc = ImmGetContext(h)) {
+				ImmNotifyIME(himc, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+				ImmReleaseContext(h, himc);
+			}
+		}
+	}
+	return DefSubclassProc(h, msg, wp, lp);
 }
 
 void WinCap::onKey(UINT key)
@@ -3078,6 +3214,11 @@ void WinCap::onKey(UINT key)
         if (preSelectPick) setTimer(100, colorCopyCloseTimerId);
         return;
     }
+    // 选中标注时：Ctrl+C / Ctrl+V 复制粘贴标注本身（应用内缓冲，不写系统剪贴板，
+    // 因此不会进剪贴板历史）。没有选中、或缓冲是空的，照旧走下面的命令表
+    if (annotLive && (GetKeyState(VK_CONTROL) & 0x8000) && (key == 'C' || key == 'V')) {
+        if (key == 'C' ? copySelectedShapes() : pasteShapes()) return;
+    }
     // 「系统按键」：按当前界面查命令表，命中即执行并吃掉。关闭/完成/复制/存为文件/撤销/重做/
     // 清除/绘图工具等均在此表内，键位可在设置页配置（阶段分流见 runCommand）
     if (commandKey(key)) return;
@@ -3113,6 +3254,7 @@ bool WinCap::nudgeSelectionByArrow(int dx, int dy)
 bool WinCap::nudgeSelectionByOutsideWheel(POINT pos, int dir)
 {
 	if (!cutMask || !cutMask->hasRect()) return false;
+	if (maskMoveLocked()) return false;   // 录屏开录 / 长图滚动：滚轮也不许挪选区
 	if (stage != CapStage::Adjust && !annotLive && !videoCanAdjust()) return false;
 	const auto& sel = cutMask->maskRect;
 	const float px = (float)pos.x, py = (float)pos.y;
@@ -3443,13 +3585,9 @@ void WinCap::onDown(POINT pos, bool isRight)
     }
     // 演示画布：没开标注会话（默认工具=无）时画布不响应点击，别退化成"拖选区"
     if (demoMode) return;
-    // 录屏开录后（未穿透）：画幅锁定，但选区整体仍可拖动；这时还没选过绘图工具
-    // （annotLive 仍为 false），走不到上面的标注分支，所以在这里补一条。
-    // 落在已有标注上的按下由 beginMaskResize 放行给标注（选中 / 拖动），见那里的判断。
-    if (stage == CapStage::Video && capVideo && capVideo->isRecording()) {
-        beginMaskResize(pos);
-        return;
-    }
+    // 录屏开录后：选框完全锁死，不能再拖/挪；标注的点击与拖动由上面的 annotLive
+    // 分支处理（选了标注工具后 annotLive 为 true），这里没有别的事可做。
+    if (stage == CapStage::Video && capVideo && capVideo->isRecording()) return;
     if (stage == CapStage::Select) {
         isPress = true;
         selectDragging_ = false;
@@ -3807,11 +3945,22 @@ void WinCap::onClosed()
 {
     if (isClosed) return;
     isClosed = true;
+    RemoveWindowSubclass(hwnd, &WinCap::keySubclassProc, 1);
     deferExitAfterRightUp = false;
     CaptureEsc::release(hwnd);
     killTimer(recCursorTimerId);
+    killTimer(demoMagnifierTimerId);
     killTimer(demoRecTickTimerId);
     killTimer(codeScanTimerId);
+    ensureMagHook(false);
+    demoMagnifierTemp_ = false;
+    magnifierOverride_ = -1;
+    magnifierZoom_ = 1.5f;
+    MagLens::get().setZoom(1.5f);
+    MagLens::get().hide();
+    if (zoomCursorHidden_) { ShowCursor(TRUE); zoomCursorHidden_ = false; }
+    if (capVideo) capVideo->setCursorHidden(false);
+    MagLens::get().hide();
     demoRecRunning_ = false;
     demoRecPaused_ = false;
     annotLive = false;
@@ -3899,18 +4048,40 @@ void WinCap::relayoutTool()
     else if (toolCap) layoutTool(toolCap.get());
 }
 
-void WinCap::layoutTool(Ling::WinBase* tool)
+void WinCap::layoutTool(ToolbarWindow* tool)
 {
     if (!tool) return;
-    if (isMainToolUserPlaced()) return;
-    const int toolW = (int)(tool->w + 0.5f);
+    if (isMainToolUserPlaced()) {
+        // 用户手动摆过：不动位置，但仍按它落点所在显示器校正缩放。
+        tool->adoptMonitorDpi();
+        return;
+    }
+    int toolW = (int)(tool->w + 0.5f);
     const int toolH = (int)(tool->h + 0.5f);
-    // 演示模式：工具栏固定在**屏幕顶部居中**（全屏画布工具栏的默认吸附位）
+    // 演示模式：全屏画布铺满**整个虚拟桌面**，它的 x/w 是「所有显示器拼起来」的坐标系，
+    // 用它的中线居中会正好落到两块屏的接缝上。工具栏默认锚定**主屏**工作区顶部居中；
+    // 用户拖到别的显示器后就按拖放位置停（isMainToolUserPlaced 已在上面挡掉）。
     if (demoMode) {
-        const int gap = (int)(12.f * tool->dpi + 0.5f);
-        const int toolX = x + (int)((w - toolW) * 0.5f);
-        const int toolY = y + gap;
-        if (tool->x != toolX || tool->y != toolY) tool->setPosition(toolX, toolY);
+        auto placeOnPrimary = [&]() {
+            MONITORINFO mi{ sizeof(MONITORINFO) };
+            if (!GetMonitorInfoW(MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY), &mi)) {
+                mi.rcWork = RECT{ 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN) };
+            }
+            const int gap = (int)(12.f * tool->dpi + 0.5f);
+            int toolX = (int)mi.rcWork.left + ((int)(mi.rcWork.right - mi.rcWork.left) - toolW) / 2;
+            const int maxX = (std::max)((int)mi.rcWork.left, (int)mi.rcWork.right - toolW);
+            if (toolX > maxX) toolX = maxX;
+            const int toolY = (int)mi.rcWork.top + gap;
+            if (tool->x != toolX || tool->y != toolY) tool->setPosition(toolX, toolY);
+        };
+        placeOnPrimary();
+        // 落到主屏之后按**这块屏**的缩放校正一次：演示画布的宿主窗口铺满所有显示器，
+        // 它的 dpi 只代表其中一块屏，照抄会让整条栏偏大/偏小（属性栏也会跟着对不齐）。
+        // 尺寸变了就按新宽度再居中一次。
+        if (tool->adoptMonitorDpi()) {
+            toolW = (int)(tool->w + 0.5f);
+            placeOnPrimary();
+        }
         return;
     }
     // shadowPad 曾为投影透明边；现为 0，工具窗即可视栏面
@@ -3967,6 +4138,8 @@ void WinCap::layoutTool(Ling::WinBase* tool)
     if (toolX + toolW > mi.rcWork.right) toolX = mi.rcWork.right - toolW;
     if (tool->x == toolX && tool->y == toolY) return;
     tool->setPosition(toolX, toolY);
+    // 落到目标屏后按这块屏的缩放校正一次；尺寸变了就按新宽度重新贴边。
+    if (tool->adoptMonitorDpi()) layoutTool(tool);
 }
 
 void WinCap::enterLiveStage()
@@ -3995,7 +4168,7 @@ bool WinCap::videoCanAdjust() const
 
 bool WinCap::maskSizeLocked() const
 {
-	// 录屏已开录：画幅定死（整体挪动仍放行，见 maskMoveLocked）
+	// 录屏已开录：画幅定死
 	if (stage == CapStage::Video && !videoCanAdjust()) return true;
 	// 长图已开始滚动（含暂停 / 编辑态）：画幅同样定死
 	if (stage == CapStage::Long && capLong && capLong->capturing()) return true;
@@ -4004,6 +4177,8 @@ bool WinCap::maskSizeLocked() const
 
 bool WinCap::maskMoveLocked() const
 {
+	// 录屏开录后选区完全钉死：不再允许拖边框或拖内部平移，鼠标事件留给标注层。
+	if (stage == CapStage::Video && capVideo && capVideo->isRecording()) return true;
 	// 长图由同一块选区逐帧拼接，滚动中挪动会使已拼部分与新帧错位，故连整体挪动也禁止
 	return stage == CapStage::Long && capLong && capLong->capturing();
 }
@@ -4065,32 +4240,342 @@ void WinCap::updateSelFollowCursor()
 	refresh();
 }
 
-// 「鼠标高亮提醒」：录制中光标位置变化就重画一次（高亮圆由 paintMouseHighlight 画）
-void WinCap::updateMouseHighlight()
+// 「鼠标轨迹效果」/「鼠标单击效果」：录制中按 16ms 轮询光标，推进轨迹与单击动画。
+// 高亮圆只看"动没动"；线条/波纹/光标放大是时间动画，即使光标停住也要继续重画。
+bool WinCap::localMagnifierOn() const
 {
-	if (stage != CapStage::Video) { killTimer(recCursorTimerId); return; }
-	if (!capVideo || !capVideo->isRecording()) return;
-	if (!Setting::get() || !Setting::get()->getMouseHighlight()) return;
+	auto* s = Setting::get();
+	if (!s) return false;
+	// 本次会话里用快捷键临时开/关过，就以它为准：
+	// 演示画布里设置默认开了「局部放大」时，也能用快捷键临时取消（不改设置）。
+	if (magnifierOverride_ >= 0) return magnifierOverride_ != 0;
+	const bool settingOn = s->getMouseTrailEffect() == Setting::kMouseTrailMagnifier;
+	if (demoMode) return demoRecRunning_ && settingOn;   // 演示里设置项的镜头只在录制时出现
+	return settingOn;
+}
+
+void WinCap::onTrailEffectChanged()
+{
+	magnifierOverride_ = -1;
+	if (capVideo && capVideo->isRecording()) capVideo->setLocalMagnifier(localMagnifierOn());
+}
+
+bool WinCap::magnifierActive() const
+{
+	if (demoMode) return localMagnifierOn();
+	return stage == CapStage::Video && capVideo && capVideo->isRecording()
+		&& localMagnifierOn();
+}
+
+bool WinCap::magnifierModifierDown() const
+{
+	UINT vk = VK_CONTROL;
+	const std::wstring chord = CommandKeys::binding(L"cmd_toggle_magnifier");
+	if (!chord.empty()) {
+		for (auto part : Ling::Util::splitStr(chord, L'+')) {
+			std::transform(part.begin(), part.end(), part.begin(), ::towlower);
+			if (part == L"ctrl") { vk = VK_CONTROL; break; }
+			if (part == L"alt") { vk = VK_MENU; break; }
+			if (part == L"shift") { vk = VK_SHIFT; break; }
+		}
+	}
+	return (GetAsyncKeyState(vk) & 0x8000) != 0;
+}
+
+bool WinCap::adjustMagnifierZoom(int wheelDelta)
+{
+	if (!magnifierActive() || !magnifierModifierDown()) return false;
+
+	const float step = wheelDelta > 0 ? 1.1f : 1.f / 1.1f;
+	magnifierZoom_ = std::clamp(magnifierZoom_ * step, 1.2f, 4.f);
+	MagLens::get().setZoom(magnifierZoom_);
+	if (capVideo) capVideo->setLocalMagnifierZoom(magnifierZoom_);
+	return true;
+}
+
+void WinCap::updateDemoClickFx()
+{
+	if (!demoMode || !demoRecRunning_) return;
+	auto* s = Setting::get();
+	if (!s) return;
+	const int clickMode = s->getMouseClickEffect();
+	const ULONGLONG now = GetTickCount64();
+	bool dirty = false;
 
 	POINT cur{};
 	if (!GetCursorPos(&cur)) return;
+	const POINT screenCur = cur;
 	ScreenToClient(hwnd, &cur);
-	// 圆心取光标本体中心而非热点（热点在指针尖角上，见 Util::cursorBodyOffset）
-	float ox = 0.f, oy = 0.f;
-	Util::cursorBodyOffset(ox, oy);
-	const POINT c{ cur.x + (LONG)ox, cur.y + (LONG)oy };
-	if (c.x == mouseHlPos_.x && c.y == mouseHlPos_.y) return;   // 没动就不重画
-	mouseHlPos_ = c;
+
+	// 高亮/线条：演示画布录制里同样生效；渐隐画笔在手时线条让位（画笔优先）
+	const int trailMode = s->getMouseTrailEffect();
+	const bool lineAllowed = !(toolCap && toolCap->curId == L"laser");
+	if (updateTrailFx(screenCur, true, trailMode, lineAllowed, (int64_t)now)) dirty = true;
+
+	if (clickMode != Setting::kMouseClickNone) {
+		const int vks[3]{ VK_LBUTTON, VK_RBUTTON, VK_MBUTTON };
+		for (int i = 0; i < 3; ++i) {
+			const bool down = (GetAsyncKeyState(vks[i]) & 0x8000) != 0;
+			if (down && !mouseBtnDown_[i]) {
+				mouseClicks_.push_back({ cur, now });
+				if (mouseClicks_.size() > 8) mouseClicks_.erase(mouseClicks_.begin());
+				dirty = true;
+			}
+			mouseBtnDown_[i] = down;
+		}
+	}
+
+	const ULONGLONG clickLife = (std::max)(clickRippleLifeMs, clickZoomLifeMs);
+	while (!mouseClicks_.empty() && now - mouseClicks_.front().t > clickLife) {
+		mouseClicks_.erase(mouseClicks_.begin());
+		dirty = true;
+	}
+	if (clickMode == Setting::kMouseClickNone && !mouseClicks_.empty()) {
+		mouseClicks_.clear();
+		dirty = true;
+	}
+	if (!mouseClicks_.empty()) dirty = true;
+
+	const bool zoomFx = clickMode == Setting::kMouseClickZoom
+		|| clickMode == Setting::kMouseClickCombo;
+	const bool zoomActive = zoomFx && !mouseClicks_.empty()
+		&& now - mouseClicks_.back().t < clickZoomLifeMs;
+	if (zoomActive) {
+		if (!zoomCursorHidden_) { ShowCursor(FALSE); zoomCursorHidden_ = true; }
+		if (capVideo) capVideo->setCursorHidden(true);
+		dirty = true;
+	}
+	else if (zoomCursorHidden_) {
+		ShowCursor(TRUE);
+		zoomCursorHidden_ = false;
+		if (capVideo) capVideo->setCursorHidden(false);
+	}
+	if (capVideo) capVideo->syncClickOverlay();
+	if (dirty) refresh();
+}
+
+void WinCap::updateDemoMagnifier()
+{
+	updateDemoClickFx();
+	const bool active = demoMode && localMagnifierOn();
+	ensureMagHook(active && magnifierModifierDown());
+	if (capVideo && demoRecRunning_) capVideo->setLocalMagnifier(active);
+	if (!active) {
+		MagLens::get().hide();
+		return;
+	}
+	POINT cur{};
+	if (!GetCursorPos(&cur)) return;
+	// 与 updateMouseFx 同一套：单击放大藏起系统光标时沿用上一次的本体偏移，镜头不跟着放大移位
+	if (!zoomCursorHidden_) {
+		float ox = 0.f, oy = 0.f;
+		Util::cursorBodyOffset(ox, oy);
+		magBodyOffset_ = POINT{ (LONG)ox, (LONG)oy };
+	}
+	cur.x += magBodyOffset_.x;
+	cur.y += magBodyOffset_.y;
+	// 录制时单击层压在镜头上；未录制仍沿用演示工具栏的层级。
+	if (demoRecRunning_ && chrome_) MagLens::get().setBelow(chrome_->hwnd);
+	else if (toolCap && toolCap->hwnd) MagLens::get().setBelow(toolCap->hwnd);
+	else MagLens::get().raiseTop();
+	MagLens::get().showAt(cur, dpi);
+}
+
+// 高亮提醒 / 线条跟随的状态推进。普通录屏与演示画布录制共用这一份：
+//  · lineAllowed=false 表示当前拿的是「渐隐画笔」，它自己就会跟着笔迹渐隐，
+//    线条跟随必须让位（渐隐画笔优先级更高），否则会出现两条拖尾；
+//  · 返回 true 表示这一帧有变化，需要重画覆盖层（高亮圆 / 线条会随时间淡出）。
+bool WinCap::updateTrailFx(POINT screenCur, bool haveCursor, int trailMode, bool lineAllowed, int64_t nowMs)
+{
+	bool dirty = false;
+	POINT c{};
+	if (haveCursor) {
+		POINT client = screenCur;
+		ScreenToClient(hwnd, &client);
+		// 圆心取光标本体中心而非热点（热点在指针尖角上，见 Util::cursorBodyOffset）
+		float ox = 0.f, oy = 0.f;
+		Util::cursorBodyOffset(ox, oy);
+		c = POINT{ client.x + (LONG)ox, client.y + (LONG)oy };
+		if (trailMode == Setting::kMouseTrailHighlight) {
+			if (c.x != mouseHlPos_.x || c.y != mouseHlPos_.y) {
+				mouseHlPos_ = c;
+				dirty = true;
+			}
+		}
+	}
+
+	if (trailMode == Setting::kMouseTrailLine && lineAllowed) {
+		// 只有在"整条轨迹都已过期"时才清空；刚采到 1 个点时 LaserStroke::visible 仍是 false，
+		// 若在这里按 visible 清掉，就永远攒不到第 2 个点 —— 线条就完全不出现了。
+		const int64_t life = std::max<int64_t>(1, mouseTrail_.lifeMs);
+		if (!mouseTrail_.points.empty() && nowMs - mouseTrail_.points.back().t >= life) {
+			mouseTrail_ = {};
+			dirty = true;   // 让最后一帧把已经消失的旧轨迹擦掉
+		}
+		if (haveCursor) {
+			// 新轨迹（含模式重开/DPI 变化）按当前缩放定笔宽。Trail 默认 width 是 4，
+			// 不能只判 <=0。寿命取演示画布渐隐画笔的一半：同样收尖收细，但拖尾短一半。
+			if (mouseTrail_.points.empty()) {
+				mouseTrail_.width = mouseTrailWidth * dpi;
+				mouseTrail_.lifeMs = 240;   // 比渐隐画笔(600ms)短很多，避免拖尾过长
+			}
+			// 渐隐画笔自己按点龄收细、按寿命淘汰；同位置重复采样会被它过滤。
+			LaserStroke::addPoint(mouseTrail_, (float)c.x, (float)c.y, nowMs);
+		}
+		// 笔迹粗细随点龄连续变化，即使光标停住也必须每帧重画才能看到渐隐
+		if (LaserStroke::visible(mouseTrail_, nowMs)) dirty = true;
+	}
+	else if (!mouseTrail_.points.empty()) {
+		mouseTrail_ = {};
+		dirty = true;
+	}
+	return dirty;
+}
+
+void WinCap::updateMouseFx()
+{
+	if (stage != CapStage::Video) {
+		killTimer(recCursorTimerId);
+		mouseTrail_ = {};
+		mouseClicks_.clear();
+		return;
+	}
+	if (!capVideo || !capVideo->isRecording()) return;
+	auto* s = Setting::get();
+	if (!s) return;
+
+	const int trailMode = s->getMouseTrailEffect();
+	const int clickMode = s->getMouseClickEffect();
+	const ULONGLONG now = GetTickCount64();
+	const int64_t nowMs = (int64_t)now;
+	bool dirty = false;
+
+	POINT cur{};
+	const bool haveCursor = GetCursorPos(&cur) != FALSE;
+	const POINT screenCur = cur;
+
+	// 单击检测：16ms 轮询按键沿，不依赖全局鼠标钩子。钩子在某些环境（权限/远程桌面/
+	// 已运行实例残留）可能装不上，那种情况下波纹和光标放大都会完全没反应。
+	if (haveCursor) {
+		const int vks[3]{ VK_LBUTTON, VK_RBUTTON, VK_MBUTTON };
+		const WPARAM msgs[3]{ WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN };
+		for (int i = 0; i < 3; ++i) {
+			const bool down = (GetAsyncKeyState(vks[i]) & 0x8000) != 0;
+			if (down && !mouseBtnDown_[i] && clickMode != Setting::kMouseClickNone)
+				onGlobalMouseDown(msgs[i], screenCur);
+			mouseBtnDown_[i] = down;
+		}
+	}
+
+	// 高亮/线条：渐隐画笔在手时让位（它本身就是一条跟随笔迹的线）
+	const bool lineAllowed = !(toolCap && toolCap->curId == L"laser");
+	if (updateTrailFx(screenCur, haveCursor, trailMode, lineAllowed, nowMs)) dirty = true;
+
+	// 单击动画按最长的那条寿命统一清理
+	const ULONGLONG clickLife = (std::max)(clickRippleLifeMs, clickZoomLifeMs);
+	while (!mouseClicks_.empty() && now - mouseClicks_.front().t > clickLife) {
+		mouseClicks_.erase(mouseClicks_.begin());
+		dirty = true;
+	}
+	if (clickMode == Setting::kMouseClickNone && !mouseClicks_.empty()) {
+		mouseClicks_.clear();
+		dirty = true;
+	}
+	if (!mouseClicks_.empty()) dirty = true;   // 动画还在走，每帧都要重画
+
+	// 「鼠标轨迹效果 → 局部放大」：独立圆形放大镜窗口跟着光标（屏幕与录制都可见）。
+	// 圆心取光标本体中心，不是热点（热点在指针尖角上）。
+	// 单击放大期间系统光标被临时藏起，本体偏移沿用上一次可见时的值 ——
+	// 否则镜头圆心会跟着放大动画跳到热点，看起来就是"放大镜随着光标放大移位"。
+	if (!zoomCursorHidden_) {
+		float ox = 0.f, oy = 0.f;
+		Util::cursorBodyOffset(ox, oy);
+		magBodyOffset_ = POINT{ (LONG)ox, (LONG)oy };
+	}
+	if (localMagnifierOn() && haveCursor) {
+		POINT lensCenter{ screenCur.x + magBodyOffset_.x, screenCur.y + magBodyOffset_.y };
+		MagLens::get().showAt(lensCenter, dpi);
+	}
+	else {
+		MagLens::get().hide();
+	}
+	// 只在真正按住调倍率修饰键时才挂鼠标钩子：常驻钩子会拖慢鼠标/合成，录制时表现为抖动
+	ensureMagHook(localMagnifierOn() && capVideo
+		&& capVideo->isRecording() && magnifierModifierDown());
+
+	// 「光标放大」：动画的 320ms 内由主覆盖层自己画放大的实时光标（屏幕/视频里都只有这一份），
+	// 同时让采集侧暂时不画光标，避免视频里出现"系统光标 + 放大光标"两个。
+	const bool zoomFx = clickMode == Setting::kMouseClickZoom
+		|| clickMode == Setting::kMouseClickCombo;
+	const bool zoomActive = zoomFx && !mouseClicks_.empty()
+		&& now - mouseClicks_.back().t < clickZoomLifeMs;
+	if (zoomActive) {
+		if (!zoomCursorHidden_) {
+			// 光标位图用会话开始时抓到的那张（primeCursorForCapture 拿到的真实窗口光标），
+			// 不要在这里重新抓：此刻 GetCursorInfo 很可能已经是我们覆盖层自己的十字/箭头。
+			ShowCursor(FALSE);
+			zoomCursorHidden_ = true;
+		}
+		if (capVideo) capVideo->setCursorHidden(true);
+		dirty = true;
+	}
+	else if (zoomCursorHidden_) {
+		ShowCursor(TRUE);
+		zoomCursorHidden_ = false;
+		if (capVideo) capVideo->setCursorHidden(false);
+	}
+	if (capVideo) capVideo->syncClickOverlay();
+
+	if (dirty) refresh();
+}
+
+// 「鼠标单击效果」：全局鼠标钩子把按键按下转进来。单击点用屏幕坐标传入，
+// 这里换算成客户区坐标；点在本软件自己的工具栏/属性栏上不算（那是在操作录制器）。
+void WinCap::onGlobalMouseDown(WPARAM msg, POINT screenPt)
+{
+	if (msg != WM_LBUTTONDOWN && msg != WM_RBUTTONDOWN && msg != WM_MBUTTONDOWN) return;
+	if (stage != CapStage::Video || !capVideo || !capVideo->isRecording()) return;
+	auto* s = Setting::get();
+	if (!s || s->getMouseClickEffect() == Setting::kMouseClickNone) return;
+	if (HWND under = WindowFromPoint(screenPt)) {
+		if ((capVideo && under == capVideo->toolHwnd())
+			|| (toolSub && under == toolSub->hwnd))
+			return;
+	}
+	POINT p = screenPt;
+	ScreenToClient(hwnd, &p);
+	mouseClicks_.push_back({ p, GetTickCount64() });
+	if (mouseClicks_.size() > 8) mouseClicks_.erase(mouseClicks_.begin());
 	refresh();
 }
 
-// 「鼠标高亮提醒」：在光标下垫一个半透明圆形色块。调用点在 paintCursor 之前 ——
+// 轨迹/波纹共用一支笔刷：色号只在设置里改，颜色变了才重建。
+ID2D1SolidColorBrush* WinCap::ensureMouseFxBrush()
+{
+	auto* s = Setting::get();
+	if (!s) return nullptr;
+	const UINT32 rgba = s->getMouseHighlightColor();
+	if (!mouseFxBrush_ || mouseFxColor_ != rgba) {
+		mouseFxBrush_.Reset();
+		auto* d2d = Ling::D2D::get();
+		if (!d2d || !d2d->deviceContext) return nullptr;
+		d2d->deviceContext->CreateSolidColorBrush(
+			D2D1::ColorF(((rgba >> 24) & 0xFFu) / 255.f, ((rgba >> 16) & 0xFFu) / 255.f,
+				((rgba >> 8) & 0xFFu) / 255.f, 1.f),
+			mouseFxBrush_.GetAddressOf());
+		mouseFxColor_ = rgba;
+	}
+	return mouseFxBrush_.Get();
+}
+
+// 「鼠标轨迹效果」→ 高亮提醒：在光标下垫一个半透明圆形色块。调用点在 paintCursor 之前 ——
 // 视觉上位于系统光标之下，符合"色块叠在鼠标后面"。录制结束后残留的刷新不会画它（条件已不成立）。
 void WinCap::paintMouseHighlight(ID2D1DeviceContext* ctx)
 {
 	if (!ctx) return;
-	if (stage != CapStage::Video || !capVideo || !capVideo->isRecording()) return;
-	if (!Setting::get() || !Setting::get()->getMouseHighlight()) return;
+	// 普通录屏与演示画布录制都支持（演示的录制同样经过采集侧合成）
+	if (!(stage == CapStage::Video || demoMode) || !capVideo || !capVideo->isRecording()) return;
+	if (!Setting::get() || Setting::get()->getMouseTrailEffect() != Setting::kMouseTrailHighlight) return;
 
 	POINT cur{};
 	if (!GetCursorPos(&cur)) return;
@@ -4112,6 +4597,54 @@ void WinCap::paintMouseHighlight(ID2D1DeviceContext* ctx)
 	const float r = mouseHlRadius * dpi;
 	ctx->FillEllipse(D2D1::Ellipse(D2D1::Point2F((float)cur.x + ox, (float)cur.y + oy), r, r),
 		mouseHlBrush_.Get());
+}
+
+// 「鼠标轨迹效果」→ 线条跟随：复用演示画布里的「渐隐画笔」LaserStroke ——
+// 每个点带时间戳，笔宽随点龄收细、队尾锥形收尖，整条轨迹一次填充。
+// 这样光标拖出去的就是一条会自己变短、收尖消失的笔刷，而不是一根等宽的折线。
+void WinCap::paintMouseTrail(ID2D1DeviceContext* ctx)
+{
+	if (!ctx) return;
+	// 普通录屏与演示画布录制都支持；渐隐画笔在手时 updateTrailFx 不会采样，这里自然没有轨迹
+	if (!(stage == CapStage::Video || demoMode) || !capVideo || !capVideo->isRecording()) return;
+	auto* s = Setting::get();
+	if (!s || s->getMouseTrailEffect() != Setting::kMouseTrailLine) return;
+
+	const int64_t nowMs = (int64_t)GetTickCount64();
+	if (!LaserStroke::visible(mouseTrail_, nowMs)) return;
+	auto* brush = ensureMouseFxBrush();
+	if (!brush) return;
+	brush->SetOpacity(MouseFx::trailOpacity);   // 与演示画布渐隐画笔同形，整体半透明
+	LaserStroke::paint(ctx, brush, mouseTrail_, nowMs);
+	brush->SetOpacity(1.f);
+}
+
+// 「鼠标单击效果」→ 单色波纹：从单击点向外扩散一圈同色圆环，边走边淡出。
+void WinCap::paintClickRipple(ID2D1DeviceContext* ctx)
+{
+	if (!ctx) return;
+	const bool recordingSurface = (stage == CapStage::Video && capVideo && capVideo->isRecording())
+		|| (demoMode && demoRecRunning_);
+	if (!recordingSurface) return;
+	auto* s = Setting::get();
+	if (!s) return;
+	const int clickMode = s->getMouseClickEffect();
+	if (clickMode != Setting::kMouseClickRipple && clickMode != Setting::kMouseClickCombo) return;
+	if (mouseClicks_.empty()) return;
+	auto* brush = ensureMouseFxBrush();
+	if (!brush) return;
+
+	const ULONGLONG now = GetTickCount64();
+	for (const auto& fx : mouseClicks_) {
+		const ULONGLONG age = now - fx.t;
+		if (age >= MouseFx::rippleLifeMs) continue;
+		const float k = (float)age / (float)MouseFx::rippleLifeMs;
+		const float r = MouseFx::rippleRadius(k) * dpi;
+		brush->SetOpacity(MouseFx::rippleAlpha(k));
+		ctx->DrawEllipse(D2D1::Ellipse(D2D1::Point2F((float)fx.pt.x, (float)fx.pt.y), r, r),
+			brush, MouseFx::rippleWidth(k) * dpi);
+	}
+	brush->SetOpacity(1.f);
 }
 
 // 选区被挪动（拖拽 / 鼠标跟随 / 方向键 / 滚轮）后由 CutMask 回调。
@@ -4583,11 +5116,28 @@ void WinCap::beginVideoCapture()
 			SetWindowPos(capVideo->toolHwnd(), chrome_->hwnd, 0, 0, 0, 0,
 				SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 	}
+	// 与演示录制同层级：主覆盖层 < 放大镜 < 单击层。
+	// 不再把镜头压到高频重画的主覆盖层下面，避免开录后 DWM 合成时镜头内容抖动。
+	MagLens::get().setBelow(chrome_ && chrome_->hwnd ? chrome_->hwnd : hwnd);
+	lensAboveOverlay_ = false;
 	// 属性栏是独立顶层窗：不排除的话，它出现在选区里就会被录进去
 	if (toolSub && toolSub->hwnd) App::excludeFromCapture(toolSub->hwnd);
-	// 录制期间轮询光标（「选框鼠标跟随」/「鼠标高亮提醒」任一开启即需要）
-	if (Setting::get()->getSelFollowMouse() || Setting::get()->getMouseHighlight())
-		setTimer(recCursorTickMs, recCursorTimerId);
+	// 录制期间轮询光标：选框跟随 / 鼠标轨迹 / 单击效果，以及录制中临时按快捷键叠加的局部放大，
+	// 都靠这条 16ms 节拍推进 —— 所以无条件开启（空转一次只是取一次光标，成本可以忽略）。
+	setTimer(recCursorTickMs, recCursorTimerId);
+	mouseTrail_ = {};
+	mouseClicks_.clear();
+	if (zoomCursorHidden_) { ShowCursor(TRUE); zoomCursorHidden_ = false; }
+	if (capVideo) capVideo->setCursorHidden(false);
+	MagLens::get().hide();
+	// 开始录制这一下本身是鼠标点击：先把当前按键状态记成"已按下"，
+	// 避免轮询把这次点击当成单击效果的第一下。
+	{
+		const int vks[3]{ VK_LBUTTON, VK_RBUTTON, VK_MBUTTON };
+		for (int i = 0; i < 3; ++i)
+			mouseBtnDown_[i] = (GetAsyncKeyState(vks[i]) & 0x8000) != 0;
+	}
+	if (capVideo) capVideo->setCursorZoom(1.f);
 	// 「录屏默认开启鼠标穿透」：开录即穿；录制中可用 ` 或工具条按钮临时开关
 	if (Setting::get()->getRecordDefaultPierce()) setMouseTransparent(true);
 	// 默认不穿透，便于边录边标；穿透按钮后续再开
@@ -4624,6 +5174,8 @@ void WinCap::startVideo()
     }
 
     stage = CapStage::Video;
+    // 每次进入录屏阶段：局部放大先跟随设置，录制中的快捷键只在本次会话里叠加
+    magnifierOverride_ = -1;
     // 录制只能针对**单块显示器**采集（采集链路按屏建复制纹理，跨屏录不全）：
     // 先把现有选区收进单块屏（跨屏框取的选区在此被收小），之后拖边 / 整体平移同样受该约束
     if (cutMask) {
@@ -4653,14 +5205,20 @@ void WinCap::startMp4(bool useSpeaker, bool useMic)
 {
     beginVideoCapture();
     if (capVideo) capVideo->startMp4(useSpeaker, useMic);
-    if (Setting::get()->getKeyOverlayPos() != Setting::kKeyOverlayNone) startKeyOverlay();
+    MagLens::get().setBelow(chrome_ && chrome_->hwnd ? chrome_->hwnd : hwnd);
+    lensAboveOverlay_ = false;
+    if (Setting::get()->getKeyOverlayPos() != Setting::kKeyOverlayNone)
+        startKeyOverlay();
 }
 
 void WinCap::startGif()
 {
     beginVideoCapture();
     if (capVideo) capVideo->startGif();
-    if (Setting::get()->getKeyOverlayPos() != Setting::kKeyOverlayNone) startKeyOverlay();
+    MagLens::get().setBelow(chrome_ && chrome_->hwnd ? chrome_->hwnd : hwnd);
+    lensAboveOverlay_ = false;
+    if (Setting::get()->getKeyOverlayPos() != Setting::kKeyOverlayNone)
+        startKeyOverlay();
 }
 
 std::wstring WinCap::stopRecord(bool userAbort)
@@ -4670,6 +5228,18 @@ std::wstring WinCap::stopRecord(bool userAbort)
 	clearForcedToolId();
 	annotLive = false;
 	stopKeyOverlay();
+	killTimer(recCursorTimerId);
+	if (zoomCursorHidden_) { ShowCursor(TRUE); zoomCursorHidden_ = false; }
+	if (capVideo) capVideo->setCursorHidden(false);
+	ensureMagHook(false);
+	magnifierZoom_ = 1.5f;
+	magnifierOverride_ = -1;
+	MagLens::get().setZoom(1.5f);
+	MagLens::get().hide();
+	MagLens::get().setBelow(nullptr);
+	mouseTrail_ = {};
+	mouseClicks_.clear();
+	mouseHlPos_ = POINT{ -1, -1 };
 	return capVideo ? capVideo->stop(true, userAbort) : L"";
 }
 
@@ -5791,7 +6361,8 @@ void WinCap::saveToFile(bool keepOpen)
             0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     };
     setToolTopmost(false);
-    // 「保存格式」决定扩展名；文件名一律走「手动保存文件名格式」的末段 ——
+    // 「保存格式」决定对话框里默认选中的类型（换类型就地改文件名扩展名）；
+    // 文件名一律走「手动保存文件名格式」的末段 ——
     // 点选窗口元素也算普通框选（历史上的「焦点窗口」只留给全局热键那条路径）。
     // 起始目录固定「桌面」——手动保存与「截图文件路径」解耦，后者只作用于自动/静默落盘
     const std::wstring saveExt = Util::extensionFromSaveFormat(Setting::get()->getSaveFormat());
@@ -5799,14 +6370,14 @@ void WinCap::saveToFile(bool keepOpen)
     const std::wstring defFallback = Setting::defaultManualSaveFormat();
     std::wstring defName = Util::previewFileName(defFmt, defFallback, focusAppName_);
     if (auto slash = defName.find_last_of(L'/'); slash != std::wstring::npos) defName = defName.substr(slash + 1);
-    auto path = Util::getSaveFilePath(hwnd, saveExt, defName, Util::lastSaveDir(false));
+    auto path = Util::getImageSaveFilePath(hwnd, saveExt, defName, Util::lastSaveDir(false));
     if (path.empty()) {
         setToolTopmost(true);
         return;
     }
     if (Util::saveToFile(path, cw, ch, pixels.data())) {
         Util::rememberSaveDir(false, path);
-        Setting::get()->addHistoryFile(path, cw, ch, L"capture");
+        Setting::get()->addHistoryFile(path, cw, ch, L"capture", &pixels);
         if (!keepOpen) close();
     }
     else {
@@ -5837,7 +6408,7 @@ void WinCap::copyToClipboard(bool keepOpen)
     if (!saved.empty() && copyAsFile) Util::addFileToClipboard(saved);
     else if (!saved.empty() && cutFile) Util::addFileToClipboardCut(saved);
     else Util::saveToClipboard(cw, ch, pixels.data());
-    if (!saved.empty()) st->addHistoryFile(saved, cw, ch, L"capture");
+    if (!saved.empty()) st->addHistoryFile(saved, cw, ch, L"capture", &pixels);
     if (!keepOpen) close();
 }
 
@@ -5876,7 +6447,7 @@ void WinCap::closeByUser()
             }
             else {
                 const auto path = Util::quietSaveCapture(pixels, cw, ch, focusAppName_);
-                if (!path.empty()) s->addHistoryFile(path, cw, ch, L"autosave");
+                if (!path.empty()) s->addHistoryFile(path, cw, ch, L"autosave", &pixels);
             }
         }
     }
@@ -6084,45 +6655,87 @@ void WinCap::toggleShowCursor()
     refresh();
 }
 
+// 光标位图按需建一次：paintCursor 与「光标放大」共用。D2D 用预乘 alpha，
+// 所以从 straight BGRA 转一份出来再建。
+ID2D1Bitmap1* WinCap::ensureCursorBitmap()
+{
+    if (cursorBmp) return cursorBmp.Get();
+    if (!cursorValid || cursorW <= 0 || cursorH <= 0) return nullptr;
+    auto* d2d = Ling::D2D::get();
+    if (!d2d || !d2d->deviceContext) return nullptr;
+    std::vector<BYTE> pm(cursorPix.size());
+    for (size_t i = 0; i + 3 < pm.size(); i += 4) {
+        const BYTE a = cursorPix[i + 3];
+        pm[i] = (BYTE)(cursorPix[i] * a / 255);
+        pm[i + 1] = (BYTE)(cursorPix[i + 1] * a / 255);
+        pm[i + 2] = (BYTE)(cursorPix[i + 2] * a / 255);
+        pm[i + 3] = a;
+    }
+    D2D1_BITMAP_PROPERTIES1 prop{
+        .pixelFormat{ DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED },
+        .dpiX{ 96.0f }, .dpiY{ 96.0f },
+        .bitmapOptions{ D2D1_BITMAP_OPTIONS_NONE }
+    };
+    d2d->deviceContext->CreateBitmap(
+        D2D1::SizeU((UINT32)cursorW, (UINT32)cursorH), pm.data(),
+        (UINT32)cursorW * 4, &prop, cursorBmp.GetAddressOf());
+    return cursorBmp.Get();
+}
+
 void WinCap::paintCursor(ID2D1DeviceContext* ctx)
 {
-    if (!showCursor || !cursorValid || cursorW <= 0 || cursorH <= 0 || !ctx) return;
-    if (!cursorBmp) {
-        // D2D 用预乘 alpha：把 straight BGRA 转一份出来建位图
-        std::vector<BYTE> pm(cursorPix.size());
-        for (size_t i = 0; i + 3 < pm.size(); i += 4) {
-            const BYTE a = cursorPix[i + 3];
-            pm[i] = (BYTE)(cursorPix[i] * a / 255);
-            pm[i + 1] = (BYTE)(cursorPix[i + 1] * a / 255);
-            pm[i + 2] = (BYTE)(cursorPix[i + 2] * a / 255);
-            pm[i + 3] = a;
-        }
-        D2D1_BITMAP_PROPERTIES1 prop{
-            .pixelFormat{ DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED },
-            .dpiX{ 96.0f }, .dpiY{ 96.0f },
-            .bitmapOptions{ D2D1_BITMAP_OPTIONS_NONE }
-        };
-        Ling::D2D::get()->deviceContext->CreateBitmap(
-            D2D1::SizeU((UINT32)cursorW, (UINT32)cursorH), pm.data(),
-            (UINT32)cursorW * 4, &prop, cursorBmp.GetAddressOf());
-    }
-    if (!cursorBmp) return;
+    if (!showCursor || !ctx) return;
+    auto* bmp = ensureCursorBitmap();
+    if (!bmp) return;
     POINT local = cursorScreenPos;
     ScreenToClient(hwnd, &local);
     const float l = (float)(local.x - cursorHotspot.x);
     const float t = (float)(local.y - cursorHotspot.y);
-    ctx->DrawBitmap(cursorBmp.Get(), D2D1::RectF(l, t, l + cursorW, t + cursorH),
+    ctx->DrawBitmap(bmp, D2D1::RectF(l, t, l + cursorW, t + cursorH),
         1.f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+}
+
+// 「光标放大」动画期间：系统光标已被临时藏起，由覆盖层在这里画放大的实时光标。
+// 覆盖层会被录进视频，同时采集侧关了光标，所以屏幕/视频里都只有这一份，不会叠影。
+void WinCap::paintZoomCursor(ID2D1DeviceContext* ctx)
+{
+	if (!ctx || !zoomCursorHidden_) return;
+	const bool recordingSurface = (stage == CapStage::Video && capVideo && capVideo->isRecording())
+		|| (demoMode && demoRecRunning_);
+	if (!recordingSurface) return;
+	auto* s = Setting::get();
+	if (!s) return;
+	const int mode = s->getMouseClickEffect();
+	if (mode != Setting::kMouseClickZoom && mode != Setting::kMouseClickCombo) return;
+	if (mouseClicks_.empty()) return;
+	const ULONGLONG age = GetTickCount64() - mouseClicks_.back().t;
+	if (age >= clickZoomLifeMs) return;
+	auto* bmp = ensureCursorBitmap();
+	if (!bmp) return;
+
+	const float k = (float)age / (float)clickZoomLifeMs;
+	const float scale = 1.f + (clickZoomScale - 1.f) * std::sin(k * 3.14159265f);
+	POINT p{};
+	if (!GetCursorPos(&p)) return;
+	ScreenToClient(hwnd, &p);
+	const float l = (float)p.x - cursorHotspot.x * scale;
+	const float t = (float)p.y - cursorHotspot.y * scale;
+	ctx->DrawBitmap(bmp, D2D1::RectF(l, t, l + cursorW * scale, t + cursorH * scale),
+		1.f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
 }
 
 // ---- 「录制中显示按键」----
 void WinCap::startKeyOverlay()
 {
 	auto mod = GetModuleHandleW(nullptr);
+	auto* s = Setting::get();
+	if (!s) return;
+	const bool keyOverlay = s->getKeyOverlayPos() != Setting::kKeyOverlayNone;
 	// WH_KEYBOARD_LL / WH_MOUSE_LL 的钩子过程在本进程、装它的线程（UI 线程）上执行，不需要注入 DLL。
-	// 键盘 + 鼠标都要：教程里"点了哪里/按了什么键"同等重要
-	if (!g_keyHook) g_keyHook = SetWindowsHookExW(WH_KEYBOARD_LL, keyHookProc, mod, 0);
-	if (!g_mouseHook) g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, mouseHookProc, mod, 0);
+	// 鼠标单击效果改由 updateMouseFx 轮询，不再需要鼠标钩子。
+	if (keyOverlay && !g_keyHook) g_keyHook = SetWindowsHookExW(WH_KEYBOARD_LL, keyHookProc, mod, 0);
+	if (keyOverlay && !g_mouseHook)
+		g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, mouseHookProc, mod, 0);
 }
 
 void WinCap::stopKeyOverlay()
@@ -6180,18 +6793,31 @@ void WinCap::paintKeyOverlay(ID2D1DeviceContext* ctx)
 	const int pos = st ? st->getKeyOverlayPos() : Setting::kKeyOverlayNone;
 	if (pos == Setting::kKeyOverlayNone) return;
 
-	const float fontH = 18.f * dpi;
-	const float padX = 14.f * dpi, padY = 9.f * dpi;
-	const float gap = 6.f * dpi;
-	const float radius = 8.f * dpi;
+	// 按键提示是自绘浮层：窗口铺满所有显示器，自己那点 dpi 只代表其中一块屏，
+	// 提示文字要按选区所在屏缩放，否则高 DPI 屏上字会偏小。
+	float d = dpi;
+	if (cutMask && cutMask->hasRect()) {
+		const RECT scr{
+			(LONG)std::lround((float)x + cutMask->maskRect.left),
+			(LONG)std::lround((float)y + cutMask->maskRect.top),
+			(LONG)std::lround((float)x + cutMask->maskRect.right),
+			(LONG)std::lround((float)y + cutMask->maskRect.bottom)
+		};
+		d = DpiUtil::dpiForRect(scr);
+	}
+
+	const float fontH = 18.f * d;
+	const float padX = 14.f * d, padY = 9.f * d;
+	const float gap = 6.f * d;
+	const float radius = 8.f * d;
 
 	// 每一条单独一个圆角框（分体式），整摞贴选区左侧或右侧、底部对齐；
 	// 没有选区时贴屏幕（窗口）对应的底角。
-	float areaLeft = 20.f * dpi, areaRight = w - 20.f * dpi, areaBottom = h - 20.f * dpi;
+	float areaLeft = 20.f * d, areaRight = w - 20.f * d, areaBottom = h - 20.f * d;
 	if (cutMask && cutMask->hasRect()) {
-		areaLeft = cutMask->maskRect.left + 14.f * dpi;
-		areaRight = cutMask->maskRect.right - 14.f * dpi;
-		areaBottom = cutMask->maskRect.bottom - 14.f * dpi;
+		areaLeft = cutMask->maskRect.left + 14.f * d;
+		areaRight = cutMask->maskRect.right - 14.f * d;
+		areaBottom = cutMask->maskRect.bottom - 14.f * d;
 	}
 
 	// 先量一遍所有条目：从下往上排（最新的在最下面），整摞底边对齐 areaBottom

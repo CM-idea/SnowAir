@@ -961,12 +961,19 @@ void ToolCap::onDragMove(POINT pos)
 	}
 }
 
+void ToolCap::onDpiAdopted()
+{
+	refreshSize();
+}
+
 void ToolCap::onDragUp(POINT, bool)
 {
 	if (!draggingBar) return;
 	draggingBar = false;
 	if (GetCapture() == hwnd) ReleaseCapture();
 	if (auto* host = annotHost()) host->markMainToolUserPlaced();
+	// 跨屏松手：先按落点那块屏的缩放重排尺寸，后面的贴边/夹取才用的是新尺寸
+	adoptMonitorDpi();
 	applyDemoEdgeBehavior();
 }
 
@@ -999,7 +1006,8 @@ void ToolCap::applyDemoEdgeBehavior()
 		const int distTop = y - wa.top;
 		const int distBottom = wa.bottom - (y + barH);
 		demoEdge = (distTop <= distBottom) ? 0 : 1;
-		demoExpandX = std::clamp(x, (int)wa.left, (int)wa.right - barW);
+		const int maxX = (std::max)((int)wa.left, (int)wa.right - barW);   // 栏比屏还宽时别算负值
+		demoExpandX = (std::min)((std::max)(x, (int)wa.left), maxX);
 		demoExpandY = (demoEdge == 0) ? wa.top + edgeGap : wa.bottom - barH - edgeGap;
 		demoAutoHide = false;
 		demoCollapsed = false;
@@ -1019,7 +1027,8 @@ void ToolCap::applyDemoEdgeBehavior()
 	const int distTop = y - area.top;
 	const int distBottom = area.bottom - (y + barH);
 	demoEdge = (distTop <= distBottom) ? 0 : 1;
-	demoExpandX = std::clamp(x, (int)area.left, (int)area.right - barW);
+	const int maxX = (std::max)((int)area.left, (int)area.right - barW);
+	demoExpandX = (std::min)((std::max)(x, (int)area.left), maxX);
 	demoExpandY = (demoEdge == 0) ? area.top : area.bottom - barH;
 	demoAutoHide = true;
 	demoCollapsed = false;
@@ -1290,9 +1299,16 @@ void ToolCap::onClick(Ling::Button* btn)
 	if ((btn->id == L"laser" || btn->id == L"pen")) {
 		if (auto* host = annotHost(); host && host->toolSub) host->toolSub->setPenSlotMode(btn->id);
 	}
-	// 再次点击已选中的工具即关闭该工具（选中标注保持选中，属性栏收起）。
-	// 需要查看该标注的属性时，重新打开对应工具即可（selectAnnotTool 会同步其属性到属性栏）。
+	// 再次点击已选中的工具：属性栏收着时先把它打开，属性栏已打开才关闭该工具。
+	// 演示画布默认只选中渐隐画笔、不展开属性栏，所以第一下是"打开属性栏"，第二下才是关闭。
+	// 这是所有工具共用的规则，不在演示画布里单独写。
 	if (!curId.empty() && btn->id == curId) {
+		auto* host = annotHost();
+		if (host && host->toolSub && !host->toolSub->chromeVisible()) {
+			if (winPin) onClickPin(btn);
+			else onClickCap(btn);
+			return;
+		}
 		cancelSelect();
 		return;
 	}
@@ -1305,9 +1321,6 @@ void ToolCap::onClickCap(Ling::Button* btn)
 	const auto eff = resolveToolId(btn->id);
 	// 「渐隐画笔 / 画笔」是一级同级槽位：都走画笔工具，靠 isPenFade 区分（见 startPenSlot）
 	if (winCap && (btn->id == L"laser" || btn->id == L"pen")) {
-		// 演示画布：再点一次当前画笔 = 取消选中，回到"未选工具"——
-		// 只有这个状态才能点选已有标注做二次编辑（见 WinCap::annotSkipHitSelect）
-		if (demoLayout && curId == btn->id) { cancelSelect(); return; }
 		winCap->startPenSlot(btn->id == L"laser");
 		return;
 	}

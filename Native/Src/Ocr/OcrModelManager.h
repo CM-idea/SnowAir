@@ -7,6 +7,8 @@ class OcrModelManager {
 public:
 	static OcrModelManager& instance();
 	bool isInstalled(OcrPackVariant v) const;
+	// 已装但 pack.id 不是当前发布号（需要重新下载覆盖）
+	bool hasOutdated(OcrPackVariant v) const;
 	/** 后台下载；progress 0~1；完成回调在调用线程需自行切回 UI */
 	void download(OcrPackVariant v,
 		std::function<void(float)> progress,
